@@ -2042,7 +2042,12 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     const params = request.params as Record<string, string>;
     const body = request.body as Record<string, unknown> | undefined;
     if (body !== undefined) {
-      validateConfiguration(body);
+      if (operation.operationId === "createAgent" || operation.operationId === "updateAgent") {
+        const { tags: _tags, ...fields } = body;
+        validateConfiguration(fields);
+      } else {
+        validateConfiguration(body);
+      }
     }
 
     if (operation.operationId === "bootstrapInstallation") {
@@ -4070,6 +4075,23 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
       preHandler: async (request) => resolveIdentity(request, nativeAdminStatusOperation),
       handler: nativeAdmin.status,
     });
+    const ordinaryJsonParser = routes.getDefaultJsonParser("error", "error");
+    const agentJsonParser = routes.getDefaultJsonParser("ignore", "ignore");
+    routes.removeContentTypeParser("application/json");
+    routes.addContentTypeParser(
+      "application/json",
+      { parseAs: "string" },
+      (request, body, done) => {
+        const operationId = (request.routeOptions.schema as DocumentedFastifySchema)?.operationId;
+        // Agent schemas permit arbitrary own keys only in the string-valued tags map.
+        // JSON parsing defines __proto__ as data; OCC copies the map before persistence.
+        const parser =
+          operationId === "createAgent" || operationId === "updateAgent"
+            ? agentJsonParser
+            : ordinaryJsonParser;
+        parser(request, body as string, done);
+      },
+    );
     for (const operation of occApiRoutes) {
       const permissions = requiredPermissions(operation);
       const schema: DocumentedFastifySchema = {
