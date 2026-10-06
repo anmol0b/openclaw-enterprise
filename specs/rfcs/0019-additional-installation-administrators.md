@@ -5,106 +5,104 @@ author: freeqaz
 status_note: "Needs human review before landing. This PR changes documentation only; it implements no option."
 ---
 
-# Proposal: Additional Installation administrators
+# Proposal: Let an Installation administrator appoint a second one
 
-- **ID:** RFC-0019
-- **Owner:** IAM and authentication. Review: IAM model owners.
+- **ID:** RFC-0019 (provisional on this branch; renumber before merge)
 - **Created:** 2026-10-02
-- **Last updated:** 2026-10-02
-- **RFC PR:** this PR (draft)
-- **Related:** finding D245 from live testing of #281 and #624; current contracts in
-  [authentication](../../docs/reference/authentication.md#account-provisioning),
-  [authorization](../../docs/reference/authorization.md) and
-  [Add a person](../../docs/guides/topics/iam.md#add-a-person).
+- **Last updated:** 2026-10-15
+- **RFC PR:** [#889](https://github.com/openclaw/openclaw-enterprise/pull/889) (draft)
 
-## Summary
-
-`POST /api/auth/accounts` with the built-in administrator `roleId`
-(`role_admin_<uuid>`) creates an account that the docs call "another
-Installation administrator". It is not one. The account seed binds the Role to
-the exact Installation resource (`resourceKind: installation`), and an exact
-binding grants only Permissions whose kind matches its target. Of the Role's
-Installation, Namespace, Agent, Secret and other Permissions, only
-`installation:administer` and `installation:read` ever apply. The bootstrap
-administrator's binding has no target, so the same Role grants it everything.
-
-This RFC decides what the administrator `roleId` should grant. It recommends
-seeding the same unscoped binding as bootstrap, guarded by the #624 coverage
-rule at account creation. Until a decision lands, this PR corrects the docs.
-
-## Motivation
-
-On the dogfood install, an account created with the administrator `roleId`
-could create accounts and read `/observability`. It got `GET /namespaces` → `[]`, `403` on `POST /namespaces`,
-on reading any Namespace or its IAM policy, and on the deployment inventory.
-Namespace Roles allow only `namespace:read`, so no Namespace grant can give it
-Namespace create or delete either. Only the bootstrap human and the bootstrap
-ServicePrincipal can create or delete Namespaces, so an Installation with one
-human administrator has a single point of failure.
-
-The exact binding is deliberate in `createAuthPrincipalSeed`
-(`packages/iam/src/index.ts`) and enforced by
-`validateAuthAccountPrincipalSeed`. Its effect is not documented.
-
-## Goals
-
-- An account created "as another Installation administrator" can do what the
-  bootstrap administrator can do, or the docs say plainly that it cannot.
-- No caller can create an account that holds grants the caller lacks (the #624
-  rule, applied to account creation).
-- Existing accounts do not gain access silently.
-
-## Options
-
-### A. Seed an unscoped binding, with a coverage check (recommended)
-
-- `createAuthPrincipalSeed` binds an existing `roleId` with no target, like the
-  bootstrap binding. `validateAuthAccountPrincipalSeed` accepts only that shape.
-- `POST /api/auth/accounts` with a `roleId` requires the caller to hold every
-  grant the new binding confers: an unscoped binding of the same Role, or an
-  equivalent check over the Role's Permissions. Today an account holding only
-  the exact-Installation binding can create other accounts with this `roleId`;
-  without the check, Option A would let it mint a full administrator.
-- Existing exact-Installation account bindings stay as they are. An operator
-  who wants a full second administrator creates a new account, or deletes and
-  recreates the binding through a documented migration step. No automatic
-  rewrite, because that would grant access nobody approved after the fact.
-
-Cost: one authorization rule on account creation and a contract change in what
-the documented `roleId` grants. Audit already records `roleId`.
-
-### B. Treat an Installation-targeted binding as covering everything in it
-
-Make the evaluator apply a binding targeted at the Installation to every
-resource in it. This changes the meaning of every existing Installation binding
-at once, including the accounts created so far, and makes "exact" targets
-mean something different for one kind. Not recommended.
-
-### C. Keep the exact binding and document it
-
-The administrator `roleId` then means "account and service key administration
-only". This needs no code. It leaves a single human able to manage Namespaces,
-and the Role name "Installation administrator" stays misleading for these
-accounts. A separate, narrower built-in Role (for example "Account
-administrator") would make the intent explicit but adds API surface.
+<a id="problem-and-decision"></a>
 
 ## Decision requested
 
-1. Choose A, B or C.
-2. For A: confirm the account-creation coverage rule, and whether existing
-   exact-Installation account bindings get a documented migration step.
+In the dogfood test reported on October 2, an operator created a second account
+with the built-in *Installation administrator* Role. That person could create
+accounts and open `/observability`, but `GET /namespaces` returned `[]` and
+`POST /namespaces` returned `403`. Following the documented procedure had left
+the bootstrap administrator as the only human who could create a Namespace.
 
-## This PR
+**IAM model owners: choose A, B, or C. We recommend A.** Let an administrator
+give a new account the same access they hold, but require the caller to cover
+*every* grant they are about to give. Otherwise the limited administrator from
+that test could create a third account more powerful than their own. A changes
+only new, explicit grants; it does not promote anyone on upgrade. This PR
+corrects the operator guidance and implements none of the options.
 
-Documentation only, so the shipped behavior is described correctly now:
-`docs/reference/authentication.md` and `docs/guides/topics/iam.md` say that the
-administrator `roleId` on an additional account grants account administration
-and Installation reads only, not Namespace or Agent access. If Option A lands,
-those sentences change with it.
+## Why the same Role gave two people different access
 
-## Risks
+A Role says *what* someone may do. Its binding also says *where*. An exact
+binding to the Installation object does not mean “the Installation and
+everything in it.” [The IAM source at `00bbc7cd`](https://github.com/openclaw/openclaw-enterprise/blob/00bbc7cd976ab7be317ce1e0a9d36ad72ce10567/packages/iam/src/index.ts)
+still makes this distinction; the HTTP results above are from the October
+report, not a claim about a currently running Installation.
 
-- Option A widens what an administrator `roleId` grants for new accounts. The
-  coverage check keeps it from exceeding the creator's own access.
-- Option C keeps today's behavior; operators who need a second full
-  administrator have none.
+| How the account got the administrator Role | Where the Role applies |
+| --- | --- |
+| Bootstrap human (and bootstrap ServicePrincipal): binding has no resource target | Includes the Role’s Namespace create, read, and delete permissions, as well as its Agent, Secret, and other permissions. |
+| Additional human: `POST /api/auth/accounts` with `roleId: role_admin_<uuid>` binds to the exact Installation | Only `installation:administer` and `installation:read`. This includes account and service key administration. Reading a known Namespace, its IAM policy, and the deployment inventory each returned `403` in the test. |
+
+A Namespace Role cannot close this particular gap: its permission on the
+Namespace itself is read, not create or delete. For someone who needs ordinary
+Namespace access, keep the existing [Add a person](../../docs/guides/topics/iam.md#add-a-person)
+path: omit `roleId`, then grant access in the intended Namespace.
+[PR #281](https://github.com/openclaw/openclaw-enterprise/pull/281) introduced
+account creation without a Role.
+
+<a id="design"></a>
+
+## A. Change what account creation can grant (recommended)
+
+Keep the [account endpoint’s](../../docs/reference/authentication.md#account-provisioning)
+existing gate: a human session with `installation:administer`. When the request
+includes `roleId`, also check whether the caller holds each proposed permission
+at the same or a broader scope. *Permission to create an account is not
+permission to give it arbitrary access.*
+
+```mermaid
+flowchart TD
+    request["Create account with administrator roleId"] --> allowed{"May the caller create accounts?"}
+    allowed -->|No| deny["Refuse the request"]
+    allowed -.->|Yes| coverage{"Does the caller cover every grant the new binding would confer?"}
+    coverage -.->|No| deny
+    coverage -.->|Yes| grant["Create the account and bind the existing Role with no resource target"]
+```
+
+Dashed paths are proposed. Use the grant coverage rule from
+[PR #624](https://github.com/openclaw/openclaw-enterprise/pull/624), which
+prevents service key issuance beyond the caller’s grants. For account creation,
+compare against the *proposed binding*, before committing it. The existing
+`coversIdentityAccess` compares two identities already in policy; comparing the
+caller to a new identity with no grants would check the wrong thing. A caller’s
+own untargeted binding to the same Role is sufficient coverage, not the only
+possible proof. If coverage cannot be established, refuse the request.
+
+On success, `createAuthPrincipalSeed` would bind the existing Role with no
+resource target, as bootstrap does; `validateAuthAccountPrincipalSeed` would
+require that shape for this path. Preserve the single account-creation
+transaction, the audit record of `roleId`, and the no-grant default. No change to
+[authorization’s meaning of an exact binding](../../docs/reference/authorization.md)
+is needed.
+
+Before shipping A, demonstrate the difference on an Installation with a known
+Namespace: the bootstrap human can appoint a second administrator who can see
+it and create a Namespace; the limited administrator from the example cannot
+appoint one; and an existing exact binding gains nothing on upgrade. Operators
+can create a new account when they intend the broader grant. IAM owners should
+separately decide whether to document an explicit delete-and-recreate procedure
+for an existing binding. Never rewrite those bindings automatically.
+
+## B. Make an Installation target include everything in it
+
+Change the evaluator instead. This would immediately broaden *existing*
+Installation-targeted bindings as well as new ones, and give “exact” a special
+meaning for this resource. Choose B only if that wider authorization change is
+the intended decision.
+
+## C. Keep the narrower administrator and document the limit
+
+No authorization change. Operators can delegate account and service key
+administration, but still cannot appoint a second human who can create or
+delete Namespaces. A built-in Role named *Account administrator* would describe
+that access more clearly, at the cost of additional API surface. Until behavior
+changes, the operator guides should describe this limit.

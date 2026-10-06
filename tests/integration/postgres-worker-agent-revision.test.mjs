@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { prepareFile } from "../../scripts/ci/prepare.mjs";
 import { createOccMetrics } from "../../apps/controller/src/metrics/index.ts";
+import { createOccLogger, createWorkerLogEmitter } from "../../apps/controller/src/logging.ts";
 import { OpenShellAdmissionLimitError } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
 import {
   ActivationFailedError,
@@ -5082,6 +5083,107 @@ test(
         { outcome: "success", code: "RECONCILE_SUCCEEDED" },
       ],
     );
+  },
+);
+
+test(
+  "a failed Namespace logs the Compute refusal reason while status and audit keep only the failure",
+  requiresPostgres,
+  async (context) => {
+    // D521: a refused existing-namespace selection ended `failed` with no reason anywhere.
+    const fixture = await setup(context);
+    const reason =
+      "Existing Kubernetes namespace customer-support belongs to another tenant: its openclaw.dev/namespace label names a different Namespace.";
+    const results = [
+      { failure: "retryable", reason: "Kubernetes API request timed out." },
+      // A reason that is not bounded printable text is dropped, never logged.
+      { failure: "retryable", reason: "line\nbreak" },
+      { failure: "permanent", reason },
+    ];
+    let attempts = 0;
+    const output = [];
+    const log = createWorkerLogEmitter(
+      createOccLogger({
+        component: "occ-worker",
+        destination: {
+          write(chunk) {
+            for (const line of String(chunk).split("\n")) {
+              if (line.length > 0) {
+                output.push(JSON.parse(line));
+              }
+            }
+            return true;
+          },
+        },
+      }),
+    );
+    await fixture.start(
+      {
+        ...fixture.compute,
+        async ensureNamespace(target) {
+          const result = results[Math.min(attempts, results.length - 1)];
+          attempts += 1;
+          return { namespaceId: target.id, namespaceReady: false, ...result };
+        },
+      },
+      log,
+    );
+    const namespace = await fixture.controller.createNamespace(fixture.actor.id, {
+      name: `refused-${randomUUID()}`,
+    });
+    assert.equal(namespace.status, "provisioning");
+    await fixture.work(
+      { id: namespace.id, idempotencyKey: `namespace:${namespace.id}:reconcile:ready` },
+      "failed_permanent",
+    );
+    const completed = await waitFor("three logged Namespace passes", async () => {
+      const lines = output.filter(
+        (line) =>
+          line.event === "worker.completed" &&
+          line.namespaceId === namespace.id &&
+          line.operation === "namespace.ensure",
+      );
+      return lines.length === 3 ? lines : undefined;
+    });
+    assert.deepEqual(
+      completed.map(({ operation, outcome, code, reason }) => ({
+        operation,
+        outcome,
+        code,
+        reason,
+      })),
+      [
+        {
+          operation: "namespace.ensure",
+          outcome: "retry",
+          code: "NAMESPACE_INCOMPLETE",
+          reason: "Kubernetes API request timed out.",
+        },
+        {
+          operation: "namespace.ensure",
+          outcome: "retry",
+          code: "NAMESPACE_INCOMPLETE",
+          reason: undefined,
+        },
+        {
+          operation: "namespace.ensure",
+          outcome: "permanent",
+          code: "NAMESPACE_INCOMPLETE",
+          reason,
+        },
+      ],
+    );
+    const failed = await fixture.state.read((view) => view.namespaces.findNamespace(namespace.id));
+    assert.equal(failed.status, "failed");
+    // The reason stays in the operator log: the Namespace and its audit events carry none.
+    assert.equal(JSON.stringify(failed).includes("another tenant"), false);
+    const { rows } = await fixture.observerPool.query(
+      `SELECT details FROM occ.audit_events WHERE namespace_id = $1`,
+      [namespace.id],
+    );
+    assert.ok(rows.length > 0);
+    assert.equal(JSON.stringify(rows).includes("another tenant"), false);
+    assert.equal(JSON.stringify(rows).includes("timed out"), false);
   },
 );
 

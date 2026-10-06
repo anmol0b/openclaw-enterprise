@@ -34,7 +34,9 @@ When converting an existing single file, preserve its ID and content and update
 all incoming and relative links; do not leave a top-level duplicate.
 Start the file with YAML frontmatter containing `status: Proposed`,
 `implementation_status: Not implemented`, and the required `author` GitHub login,
-as defined in the specification process. Companion
+as defined in the specification process. Treat the author as the RFC owner;
+keep attribution in frontmatter and the index without repeating it in the body
+or adding a separate owner field. Companion
 Markdown notes use an `rfc` frontmatter link to the main document and inherit
 its decision status; do not duplicate the status in companions. When adding
 metadata to historical RFCs, use recorded decision evidence. If no decision is
@@ -65,9 +67,10 @@ policy and actual decision evidence.
 - Remove unused template prompts and optional sections. Keep links repository
   relative, and verify their paths and any referenced heading anchors.
 - Add or update the RFC’s row in `specs/README.md`, showing its linked number
-  and name in the first column, `implementation_status` in the second, and
-  evidence or remaining gaps in the third. Keep the row synchronized when the
-  name or implementation status changes. Link the RFC and plan
+  and name in the first column, the emoji for `implementation_status` from the
+  index legend in the second,
+  evidence or remaining gaps in the third, and the author in the fourth. Keep the row synchronized when the
+  name, implementation status, or author changes. Link the RFC and plan
   to each other when both exist.
 - Check the document against current source, scope, alternatives, failure
   behavior, and required outcomes. Apply the technical-writing clarity pass.

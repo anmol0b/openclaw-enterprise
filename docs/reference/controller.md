@@ -126,7 +126,9 @@ The worker emits fixed operational event classes through the same logger:
   the dependency. An HTTP failure adds `status`, and the Kubernetes Status `reason`
   when its cause keeps one, such as `403` and `Forbidden` for a refused Secret
   write. A provisioning plan that the Compute Driver refuses for a reason the caller
-  cannot fix adds that `reason`. These fields stay in the local log; the Collector
+  cannot fix adds that `reason`. A failed Namespace pass adds the Compute Driver's
+  `reason` when it gives one: bounded printable text that never carries another
+  tenant's values. These fields stay in the local log; the Collector
   exports only the result code. Each deployment pass adds worker wall-clock milliseconds:
   `durationMs` for the pass, `deployPasses` and summed Compute `prepareMs` so
   far, `readinessWaitMs` from the first unready observation to the first ready
