@@ -248,7 +248,10 @@ if (command === "docker" || command === "podman") {
     state.tag = args[3];
     finish();
   }
-  if (equals(args, ["image", "inspect", state.tag])) finish("[]\n");
+  if (equals(args, ["image", "inspect", state.tag])) {
+    if (scenario === "hung-host-owned") await hang();
+    finish("[]\n");
+  }
   // Images and Packaging pulls its pinned Node base image after the builds.
   if (equals(args.slice(0, 4), ["image", "inspect", "--format", "{{json .RepoDigests}}"]) &&
       args[4]?.startsWith("docker.io/library/node:")) {
@@ -1023,6 +1026,20 @@ test("k3d preparation times out a hung host image command and never pulls for it
     const cleanup = commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
   }
+});
+
+test("fixture preparation times out a hung inspect of its own fixture image", async (t) => {
+  const commands = await fixtureImageCommands(t, "hung-host-owned", undefined, {
+    OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS: "3000",
+  });
+  const result = commands.prepare();
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /The container engine did not answer within 3000 ms \(image inspect localhost\/\S+\/fixture:local\)\./,
+  );
+  const cleanup = commands.cleanup();
+  assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
 test("ordinary k3d preparation forwards an immutable K3s override and retains the server version gate", async (t) => {

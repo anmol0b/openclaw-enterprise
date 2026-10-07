@@ -1155,9 +1155,18 @@ test("Namespace IAM refuses bindings whose Role cannot apply to the target", asy
       },
     });
 
-  // The dogfood "share the Namespace" attempt: create is authorized against the Namespace,
-  // never an exact resource, so these Permissions would be silently dropped at evaluation.
-  const creator = await createRole([
+  // Role creation now refuses create Permissions, but Roles stored before that refusal can
+  // still hold them; write one straight to the policy State, as the earlier API did.
+  // Binding it is the dogfood "share the Namespace" attempt: create is authorized against
+  // the Namespace, never an exact resource, so these Permissions would be silently dropped
+  // at evaluation.
+  const storedRole = async (id, permissions) => {
+    await fixture.platformState.transact((unit) =>
+      unit.iamPolicy.createRole({ id, namespaceId: namespace.id, permissions }),
+    );
+    return id;
+  };
+  const creator = await storedRole(`role_${randomUUID()}`, [
     { action: "read", resourceKind: "namespace" },
     { action: "create", resourceKind: "agent" },
     { action: "create", resourceKind: "configuration" },
@@ -1173,12 +1182,13 @@ test("Namespace IAM refuses bindings whose Role cannot apply to the target", asy
     assert.deepEqual(rejected.body.error.details, [{ path: "/roleId", code: "INVALID_VALUE" }]);
     assert.match(
       rejected.body.error.message,
-      /agent:create, configuration:create, secret:create\. No AccessBinding grants create: only Installation administrators/,
+      /^Role role_\S+ has Permissions this API cannot bind: agent:create, configuration:create, secret:create\. Create is checked on the Namespace, and this API binds only exact resources; bind a Role without them\.$/,
     );
   }
 
   // A long list of create Permissions is shortened so the guidance still fits the cap.
-  const manyCreates = await createRole(
+  const manyCreates = await storedRole(
+    `role_${randomUUID()}`,
     ["agent", "configuration", "credential_source", "preset", "secret", "service_account"].map(
       (resourceKind) => ({ action: "create", resourceKind }),
     ),
@@ -1186,7 +1196,27 @@ test("Namespace IAM refuses bindings whose Role cannot apply to the target", asy
   const long = await bind(manyCreates, "namespace", namespace.id);
   assert.equal(long.status, 400, JSON.stringify(long.body));
   assert.ok(Array.from(long.body.error.message).length <= 256, long.body.error.message);
-  assert.match(long.body.error.message, / and \d+ more\. .*remove them from the Role\.$/);
+  assert.match(long.body.error.message, / and \d+ more\. .*bind a Role without them\.$/);
+
+  // A stored create Role stays readable and deletable, so an administrator can replace it.
+  const policyPath = `/namespaces/${namespace.id}/iam/roles`;
+  const listed = await controller.request("GET", policyPath);
+  assert.ok(
+    listed.data.some((role) => role.id === creator),
+    "stored create Roles must still be listed",
+  );
+  const read = await controller.request("GET", `${policyPath}/${creator}`);
+  assert.equal(read.status, 200, JSON.stringify(read.body));
+  assert.deepEqual(
+    read.data.permissions.filter((permission) => permission.action === "create"),
+    [
+      { action: "create", resourceKind: "agent" },
+      { action: "create", resourceKind: "configuration" },
+      { action: "create", resourceKind: "secret" },
+    ],
+  );
+  const removed = await controller.request("DELETE", `${policyPath}/${creator}`);
+  assert.equal(removed.status, 204, JSON.stringify(removed.body));
 
   // A Role with no Permission for the target's kind would grant nothing there.
   const agentReader = await createRole([{ action: "read", resourceKind: "agent" }]);
@@ -1627,6 +1657,53 @@ test("Namespace IAM reports invalid policy input as 400 with the field and refus
   assert.deepEqual(lifecycle.body.error.details, [
     { path: "/permissions/0/action", code: "INVALID_VALUE" },
   ]);
+  // create is checked on the Namespace collection and this API binds only exact resources,
+  // so every binding of such a Role would be refused; Role creation refuses it first and
+  // points at the first create Permission.
+  const createKinds = [
+    "agent",
+    "configuration",
+    "credential_source",
+    "preset",
+    "secret",
+    "service_account",
+  ];
+  for (const resourceKind of createKinds) {
+    for (const [permissions, index] of [
+      [[{ action: "create", resourceKind }], 0],
+      [
+        [
+          { action: "read", resourceKind },
+          { action: "create", resourceKind },
+        ],
+        1,
+      ],
+    ]) {
+      const rejected = await createRole(namespace.id, permissions);
+      assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
+      assert.equal(rejected.body.error.code, "INVALID_REQUEST");
+      assert.deepEqual(rejected.body.error.details, [
+        { path: `/permissions/${index}/action`, code: "INVALID_VALUE" },
+      ]);
+      assert.equal(
+        rejected.body.error.message,
+        `Namespace IAM Roles cannot grant create Permissions: ${resourceKind}:create. Create is checked on the Namespace, and this API binds only exact resources; omit them from the Role.`,
+      );
+    }
+  }
+  const allCreates = await createRole(namespace.id, [
+    { action: "read", resourceKind: "agent" },
+    ...createKinds.map((resourceKind) => ({ action: "create", resourceKind })),
+  ]);
+  assert.equal(allCreates.status, 400, JSON.stringify(allCreates.body));
+  assert.deepEqual(allCreates.body.error.details, [
+    { path: "/permissions/1/action", code: "INVALID_VALUE" },
+  ]);
+  assert.ok(Array.from(allCreates.body.error.message).length <= 256, allCreates.body.error.message);
+  assert.match(
+    allCreates.body.error.message,
+    /^Namespace IAM Roles cannot grant create Permissions: agent:create, .* and \d+ more\. .*omit them from the Role\.$/,
+  );
   const roles = await controller.request("GET", `/namespaces/${namespace.id}/iam/roles`);
   assert.deepEqual(roles.data, [], "rejected Roles must not be persisted");
 
@@ -1799,6 +1876,15 @@ test("OCC rejects Namespace lifecycle Role Permissions before any IAM Driver or 
     assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
     assert.equal(rejected.body.error.code, "INVALID_REQUEST");
   }
+  // A create Permission on a child kind is refused by OCC too, whatever the Driver accepts.
+  const childCreate = await createRole([
+    { action: "read", resourceKind: "agent" },
+    { action: "create", resourceKind: "agent" },
+  ]);
+  assert.equal(childCreate.status, 400, JSON.stringify(childCreate.body));
+  assert.deepEqual(childCreate.body.error.details, [
+    { path: "/permissions/1/action", code: "INVALID_VALUE" },
+  ]);
   assert.deepEqual(driverCalls, [], "OCC must reject before delegating to the IAM Driver");
 
   // Control: the same Driver receives a Namespace read Role, so the rejection above is OCC's.
@@ -4889,8 +4975,59 @@ test("Agent provisioning API validates inline configuration with existing Secret
     `/namespaces/${namespace.data.id}/agents/provision`,
     { body: provisioningRequestBody(namespace.data.id, secrets) },
   );
-  fixture.state.restrictions.pop();
   assert.equal(refusedUnauthorized.status, 403, JSON.stringify(refusedUnauthorized.body));
+  // Authorization also precedes OCC's own plan checks. Each body below draws a 400 or 404 from
+  // an authorized caller; without the grant it is the same 403, so a caller learns nothing about
+  // a Namespace they cannot provision in from how the plan is refused.
+  const planRefusals = [
+    [
+      "omitted execution mode",
+      provisioningRequestBody(namespace.data.id, secrets, { executionMode: undefined }),
+      400,
+    ],
+    [
+      "no Harness authentication",
+      provisioningRequestBody(namespace.data.id, secrets, { harnessAuth: null }),
+      404,
+    ],
+    [
+      "runtime Harness authentication",
+      provisioningRequestBody(namespace.data.id, secrets, { harnessAuth: { method: "runtime" } }),
+      404,
+    ],
+  ];
+  const assertPlanRefusalsDenied = async (grant) => {
+    for (const [description, body] of planRefusals) {
+      const denied = await injectedRequest(
+        fixture.app,
+        "POST",
+        `/namespaces/${namespace.data.id}/agents/provision`,
+        { body },
+      );
+      assert.equal(denied.status, 403, `${grant}, ${description}: ${JSON.stringify(denied.body)}`);
+      assert.equal(denied.body.error.code, "FORBIDDEN", `${grant}, ${description}`);
+    }
+  };
+  await assertPlanRefusalsDenied("without Agent create");
+  fixture.state.restrictions.pop();
+  // Installation administer used to be checked only after the plan was validated and stored.
+  fixture.state.restrictions.push({
+    id: "deny-provisioning-installation-administer",
+    resourceKind: "installation",
+    action: "administer",
+    effect: "deny",
+  });
+  await assertPlanRefusalsDenied("without Installation administer");
+  fixture.state.restrictions.pop();
+  for (const [description, body, status] of planRefusals) {
+    const refused = await injectedRequest(
+      fixture.app,
+      "POST",
+      `/namespaces/${namespace.data.id}/agents/provision`,
+      { body },
+    );
+    assert.equal(refused.status, status, `${description}: ${JSON.stringify(refused.body)}`);
+  }
   // The logged reason keeps at most 512 characters, and a thrown non-Error's value is not logged.
   for (const [thrown, reason] of [
     [new Error("r".repeat(600)), "r".repeat(512)],
