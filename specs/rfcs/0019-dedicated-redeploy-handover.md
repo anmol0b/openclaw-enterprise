@@ -6,137 +6,124 @@ author: freeqaz
 
 # Proposal: Check a dedicated replacement before stopping its predecessor
 
-- **ID:** RFC-0019
-- **Owner:** freeqaz (proposal). Compute and worker review: Kubernetes Compute maintainers.
+- **ID:** RFC-0019 (provisional in this draft, renumber before merge)
 - **Created:** 2026-10-03
-- **Last updated:** 2026-10-03
+- **Last updated:** 2026-10-15
 - **RFC PR:** [#1045](https://github.com/openclaw/openclaw-enterprise/pull/1045)
-- **Related:** [Dedicated Harness RWO workspace plan](../plans/38-harness-rwo-workspace-plan.md);
-  [exclusive replacement contract](../../docs/reference/drivers/compute.md#production-revision-stages);
-  [harness execution](../../docs/reference/harness-execution.md)
 
 <a id="problem-and-decision"></a>
 
-## Summary
+## Let an operator correct a bad deployment while the Agent still serves
 
-A dedicated Agent redeploy stops every earlier revision before it prepares the
-replacement. A healthy Agent is therefore unavailable for the whole replacement,
-about 75 seconds on a local k3d install, and a replacement that cannot start (for
-example a rotated credential with a typo) leaves no revision serving. This RFC
-proposes that the worker run the replacement's checks that need no Agent-owned
-volume before it stops the predecessor. A replacement that fails those checks
-fails while the predecessor keeps serving. The remaining outage covers only
-predecessor termination and the replacement's own startup. Zero-downtime
-replacement is out of scope; it needs a second copy of single-writer state.
+In an observed redeploy, an operator put the wrong model credential in a Secret. One second after the
+request, the controller deleted the working revision. The replacement reported
+`RUNTIME_AUTHENTICATION_FAILED` 27 seconds later. Nobody could use the Agent until the operator
+deployed again. The operator needed the authentication error while they could still use the Agent
+and correct the Secret.
 
-## Motivation
+**Decision requested:** Check the replacement credential, configuration and images while the
+current revision still serves and receives maintenance. If the provider rejects the credential,
+fail the deployment with the original error and tell the operator *we did not stop the previous
+revision*. That is a fact the controller can report, not a claim that it just verified Agent health.
 
-Dogfood measurement (D67 in the OCE dogfood log, a 1 s Pod poll of a Codex
-Agent redeploy with a working key):
-
-| Phase                                               | Time     |
-| --------------------------------------------------- | -------- |
-| Request to predecessor Gateway and Harness deletion | ~5 s     |
-| Predecessor termination                             | ~20 s    |
-| Replacement scheduling and volume attach            | ~7 s     |
-| Replacement Harness and Gateway startup to Ready    | ~43-50 s |
-
-D95 shows the worse case: a Secret updated to a wrong value, then a redeploy.
-The predecessor was deleted one second after the request, the replacement failed
-`RUNTIME_AUTHENTICATION_FAILED` 27 seconds later, and the Agent had no running
-workload until someone deployed again.
-
-The ordering is deliberate. [Plan 38](../plans/38-harness-rwo-workspace-plan.md)
-moved the dedicated Harness workspace to a per-Agent ReadWriteOnce claim and made
-Kubernetes Compute return `requiresStoppedPredecessors(revision) === true` for
-dedicated revisions. The worker then stops predecessors before
-`prepareAfterPredecessors` (`apps/controller/src/worker.ts`,
-`prepareRevisionPass`). The Gateway's SQLite private state is also a per-Agent
-ReadWriteOnce claim behind a `Recreate` Deployment. Two revisions cannot run
-against either claim at once, so a Deployment strategy change (surge or
-RollingUpdate) cannot fix this: it would start a second writer on the same
-state.
-
-## Goals
-
-- A replacement whose credentials, configuration or images are unusable fails
-  before the predecessor is stopped, and the Agent keeps serving.
-- The successful-path outage drops by the work that does not need the volumes.
-- The exclusive contract still holds: no two revisions run against one
-  Agent-owned claim.
-
-## Non-goals
-
-- Zero-downtime dedicated replacement. That needs per-revision state copies,
-  ReadWriteMany storage with multi-writer semantics, or a state handoff
-  protocol. All three change the storage design from plan 38.
-- Embedded Agents, which already prepare while the predecessor serves.
+Keep the [exclusive handover](../../docs/reference/drivers/compute.md#production-revision-stages).
+The Harness owns the Agent’s workspace, and the Gateway owns its private SQLite state. Each needs
+its volume to itself. We can discover some failures before the interruption, but we cannot start
+a second full Agent to prove the handover will succeed. The first implementation task is to move
+the point where the worker retires the old revision’s maintenance. Adding a credential probe
+after that point would be too late.
 
 <a id="design"></a>
 
-## Proposal
+## Put the boundary at “begin stopping,” not “replacement admitted”
 
-Split exclusive preparation into two stages around the predecessor stop:
+In [the worker](../../apps/controller/src/worker.ts) at `00bbc7cd9`, a newer exclusive revision can
+supersede the old revision’s reconciliation and maintenance as soon as it is admitted.
+`prepareRevisionPass` then calls `stopPredecessors` before `prepareAfterPredecessors`.
+[Kubernetes Compute](../../apps/controller/src/drivers/compute/kubernetes/index.ts) already
+rejects some invalid settings at admission. Keep those checks there. A credential can be
+well-formed and still be refused by the provider; admission alone cannot settle that case.
 
-1. **Pre-stop checks (predecessor still serving).** The worker calls a new
-   optional Compute stage, `prepareWithoutExclusiveResources(revision, context)`,
-   before `stopPredecessors`. Kubernetes Compute uses it to:
-   - create or update the replacement's revision-owned Secrets, ConfigMaps and
-     NetworkPolicies, none of which the predecessor reads;
-   - make sure the replacement images exist on the node that holds the Agent's
-     claims, with a short-lived pull Pod that mounts nothing;
-   - run the existing startup model check from a short-lived probe Pod that
-     receives only the replacement's model credential and no workspace or
-     Gateway state, under the same NetworkPolicy as the Harness.
-     A failure here records the revision as failed with the existing failure
-     codes. The predecessor is not touched, and the console's existing "Probably
-     down" state does not apply because the active revision still runs.
-2. **Exclusive stage (unchanged).** Stop predecessors, then
-   `prepareAfterPredecessors` creates the Gateway and Harness workloads that
-   mount the claims, waits for readiness, and activates.
+```mermaid
+flowchart TD
+    Check["Check replacement without either Agent volume<br/>Old revision still serves and receives maintenance"]
+    Keep["Fail deployment with original error<br/>Tell operator we did not stop the old revision"]
+    Stop["Begin exclusive handover<br/>End old maintenance, stop predecessors, wait for volumes"]
+    Start["Start Gateway and Harness on their volumes<br/>Activate only when ready"]
+    Recover["Report failure after stop<br/>Operator corrects the problem and deploys a higher revision"]
+    Check -.->|check fails| Keep
+    Check -.->|checks pass| Stop
+    Stop -->|volumes released| Start
+    Start -->|startup fails| Recover
+```
 
-Drivers that do not implement the new stage keep today's behavior. The stage
-must be idempotent and safe to repeat after a lost lease, like other preparation
-stages. Its probe and pull Pods are revision-owned and are removed by the same
-cleanup that removes a failed candidate.
+Dashed arrows are the proposed change. Solid arrows are the existing exclusive handover.
+The stop can yield while the Gateway drains and resume in another worker pass. Once stopping
+has begun, a retry must not go back to reporting that no predecessor was stopped.
 
-### Security
+### Before stopping, use only resources that belong to the replacement
 
-The probe Pod receives exactly the credential the Harness would receive, in the
-Agent's Namespace, under the Harness NetworkPolicy and workload identity. No
-credential reaches the Gateway, the controller or a log. The probe makes one
-provider request, as the startup check already does.
+Add an optional Compute stage, `prepareWithoutExclusiveResources(revision, context)`, before
+`stopPredecessors`. Drivers that omit it keep their current ordering. For a dedicated Kubernetes
+replacement, the stage would:
 
-### Failure and recovery
+1. Prepare the replacement’s revision-owned Secrets, ConfigMaps and NetworkPolicies. Changing
+   them must not change what the serving revision reads.
+2. Ensure the replacement images are present on the node that holds the Agent’s claims. A
+   short-lived pull Pod can do this without mounting a volume.
+3. Run the Harness startup model check from a short-lived probe Pod, also without either volume.
+   This makes one provider request. Treat the probe as part of the replacement Harness’s
+   credential boundary: same Agent Namespace, Harness NetworkPolicy, workload identity and model
+   credential. Do not give the credential to the controller or Gateway, or write it to a log.
 
-- Probe or pull failure: the revision fails before any stop; the predecessor
-  keeps serving, and its active pointer and routes are unchanged.
-- Worker loss during pre-stop checks: the next pass repeats them; nothing has
-  been stopped.
-- Failure after the stop: unchanged from today (deploy a higher revision).
+The stage must be safe to repeat after loss of a worker lease, including the possibility of
+another provider request. Both Pods belong to the candidate and follow its failed-revision cleanup.
+If a check fails, preserve its failure code and record in deployment status that this attempt did
+not stop a predecessor. Leave the active route, credential sessions and maintenance in place.
 
-## Alternatives
+### When stopping begins, keep the existing single-writer and recovery rules
 
-- **Accept and document.** The Compute and harness-execution references already
-  state the downtime. This leaves D95's outage on a bad credential.
-- **Surge or RollingUpdate.** Rejected: two writers on ReadWriteOnce claims.
-- **ReadWriteMany or per-revision claims with a copy.** Zero downtime, but
-  reopens the plan 38 storage decision and SQLite-on-shared-storage risks.
+Coordinate the transition with predecessor reconciliation so no old maintenance or retry can
+recreate a competing workload. Close earlier credential sessions, stop *every* predecessor
+(including failed candidates), and wait for resource release. A failed or yielded stop does not
+authorize preparing the replacement on those volumes. After release, prepare the dedicated
+Gateway and Harness, wait for readiness, then activate. If startup fails now, the old revision can
+still be recorded as current even though it is no longer serving. Recovery is a higher revision,
+not automatic rollback.
 
-## Delivery and evidence
+The [workspace decision](../plans/38-harness-rwo-workspace-plan.md) was to give the dedicated
+Harness a per-Agent ReadWriteOnce claim. The Gateway has another such claim and uses `Recreate`.
+A surge or `RollingUpdate` would risk two writers. Copies per revision or different storage
+semantics would reopen that decision, including SQLite’s suitability for shared storage.
+[Embedded Agents](../../docs/reference/harness-execution.md) are outside this proposal.
 
-One PR: the optional stage in the Compute contract and worker, the Kubernetes
-implementation, and an extension of the existing exclusive-replacement worker
-integration test (a replacement with a rejected credential must leave the
-predecessor's Pods running and its route active). The real-cluster case in
-`tests/integration/kubernetes-compute-real.test.mjs` measures the outage window
-before and after. Docs: Compute contract, harness execution, Kubernetes Compute.
+## Review the change by making the same credential fail on each side of the stop
 
-## Open questions
+Deliver the Compute contract, worker ordering, Kubernetes stage and deployment-status consumers
+together. Use the [worker revision fixtures](../../tests/helpers/postgres-worker-revision-fixture.mjs)
+[extracted in #1553](https://github.com/openclaw/openclaw-enterprise/pull/1553).
+Kubernetes Compute maintainers should review the contract and worker transition. Update
+the Compute, Harness execution, Kubernetes Compute and deployment status API references.
 
-- Should the probe run for every redeploy, or only when the credential or
-  harness settings changed since the active revision (owner: Compute
-  maintainers)?
-- Is the startup check's provider charge acceptable twice per redeploy (probe
-  and Harness startup), or should the Harness skip its own check when the probe
-  passed for the same credential generation (owner: product)?
+- **Provider refuses before stop.** In the [PostgreSQL revision-worker tests](../../tests/integration/postgres-worker-agent-revision.test.mjs),
+  hold the probe pending long enough to run predecessor maintenance, then reject the credential.
+  Verify the old route still serves, maintenance continues, and status records the deployment
+  failure *and* that no stop began. The console’s `replacementFailed` must not say “Probably down”
+  on that evidence, and native admin’s `replacesActiveWorkload` must preserve authorized access.
+- **Startup refuses after stop.** Let the probe pass, then fail authentication at startup.
+  Preserve the console’s “Probably down” warning and native admin’s unavailable result. Add a case
+  where the stop yields during Gateway drain and another worker resumes it. That worker must
+  remember that stopping already began, even if it did not issue the original stop.
+- **Successful handover.** Measure interruption before and after in the [real Kubernetes test](../../tests/integration/kubernetes-compute-real.test.mjs).
+  A local k3d redeploy recorded by October 3 showed roughly 75 seconds of interruption in a
+  once-per-second Pod poll. Termination, attachment and startup still take time. The observation
+  explains why to measure the interruption, not how many seconds this change would save.
+
+<a id="open-questions"></a>
+
+## Decide when the provider check is worth its cost
+
+**Compute maintainers:** probe every redeploy, or only when the
+credential or Harness settings differ from the active revision? **Product:** pay for both the
+probe and the startup check, or let the Harness omit its check for the same credential generation?
+Either way, a successful probe is evidence about one request, not a promise of readiness or rollback.
