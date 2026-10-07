@@ -140,6 +140,14 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     await transaction.operations.append(operation);
   });
 
+  // The draft binding and the pending deployment both reference the key: one Agent entry.
+  await store.read(async (state) => {
+    assert.deepEqual(await state.secrets.listReferences(namespace.id, harnessSecret.id, 50), {
+      references: [{ kind: "agent", id: agent.id }],
+      truncated: false,
+    });
+  });
+
   // Agent-scoped work exists only to tear an Agent down. Reconciliation still
   // belongs to revisions, so Agent work without the deleted target is refused
   // rather than queued as generic Agent reconciliation.
@@ -1582,8 +1590,13 @@ async function verifyDeletedResourceAccessBindingContract(store, revision) {
     status: "active",
     createdAt,
   };
-  const configuration = configurationFor();
   const secret = secretFor("Bound secret");
+  const configuration = {
+    ...configurationFor(),
+    secretBindings: {
+      SLACK_BOT_TOKEN: { source: { kind: "secret", namespaceId: namespace.id, id: secret.id } },
+    },
+  };
   const preset = {
     id: identifier("pre"),
     namespaceId: namespace.id,
@@ -1630,9 +1643,9 @@ async function verifyDeletedResourceAccessBindingContract(store, revision) {
   await store.transact(async (transaction) => {
     await transaction.namespaces.createNamespace(namespace);
     await transaction.configurations.createConfiguration(agentConfiguration);
-    await transaction.configurations.createConfiguration(configuration);
     await transaction.secrets.createSecret(agentSecret);
     await transaction.secrets.createSecret(secret);
+    await transaction.configurations.createConfiguration(configuration);
     await transaction.agents.createAgent(agent);
     await transaction.revisions.createRevision({
       ...revision,
@@ -1659,17 +1672,36 @@ async function verifyDeletedResourceAccessBindingContract(store, revision) {
     }
   });
 
-  // The credential source references the Secret, so it goes first.
+  // Each reference comes back once, ordered by kind then ID; a full page says more exist.
+  await store.read(async (state) => {
+    assert.deepEqual(await state.secrets.listReferences(namespace.id, secret.id, 50), {
+      references: [
+        { kind: "configuration", id: configuration.id },
+        { kind: "credential_source", id: source.id },
+      ],
+      truncated: false,
+    });
+    assert.deepEqual(await state.secrets.listReferences(namespace.id, secret.id, 1), {
+      references: [{ kind: "configuration", id: configuration.id }],
+      truncated: true,
+    });
+    assert.deepEqual(await state.secrets.listReferences(namespace.id, agentSecret.id, 50), {
+      references: [{ kind: "agent", id: agent.id }],
+      truncated: false,
+    });
+  });
+
+  // The credential source and the Configuration reference the Secret, so they go first.
   await store.transact(async (transaction) => {
     assert.equal(
       await transaction.credentialSources.deleteCredentialSource(namespace.id, source.id),
       true,
     );
-    assert.equal(await transaction.secrets.deleteSecret(namespace.id, secret.id), true);
     assert.equal(
       await transaction.configurations.deleteConfiguration(namespace.id, configuration.id),
       true,
     );
+    assert.equal(await transaction.secrets.deleteSecret(namespace.id, secret.id), true);
     assert.equal(await transaction.presets.deletePreset(namespace.id, preset.id), true);
     assert.equal(
       await transaction.serviceAccounts.deleteServiceAccount(namespace.id, account.id),

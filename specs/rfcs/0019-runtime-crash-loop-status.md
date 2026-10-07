@@ -5,107 +5,127 @@ author: freeqaz
 status_note: "Needs human review before landing. The accompanying draft implements step 1 only."
 ---
 
-# Proposal: Report a crash-looping runtime in the deployment record
+# Proposal: Show repeated runtime restarts while a deployment can still recover
 
-- **ID:** RFC-0019
-- **Owner:** Controller worker and Kubernetes Compute Driver. Review: API contract owners.
-- **Created:** 2026-10-02
-- **Last updated:** 2026-10-02
-- **RFC PR:** this PR (draft)
-- **Related:** dogfood finding D263 from live testing of #696 and #747; the
-  Collector half of D263 (`gateway.startup_failed`) is a separate fix; current
-  contracts in [deployment status](../../docs/reference/agents.md) and
-  [agent logs](../../docs/guides/topics/agent-logs.md).
+- **ID:** RFC-0019 on this draft branch (renumber before merge)
+- **Owners:** Controller worker and Kubernetes Compute Driver. API contract owners decide how pending progress is represented.
+- **Created:** 2026-10-02. **Last updated:** 2026-10-15. **[RFC PR](https://github.com/openclaw/openclaw-enterprise/pull/883):** draft, needs human review.
 
 ## Summary
 
-A Gateway that exits on every start (for example `gateway.bind=custom` without
-`gateway.customBindHost`) is invisible in the deployment record for the whole
-15-minute convergence window. The record reads `running` with
-`lastAttempt REVISION_INCOMPLETE "Waiting for the runtime to become ready."`, with
-no error or warning. Then it fails with a generic
-`CONVERGENCE_DEADLINE_EXCEEDED` and no `runtimeFailure`. The cause is visible
-only through `occ agent logs --previous`. This RFC proposes three steps:
+A Gateway exited with code 1 on every start. From 23:20 to 23:35, its deployment
+said “Waiting for the runtime to become ready.” It then reported only that the
+deadline had expired. The useful clue was available during the wait: the previous
+Gateway’s logs showed that its configuration omitted `gateway.customBindHost`.
 
-1. The Kubernetes Driver reports a crash loop as runtime-failure evidence
-   (`component`, `check: "container"`, `code: "CONTAINER_CRASH_LOOP"`, exit time).
-   This uses the existing `runtimeFailure` shape.
-2. The pending deployment progress names it while the deadline runs.
-3. Optionally, the deployment fails early when the loop cannot recover.
+**Show the restarts and keep waiting.** We ask the API contract owners to approve
+`RUNTIME_CRASH_LOOP` as a *pending* attempt code. An operator could read
+`occ agent logs <agent> --previous` and correct that configuration immediately.
+A Gateway waiting for a dependency would still have until the existing deadline
+to recover. The proposed signal means “at least three restarts, last exit
+nonzero.” It does not establish that all three starts failed for the same reason.
 
-## Motivation
+[Draft PR #883](https://github.com/openclaw/openclaw-enterprise/pull/883) implements
+only the Kubernetes observation and its path to the existing failure panel *at the
+deadline*. Reviewing that code and choosing what the operator sees *during the
+wait* are separate decisions. Ending the deployment early is a third, optional
+policy choice.
 
-On the dogfood install, the lane's crash-looping embedded Agent restarted 5
-times between 23:20 and 23:35. `occ agent get` showed `active` with no
-revision. The console offered no hint until the deadline, and the deadline
-failure carried no evidence. Plugin install failures and model-authentication
-failures already surface early: plugin warnings during pending, and
-`RUNTIME_AUTHENTICATION_FAILED` as an early permanent failure. A container that
-never reaches the wrapper's status endpoint has no equivalent.
+## What the operator would see
+
+In live test D263, an embedded Agent had `gateway.bind=custom` without
+`gateway.customBindHost`. Its Gateway restarted five times. `occ agent get` still
+showed `active` with no revision, and the [deployment record](../../docs/reference/agents.md)
+remained `running` with last attempt `REVISION_INCOMPLETE`. Here is how the
+proposal would change that sequence:
+
+1. **While starting:** Keep “Waiting for the runtime to become ready” until we have more specific evidence.
+2. **On observing the restarts:** Show “The runtime keeps restarting. Run `occ agent logs <agent> --previous` to see why.” Kubernetes supplies the restart observation even when the Gateway exits before its status endpoint is available. The operator reads the [previous container’s logs](../../docs/guides/topics/agent-logs.md) for the explanation; we do not copy exit text into deployment status.
+3. **On recovery or timeout:** If the runtime becomes ready, let the deployment proceed. If it is still unready at the deadline and we still observe the loop, retain `CONVERGENCE_DEADLINE_EXCEEDED` as the failure and attach the restart evidence. Fifteen minutes was the wait in D263, not a new timeout proposed here.
+
+D263 exercised the status and log paths from [#696](https://github.com/openclaw/openclaw-enterprise/pull/696)
+and [#747](https://github.com/openclaw/openclaw-enterprise/pull/747). The separate
+Collector change to export `gateway.startup_failed` to Loki [merged in #879](https://github.com/openclaw/openclaw-enterprise/pull/879);
+that does not put the restart clue in the deployment an operator is watching.
 
 ## Design
 
+```mermaid
+flowchart TB
+    pod["Unready runtime: at least 3 restarts, last exit nonzero"]
+    observation["Kubernetes Driver: CONTAINER_CRASH_LOOP"]
+    pending["During the wait: show restarts and point to previous logs"]
+    deadline["At timeout: show restart evidence in existing failure panel"]
+    pod --> observation
+    observation -. "proposed pending progress" .-> pending
+    observation -->|"in draft PR"| deadline
+```
+
 ### Step 1: evidence (draft in this PR)
 
-`safeRuntimeFailureObservation` already returns wrapper-published failures and
-`WORKSPACE_SETUP_FAILED` from init-container status. After those checks, it
-now reads the revision's runtime Pods (Gateway Pods from the Gateway
-namespace). A runtime container whose `restartCount >= 3` and whose
-`lastState.terminated.exitCode` is nonzero yields:
+On an unready observation, `safeRuntimeFailureObservation` first checks for
+`WORKSPACE_SETUP_FAILED` when workspace setup applies, then checks the wrapper’s
+own failure evidence. If neither explains the wait, the Driver lists the
+revision’s Pods, using the Gateway namespace for a Gateway. This fallback costs
+up to one additional Pod list per runtime container per unready observation.
+
+For a Pod not being deleted, the test is `restartCount >= 3` and a nonzero
+`lastState.terminated.exitCode` on the same container. We need neither a
+Kubernetes `CrashLoopBackOff` reason nor a history of three exit codes. An
+unavailable observation supplies no failure evidence; cancellation still propagates.
+The deadline failure carries this observation in `data.runtimeFailure`:
 
 ```json
 {
   "component": "gateway",
   "check": "container",
   "code": "CONTAINER_CRASH_LOOP",
-  "checkedAt": "<finishedAt>"
+  "checkedAt": "<last exit time, or observation time if unavailable>"
 }
 ```
 
-Termination messages and reasons never leave the Driver. This is a new value
-of an existing open identifier, not a schema change. With step 1 alone, the
-deadline failure carries `data.runtimeFailure`, and the console's existing
-failure panel shows component, check and code.
+`CONTAINER_CRASH_LOOP` is a new value of an existing open identifier. The console
+failure panel can display the component, check and code. The Driver uses the exit
+code to recognize the loop; it does not export that code, the termination message
+or the reason in this observation.
 
 ### Step 2: visible while pending (needs a contract decision)
 
-`progress.lastAttempt` exposes only the attempt code and a fixed message, and
-`warnings` is a closed union. The options are:
+**Recommend a pending attempt code.** When the Driver reports `CONTAINER_CRASH_LOOP`,
+the Controller worker would record `RUNTIME_CRASH_LOOP` in `progress.lastAttempt`.
+`deploymentProgressForWork` would supply the message above. Keep the same
+readiness recheck delay as `REVISION_INCOMPLETE`. The attempt code is a bounded
+string, so this adds public vocabulary without changing the response shape.
+Pending progress already distinguishes an unschedulable Pod from a runtime
+that is not ready. This code would describe the latest observed attempt while
+the deployment remains pending.
 
-- **A. New progress code `RUNTIME_CRASH_LOOP`** (recommended). The worker
-  records the pending attempt with this code when the observation carries
-  `CONTAINER_CRASH_LOOP`. `deploymentProgressForWork` maps it to "The runtime
-  keeps restarting. Run `occ agent logs <agent> --previous` to see why." The
-  schema is unchanged, because `code` is a bounded string, but the code is new
-  public vocabulary. The worker's readiness recheck delay, keyed on
-  `REVISION_INCOMPLETE` today, must also cover it.
-- **B. New deployment warning `RUNTIME_CRASH_LOOP`** with `component` and
-  `exitCode`. This changes the closed `warnings` union and the console warning
-  rendering, and regenerates OpenAPI.
-- **C. `progress.lastAttempt.data.runtimeFailure`.** This reuses the evidence
-  shape in pending progress. It is an additive schema change to `progress`.
+If clients need more than an actionable progress message, two alternatives remain:
+
+- **A deployment warning named `RUNTIME_CRASH_LOOP`.** Today, plugin warnings describe a deployment that succeeded with a plugin disabled. This option would also use warnings while deployment is pending, expose `component` and `exitCode`, extend the closed warnings union, and require console and OpenAPI updates.
+- **Structured evidence at `progress.lastAttempt.data.runtimeFailure`.** Add to the progress schema so clients can read the same evidence while pending and at the deadline.
 
 ### Step 3: fail early (owner decision)
 
-Some crash loops recover. A container that exits because a dependency is not
-ready yet may start once that dependency is up. A configuration error such as
-the one above cannot recover until a new version is deployed. Failing early on
-`CONTAINER_CRASH_LOOP` (as `RUNTIME_AUTHENTICATION_FAILED` does) would end a
-doomed deployment after about 2 minutes instead of 15. It would also fail a
-loop that would have recovered. The proposal is to fail early only after a
-higher threshold, for example 6 restarts with the same nonzero exit code, or
-not at all.
-
-## Open questions
-
-- Should step 2 use A, B or C?
-- Should step 3 happen, and at what threshold?
-- Should the Docker Compute Driver report the same evidence? Its restart
-  policy differs.
+Keep the existing deadline unless the Controller worker and Kubernetes Driver
+owners choose a separate stopping rule. We already stop early for
+`RUNTIME_AUTHENTICATION_FAILED`, but repeated restarts are less conclusive. In
+D263, stopping around minute two instead of minute fifteen might have helped;
+for a transient dependency, it might abort a deployment just before recovery.
+Six restarts with the same nonzero exit code is an example to evaluate, not an
+approved threshold or a history the draft observation can establish. Whether the
+Docker Compute Driver should report analogous evidence is also open; its restart
+policy differs.
 
 ## Verification of the draft
 
-A new conformance test,
-`Kubernetes embedded Gateway crash loop reports fixed evidence after three restarts`,
-covers the threshold (2 restarts: no evidence; 4: evidence), the exit-time
-mapping, and that termination messages do not leave the Driver.
+The draft conformance test, `Kubernetes embedded Gateway crash loop reports fixed
+evidence after three restarts`, asserts no evidence at two restarts, the fixed
+observation and exit timestamp at four, and no termination-message leak. Those
+are the tested counts around the threshold of three. D263 establishes the
+operator problem; the draft has not been verified on that installation.
+
+If the pending code is approved, the decisive check is to see the restart message
+*before* the deadline, then let the same deployment become ready. Also exercise
+the case that stays unready through timeout. A Driver-only test cannot establish
+either pending behavior.
