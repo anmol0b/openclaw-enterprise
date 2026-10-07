@@ -2825,6 +2825,74 @@ test("explicit existing namespace adoption claims tenant identity only after sec
   assert.equal(sameTenant.patches.length, 1);
 });
 
+// The worker logs a failed ensure's reason, so the reason never carries response text and stays
+// loggable: other failures map to fixed texts, and the Driver's own refusals are cleaned and cut.
+test("a failed Namespace ensure reports a fixed or cleaned, bounded reason", async (t) => {
+  const { KubernetesApiUnavailableError } =
+    await import("../../apps/controller/src/drivers/kubernetes/client.ts");
+  const selection = { ...tenant, status: "provisioning", existingNamespace: "customer-support" };
+  const ensure = (readNamespace, namespace = selection) => {
+    const driver = createKubernetesComputeDriver(options());
+    driver.waitBeforeRetry = async () => {};
+    driver.apiClients = Promise.resolve({ core: { readNamespace } });
+    driver.executionApiClients = driver.apiClients;
+    return driver.ensureNamespace(namespace);
+  };
+  const failed = (failure, reason) => ({
+    namespaceId: tenant.id,
+    namespaceReady: false,
+    failure,
+    reason,
+  });
+  const unreachable = "The Kubernetes API server is unreachable.";
+  for (const [error, failure, reason] of [
+    [new KubernetesApiUnavailableError("https://192.0.2.1:6443"), "retryable", unreachable],
+    [
+      new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connect ECONNREFUSED 192.0.2.1:6443"), {
+          code: "ECONNREFUSED",
+        }),
+      }),
+      "retryable",
+      unreachable,
+    ],
+    [
+      Object.assign(new Error('namespaces "other-tenant" is invalid'), { statusCode: 422 }),
+      "permanent",
+      "A Namespace preparation request failed with HTTP status 422.",
+    ],
+  ]) {
+    assert.deepEqual(
+      await ensure(async () => {
+        throw error;
+      }),
+      failed(failure, reason),
+    );
+  }
+  // request() makes its deadline right before the read, which lets it lapse in flight.
+  let deadline;
+  const timeout = t.mock.method(AbortSignal, "timeout", () => {
+    deadline = new AbortController();
+    return deadline.signal;
+  });
+  const timedOut = await ensure(async () => {
+    deadline.abort(new DOMException("The operation timed out.", "TimeoutError"));
+    throw deadline.signal.reason;
+  });
+  timeout.mock.restore();
+  assert.deepEqual(timedOut, failed("retryable", "Kubernetes API request timed out."));
+  // A refusal's characters the worker log refuses become "_", and a long one is cut to 256.
+  const missing = await ensure(
+    async () => {
+      throw Object.assign(new Error("not found"), { statusCode: 404 });
+    },
+    { ...selection, existingNamespace: `customer-support,${"x".repeat(260)}` },
+  );
+  const shown = `Existing Kubernetes namespace customer-support_${"x".repeat(206)}...`;
+  assert.equal(shown.length, 256);
+  assert.deepEqual(missing, failed("permanent", shown));
+});
+
 test("dedicated Agent shared claims retain ownership inside an existing tenant namespace", () => {
   const driver = createKubernetesComputeDriver(options());
   const agentId = "agt_00000000-0000-4000-8000-000000000001";
