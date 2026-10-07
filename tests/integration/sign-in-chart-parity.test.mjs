@@ -544,6 +544,75 @@ test(
 
 const githubOn = { "auth.github.enabled": "true", "auth.recoveryUserId": recoveryUserId };
 const googleOn = { "auth.google.enabled": "true", "auth.recoveryUserId": recoveryUserId };
+
+// Treat mapped spellings as IPv4 before interpreting their prefix. The /1 examples
+// deliberately use the upper IPv4 half, so none can legitimately trust 8.8.8.8.
+const trustedProxyCidrs = {
+  accepted: [
+    ["10.0.0.0/8", "10.1.2.3"],
+    ["8.0.0.0/8", "8.8.8.8"],
+    ["::1/128", "::1"],
+    ["fd00:10::/64", "fd00:10::1"],
+    ["2600:1f18::/40", "2600:1f18::1"],
+    ["fe80::/10", "fe80::1"],
+    ["::/81", "::1"],
+    ["::/96", "::192.0.2.1"],
+    ["::fffe:0:0/96", "::fffe:c000:201"],
+    ["64:ff9b::/96", "64:ff9b::c000:201"],
+    ["2002::/16", "2002:c000:201::1"],
+    ["::ffff:192.0.2.1/1", "192.0.2.1"],
+    ["::ffff:c000:201/1", "192.0.2.1"],
+    ["::ffff:192.0.2.1/32", "192.0.2.1"],
+    ["::FFFF:c000:201/32", "192.0.2.1"],
+    ["0:0:0:0:0:ffff:192.0.2.1/32", "192.0.2.1"],
+    ["0::ffff:1.2.3.4/32", "1.2.3.4"],
+    ["::0:ffff:1.2.3.4/32", "1.2.3.4"],
+    ["0000:0000:0000:0000:0000:FFFF:C000:0201/32", "192.0.2.1"],
+  ],
+  catchAll: ["::/1", "::/8", "::/80", "::8000:0:0/81", "::fffe:0:0/95"],
+  invalidMappedPrefix: [
+    "::ffff:0:0/96",
+    "::FFFF:c000:201/33",
+    "0:0:0:0:0:ffff:192.0.2.1/96",
+    "0::ffff:1.2.3.4/128",
+    "::0:ffff:1.2.3.4/33",
+    "::ffff:192.0.2.1/33",
+    "::FFFF:C000:0201/128",
+  ],
+};
+
+test(
+  "trusted-proxy CIDR parity preserves mapped hosts and bounded IPv6 ranges",
+  tooling,
+  async () => {
+    // One render validates every accepted entry; parse its emitted entries individually
+    // so another trusted subnet cannot conceal an entry that trusts every IPv4 peer.
+    const objects = await renderChart({
+      "api.trustedProxy.preset": "ingress-nginx",
+      ...Object.fromEntries(
+        trustedProxyCidrs.accepted.map(([cidr], index) => [
+          `api.trustedProxy.cidrs[${index}]`,
+          cidr,
+        ]),
+      ),
+    });
+    const rendered = signInSettings(deploymentEnv(objects, "api"));
+    const cidrs = rendered.OCC_AUTH_TRUSTED_PROXY_CIDRS.split(",");
+    assert.deepEqual(
+      cidrs,
+      trustedProxyCidrs.accepted.map(([cidr]) => cidr),
+    );
+    for (const [index, cidr] of cidrs.entries()) {
+      const config = clientAddressConfiguration({
+        ...rendered,
+        OCC_AUTH_TRUSTED_PROXY_CIDRS: cidr,
+      });
+      assert.equal(config.trusts(trustedProxyCidrs.accepted[index][1]), true, cidr);
+      assert.equal(config.trusts("8.8.8.8"), cidr === "8.0.0.0/8", cidr);
+    }
+  },
+);
+
 const invalid = [
   {
     name: "generic preset without a header",
@@ -582,6 +651,22 @@ const invalid = [
     },
     parser: /must not trust every address/,
   },
+  // IPv6 prefixes covering the mapped range would otherwise let every IPv4
+  // socket peer supply the header used for sign-in rate limiting.
+  ...trustedProxyCidrs.catchAll.map((cidr) => ({
+    name: `a trusted-proxy IPv6 CIDR covering every IPv4 address: ${cidr}`,
+    values: { "api.trustedProxy.preset": "ingress-nginx", "api.trustedProxy.cidrs[0]": cidr },
+    chart: /must not trust every address/,
+    env: { OCC_AUTH_TRUSTED_PROXY_PRESET: "ingress-nginx", OCC_AUTH_TRUSTED_PROXY_CIDRS: cidr },
+    parser: /must not trust every address/,
+  })),
+  ...trustedProxyCidrs.invalidMappedPrefix.map((cidr) => ({
+    name: `a trusted-proxy mapped IPv4 address with an IPv6 prefix: ${cidr}`,
+    values: { "api.trustedProxy.preset": "ingress-nginx", "api.trustedProxy.cidrs[0]": cidr },
+    chart: /prefix must be 1 through 32/,
+    env: { OCC_AUTH_TRUSTED_PROXY_PRESET: "ingress-nginx", OCC_AUTH_TRUSTED_PROXY_CIDRS: cidr },
+    parser: /IPv4-mapped address, whose prefix must be 1 through 32/,
+  })),
   {
     name: "an invalid proxy address",
     values: { "api.trustedProxy.preset": "aws", "api.trustedProxy.cidrs[0]": "300.1.1.0/24" },
@@ -641,6 +726,7 @@ const invalid = [
     values: githubOn,
     chart: /auth\.github requires agentNativeAdmin\.enabled: false/,
     github: true,
+    code: "EXTERNAL_SIGN_IN_NATIVE_ADMIN_UNSUPPORTED",
     env: {
       OCC_AGENT_NATIVE_ADMIN_ENABLED: "true",
       OCC_AGENT_NATIVE_ADMIN_DOMAIN: "agents.oce.example.internal",
@@ -761,6 +847,7 @@ const invalid = [
     values: googleOn,
     chart: /auth\.google requires agentNativeAdmin\.enabled: false/,
     google: true,
+    code: "EXTERNAL_SIGN_IN_NATIVE_ADMIN_UNSUPPORTED",
     env: {
       OCC_AGENT_NATIVE_ADMIN_ENABLED: "true",
       OCC_AGENT_NATIVE_ADMIN_DOMAIN: "agents.oce.example.internal",
@@ -867,6 +954,7 @@ const invalid = [
     values: { ...oidcUpgradeValues(recoveryUserId), "agentNativeAdmin.enabled": "true" },
     chart: /auth\.oidc requires agentNativeAdmin\.enabled: false/,
     oidc: true,
+    code: "EXTERNAL_SIGN_IN_NATIVE_ADMIN_UNSUPPORTED",
     env: {
       OCC_AGENT_NATIVE_ADMIN_ENABLED: "true",
       OCC_AGENT_NATIVE_ADMIN_DOMAIN: "agents.oce.example.internal",
@@ -874,6 +962,9 @@ const invalid = [
     },
   },
 ];
+
+// Refusals with a named startup code; every other entry stops with STARTUP_FAILED.
+const startupCodes = new Map(invalid.flatMap(({ name, code }) => (code ? [[name, code]] : [])));
 
 test("values the chart refuses are settings the API also refuses", tooling, async (t) => {
   const directory = await startupDirectory(t);
@@ -903,7 +994,11 @@ test("values the chart refuses are settings the API also refuses", tooling, asyn
         name,
       );
     }
-    assert.equal(await startupCode(directory, environment), "STARTUP_FAILED", name);
+    assert.equal(
+      await startupCode(directory, environment),
+      startupCodes.get(name) ?? "STARTUP_FAILED",
+      name,
+    );
   });
 });
 

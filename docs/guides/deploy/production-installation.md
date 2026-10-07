@@ -116,7 +116,8 @@ Kubernetes older than 1.35 is unsupported; the API and worker emit
 ### Recommended: generate profile configuration
 
 Choose `openclaw` or `codex` from the [profile options](installation-profiles.md#choose-a-profile).
-Generation requires Node.js 24+ on the operator host. Manual YAML does not, but
+Generation requires Node.js 24+ on the operator host (and `pnpm install` with
+native admin). Manual YAML does not, but
 the later Agent transport-provisioning example does; without Node, provision
 transports in the console.
 
@@ -201,8 +202,9 @@ before running the checks:
   `127.0.0.1`), has a path other than `/`, a query, fragment or user info (even a
   bare `?` or `#`), or contains Unicode spaces or invisible characters (ASCII
   spaces at either end are ignored) or compatibility forms the API's URL parser
-  refuses, such as full-width `？`. With native admin, it must be `https` and its
-  host inside `agentNativeAdmin.sharedCookieDomain`.
+  refuses, such as full-width `？`. A joiner (U+200C, U+200D) in a position IDNA
+  does not allow passes Helm but fails the bootstrap Job. With native admin, it
+  must be `https` and its host inside `agentNativeAdmin.sharedCookieDomain`.
 - `installation.yaml`: set cluster name, log level, DNS selectors,
   service-principal token settings, Secret prefixes, runtime storage class,
   immutable runtime image digests, and PluginDriver catalog. Set

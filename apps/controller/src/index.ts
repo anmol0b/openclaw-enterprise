@@ -657,7 +657,10 @@ function requiredPermissions(operation: OccApiRoute): readonly RequiredPermissio
     operation.operationId === "deleteIAMRole" ||
     operation.operationId === "listIAMAccessBindings" ||
     operation.operationId === "getIAMAccessBinding" ||
-    operation.operationId === "deleteIAMAccessBinding"
+    operation.operationId === "deleteIAMAccessBinding" ||
+    operation.operationId === "listIAMServicePrincipals" ||
+    operation.operationId === "createIAMServicePrincipal" ||
+    operation.operationId === "getIAMServicePrincipal"
   ) {
     return [
       { action: "administer", resourceKind: "installation", scope: "requested" },

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -428,6 +428,96 @@ test("service API keys authenticate scoped automation without replacing sessions
       { env: adminEnv },
     );
     assert.deepEqual(JSON.parse(bindingRead.stdout), binding);
+
+    // An Installation administrator creates a Namespace ServicePrincipal for a member's CLI.
+    // It holds no grant until an AccessBinding names it (proved with PostgreSQL policy in
+    // postgres-service-api-keys.test.mjs).
+    const principalCreated = await run(
+      occCli,
+      ["iam", "service-principal", "create", "-o", "json"],
+      { env: adminEnv },
+    );
+    const createdPrincipal = JSON.parse(principalCreated.stdout);
+    assert.match(createdPrincipal.id, /^spn_/);
+    assert.equal(createdPrincipal.namespaceId, namespaceId);
+    const principalList = await run(occCli, ["iam", "service-principal", "list", "-o", "json"], {
+      env: adminEnv,
+    });
+    assert.deepEqual(JSON.parse(principalList.stdout), [createdPrincipal]);
+    const principalRead = await run(
+      occCli,
+      ["iam", "service-principal", "get", createdPrincipal.id, "-o", "json"],
+      { env: adminEnv },
+    );
+    assert.deepEqual(JSON.parse(principalRead.stdout), createdPrincipal);
+
+    // occ service-key create writes a private key file that occ itself accepts, and never
+    // prints the key. The administrator key covers its own grants, so it may rotate itself.
+    const rotatedKeyFile = join(directory, "rotated-admin-key.json");
+    const { OCC_NAMESPACE: _namespace, ...installationEnv } = adminEnv;
+    const rotated = await run(
+      occCli,
+      [
+        "service-key",
+        "create",
+        "--service-principal",
+        installationPrincipal.id,
+        "--name",
+        "cli-rotated",
+        "--expires-in-days",
+        "2",
+        "--out",
+        rotatedKeyFile,
+        "-o",
+        "json",
+      ],
+      { env: installationEnv },
+    );
+    const rotatedDetails = JSON.parse(rotated.stdout);
+    assert.equal(rotatedDetails.servicePrincipalId, installationPrincipal.id);
+    assert.equal(rotatedDetails.key, undefined);
+    // Read mode and content through one handle so both describe the same file.
+    const rotatedHandle = await open(rotatedKeyFile);
+    let rotatedKey;
+    try {
+      assert.equal((await rotatedHandle.stat()).mode & 0o777, 0o600);
+      rotatedKey = JSON.parse(await rotatedHandle.readFile("utf8")).data;
+    } finally {
+      await rotatedHandle.close();
+    }
+    assert.equal(rotatedKey.id, rotatedDetails.id);
+    assert.ok(!rotated.stdout.includes(rotatedKey.key));
+    const rotatedEnv = { ...adminEnv, OCC_SERVICE_KEY_FILE: rotatedKeyFile };
+    await run(occCli, ["iam", "service-principal", "list"], { env: rotatedEnv });
+    // An existing file is never overwritten, and no key is issued for it.
+    const keysBeforeClobber = memoryDatabase.apikey.length;
+    await assert.rejects(
+      run(
+        occCli,
+        [
+          "service-key",
+          "create",
+          "--service-principal",
+          installationPrincipal.id,
+          "--name",
+          "cli-clobber",
+          "--out",
+          rotatedKeyFile,
+        ],
+        { env: installationEnv },
+      ),
+      /failed to create key file/,
+    );
+    assert.equal(memoryDatabase.apikey.length, keysBeforeClobber);
+    const revokedRotated = await run(
+      occCli,
+      ["service-key", "revoke", rotatedDetails.id, "-o", "json"],
+      { env: adminEnv },
+    );
+    assert.deepEqual(JSON.parse(revokedRotated.stdout), { id: rotatedDetails.id, revoked: true });
+    await assert.rejects(run(occCli, ["iam", "service-principal", "list"], { env: rotatedEnv }), {
+      stderr: /HTTP 401/,
+    });
     // A secret Role bound to the Namespace could never grant anything there: the CLI shows
     // the API's refusal naming the Permissions instead of reporting a created binding.
     const inapplicableFile = join(directory, "inapplicable-binding.json");

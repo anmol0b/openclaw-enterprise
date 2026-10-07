@@ -203,11 +203,10 @@ worker does not expose an HTTP health endpoint.
   spaces (a trailing newline counts). Native admin without the path reports
   this code too. Helm mounts the file from `gatewayRouting.apiKeySecretName`;
   see [gateway routing](gateway-routing.md#service-key-and-native-identity).
-- **`STARTUP_FAILED` with GitHub, Google or OIDC sign-in:** These providers
-  support host-only cookies only. With native admin enabled and
-  `OCC_AUTH_COOKIE_DOMAIN` set, the API stops with this generic code after it
-  connects to the database. Turn off native admin; the chart refuses it with
-  these providers.
+- **`EXTERNAL_SIGN_IN_NATIVE_ADMIN_UNSUPPORTED` at startup:** GitHub, Google
+  and OIDC sign-in support host-only cookies only, so the API refuses any of
+  them with native admin enabled, before it connects to the database. Turn off
+  native admin; the chart refuses it with these providers.
 - **Configuration operations fail:** Verify exact Namespace or Configuration
   authorization, tenant-local ConfigMap CRUD, and a native JSON configuration
   document;

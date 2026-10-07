@@ -11,6 +11,7 @@
 {{- $baseUrlText := regexReplaceAll "^[\\x00-\\x20]+|[\\x00-\\x20]+$" (toString .Values.auth.baseUrl) "" -}}
 {{- if regexMatch "^[^\\pL\\pM\\pN\\pP\\pS]|[^\\pL\\pM\\pN\\pP\\pS]$" $baseUrlText -}}{{- fail "auth.baseUrl must not begin or end with Unicode spaces or invisible characters; the API's URL parser keeps them" -}}{{- end -}}
 {{- /* Inside, the host parser refuses spaces, < and > (Go's URL parser keeps < and >), and drops most invisible characters. Only the joiners U+200C and U+200D, which some IDN labels need, may appear besides L, M, N, P and S; this also covers the ends, except for a joiner there. */ -}}
+{{- /* A joiner outside an IDNA ContextJ position (U+200D not after a virama, U+200C not after a virama or in an Arabic joining context) renders: RE2 has no combining-class property. The API, the bootstrap Job and the profile renderer refuse it, so install or upgrade fails at the bootstrap Job. */ -}}
 {{- if regexMatch "[^\\pL\\pM\\pN\\pP\\pS\\x{200C}\\x{200D}]|[<>]" $baseUrlText -}}{{- fail "auth.baseUrl must not contain spaces, invisible characters, < or >; the API's URL parser refuses or drops them in a host" -}}{{- end -}}
 {{- /* The host parser maps compatibility characters (UTS #46, close to NFKC) before it checks them, and refuses those that map to a forbidden host code point (full-width ? # / : @, spacing accents that map to a space) or that UTS #46 disallows (dotted numbers such as U+2488, ideographic description characters, U+FFFC, U+FFFD). Go's URL parser keeps them all. The list is generated from Node; sign-in-chart-parity.test.mjs re-derives it. */ -}}
 {{- $baseUrlHostRefused := "[\\x{00A8}\\x{00AF}\\x{00B4}\\x{00B8}\\x{02D8}-\\x{02DD}\\x{037A}\\x{0384}\\x{0385}\\x{1FBD}\\x{1FBF}-\\x{1FC1}\\x{1FCD}-\\x{1FCF}\\x{1FDD}-\\x{1FDF}\\x{1FED}\\x{1FEE}\\x{1FFD}\\x{1FFE}\\x{2017}\\x{2024}-\\x{2026}\\x{203E}\\x{2047}-\\x{2049}\\x{2100}\\x{2101}\\x{2105}\\x{2106}\\x{2488}-\\x{249B}\\x{2A74}\\x{2FF0}-\\x{2FFF}\\x{309B}\\x{309C}\\x{31EF}\\x{33C2}\\x{33C7}\\x{33D8}\\x{FC5E}-\\x{FC63}\\x{FDFA}\\x{FDFB}\\x{FE12}\\x{FE13}\\x{FE16}\\x{FE19}\\x{FE30}\\x{FE47}-\\x{FE4C}\\x{FE52}\\x{FE55}\\x{FE56}\\x{FE5F}\\x{FE64}\\x{FE65}\\x{FE68}\\x{FE6A}\\x{FE6B}\\x{FE70}\\x{FE72}\\x{FE74}\\x{FE76}\\x{FE78}\\x{FE7A}\\x{FE7C}\\x{FE7E}\\x{FF03}\\x{FF05}\\x{FF0F}\\x{FF1A}\\x{FF1C}\\x{FF1E}-\\x{FF20}\\x{FF3B}-\\x{FF3E}\\x{FF5C}\\x{FFE3}\\x{FFFC}\\x{FFFD}\\x{1F100}]" -}}
@@ -148,6 +149,7 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- else if not (regexMatch "^[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*/([1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$" $value) -}}
 {{- fail "api.trustedProxy.cidrs requires IPv4 or IPv6 CIDRs with a nonzero prefix" -}}
 {{- end -}}
+{{- include "openclaw.trustedProxy.validateCidrRange" $value -}}
 {{- end -}}
 {{- if and (eq $preset "generic") (not $proxy.clientAddressHeader) -}}{{- fail "api.trustedProxy.preset generic requires api.trustedProxy.clientAddressHeader" -}}{{- end -}}
 {{- $header := lower (toString (default "" $proxy.clientAddressHeader)) -}}
@@ -370,6 +372,40 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- if not $routing.sandbox.ingressPeers -}}{{- fail "gatewayRouting.sandbox.ingressPeers must explicitly select public ingress sources" -}}{{- end -}}
 {{- $cookieDomain := trimPrefix "." (lower .Values.agentNativeAdmin.sharedCookieDomain) -}}
 {{- if and $cookieDomain (or (eq $routing.sandbox.domain $cookieDomain) (hasSuffix (printf ".%s" $cookieDomain) $routing.sandbox.domain) (hasSuffix (printf ".%s" $routing.sandbox.domain) $cookieDomain)) -}}{{- fail "gatewayRouting.sandbox.domain must be outside the OCE shared session cookie domain" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* Check CIDR meaning separately from syntax so every spelling has the API's
+IPv4-mapped prefix rules. Node also matches IPv4 peers against IPv6 subnets that
+contain the entire ::ffff:0:0/96 range. Such entries must not trust forwarded headers. */ -}}
+{{- define "openclaw.trustedProxy.validateCidrRange" -}}
+{{- $address := lower (first (splitList "/" .)) -}}
+{{- if contains ":" $address -}}
+{{- $prefix := int (last (splitList "/" .)) -}}
+{{- /* Both checks concern only the first 96 bits; a dotted tail occupies the final two groups. */ -}}
+{{- $tail := regexFind "[0-9]+(\\.[0-9]+){3}$" $address -}}
+{{- if $tail -}}{{- $address = printf "%s0:0" (trimSuffix $tail $address) -}}{{- end -}}
+{{- $halves := splitList "::" $address -}}
+{{- $groups := splitList ":" $address -}}
+{{- if eq (len $halves) 2 -}}
+{{- $left := compact (splitList ":" (first $halves)) -}}
+{{- $right := compact (splitList ":" (last $halves)) -}}
+{{- $missing := sub 8 (add (len $left) (len $right)) -}}
+{{- if lt $missing 1 -}}{{- fail "api.trustedProxy.cidrs contains an invalid IPv6 address" -}}{{- end -}}
+{{- $groups = concat $left (splitList ":" (trimSuffix ":" (repeat (int $missing) "0:"))) $right -}}
+{{- end -}}
+{{- /* Guard expansion before inspecting bits; malformed input must never panic the template. */ -}}
+{{- if or (gt (len $halves) 2) (ne (len $groups) 8) -}}{{- fail "api.trustedProxy.cidrs contains an invalid IPv6 address" -}}{{- end -}}
+{{- $bits := "" -}}
+{{- range $group := $groups -}}
+{{- $bits = printf "%s%016b" $bits (int (printf "0x%s" $group)) -}}
+{{- end -}}
+{{- $mappedPrefix := printf "%s%s" (repeat 80 "0") (repeat 16 "1") -}}
+{{- if hasPrefix $mappedPrefix $bits -}}
+{{- if gt $prefix 32 -}}{{- fail "api.trustedProxy.cidrs contains an IPv4-mapped address, whose prefix must be 1 through 32" -}}{{- end -}}
+{{- else if and (le $prefix 96) (eq (substr 0 $prefix $bits) (substr 0 $prefix $mappedPrefix)) -}}
+{{- fail "api.trustedProxy.cidrs must not trust every address (covers every IPv4 address)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

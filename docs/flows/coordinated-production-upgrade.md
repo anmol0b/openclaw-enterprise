@@ -171,6 +171,10 @@ broker-enabled worker it also accepts a restartable init container, provided
 no worker exists in the ordinary container list. It rejects a non-restartable
 init worker or ambiguous placement. It retries authenticated OCC access and verifies the same Installation ID. A
 controller-only release then ends without requesting Agent deployments.
+Existing revisions keep the Pod specification of the controller that deployed
+them, so controller fixes to Gateway and Agent Pods, such as
+[diagnostics](agent-deployment-diagnostics.md) mappings, reach an Agent only at
+its next deployment.
 
 For a repository-enabled release, it also verifies the ready API and worker
 Pods, their owning ReplicaSets, node architecture, and runtime controller and
@@ -239,6 +243,8 @@ access, and required restore behavior.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-07 12:00: Say that a controller-only release leaves existing revisions on their old Pod specification until the next deployment. (dogfood-r43)
 
 - 2026-10-05 15:01: Keep filesystem layers outside the image identity metadata budget. (authoring-run/0b8bd46b-85c0-4664-8dbd-2ee77cd7b602 - 08248f8dbf227dfb7b73162056b6afd1c33cee0d)
 

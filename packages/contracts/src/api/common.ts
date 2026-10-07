@@ -11,6 +11,7 @@ export const SecretId = Type.String({ pattern: `^sec_${UUID_V4}$` });
 export const CredentialSourceId = Type.String({ pattern: `^cs_${UUID_V4}$` });
 export const IAMRoleId = Type.String({ minLength: 1, maxLength: 200 });
 export const IAMAccessBindingId = Type.String({ minLength: 1, maxLength: 200 });
+export const IAMServicePrincipalId = Type.String({ minLength: 1, maxLength: 200 });
 export const ConfigurationKindSchema = Type.Literal("agent");
 export const HarnessExecutionModeSchema = Type.Union([
   Type.Literal("embedded"),
@@ -180,6 +181,11 @@ export const IAMRoleParams = Type.Object(
 
 export const IAMAccessBindingParams = Type.Object(
   { namespaceId: NamespaceId, bindingId: IAMAccessBindingId },
+  { additionalProperties: false },
+);
+
+export const IAMServicePrincipalParams = Type.Object(
+  { namespaceId: NamespaceId, servicePrincipalId: IAMServicePrincipalId },
   { additionalProperties: false },
 );
 
@@ -551,6 +557,8 @@ export const CreateIAMRoleBody = Type.Object(
   },
   { additionalProperties: false },
 );
+
+export const CreateIAMServicePrincipalBody = Type.Object({}, { additionalProperties: false });
 
 export const CreateIAMAccessBindingBody = Type.Object(
   {
@@ -937,6 +945,7 @@ export type ServiceAccountId = Type.Static<typeof ServiceAccountId>;
 export type SecretId = Type.Static<typeof SecretId>;
 export type IAMRoleId = Type.Static<typeof IAMRoleId>;
 export type IAMAccessBindingId = Type.Static<typeof IAMAccessBindingId>;
+export type IAMServicePrincipalId = Type.Static<typeof IAMServicePrincipalId>;
 export type ConfigurationGeneration = Type.Static<typeof ConfigurationGeneration>;
 export type AgentId = Type.Static<typeof AgentId>;
 export type RevisionId = Type.Static<typeof RevisionId>;
@@ -954,6 +963,7 @@ export type ServiceAccountParams = Type.Static<typeof ServiceAccountParams>;
 export type SecretParams = Type.Static<typeof SecretParams>;
 export type IAMRoleParams = Type.Static<typeof IAMRoleParams>;
 export type IAMAccessBindingParams = Type.Static<typeof IAMAccessBindingParams>;
+export type IAMServicePrincipalParams = Type.Static<typeof IAMServicePrincipalParams>;
 export type AgentParams = Type.Static<typeof AgentParams>;
 export type RevisionParams = Type.Static<typeof RevisionParams>;
 export type DeploymentParams = Type.Static<typeof DeploymentParams>;
@@ -963,6 +973,7 @@ export type AgentRuntimeCredentialsBody = Type.Static<typeof AgentRuntimeCredent
 export type WorkspaceFileParams = Type.Static<typeof WorkspaceFileParams>;
 export type CreateIAMRoleBody = Type.Static<typeof CreateIAMRoleBody>;
 export type CreateIAMAccessBindingBody = Type.Static<typeof CreateIAMAccessBindingBody>;
+export type CreateIAMServicePrincipalBody = Type.Static<typeof CreateIAMServicePrincipalBody>;
 export type ConfigurationValues = Type.Static<typeof ConfigurationValues>;
 export type CreateSecretBody = Type.Static<typeof CreateSecretBody>;
 export type UpdateSecretBody = Type.Static<typeof UpdateSecretBody>;
