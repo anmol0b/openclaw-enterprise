@@ -5,77 +5,75 @@ author: freeqaz
 status_note: "Needs human review before landing. The accompanying draft implements Option A only."
 ---
 
-# Proposal: Level floors for plain-text runtime log lines
+# Give known node-host messages a level in agent logs
 
-- **ID:** RFC-0019
-- **Owner:** OCC runtime log reads (`packages/occ/src/runtime-logs`). Review: API
-  contract owners and the CLI and Console log viewers.
-- **Created:** 2026-10-02
-- **Last updated:** 2026-10-02
-- **RFC PR:** this PR (draft)
-- **Related:** dogfood finding D266 from live testing of #807; current contract
-  in [agent logs](../../docs/guides/topics/agent-logs.md) and the
-  [CLI reference](../../docs/reference/cli.md).
+**Decision requested from OCC runtime logs, API, CLI and Console owners.** Adopt Option A:
+give recognizable node-host messages a severity, and keep showing text whose severity we
+cannot tell. Before approving the mapping, decide whether an operator reading at
+`--level error` must see that the node host *stopped retrying*. The draft hides both
+`node host gateway closed (1006)` and `reconnect paused … waiting for operator action`
+as warnings. Those messages call for different responses.
 
-## Summary
+The [October 2 report](https://github.com/openclaw/openclaw-enterprise/pull/884) records why
+this matters. After [the level filter landed](https://github.com/openclaw/openclaw-enterprise/pull/807),
+an operator ran `occ agent logs <agent> --source agent --since 30m --level error` against a
+dedicated Codex Harness. Of 46 lines, eight were errors and 38 reported closed or refused
+gateway connections with level `unknown`. Keeping unknowns was intentional: an unrecognized
+stack trace can be the only evidence of a crash. The 46 lines describe the original read,
+not a before-and-after result.
 
-A level floor (`occ agent logs --level error`, the API's `minLevel` and the
-Logs tab's floor) keeps every line of `unknown` level. The level of plain-text
-lines is always `unknown`. On a dedicated Codex Harness, most of what a reader
-then sees at `--level error` is node-host reconnect chatter. In the lane's
-30-minute read, 46 lines were returned and 8 of them were errors; the rest
-were `node host gateway closed (1006)` and `connect failed ... ECONNREFUSED`.
-This RFC decides how a floor should treat plain text. It recommends Option A:
-classify the node host's known lines. Option B, a new request flag, should
-wait until a second source shows the same problem.
+## What an operator would see
 
-## Options
+The [agent logs contract](../../docs/guides/topics/agent-logs.md) treats the selected level as a
+minimum. The [CLI](../../docs/reference/cli.md), API `minLevel` and Console Logs tab use the same
+server-side filter. Option A changes the level assigned to certain text, not that filter or its
+default. Here is the complete mapping in [the draft](../../packages/occ/src/runtime-logs/sanitize.ts):
 
-### A. Classify the Harness node host's known lines (recommended; draft in this PR)
+| Start of the line (after trimming) | Assigned level | Shown at `--level error`? |
+| --- | --- | --- |
+| `node host gateway connect failed:` or `node host gateway closed (` | `warn` | No. This reports a failed attempt or closed connection, not whether a later attempt succeeded. |
+| `node host gateway reconnect paused` | `warn` | No, even when the host says it is waiting for an operator or exiting for supervisor restart. **Owner decision needed.** |
+| `node host gateway endpoint persistence failed:` | `warn` | No. The host could not save the selected gateway endpoint. **Confirm this may be hidden.** |
+| `node host gateway permanently rejected connection` | `error` | Yes. The host reports the rejection before exiting. |
+| `node host gateway connected:` or the tag `[node-host]` followed by a space | `info` | No. The tag rule matches any text after that prefix, not just startup announcements. |
+| Other unrecognized plain text, such as a stack trace | `unknown` | Yes, if the line is otherwise eligible to be shown. |
 
-OpenClaw's node host (`src/node-host/runner.ts` upstream) prints a fixed set of
-stderr lines. The sanitizer keeps them as `text` records and assigns a level
-by prefix:
+The pause and exit distinction comes from the [node-host producer](https://github.com/openclaw/openclaw/blob/daf5cfeeee98dbc6cdaa89361fba73a50efdb68c/src/node-host/runner.ts),
+not an inference from a close code. If operators need to see a pause at the error floor,
+classify that message as `error`; if its severity is unresolved, leave it `unknown`. Neither
+choice requires showing every routine close again.
 
-| Prefix                                              | Level |
-| --------------------------------------------------- | ----- |
-| `node host gateway permanently rejected connection` | error |
-| `node host gateway connect failed:`                 | warn  |
-| `node host gateway closed (`                        | warn  |
-| `node host gateway reconnect paused`                | warn  |
-| `node host gateway endpoint persistence failed:`    | warn  |
-| `node host gateway connected:`                      | info  |
-| `[node-host] `                                      | info  |
+```mermaid
+flowchart TB
+    Text["Plain text eligible to be shown"]
+    Text -.->|proposed prefix match| Level["Assign error, warn or info"]
+    Text -->|no recognized level| Unknown["Keep level unknown"]
+    Level --> View["Show lines at or above the minimum, plus unknowns"]
+    Unknown --> View
+```
 
-There is no contract change: `level` already allows these values for any
-kind. The cost is upstream drift. A reworded line falls back to `unknown`,
-which is today's behavior, so drift only makes the noise come back. The
-replay golden for the Harness startup records the new levels, and a pin bump
-that rewords the lines shows up as a golden diff.
+A prefix is a display hint, not proof that the node host wrote the line. The record remains
+`text`; authorization, redaction, withholding and existing wrapper-error handling still apply.
+If upstream changes a prefix, an unrecognized line stays visible as `unknown`. The
+[page filter](../../packages/occ/src/runtime-logs/read.ts) retains gaps and withheld counts.
+Its cursor advances past hidden lines, too. To recover connection context, start a *fresh read
+of the same time window* at `--level warn`; continuing from the error-view cursor cannot rewind it.
 
-### B. Let a floor drop `unknown` on request
+## What to settle before landing
 
-Add `includeUnknown=false` to `runtime/logs`, `--level error --strict` (or
-similar) to the CLI, and a checkbox to the tab. This is new public API
-surface. It would also hide plain-text lines that matter, for example an
-uncaught exception's stack printed as text. That is why the floor keeps
-`unknown` today.
+1. **Agree on the mapping.** Start with this producer. Leave other plain-text sources
+   unclassified unless their owners can say what a message means and who needs to see it.
+2. **Test the operator's view.** The [draft conformance test](../../tests/conformance/runtime-logs-content.test.mjs)
+   asserts assigned levels, not the filtered page, and omits reconnect-paused and
+   endpoint-persistence failures. Exercise the agreed mapping at `error` and `warn` alongside a
+   permanent rejection and unfamiliar crash text. The startup replay changes two lines from
+   `unknown` to `info`; it can expose wording drift only for messages it exercises. No corresponding
+   filtered read from a deployment is recorded here.
+3. **Keep the public contract explicit.** Option B would let callers opt out of unknowns, for
+   example with API `includeUnknown=false`, CLI `--level error --strict` and a Console control.
+   Defer that new choice unless another source demonstrates the need. Option C would drop
+   unknowns by default, contrary to the documented promise that “lines of unknown level stay.”
 
-### C. Change the default to drop `unknown` under a floor
-
-This is the smallest code change, but it breaks the documented contract
-("lines of unknown level stay") and hides crash output. Not recommended.
-
-## Decision requested
-
-- Accept Option A as a sanitizer rule, and decide whether more known
-  plain-text sources should be classified the same way.
-- Decide whether Option B is wanted at all.
-
-## Verification of the draft
-
-- New conformance test
-  `known node-host plain-text lines carry a level so a level floor can drop them`.
-- The `agent-harness-startup` replay golden was regenerated: two lines changed
-  from `unknown` to `info`.
-- The runtime-logs conformance suites pass (68 tests).
+Filed October 2, 2026, from finding D266. The RFC number on this draft branch is provisional;
+`implementation_status: Implemented` describes the accompanying Option A code, not acceptance
+of the decision or deployment.

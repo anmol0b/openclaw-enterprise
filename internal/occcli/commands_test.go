@@ -129,6 +129,36 @@ func TestSecretListShowsNamespaceSecrets(t *testing.T) {
 	}
 }
 
+func TestSecretGetTableNamesConsumersAndCountsUnreadableOnes(t *testing.T) {
+	const secretID = "sec_55555555-5555-4555-8555-555555555555"
+	const configurationID = "cfg_77777777-7777-4777-8777-777777777777"
+	secret := `{"id":"` + secretID + `","name":"model-key","namespaceId":"` + testNamespaceID + `","ref":{},` +
+		`"consumers":{"agents":["` + testAgentID + `"],"configurations":["` + configurationID + `"],` +
+		`"credentialSources":[],"provisioningRequests":[],"unreadable":2,"truncated":true}}`
+	out, _, err := runOCC(t, map[string]string{
+		"GET /namespaces/" + testNamespaceID + "/secrets/" + secretID: secret,
+	}, "--namespace", testNamespaceID, "secret", "get", secretID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "agent:" + testAgentID + ", configuration:" + configurationID + ", 2 unreadable, more"
+	if !strings.Contains(out, "CONSUMERS") || !strings.Contains(out, want) {
+		t.Fatalf("expected the consumers column %q:\n%s", want, out)
+	}
+
+	unused := `{"id":"` + secretID + `","name":"model-key","namespaceId":"` + testNamespaceID + `","ref":{},` +
+		`"consumers":{"agents":[],"configurations":[],"credentialSources":[],"provisioningRequests":[],"unreadable":0,"truncated":false}}`
+	out, _, err = runOCC(t, map[string]string{
+		"GET /namespaces/" + testNamespaceID + "/secrets/" + secretID: unused,
+	}, "--namespace", testNamespaceID, "secret", "get", secretID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row := strings.Fields(strings.Split(out, "\n")[1]); len(row) != 3 || row[2] != "-" {
+		t.Fatalf("an unreferenced Secret must show no consumers:\n%s", out)
+	}
+}
+
 func TestPresetCommandsListShowAndDeleteNamespacePresets(t *testing.T) {
 	const presetID = "pre_66666666-6666-4666-8666-666666666666"
 	collection := "/namespaces/" + testNamespaceID + "/presets"
@@ -371,5 +401,60 @@ func TestJSONOutputAndTableCellsKeepAStableKeyOrder(t *testing.T) {
 		if !strings.Contains(out, `[{"action":"read","resourceKind":"agent"}]`) {
 			t.Fatalf("table cells must render nested objects with sorted keys:\n%s", out)
 		}
+	}
+}
+
+func TestServiceKeyCreateWritesAPrivateKeyFileAndNeverPrintsTheKey(t *testing.T) {
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		_ = json.UnmarshalRead(request.Body, &body)
+		requests = append(requests, body)
+		writer.Header().Set("content-type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = writer.Write([]byte(`{"data":{"id":"key_1","servicePrincipalId":"spn_1","namespaceId":"` +
+			testNamespaceID + `","name":"nora","expiresAt":"2026-11-06T00:00:00.000Z","key":"occ_secret"},"meta":{"requestId":"r"}}`))
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	adminKey := filepath.Join(directory, "admin.json")
+	if err := os.WriteFile(adminKey, []byte(`{"data":{"key":"admin-key"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		command := New(&out, &bytes.Buffer{})
+		command.SetArgs(append([]string{"--url", server.URL, "--service-key-file", adminKey, "--namespace", testNamespaceID, "service-key", "create", "--service-principal", "spn_1", "--name", "nora"}, args...))
+		err := command.Execute()
+		return out.String(), err
+	}
+
+	// An out-of-range lifetime fails before any request and leaves no file behind.
+	rejected := filepath.Join(directory, "rejected.json")
+	if _, err := run("--out", rejected, "--expires-in-days", "400"); err == nil || !strings.Contains(err.Error(), "between 1 and 365") {
+		t.Fatalf("expires-in-days 400 error = %v", err)
+	}
+	if _, err := os.Stat(rejected); !os.IsNotExist(err) || len(requests) != 0 {
+		t.Fatalf("rejected lifetime left a file (%v) or sent %d requests", err, len(requests))
+	}
+
+	keyFile := filepath.Join(directory, "nora.json")
+	out, err := run("--out", keyFile, "--expires-in-days", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "occ_secret") || !strings.Contains(out, "key_1") {
+		t.Fatalf("table output must name the key ID and never the key:\n%s", out)
+	}
+	if len(requests) != 1 || requests[0]["namespaceId"] != testNamespaceID || requests[0]["expiresIn"] != float64(2*24*60*60) {
+		t.Fatalf("unexpected issuance request: %v", requests)
+	}
+	info, err := os.Stat(keyFile)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("key file mode = %v, %v; want 0600", info, err)
+	}
+	contents, err := os.ReadFile(keyFile)
+	if err != nil || !strings.Contains(string(contents), `"key":"occ_secret"`) || !strings.HasPrefix(string(contents), `{"data":`) {
+		t.Fatalf("key file is not the issuance envelope: %s, %v", contents, err)
 	}
 }
