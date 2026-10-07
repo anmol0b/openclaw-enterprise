@@ -5,99 +5,97 @@ author: freeqaz
 status_note: "Needs human review before landing. No implementation accompanies this proposal."
 ---
 
-# Proposal: Truthful availability for the sandbox log source
+# Proposal: Disable the Sandbox log choice when Compute finds no Harness Pod
 
-- **ID:** RFC-0019
-- **Owner:** Agent runtime logs (controller and OpenShell Sandbox Driver). Review: API
-  contract owners.
+- **ID:** RFC-0019 (provisional)
 - **Created:** 2026-10-02
-- **Last updated:** 2026-10-02
-- **RFC PR:** this PR (draft)
-- **Related:** dogfood finding D114; runtime log reads
-  ([flow](../../docs/flows/agent-runtime-logs.md),
-  [guide](../../docs/guides/topics/agent-logs.md)); RFC #854 (open) records the
-  runtime log design.
+- **Last updated:** 2026-10-15
+- **RFC PR:** [#905 (draft)](https://github.com/openclaw/openclaw-enterprise/pull/905)
+- **Related:** [Runtime log flow](../../docs/flows/agent-runtime-logs.md),
+  [operator guide](../../docs/guides/topics/agent-logs.md),
+  [runtime log design proposal #854](https://github.com/openclaw/openclaw-enterprise/pull/854)
 
 <a id="problem-and-decision"></a>
 
-## Summary
+## When a deployment fails before it gets a Sandbox
 
-`GET …/deployments/<id>/runtime` lists the `sandbox` log source as `available: true`
-whenever the revision's Sandbox Driver can read logs. That holds even for a failed
-revision that never got a Sandbox. A read of that source then answers
-`503 RUNTIME_LOGS_SANDBOX_NOT_FOUND`, and the documentation lists three possible
-causes. This RFC proposes deriving availability from the revision's own Harness Pod,
-which the description already lists, and adds one `unavailableCode`.
+In dogfood finding D114, the Console disabled **Agent (no Pod)** but still offered
+**Sandbox**. Selecting it returned `503 RUNTIME_LOGS_SANDBOX_NOT_FOUND`. The useful
+fact was already on screen: the controller had looked for that revision’s Harness Pod
+and found none.
 
-## Motivation
+**Recommendation:** When the runtime description reports `agent: NO_POD`, disable
+**Sandbox** too and explain “No Harness Pod observed.” This is advice about what to try,
+not a claim that OpenShell has no logs. During Pod replacement, the same observation
+can temporarily hide useful startup logs from the picker. An operator who explicitly
+requests `source=sandbox` must still be able to read whatever OpenShell retains.
 
-`withSandboxLogSource` (`packages/occ/src/index.ts`) appends the source with a fixed
-`available: true` and never looks at the cluster. Container sources already report
-`available: false` with `unavailableCode: "NO_POD"` when their Pod is missing, so
-`occ agent runtime` shows the `agent` source as unavailable and the `sandbox` source
-as available for the same failed revision. The Console's source picker and the CLI
-both trust `available`. The user picks the source and gets a `503` that cannot say
-which of its causes applies.
+API owners: decide whether that tradeoff is acceptable, then settle the proposed
+`unavailableCode: "NO_SANDBOX"`. Its name implies more certainty than the observation
+provides. If we proceed, the first implementation step is for the Kubernetes and
+OpenShell Driver owners to verify that they identify the same Harness Pod.
 
-OpenShell answers `NOT_FOUND` both for a Sandbox that does not exist and for one
-hidden from an identity outside its Workspace (`readSandboxLogs` in
-`apps/controller/src/drivers/sandbox/openshell.ts`). The read alone cannot tell
-the two apart.
+<a id="design"></a>
 
-## Goals
+## Describe what Compute observed; let OpenShell answer the read
 
-- A revision with no Sandbox does not offer the `sandbox` source as available.
-- No extra OpenShell call on every follow poll.
-- A misconfigured Workspace membership still surfaces as an error, not as "not
-  provisioned".
+The two requests answer different questions. In the [controller source reviewed
+October 15](https://github.com/openclaw/openclaw-enterprise/blob/00bbc7cd976ab7be317ce1e0a9d36ad72ce10567/packages/occ/src/index.ts),
+`GET …/deployments/<id>/runtime` offers `sandbox` if the revision’s Sandbox Driver
+supports reading logs. We would keep omitting the source when the Driver cannot read
+it. When it can, use the `agent` observation already in the description, without an
+extra OpenShell request on each refresh:
 
-## Options
+```mermaid
+flowchart TD
+    describe["Describe this revision"] --> agent["Read the agent Pod observation"]
+    agent -.->|No Pod observed| absent["Disable Sandbox: No Harness Pod observed"]
+    agent -.->|Pod observed| present["Offer Sandbox; a read can still fail"]
+    agent -.->|No agent observation| unknown["Keep offering Sandbox; absence is unknown"]
+```
 
-### A. Follow the Harness Pod (recommended)
+Dashed arrows are proposed. [Kubernetes](../../apps/controller/src/drivers/compute/kubernetes/index.ts)
+excludes terminating Pods from this list; a listed Pod need not be ready. An embedded
+Harness has only a `gateway` source, and a failed Pod list is an error, not an empty
+list. The controller can also report dedicated Harness status, but deliberately reports
+some missing or deleting Sandboxes as `unknown` for an inactive revision. None of
+these cases establishes that a Sandbox log is gone.
 
-Describe lists the revision's `agent` Pods by the labels `openclaw.dev/revision` and
-`openclaw.dev/workload-role: agent`. If the OpenShell Harness Pod carries those labels
-(verify this before implementing; `providerHarnessReady` already waits on the Harness
-Pod's labels), describe already lists it as the `agent` source. When that source has no Pod, report `sandbox` as `available: false` with a new
-`unavailableCode: "NO_SANDBOX"`. Keep reads unchanged, so a direct read still answers
-`503 RUNTIME_LOGS_SANDBOX_NOT_FOUND`.
+For a direct read, `readSandboxLogs` intentionally starts with an empty Pod list:
+it *did not look*. Keep that path independent of the picker, with the existing log
+permission, revision and Workspace restrictions, and audit before reading log text.
+OpenShell’s `NOT_FOUND` can mean never provisioned, since removed, or outside the
+controller’s Workspace. Preserve the [operator guidance for all three
+cases](../../docs/guides/topics/agent-logs.md); a Pod observation cannot resolve them.
 
-Cost: one schema literal (`unavailableCode` becomes `"NO_POD" | "NO_SANDBOX"`), the
-description validator in `packages/occ/src/runtime-logs/description.ts`, which rejects
-unknown codes today, the
-regenerated API reference, a CLI and Console label, and tests. A `source=sandbox`
-read currently skips the Compute description. It stays that way, because only
-describe changes.
+## What an implementation would have to demonstrate
 
-Risk: if OpenShell keeps a Sandbox's log buffer after its Pod is replaced, the source
-would show as unavailable during a restart, although a read could still return lines. The picker already handles a source that changes state
-between polls.
+1. **Identify this revision’s Pod.** Exercise the labels shared by `revisionPods` and
+   `providerHarnessReady`: `openclaw.dev/agent`, `openclaw.dev/revision`, and
+   `openclaw.dev/workload-role: agent`. Verify that the OpenShell Harness actually
+   carries them; the proposal depends on identity, not on passing a readiness check.
+2. **Explain the disabled choice.** For D114, return `available: false` and the agreed
+   code on `sandbox`. Show its meaning in the Console and `occ agent runtime`. Extend the
+   [public response type](../../packages/contracts/src/index.ts) and its
+   [API schema](../../packages/contracts/src/api/resources.ts), both of which currently
+   allow only `NO_POD`. Update the generated reference and account for clients that
+   exhaustively match the old value.
+   The [description validator](../../packages/occ/src/runtime-logs/description.ts) checks
+   Compute’s container sources *before* the controller adds `sandbox`; keep that boundary.
+3. **Recover across replacement.** With no current Pod but retained log lines, show
+   the disabled choice, retrieve those lines by direct read, then show that the next
+   description offers **Sandbox** once the replacement Pod appears. Test the ambiguous
+   Workspace refusal separately. These are acceptance conditions, not reported results.
 
-### B. Probe OpenShell on describe
+<a id="alternatives-and-open-decisions"></a>
 
-Call `GetSandbox` through the narrowed reader when describing. This is exact for "the
-Sandbox exists", but `NOT_FOUND` still conflates non-membership, so the code would have
-to say "not found or not visible". It also adds a gRPC round trip to every describe.
+## If hiding retained logs is the wrong tradeoff
 
-### C. Keep the contract, sharpen the error
-
-Leave `available: true`. When the `agent` source has no Pod, the read error message
-says "This revision has no running Harness". No schema change, but the picker keeps
-offering a source that cannot work.
-
-### D. Do nothing
-
-The finding is low severity. The `agent` source already shows `NO_POD`, and the guide
-lists the causes.
-
-## Decision requested
-
-1. Choose A, B, C or D.
-2. If A or B: approve the new `unavailableCode` value and its name.
-
-## Risks
-
-- Option A ties sandbox availability to a Pod label convention between the Kubernetes
-  Compute Driver and the OpenShell Sandbox Driver. A test must pin it.
-- Clients that switch on `unavailableCode` must accept the new value. Today the only one
-  is `NO_POD`, and neither the Console nor the CLI switches on its value.
+The recommendation above is option A. **B: Probe OpenShell on describe** would use
+`GetSandbox` through the restricted reader. Success confirms a visible Sandbox;
+`NOT_FOUND` still means “not found or not visible.” This adds a gRPC round trip to
+each description and also requires agreement on the public reason code.
+**C: Explain the failed read** would keep the source selectable and add “No Harness
+Pod observed” when we know that fact. **D: Keep the current behavior** is reasonable
+for a low-severity finding: the adjacent Agent status and the log guide already help
+an operator interpret the failure.
