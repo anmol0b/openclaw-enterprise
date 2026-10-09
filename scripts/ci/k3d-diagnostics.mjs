@@ -1,9 +1,16 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { open, readFile, rm, statfs, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rm, statfs, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { cpus, freemem, loadavg, totalmem } from "node:os";
+import {
+  failureSecrets,
+  isCredentialLine,
+  maskPrivateKeyLines,
+  redactLogLine,
+  redactOutputLine,
+} from "./failure-redaction.mjs";
 
 export async function k3dHostMetrics(directory) {
   const disk = await statfs(directory).catch(() => undefined);
@@ -58,6 +65,11 @@ const NODE_LOG_HEAD = { lines: 60, chars: 8_000 };
 const NODE_LOG_FIRST_PROBLEMS = { lines: 20, chars: 4_000 };
 const NODE_LOG_LAST_PROBLEMS = { lines: 100, chars: 12_000 };
 const NODE_LOG_TAIL_CHARS = 16_000;
+// Each diagnostic command is bounded; a hung one must not replace the failure.
+const diagnosticCommandTimeoutMs =
+  Number(process.env.OPENCLAW_CI_K3D_DIAGNOSTICS_TIMEOUT_MS) > 0
+    ? Number(process.env.OPENCLAW_CI_K3D_DIAGNOSTICS_TIMEOUT_MS)
+    : 10_000;
 
 function takeWithin(lines, { lines: maxLines = Infinity, chars }, fromEnd = false) {
   const ordered = fromEnd ? [...lines].reverse() : lines;
@@ -170,7 +182,7 @@ function conditions(values = []) {
   }));
 }
 
-export async function captureK3dDiagnostics({ execFile, cluster, lane, statePath }) {
+export async function captureK3dDiagnostics({ execFile, cluster, lane, statePath, failure }) {
   const kubectl = process.env.OCC_KUBECTL_BIN ?? "kubectl";
   const docker = process.env.OCC_DOCKER_BIN ?? "docker";
   const scope = ["--kubeconfig", cluster.kubeconfig, "--context", cluster.context];
@@ -182,7 +194,7 @@ export async function captureK3dDiagnostics({ execFile, cluster, lane, statePath
   ) {
     try {
       const output = await execFile(command, args, {
-        timeoutMs: 10_000,
+        timeoutMs: diagnosticCommandTimeoutMs,
         maxOutputChars,
       });
       return { status: "ok", value: project(output) };
@@ -283,6 +295,7 @@ export async function captureK3dDiagnostics({ execFile, cluster, lane, statePath
     capturedAt: new Date().toISOString(),
     lane,
     cluster: cluster.name,
+    ...(failure ? { failure } : {}),
     nodeImage: cluster.nodeImage,
     host,
     nodes,
@@ -380,15 +393,8 @@ export function projectAgentNamespaceActivity(eventsText, podsText) {
     }
     // Later watch records for the same event carry its updated count.
     events.set(object.metadata.uid ?? `${namespace}/${object.metadata.name}`, {
+      ...eventStatus(object),
       namespace,
-      kind: object.involvedObject?.kind,
-      name: object.involvedObject?.name,
-      type: object.type,
-      reason: object.reason,
-      message: safeText(object.message)?.slice(0, 512),
-      count: object.count,
-      firstTimestamp: object.firstTimestamp ?? object.eventTime,
-      lastTimestamp: object.lastTimestamp ?? object.eventTime,
     });
   }
   const orderedEvents = [...events.values()].sort((left, right) =>
@@ -403,6 +409,147 @@ export function projectAgentNamespaceActivity(eventsText, podsText) {
       events: Math.max(0, orderedEvents.length - MAX_ACTIVITY_RECORDS),
     },
   };
+}
+
+// Tests that follow a container's log write one JSON record per failed wait into
+// this directory (tests/helpers/container-log-capture.mjs); `finish` publishes a
+// bounded, redacted projection. Passing tests write nothing.
+export const CONTAINER_LOG_DIRECTORY_VARIABLE = "OPENCLAW_CI_CONTAINER_LOG_DIR";
+// A file keeps its first records (the earliest failure is the likeliest cause);
+// the report keeps the most recent files' records.
+const MAX_CONTAINER_LOG_FILES = 4;
+const MAX_CONTAINER_LOG_RECORDS = 8;
+const MAX_CONTAINER_LOG_INPUT_BYTES = 4 * 1024 * 1024;
+const CONTAINER_LOG_LINES = 1_500;
+const CONTAINER_LOG_LINE_CHARS = 1_000;
+
+function eventStatus(object) {
+  return {
+    namespace: object.metadata?.namespace ?? object.involvedObject?.namespace,
+    kind: object.involvedObject?.kind,
+    name: object.involvedObject?.name,
+    type: object.type,
+    reason: object.reason,
+    message: safeText(object.message)?.slice(0, 512),
+    count: object.count,
+    firstTimestamp: object.firstTimestamp ?? object.eventTime,
+    lastTimestamp: object.lastTimestamp ?? object.eventTime,
+  };
+}
+
+/**
+ * Projects one test-written container log record: the target, the test's
+ * timeline markers, Pod status and events snapshots (never specs), and the
+ * log's last lines with every secret value and shape redacted.
+ */
+export function projectContainerLog(value, secrets = []) {
+  const record = (field) => typeof field === "object" && field !== null && !Array.isArray(field);
+  if (!record(value) || !Array.isArray(value.lines)) {
+    return undefined;
+  }
+  const text = (field, limit = 200) =>
+    typeof field === "string" ? redactLogLine(field, secrets, limit) : undefined;
+  const count = (field) => (Number.isSafeInteger(field) && field >= 0 ? field : 0);
+  // Lines are redacted one at a time, so a private key's body lines go first.
+  const lines = maskPrivateKeyLines(value.lines.filter((line) => typeof line === "string"));
+  const kept = lines
+    .slice(-CONTAINER_LOG_LINES)
+    // Value-level redaction keeps the credential lifecycle lines a slow stop
+    // needs; lines that name a credential are dropped whole.
+    .map((line) => redactOutputLine(line, secrets, "", CONTAINER_LOG_LINE_CHARS));
+  const stream = record(value.stream) ? value.stream : {};
+  const markers = (Array.isArray(value.markers) ? value.markers : []).filter(record);
+  return {
+    test: text(value.test),
+    reason: text(value.reason),
+    namespace: text(value.namespace),
+    pod: text(value.pod),
+    container: text(value.container),
+    // The last marker names the failed wait.
+    markers: (markers.length > 20 ? [...markers.slice(0, 19), markers.at(-1)] : markers).map(
+      (marker) => ({ label: text(marker.label), at: text(marker.at, 40) }),
+    ),
+    stream: {
+      startedAt: text(stream.startedAt, 40),
+      endedAt: text(stream.endedAt, 40),
+      ended: stream.ended === true,
+      exitCode: Number.isInteger(stream.exitCode) ? stream.exitCode : undefined,
+      // kubectl's own complaint when the follow failed (Pod gone, API error).
+      error:
+        typeof stream.error === "string"
+          ? text(
+              maskPrivateKeyLines(stream.error.split("\n"))
+                .map((line) =>
+                  isCredentialLine(line) ? "[redacted credential-bearing line]" : line,
+                )
+                .join("\n"),
+              2_000,
+            )
+          : undefined,
+    },
+    snapshots: (Array.isArray(value.snapshots) ? value.snapshots : [])
+      .filter(record)
+      .slice(0, 4)
+      .map((snapshot) => ({
+        label: text(snapshot.label),
+        at: text(snapshot.at, 40),
+        // A failed read must not look like a Pod that is already gone.
+        ...(snapshot.unavailable === true ? { unavailable: true } : {}),
+        pods: (Array.isArray(snapshot.pods) ? snapshot.pods : [])
+          .filter((pod) => record(pod?.metadata))
+          .slice(0, 8)
+          .map((pod) => {
+            const { watch: _watch, ...status } = podStatus("SNAPSHOT", pod);
+            return {
+              ...status,
+              uid: pod.metadata.uid,
+              deletionGracePeriodSeconds: pod.metadata.deletionGracePeriodSeconds,
+            };
+          }),
+        events: (Array.isArray(snapshot.events) ? snapshot.events : [])
+          .filter(record)
+          .map((event) => {
+            const status = eventStatus(event);
+            return { ...status, message: text(status.message, 512) };
+          })
+          .sort((left, right) =>
+            String(left.lastTimestamp ?? "").localeCompare(String(right.lastTimestamp ?? "")),
+          )
+          .slice(-MAX_ACTIVITY_RECORDS),
+      })),
+    omittedLines: count(value.omittedLines) + lines.length - kept.length,
+    lines: kept,
+  };
+}
+
+async function readContainerLogs(directory, secrets) {
+  const names = (await readdir(directory).catch(() => []))
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+  const logs = [];
+  for (const name of names.slice(0, MAX_CONTAINER_LOG_FILES)) {
+    const handle = await open(join(directory, name), "r").catch(() => undefined);
+    if (handle === undefined) {
+      continue;
+    }
+    try {
+      const { size } = await handle.stat();
+      if (size > MAX_CONTAINER_LOG_INPUT_BYTES) {
+        logs.push({ unavailable: "oversize" });
+        continue;
+      }
+      const projected = projectContainerLog(JSON.parse(await handle.readFile("utf8")), secrets);
+      logs.push(projected ?? { unavailable: "invalid" });
+    } catch {
+      logs.push({ unavailable: "invalid" });
+    } finally {
+      await handle.close();
+    }
+  }
+  if (names.length > MAX_CONTAINER_LOG_FILES) {
+    logs.push({ unavailable: "omitted", count: names.length - MAX_CONTAINER_LOG_FILES });
+  }
+  return logs;
 }
 
 async function readWatchTail(path) {
@@ -451,6 +598,11 @@ async function stopWatch(child) {
  * are cluster-wide: a file's record then also lists a concurrent sibling's
  * namespaces and shares its record caps. Callers serialize `finish` with other
  * writers of the state's diagnostics file.
+ *
+ * The returned `env` names a private per-file directory for container log
+ * records (CONTAINER_LOG_DIRECTORY_VARIABLE); `finish` adds their redacted
+ * projection to the report's `containerLogs`. Pass the child's environment as
+ * `finish({ env })` so its prepared secrets are redacted too.
  */
 export async function startAgentNamespaceCapture({ statePath, lane, file }) {
   let clusters;
@@ -514,8 +666,19 @@ export async function startAgentNamespaceCapture({ statePath, lane, file }) {
     }
     watches.push({ cluster, paths, children });
   }
+  // Inside the first cluster's private directory, which cleanup removes.
+  let containerLogDirectory = join(clusters[0].directory, `container-logs-${randomUUID()}`);
+  try {
+    await mkdir(containerLogDirectory, { mode: 0o700 });
+  } catch {
+    containerLogDirectory = undefined;
+  }
   return {
-    async finish() {
+    env:
+      containerLogDirectory === undefined
+        ? {}
+        : { [CONTAINER_LOG_DIRECTORY_VARIABLE]: containerLogDirectory },
+    async finish({ env = {} } = {}) {
       try {
         const captured = [];
         for (const { cluster, paths, children } of watches) {
@@ -534,7 +697,17 @@ export async function startAgentNamespaceCapture({ statePath, lane, file }) {
             });
           }
         }
-        if (captured.length === 0) {
+        let containerLogs = [];
+        if (containerLogDirectory !== undefined) {
+          try {
+            containerLogs = (
+              await readContainerLogs(containerLogDirectory, failureSecrets([process.env, env]))
+            ).map((log) => ({ file, capturedAt: new Date().toISOString(), ...log }));
+          } finally {
+            await rm(containerLogDirectory, { recursive: true, force: true });
+          }
+        }
+        if (captured.length === 0 && containerLogs.length === 0) {
           return;
         }
         const diagnosticsPath = `${statePath}.diagnostics.json`;
@@ -544,9 +717,16 @@ export async function startAgentNamespaceCapture({ statePath, lane, file }) {
         } catch {
           // The first passing file starts the report.
         }
-        report.agentNamespaces = [...(report.agentNamespaces ?? []), ...captured].slice(
-          -MAX_ACTIVITY_FILES,
-        );
+        if (captured.length > 0) {
+          report.agentNamespaces = [...(report.agentNamespaces ?? []), ...captured].slice(
+            -MAX_ACTIVITY_FILES,
+          );
+        }
+        if (containerLogs.length > 0) {
+          report.containerLogs = [...(report.containerLogs ?? []), ...containerLogs].slice(
+            -MAX_CONTAINER_LOG_RECORDS,
+          );
+        }
         await writeFile(diagnosticsPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
       } catch {
         console.error(`[run:${lane}] Agent namespace activity unavailable for ${file}`);
