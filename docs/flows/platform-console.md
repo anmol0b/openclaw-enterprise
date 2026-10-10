@@ -1,7 +1,7 @@
 ---
 created: 2026-09-01
-updated: 2026-10-08
-last_updated_session: 01a11d68-d6e8-7033-ab93-03767bced2da
+updated: 2026-10-10
+last_updated_session: authoring-run/73ca79b6-4687-4e93-a98f-d46b194ee2ed
 ---
 
 # Platform console request flow
@@ -182,7 +182,10 @@ missing wiring or failed dependencies return errors.
 
 `apps/controller/src/console/agents/create.mjs:renderCreateAgent` composes Provider,
 Harness, Preset, Configuration, and workspace inputs. Provider/Harness changes
-reset incompatible credentials and model choices while retaining unrelated JSON. The
+reset incompatible credentials and model choices while retaining unrelated JSON.
+`updateModelConfiguration` adds Codex only to a non-empty native `plugins.allow`
+array; omitted or empty lists remain unrestricted. Returning to OpenClaw removes Codex's entry and
+allowlist ID while retaining other native plugin settings. The
 [creation reference](../reference/console/create-and-deploy.md) owns combinations,
 Preset constraints, token handling, permissions, and recovery.
 
@@ -203,20 +206,14 @@ Preset Secret takes precedence over an entered token. OCC reads the
 Secret server-side. Pagination is upstream; filtering is local. Selecting a plugin loads tools.
 Credential, provider, and Harness changes clear results and invalidate pending reads.
 
-`create.mjs:MODEL_CHOICES` supplies unauthenticated static model lists and manual
-entry. In `renderAgentForm`, the model-entry button switches `manualModel` and
-calls `updateModelConfiguration` and `updateControls`. Entering manual mode
-keeps `model.value` and clears the hidden dropdown selection.
-Returning to the list uses `resetModelChoices` to rebuild the current provider's
-options, including after Configuration JSON changes the provider. It retains
-the model only if that provider's list contains it; otherwise it clears both
-inputs. Provider and authentication changes call the same reset without a model
-to retain. `model.value` supplies one Configuration model, and submission checks
-that its primary model matches that value.
-`updateControls` updates the button label, visibility, and required input; focus moves
-to that input. Switching back to the list preserves credentials and unrelated
-Configuration values. Saved Configuration and pending-request locks apply to
-both directions.
+`create.mjs:MODEL_CHOICES` supplies unauthenticated lists and manual entry.
+`renderAgentForm` switches `manualModel`, calls `updateModelConfiguration` and
+`updateControls`, and focuses the required input. Manual mode keeps `model.value`
+and clears the hidden dropdown. `resetModelChoices` rebuilds the current provider's
+list, including JSON provider edits; it retains listed models, otherwise clears
+both inputs. Provider/authentication changes reset without retention. Submission
+checks that the primary equals `model.value`. Both directions preserve credentials
+and unrelated Configuration, with saved-Configuration and pending-request locks.
 
 `configurationTemplate` enables Control UI with loopback origins on port 18789.
 Compute supplies gateway authentication; Presets replace the starter unchanged.
@@ -372,6 +369,8 @@ refresh and inspection.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-10 22:27: Preserve native plugin allowlists across Harness switches. (authoring-run/73ca79b6-4687-4e93-a98f-d46b194ee2ed - 80725162a946f80652b939a32a57ee4e922eeb5c)
 
 - 2026-10-08 15:59: Trace responsive drawer and tab visibility, destination focus, scoped authentication feedback, and compact plugin setup. (01a11d68-d6e8-7033-ab93-03767bced2da - 58daaa5a3ac4c64bc5fb3af00759b59b365b20ca)
 - 2026-10-08 14:30: Trace client navigation from a failed deployment to its exact version and focus its Logs tab and scroll the panel into view. (01a11d68-d6e8-7033-ab93-03767bced2da - 0ff96342dc416325770eebed5963e9886fd3dff3)

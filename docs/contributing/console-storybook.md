@@ -138,7 +138,9 @@ simulated Admin UI, connected to no gateway, Slack, credential, or model.
 combinations; models appear before credentials. **Enter another model ID**
 allows manual entry but does not prove access. Execution mode follows the
 harness; saved tokens require Codex. **Experimental Dedicated OpenClaw** shows
-the runtime-build warning; Embedded OpenClaw does not.
+the runtime-build warning; Embedded OpenClaw does not. In **Native plugins**
+stories, switch to Codex and back; inspect omitted, empty, and selected native
+allowlists and the retained plugin entry.
 
 In **Enter another model ID**, switch to **Choose a model from the list** and
 back: listed models survive both switches, focus moves to the active input, and

@@ -1215,6 +1215,69 @@ test("API-key Presets keep their credential provider fixed while allowing model 
   assert.equal(pathRequests(requests, "POST", `/namespaces/${namespace.id}/secrets`).length, 0);
 });
 
+test("Harness switches preserve unrestricted and explicit native plugin allowlists through Agent creation", async (t) => {
+  for (const { allow, codexAllow } of [
+    { allow: undefined, codexAllow: undefined },
+    { allow: [], codexAllow: [] },
+    { allow: ["knowledge"], codexAllow: ["knowledge", "codex"] },
+  ]) {
+    const fixture = await createConsoleAppFixture(t);
+    await fixture.bootstrap();
+    const namespace = await fixture.createNamespace("Native plugin settings", { ready: true });
+    const secret = await fixture.createSecret(namespace.id, "OpenAI model key", "preset-model-key");
+    const harnessAuth = { method: "api_key", source: secret.ref };
+    const values = nativeValues("preserved-native-plugin");
+    if (allow !== undefined) {
+      values.plugins.allow = allow;
+    }
+    const preset = await fixture.request("POST", `/namespaces/${namespace.id}/presets`, {
+      body: {
+        name: "Native plugins",
+        template: {
+          agent: { name: "Native plugin Agent", executionMode: "embedded", harnessAuth },
+          configuration: { values },
+        },
+      },
+    });
+    assert.equal(preset.status, 201);
+    const { page } = await newPage(t, fixture);
+    await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+    await page.getByLabel("Preset template", { exact: true }).selectOption(preset.data.id);
+    await page.getByRole("button", { name: "Use Preset", exact: true }).click();
+    await openAdvancedSettings(page);
+    const configuration = page.getByLabel("Configuration JSON", { exact: true });
+    const harness = page.getByLabel("Harness", { exact: true });
+
+    // Omitted and empty allowlists remain unrestricted; a selected allowlist retains native IDs.
+    await harness.selectOption("codex");
+    const dedicated = JSON.parse(await configuration.inputValue());
+    assert.deepEqual(dedicated.plugins.allow, codexAllow);
+    assert.deepEqual(dedicated.plugins.entries.knowledge, values.plugins.entries.knowledge);
+    assert.equal(dedicated.plugins.entries.codex.enabled, true);
+    await harness.selectOption("openclaw");
+    assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins, values.plugins);
+
+    // Save through the ordinary Agent form and read its owned Configuration back from the API.
+    const createdResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/namespaces/${namespace.id}/agents`) &&
+        response.request().method() === "POST",
+    );
+    await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+    const response = await createdResponse;
+    assert.equal(response.status(), 201);
+    const created = (await response.json()).data;
+    assert.equal(created.executionMode, "embedded");
+    assert.deepEqual(created.harnessAuth, harnessAuth);
+    const saved = await fixture.request(
+      "GET",
+      `/namespaces/${namespace.id}/configurations/${created.configurationId}`,
+    );
+    assert.equal(saved.status, 200);
+    assert.deepEqual(saved.data.values.plugins, values.plugins);
+  }
+});
+
 test("Dedicated OpenClaw Presets preserve custom provider transport across execution mode changes", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();

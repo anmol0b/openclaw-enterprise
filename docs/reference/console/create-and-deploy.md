@@ -53,7 +53,9 @@ still block initial workspace files and Secret-backed environment projection.
 4. Confirm the Installation, credential, and runtime support the chosen model. Primary and fallback
    models must use the same supported provider and Harness. For custom settings,
    open **Advanced settings**. Selection changes preserve unrelated JSON edits;
-   **Reset template** replaces them.
+   **Reset template** replaces them. Harness switches keep omitted or empty native
+   `plugins.allow` unrestricted, and add/remove `codex` only in a non-empty allowlist.
+   Other native plugin entries remain separate from Agent plugin policies.
 5. Under **Repository access**, optionally select up to 16 approved repositories
    and set their access levels. Kubernetes supports Codex (Dedicated) or OpenClaw
    (Embedded), without a Sandbox Driver. Dedicated OpenClaw requires a Sandbox

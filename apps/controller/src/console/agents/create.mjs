@@ -731,7 +731,9 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     if (next.plugins) {
       values.plugins = {
         ...values.plugins,
-        allow: [...new Set([...(values.plugins?.allow ?? []), ...next.plugins.allow])],
+        ...(Array.isArray(values.plugins?.allow) && values.plugins.allow.length > 0
+          ? { allow: [...new Set([...values.plugins.allow, ...next.plugins.allow])] }
+          : {}),
         entries: {
           ...values.plugins?.entries,
           codex: resetTransport
