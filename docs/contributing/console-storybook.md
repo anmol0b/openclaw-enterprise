@@ -115,13 +115,15 @@ Compare **New version queued**, **Deployment waiting for runtime**, and
 a separate credential action. Its initial state is not a Stop request; OCC
 generation is simulated.
 
-Choose a Preset, fill its variables, review seeded workspace files, and create
-a Codex-harness Agent: the Console submits inline Configuration and Secret
-references, then follows simulated provisioning. Another flow uses the default
-Preset with OpenAI Codex, a new or existing model Secret, and a model, editing
-IDENTITY.md and clearing USER.md first.
-OpenClaw and unsupported-runtime stories keep the draft workflow: provision
-credentials and deploy from Agent detail.
+Choose a Preset, fill variables, review workspace files, and create a Codex Agent
+to follow simulated provisioning. With the default Preset, choose a model and
+new/existing Secret, edit IDENTITY.md, and clear USER.md. OpenClaw and unsupported
+runtimes keep the draft workflow: provision credentials and deploy from Agent detail.
+
+In **Preset Secret access retry**, a separate tool Secret has two environment
+bindings. Check that denied delegation retains saved IDs, locks fields, and offers
+**Open saved Agent**. Select **Retry credential access** to open that draft.
+IAM responses are simulated; browser tests verify policy writes and deployment admission.
 
 **Plugins Curated** exercises token-free discovery against simulated Driver
 responses, leaving access unverified. Hosted discovery requires an eligible Codex

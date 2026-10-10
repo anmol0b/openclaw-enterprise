@@ -1,7 +1,7 @@
 ---
 created: 2026-09-01
-updated: 2026-10-08
-last_updated_session: 01a11d68-d6e8-7033-ab93-03767bced2da
+updated: 2026-10-10
+last_updated_session: 01a11ac0-ab87-7d21-8df5-a306d8563a19
 ---
 
 # Platform console request flow
@@ -203,20 +203,15 @@ Preset Secret takes precedence over an entered token. OCC reads the
 Secret server-side. Pagination is upstream; filtering is local. Selecting a plugin loads tools.
 Credential, provider, and Harness changes clear results and invalidate pending reads.
 
-`create.mjs:MODEL_CHOICES` supplies unauthenticated static model lists and manual
-entry. In `renderAgentForm`, the model-entry button switches `manualModel` and
-calls `updateModelConfiguration` and `updateControls`. Entering manual mode
-keeps `model.value` and clears the hidden dropdown selection.
-Returning to the list uses `resetModelChoices` to rebuild the current provider's
-options, including after Configuration JSON changes the provider. It retains
-the model only if that provider's list contains it; otherwise it clears both
-inputs. Provider and authentication changes call the same reset without a model
-to retain. `model.value` supplies one Configuration model, and submission checks
-that its primary model matches that value.
-`updateControls` updates the button label, visibility, and required input; focus moves
-to that input. Switching back to the list preserves credentials and unrelated
-Configuration values. Saved Configuration and pending-request locks apply to
-both directions.
+`create.mjs:MODEL_CHOICES` supplies static model lists and manual entry.
+In `renderAgentForm`, the model-entry button toggles `manualModel`, updates
+Configuration and controls, and focuses the visible input. Manual entry retains
+`model.value` and clears the hidden dropdown. Returning to the list calls
+`resetModelChoices` for the current provider, retaining only a listed model;
+otherwise both inputs clear. Provider/authentication changes reset without a
+retained model. Submission requires the primary Configuration model to match
+`model.value`. Both directions preserve credentials and unrelated Configuration,
+and respect saved-Configuration and pending-request locks.
 
 `configurationTemplate` enables Control UI with loopback origins on port 18789.
 Compute supplies gateway authentication; Presets replace the starter unchanged.
@@ -241,10 +236,15 @@ Ordinary drafts post `{kind: "agent", values, secretBindings}` to
 OCC stages all four workspace textareas, including unchanged/empty values, outside
 Agent/Configuration for [workspace setup](workspace-files.md).
 
-`create.mjs:grantConfigurationSecretAccess` grants exact Secret `operate` for final
-same-Namespace `env` bindings. Failure retains the Agent; **Retry credential access**
-rereads grants without duplication. Failed Agent writes retain Configuration ID
-and lock JSON/Harness for explicit reuse. Writes never retry automatically; drafts
+`create.mjs:grantConfigurationSecretAccess` enumerates the saved Configuration's
+normalized same-Namespace `env` bindings, deduplicates their Secret sources, and
+rejects unsupported accepted bindings before granting any Configuration access.
+`agents/secret-access.mjs:ensureSecretOperateBinding` reads and creates exact
+Secret `operate` grants through the IAM APIs. The caller must hold existing
+Installation-admin delegation authority; Secret access alone grants no delegation.
+Failure retains the Agent; **Retry credential access** rereads grants without
+duplication. Failed Agent writes retain Configuration ID and lock JSON/Harness
+for explicit reuse. Writes never retry automatically; drafts
 admit no revision and start no runtime.
 
 `agents/harness-auth.mjs` edits bindings and shows
@@ -373,6 +373,7 @@ refresh and inspection.
 
 ## Changelog
 
+- 2026-10-10 22:15: Trace saved Configuration Secret enumeration and existing IAM delegation checks. (01a11ac0-ab87-7d21-8df5-a306d8563a19 - 80725162a946f80652b939a32a57ee4e922eeb5c)
 - 2026-10-08 15:59: Trace responsive drawer and tab visibility, destination focus, scoped authentication feedback, and compact plugin setup. (01a11d68-d6e8-7033-ab93-03767bced2da - 58daaa5a3ac4c64bc5fb3af00759b59b365b20ca)
 - 2026-10-08 14:30: Trace client navigation from a failed deployment to its exact version and focus its Logs tab and scroll the panel into view. (01a11d68-d6e8-7033-ab93-03767bced2da - 0ff96342dc416325770eebed5963e9886fd3dff3)
 - 2026-10-07 12:30: Explain a disabled account's provider sign-in (`authReason=account-disabled`). (fix-member-1007/d534)
