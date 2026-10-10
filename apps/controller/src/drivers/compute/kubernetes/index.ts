@@ -4989,6 +4989,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         repositoryMaterial,
       ),
       harnessAuth.credentialSource?.config.base_url,
+      harnessAuth.credentialSource?.config.auth_header,
     );
     const hasEnabledPluginSelections =
       pluginRuntime !== undefined &&
@@ -5806,6 +5807,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           repositoryMaterial,
         ),
         harnessAuth.credentialSource?.config.base_url,
+        harnessAuth.credentialSource?.config.auth_header,
       );
       if (
         currentRevisionId !== revision.id ||
@@ -5909,6 +5911,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         repositoryMaterial,
       ),
       harnessAuth.credentialSource?.config.base_url,
+      harnessAuth.credentialSource?.config.auth_header,
     );
     const revisionName = `${agentName}-rev-${sha256Hex(revision.id, 12)}`;
     const configuration = this.gatewayConfiguration(
@@ -11337,7 +11340,25 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     revision: AgentRevision,
     repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy,
     openaiBaseUrl?: string,
+    authHeader?: string,
   ): PluginRuntimeSnapshot | undefined {
+    if (authHeader !== undefined && authHeader !== "authorization" && authHeader !== "x-api-key") {
+      throw new ConfigurationFailure(
+        "Credential source auth_header must be authorization or x-api-key.",
+      );
+    }
+    if (authHeader === "x-api-key") {
+      if (
+        revision.harness.id !== "codex" ||
+        revision.harness.mode !== "dedicated" ||
+        revision.harnessAuth?.method !== "credential_source"
+      ) {
+        throw new ConfigurationFailure(
+          "Custom model authentication headers require a dedicated Codex credential source.",
+        );
+      }
+      openaiBaseUrl ??= "https://api.openai.com/v1";
+    }
     if (
       openaiBaseUrl === undefined &&
       revision.harness.id === "codex" &&
@@ -11361,6 +11382,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         revision,
         repositoryBrokerNetworkPolicy,
         openaiBaseUrl,
+        authHeader === "x-api-key" ? authHeader : undefined,
       );
     } catch (error) {
       throw new ConfigurationFailure(
