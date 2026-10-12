@@ -90,7 +90,7 @@ Kubernetes Configuration requests inherit the provisioning claim cancellation si
 
 `packages/occ/src/index.ts:OpenClawController.deployAgent`
 
-The job admits one first revision and records its ID. `packages/occ/src/index.ts:observeProvisioningDeployment` defers the original work without spending its retry budget until that exact revision activates or fails. Success completes provisioning; failure records the deployment's safe code and message on the same handle. Agent and revision identities remain unchanged across restart. `apps/controller/src/console/agents/create.mjs:waitForProvisioning` stays pending through activation; a failed initial deployment links to the existing Agent for repair and a new deployment. It does not retry creation. Ordinary reconciliation owns startup and activation; later deployments use the regular Deploy API.
+The job admits one first revision and records its ID. `packages/occ/src/index.ts:observeProvisioningDeployment` defers the original work without spending its retry budget until that exact revision activates or fails. Success completes provisioning, and so does a later deploy that supersedes that revision. A Stop during the first rollout records `REVISION_STOPPED` ("The Agent was stopped before its first deployment finished."). Other failures record the deployment's safe code and message on the same handle. Agent and revision identities remain unchanged across restart. `apps/controller/src/console/agents/create.mjs:waitForProvisioning` stays pending through activation; a failed initial deployment links to the existing Agent for repair and a new deployment; after a Stop it asks for no repair. It does not retry creation. Ordinary reconciliation owns startup and activation; later deployments use the regular Deploy API.
 
 Dedicated OpenClaw admission requires native worker support and a Sandbox Driver
 with all required containment facets. The pinned runtime lacks that support;
@@ -137,6 +137,7 @@ No API deletes a provisioning request. Agent deletion removes the Agent's reques
 
 ## Changelog
 
+- 2026-10-12 23:45: A later deploy that supersedes the first revision completes provisioning; a Stop during the first rollout is a named `REVISION_STOPPED` outcome, not a failure to correct. (fix-1994-followups)
 - 2026-10-12 11:55: Follow the initial deployment on the original provisioning handle and retain its failure identity. (authoring-run/adccd418-cf61-4fbb-b3ba-0fcad194d907 - 040e7498ecd89e0e565af71f234776ecfaad2186)
 
 - 2026-10-09 12:00: A Configuration create still absent 90 seconds after it began is resent. (fix-911)
