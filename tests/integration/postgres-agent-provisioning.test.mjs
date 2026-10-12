@@ -994,17 +994,24 @@ for (const authMethod of ["api_key", "codex_pat"]) {
 
 // A second deploy (another tab, the CLI) or a Stop during the first rollout ends the first
 // revision without a fault. Provisioning hands off to the later deploy, and reports a stop as
-// a named outcome rather than a failure to correct.
-for (const [interruption, expected] of [
-  ["deploy", { revision: "REVISION_SUPERSEDED", status: "succeeded" }],
-  ["stop", { revision: "REVISION_STOPPED", status: "failed" }],
+// a named outcome rather than a failure to correct. Exclusive replacement (dedicated Kubernetes)
+// supersedes the first revision as soon as the later one is admitted, before it prepares.
+for (const [interruption, exclusive, expected] of [
+  ["deploy", false, { revision: "REVISION_SUPERSEDED", status: "succeeded" }],
+  ["deploy", true, { revision: "REVISION_SUPERSEDED", status: "succeeded" }],
+  ["stop", false, { revision: "REVISION_STOPPED", status: "failed" }],
 ]) {
   test(
-    `initial provisioning settles when a ${interruption} interrupts its first deployment`,
+    `initial provisioning settles when a ${interruption} interrupts its first deployment${
+      exclusive ? " under exclusive replacement" : ""
+    }`,
     { ...requiresPostgres, timeout: 90_000 },
     async (context) => {
       let firstRevisionId;
       const computeDriver = createRuntimeComputeDriver();
+      if (exclusive) {
+        computeDriver.requiresStoppedPredecessors = () => true;
+      }
       const prepareRevision = computeDriver.prepareRevision.bind(computeDriver);
       // The first revision never becomes ready; a later one does.
       computeDriver.prepareRevision = async (revision, operationContext) => ({
