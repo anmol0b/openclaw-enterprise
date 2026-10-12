@@ -992,6 +992,83 @@ for (const authMethod of ["api_key", "codex_pat"]) {
   );
 }
 
+// A second deploy (another tab, the CLI) or a Stop during the first rollout ends the first
+// revision without a fault. Provisioning hands off to the later deploy, and reports a stop as
+// a named outcome rather than a failure to correct.
+for (const [interruption, expected] of [
+  ["deploy", { revision: "REVISION_SUPERSEDED", status: "succeeded" }],
+  ["stop", { revision: "REVISION_STOPPED", status: "failed" }],
+]) {
+  test(
+    `initial provisioning settles when a ${interruption} interrupts its first deployment`,
+    { ...requiresPostgres, timeout: 90_000 },
+    async (context) => {
+      let firstRevisionId;
+      const computeDriver = createRuntimeComputeDriver();
+      const prepareRevision = computeDriver.prepareRevision.bind(computeDriver);
+      // The first revision never becomes ready; a later one does.
+      computeDriver.prepareRevision = async (revision, operationContext) => ({
+        ...(await prepareRevision(revision, operationContext)),
+        ready: firstRevisionId !== undefined && revision.id !== firstRevisionId,
+      });
+      const fixture = await createFixture(context, { computeDriver });
+      const namespace = await fixture.bootstrapNamespace();
+      const secrets = await createProvisioningSecrets(fixture, namespace.id);
+      const admitted = await fixture.request(
+        "POST",
+        `/namespaces/${namespace.id}/agents/provision`,
+        { body: provisioningBody(namespace.id, secrets) },
+      );
+      assert.equal(admitted.status, 202, JSON.stringify(admitted.body));
+      await fixture.startWorker();
+      try {
+        const handoff = await waitFor("the first deployment to be admitted", async () => {
+          const observed = await fixture.request("GET", admitted.data.provisioning.url);
+          assert.equal(observed.status, 200, JSON.stringify(observed.body));
+          return observed.data.revisionId !== undefined ? observed.data : undefined;
+        });
+        firstRevisionId = handoff.revisionId;
+        fixture.cancelProvisioningAtTeardown(namespace.id, handoff.agentId);
+        const agentPath = `/namespaces/${namespace.id}/agents/${handoff.agentId}`;
+        const interrupted = await fixture.request("POST", `${agentPath}/${interruption}`);
+        assert.equal(interrupted.status, 202, JSON.stringify(interrupted.body));
+
+        const settled = await waitFor(
+          "initial provisioning to settle",
+          async () => {
+            const observed = await fixture.request("GET", admitted.data.provisioning.url);
+            assert.equal(observed.status, 200, JSON.stringify(observed.body));
+            return ["succeeded", "failed"].includes(observed.data.status)
+              ? observed.data
+              : undefined;
+          },
+          30_000,
+        );
+        const first = await fixture.request(
+          "GET",
+          `${agentPath}/deployments/${handoff.revisionId}`,
+        );
+        assert.equal(first.status, 200, JSON.stringify(first.body));
+        assert.equal(first.data.error?.code, expected.revision);
+        assert.equal(settled.status, expected.status, JSON.stringify(settled));
+        assert.equal(settled.agentId, handoff.agentId);
+        assert.equal(settled.revisionId, handoff.revisionId);
+        assert.deepEqual(
+          settled.error,
+          interruption === "stop"
+            ? {
+                code: "REVISION_STOPPED",
+                message: "The Agent was stopped before its first deployment finished.",
+              }
+            : undefined,
+        );
+      } finally {
+        await fixture.stopWorker();
+      }
+    },
+  );
+}
+
 test(
   "queued provisioning leaves existing Secrets but creates no Agent or Configuration before a worker runs",
   { ...requiresPostgres, timeout: 60_000 },
