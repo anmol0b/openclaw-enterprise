@@ -137,7 +137,6 @@ No API deletes a provisioning request. Agent deletion removes the Agent's reques
 
 ## Changelog
 
-- 2026-10-12 23:45: A later deploy that supersedes the first revision completes provisioning; a Stop during the first rollout is a named `REVISION_STOPPED` outcome, not a failure to correct. (fix-1994-followups)
 - 2026-10-12 11:55: Follow the initial deployment on the original provisioning handle and retain its failure identity. (authoring-run/adccd418-cf61-4fbb-b3ba-0fcad194d907 - 040e7498ecd89e0e565af71f234776ecfaad2186)
 
 - 2026-10-09 12:00: A Configuration create still absent 90 seconds after it began is resent. (fix-911)
