@@ -1,7 +1,7 @@
 ---
 created: 2026-09-01
-updated: 2026-10-10
-last_updated_session: authoring-run/73ca79b6-4687-4e93-a98f-d46b194ee2ed
+updated: 2026-10-12
+last_updated_session: authoring-run/86831b3d-1b20-4d59-8b4f-e814f6bdb488
 ---
 
 # Platform console request flow
@@ -124,13 +124,19 @@ First loads show loading. Return navigation and Refresh can restore one of at mo
 run. Password fields and their derived discovery state clear before retention.
 Controls stay inert until admission succeeds; navigation remains available.
 
-Completed views retain their DOM, handlers, and draft capture callbacks. On return,
-`loadPage` rereads their GET dependencies and compares data and user identity.
-Unchanged views reactivate without rebuilding panels; changed data rebuilds them,
-as does a first readable Namespace for a view retained without a selection.
-Pending reads, read failures, password input, or mutations prevent reuse. Read-only
-catalog and diagnostic POSTs do not invalidate views. Refresh always rebuilds.
-Debug runtime disclosures follow the same validation and retain expanded state.
+`apps/controller/src/console/api-client.mjs:createApiClient` keeps its composed
+abort signal through JSON and text body consumption. After headers arrive,
+cancellation retains the signal's reason and socket failures reach the caller's
+interrupted-read recovery. Only JSON syntax failures become invalid-response
+errors; a failed body never causes an automatic replay.
+
+Completed views retain DOM, handlers, and draft capture callbacks. On return,
+`loadPage` rereads GET dependencies and compares data and user identity. Unchanged
+views reactivate; changed data or the first readable Namespace for a view without
+a selection rebuilds them.
+Pending or failed reads, password input, and mutations prevent reuse; read-only
+catalog and diagnostic POSTs do not. Refresh always rebuilds. Debug runtime
+disclosures retain expanded state under the same validation.
 
 A changed user or session key clears retained views and drafts before further
 private reads. Missing sessions open login; failed reads offer Retry.
@@ -184,8 +190,8 @@ missing wiring or failed dependencies return errors.
 Harness, Preset, Configuration, and workspace inputs. Provider/Harness changes
 reset incompatible credentials and model choices while retaining unrelated JSON.
 `updateModelConfiguration` adds Codex only to a non-empty native `plugins.allow`
-array; omitted or empty lists remain unrestricted. Returning to OpenClaw removes Codex's entry and
-allowlist ID while retaining other native plugin settings. The
+array; omitted or empty lists remain unrestricted. Returning to OpenClaw removes
+Codex's entry and allowlist ID; other native settings remain. The
 [creation reference](../reference/console/create-and-deploy.md) owns combinations,
 Preset constraints, token handling, permissions, and recovery.
 
@@ -193,12 +199,11 @@ Preset constraints, token handling, permissions, and recovery.
 from Configuration. Invalid JSON and untouched fields survive; clearing overrides
 restores inheritance. Submission, uncertain outcomes, or invalid JSON lock editing.
 `capabilities.pluginPolicies` gates policy edits; unsupported reviewers remain clearable.
-The picker keeps a compact credential/access reminder beside an expandable
-**Access and credential setup** disclosure. Its bounded instructions, list, and
-details scroll within the dialog while search and pagination remain reachable.
-While mounted, Available and Configured retain separate selected plugins, queries,
-tool filters, and expanded rows without fetching pages or changing drafts.
-Removed selections clear their details; discovery resets clear both tabs.
+The picker has a compact credential/access reminder, expandable **Access and
+credential setup**, and bounded scrolling with reachable search/pagination.
+Available and Configured retain separate selections, queries, filters, and expanded
+rows without requests or draft edits. Removal clears details; discovery resets
+clear both tabs.
 
 `create.mjs:loadPluginCatalog` and `loadPluginTools` implement
 [PAT discovery](agent-plugins.md#credential-scoped-discovery): the selected or
@@ -206,14 +211,14 @@ Preset Secret takes precedence over an entered token. OCC reads the
 Secret server-side. Pagination is upstream; filtering is local. Selecting a plugin loads tools.
 Credential, provider, and Harness changes clear results and invalidate pending reads.
 
-`create.mjs:MODEL_CHOICES` supplies unauthenticated lists and manual entry.
+`create.mjs:MODEL_CHOICES` supplies static unauthenticated lists and manual entry.
 `renderAgentForm` switches `manualModel`, calls `updateModelConfiguration` and
-`updateControls`, and focuses the required input. Manual mode keeps `model.value`
+`updateControls`, and focuses the required input. Manual mode retains `model.value`
 and clears the hidden dropdown. `resetModelChoices` rebuilds the current provider's
-list, including JSON provider edits; it retains listed models, otherwise clears
-both inputs. Provider/authentication changes reset without retention. Submission
-checks that the primary equals `model.value`. Both directions preserve credentials
-and unrelated Configuration, with saved-Configuration and pending-request locks.
+list after JSON provider edits, retaining listed models or clearing both inputs.
+Provider/authentication changes reset without retention. Submission requires primary
+model equality with `model.value`. Both directions retain credentials, unrelated
+Configuration, and saved-Configuration/pending-request locks.
 
 `configurationTemplate` enables Control UI with loopback origins on port 18789.
 Compute supplies gateway authentication; Presets replace the starter unchanged.
@@ -298,14 +303,13 @@ or displays its access or availability error;
 
 `apps/controller/src/console/console.mjs:loadPage`, `logout`
 
-After a full-page client navigation settles, `loadPage` focuses the destination
-heading if focus fell to the document body. It uses `preventScroll` to preserve
-return position; tab navigation and controls that already have focus keep it.
-Navigation, Namespace changes, and logout invalidate reads; generations reject
-late responses. Refocus coalesces events. Agent detail rechecks access in place,
-preserving controls, input, and saves; failures clear the view. Other pages
-revalidate before reuse; forms defer refocus. Drafts keep save baselines and Namespace
-scopes separate.
+After full-page navigation settles, `loadPage` focuses the destination heading if
+focus fell to the body, using `preventScroll` to preserve return position. Tabs and
+focused controls keep focus. Navigation, Namespace changes, and logout invalidate
+reads; generations reject late responses. Refocus coalesces events. Agent detail
+rechecks access in place, preserving controls, input, and saves; failures clear it.
+Other pages revalidate before reuse; forms defer refocus. Draft save baselines and
+Namespace scopes stay separate.
 
 Authorization and dependency failures clear affected content and expose recovery;
 a current protected `401` clears all private state. `pagehide` clears
@@ -370,7 +374,10 @@ refresh and inspection.
 
 ## Changelog
 
+- 2026-10-12 15:30: Refresh native plugin preservation against current upstream. (authoring-run/86831b3d-1b20-4d59-8b4f-e814f6bdb488 - 1c722bea21fabefffc112b23bb739c88dbcecf4b)
 - 2026-10-10 22:27: Preserve native plugin allowlists across Harness switches. (authoring-run/73ca79b6-4687-4e93-a98f-d46b194ee2ed - 80725162a946f80652b939a32a57ee4e922eeb5c)
+
+- 2026-10-09 21:10: Preserve cancellation, deadline and transport failures during response body reads (authoring-run/2e195d67-c77d-43d0-8c32-2179523eb3a2 - 013bcf5f76819ca280a164745d470855fc5b74cd)
 
 - 2026-10-08 15:59: Trace responsive drawer and tab visibility, destination focus, scoped authentication feedback, and compact plugin setup. (01a11d68-d6e8-7033-ab93-03767bced2da - 58daaa5a3ac4c64bc5fb3af00759b59b365b20ca)
 - 2026-10-08 14:30: Trace client navigation from a failed deployment to its exact version and focus its Logs tab and scroll the panel into view. (01a11d68-d6e8-7033-ab93-03767bced2da - 0ff96342dc416325770eebed5963e9886fd3dff3)
