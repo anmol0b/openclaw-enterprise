@@ -98,6 +98,36 @@ func (client *Client) DeleteIAMAccessBinding(namespaceID, bindingID string) erro
 	)
 }
 
+// CreateIAMServicePrincipal creates a Namespace ServicePrincipal that holds no grant.
+func (client *Client) CreateIAMServicePrincipal(namespaceID string) (any, error) {
+	return client.send(
+		http.MethodPost,
+		[]string{"namespaces", namespaceID, "iam", "service-principals"},
+		map[string]any{},
+	)
+}
+
+// ListIAMServicePrincipals lists a Namespace's non-Agent ServicePrincipals.
+func (client *Client) ListIAMServicePrincipals(namespaceID string) (any, error) {
+	return client.get("namespaces", namespaceID, "iam", "service-principals")
+}
+
+// GetIAMServicePrincipal fetches a Namespace ServicePrincipal.
+func (client *Client) GetIAMServicePrincipal(namespaceID, servicePrincipalID string) (any, error) {
+	return client.get("namespaces", namespaceID, "iam", "service-principals", servicePrincipalID)
+}
+
+// CreateServiceKey issues a key for an existing non-Agent ServicePrincipal. The
+// response holds the plaintext key, which the server returns only once.
+func (client *Client) CreateServiceKey(body map[string]any) (any, error) {
+	return client.send(http.MethodPost, []string{"api", "auth", "service-keys"}, body)
+}
+
+// RevokeServiceKey deletes a service key so it can no longer authenticate.
+func (client *Client) RevokeServiceKey(keyID string) (any, error) {
+	return client.send(http.MethodDelete, []string{"api", "auth", "service-keys", keyID}, nil)
+}
+
 // CreateConfiguration creates a Configuration in a Namespace.
 func (client *Client) CreateConfiguration(namespaceID string, body jsontext.Value) (any, error) {
 	return client.send(
@@ -131,6 +161,50 @@ func (client *Client) DeleteConfiguration(namespaceID, configurationID string) e
 		http.MethodDelete,
 		[]string{"namespaces", namespaceID, "configurations", configurationID},
 	)
+}
+
+// ListServiceAccounts lists the ServiceAccounts in a Namespace that the caller can read.
+func (client *Client) ListServiceAccounts(namespaceID string) (any, error) {
+	return client.get("namespaces", namespaceID, "service-accounts")
+}
+
+// DeleteServiceAccount deletes an unreferenced ServiceAccount. It returns nil after a
+// complete deletion. With force, an account whose issued access token no ChatGPT Backend can
+// revoke is deleted anyway, and the returned data reports the unrevoked token.
+func (client *Client) DeleteServiceAccount(namespaceID, serviceAccountID string, force bool) (any, error) {
+	segments := []string{"namespaces", namespaceID, "service-accounts", serviceAccountID}
+	if !force {
+		return nil, client.sendEmpty(http.MethodDelete, segments)
+	}
+	status, header, responseBody, err := client.executeQuery(
+		http.MethodDelete,
+		segments,
+		url.Values{"force": {"true"}},
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	switch status {
+	case http.StatusNoContent:
+		if len(responseBody) != 0 {
+			return nil, fmt.Errorf("OCC returned an invalid empty response (HTTP %d)", status)
+		}
+		return nil, nil
+	case http.StatusOK:
+		var envelope responseEnvelope
+		var data any
+		if json.Unmarshal(responseBody, &envelope) != nil || len(envelope.Data) == 0 ||
+			len(envelope.Meta) == 0 || json.Unmarshal(envelope.Data, &data) != nil {
+			return nil, fmt.Errorf("OCC returned an invalid response (HTTP %d)", status)
+		}
+		return data, nil
+	default:
+		if status >= http.StatusOK && status < http.StatusMultipleChoices {
+			return nil, fmt.Errorf("OCC returned an unexpected response (HTTP %d)", status)
+		}
+		return nil, client.apiError(status, header, responseBody)
+	}
 }
 
 // CreateSecret creates a Secret in a Namespace and returns metadata only.
@@ -202,6 +276,15 @@ func (client *Client) UpdateCredentialSource(
 		http.MethodPatch,
 		[]string{"namespaces", namespaceID, "credential-sources", sourceID},
 		body,
+	)
+}
+
+// RotateCredentialSource forces a refresh-type source to mint a new token.
+func (client *Client) RotateCredentialSource(namespaceID, sourceID string) (any, error) {
+	return client.send(
+		http.MethodPost,
+		[]string{"namespaces", namespaceID, "credential-sources", sourceID, "rotate"},
+		nil,
 	)
 }
 
