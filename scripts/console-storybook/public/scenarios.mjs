@@ -21,8 +21,9 @@ const nativePlugins = {
   entries: { knowledge: { enabled: true, config: { collection: "team-notes" } } },
 };
 const nativePluginSteps = [
-  "Inspect Configuration JSON, then select Codex. The knowledge entry remains; Codex is added only to a non-empty allowlist.",
-  "Select OpenClaw again. Confirm the original plugin entries and omitted, empty, or selected allowlist are restored.",
+  "Inspect Configuration JSON, then select Codex. The allowlist and denylist stay unchanged; only Codex's runtime entry is added.",
+  "With an allowlist excluding Codex, try Create Agent: the policy conflict requires an explicit Configuration JSON edit.",
+  "Select OpenClaw again. Confirm the same policy remains and Codex's runtime entry is removed.",
 ];
 const oauthForm = [...form, { selector: "#agent-auth-method", value: "oauth" }];
 const startOAuthLogin = [...oauthForm, click("Sign in with OAuth")];
@@ -2092,7 +2093,7 @@ export const scenarios = {
     nativePluginSettings: { ...nativePlugins, allow: ["knowledge"] },
     actions: nativePluginForm,
     description:
-      "Codex is temporarily added to the authored allowlist; returning to OpenClaw retains the original selection.",
+      "A restrictive allowlist is preserved. Selecting Codex reports the conflict rather than granting permission.",
     steps: nativePluginSteps,
     gap: "Simulated UI proof; no plugin is loaded or model turn executed.",
   },
@@ -2105,6 +2106,32 @@ export const scenarios = {
     actions: nativePluginForm,
     description: "An explicitly authored empty array remains unrestricted in both Harnesses.",
     steps: nativePluginSteps,
+    gap: "Simulated UI proof; no plugin is loaded or model turn executed.",
+  },
+  createNativePluginsCodexRoundTrip: {
+    group: "Pages/Create Agent",
+    name: "Codex allowlist round-trip",
+    path: create,
+    standardCodexPreset: true,
+    actions: [...passwordPresetForm, { selector: ".launch-advanced summary", click: true }],
+    description:
+      "The shipped Codex Preset keeps its codex-only allowlist when switching to OpenClaw and back.",
+    steps: [
+      "Inspect plugins.allow, switch to OpenClaw, then back to Codex. The list stays [codex] throughout.",
+    ],
+    gap: "Simulated UI proof; no plugin is loaded or model turn executed.",
+  },
+  createNativePluginsDenyConflict: {
+    group: "Pages/Create Agent",
+    name: "Codex denied by native policy",
+    path: create,
+    standardOpenclawPreset: true,
+    nativePluginSettings: { ...nativePlugins, deny: ["codex"] },
+    actions: [...nativePluginForm, { selector: "#agent-harness", value: "codex" }],
+    description: "Selecting Codex preserves the denylist and reports the conflict before creation.",
+    steps: [
+      "Try Create Agent. Edit Configuration JSON to deliberately remove the codex denial, or select OpenClaw.",
+    ],
     gap: "Simulated UI proof; no plugin is loaded or model turn executed.",
   },
   createStandardOpenclawPreset: {

@@ -1,7 +1,7 @@
 ---
 created: 2026-09-01
-updated: 2026-10-12
-last_updated_session: authoring-run/86831b3d-1b20-4d59-8b4f-e814f6bdb488
+updated: 2026-10-13
+last_updated_session: authoring-run/b6795ba9-f6ca-4258-9c2e-e964cd0860de
 ---
 
 # Platform console request flow
@@ -187,14 +187,12 @@ Installation-wide collection. No readable selection means no Agent request.
 returning safe startup summaries. Empty configuration returns an empty list;
 missing wiring or failed dependencies return errors.
 
-`apps/controller/src/console/agents/create.mjs:renderCreateAgent` composes Provider,
-Harness, Preset, Configuration, and workspace inputs. Provider/Harness changes
-reset incompatible credentials and model choices while retaining unrelated JSON.
-`updateModelConfiguration` adds Codex only to a non-empty native `plugins.allow`
-array; omitted or empty lists remain unrestricted. Returning to OpenClaw removes
-Codex's entry and allowlist ID; other native settings remain. The
-[creation reference](../reference/console/create-and-deploy.md) owns combinations,
-Preset constraints, token handling, permissions, and recovery.
+`apps/controller/src/console/agents/create.mjs:renderCreateAgent` composes the form.
+Provider/Harness changes reset incompatible credentials and models.
+`updateModelConfiguration` preserves allow/deny policy, changing only
+Codex's runtime entry. The form rejects conflicts before writes;
+Kubernetes Compute's `validateHarnessAuth` enforces this for API callers.
+See [creation](../reference/console/create-and-deploy.md) for supported combinations.
 
 `agents/plugin-fields.mjs:createPluginFields` edits Agent `plugins` separately
 from Configuration. Invalid JSON and untouched fields survive; clearing overrides
@@ -374,6 +372,8 @@ refresh and inspection.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-13 15:53: Preserve plugin permissions; reject conflicts. (authoring-run/b6795ba9-f6ca-4258-9c2e-e964cd0860de - 438103e91)
 
 - 2026-10-12 15:30: Refresh native plugin preservation against current upstream. (authoring-run/86831b3d-1b20-4d59-8b4f-e814f6bdb488 - 1c722bea21fabefffc112b23bb739c88dbcecf4b)
 - 2026-10-10 22:27: Preserve native plugin allowlists across Harness switches. (authoring-run/73ca79b6-4687-4e93-a98f-d46b194ee2ed - 80725162a946f80652b939a32a57ee4e922eeb5c)

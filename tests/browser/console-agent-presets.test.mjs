@@ -1314,17 +1314,14 @@ test("API-key Presets keep their credential provider fixed while allowing model 
 });
 
 test("Harness switches preserve unrestricted and explicit native plugin allowlists through Agent creation", async (t) => {
-  for (const { allow, codexAllow } of [
-    { allow: undefined, codexAllow: undefined },
-    { allow: [], codexAllow: [] },
-    { allow: ["knowledge"], codexAllow: ["knowledge", "codex"] },
-  ]) {
+  for (const allow of [undefined, [], ["knowledge"], ["knowledge", "codex"], ["codex"]]) {
     const fixture = await createConsoleAppFixture(t);
     await fixture.bootstrap();
     const namespace = await fixture.createNamespace("Native plugin settings", { ready: true });
     const secret = await fixture.createSecret(namespace.id, "OpenAI model key", "preset-model-key");
     const harnessAuth = { method: "api_key", source: secret.ref };
     const values = nativeValues("preserved-native-plugin");
+    values.plugins.deny = ["blocked-plugin"];
     if (allow !== undefined) {
       values.plugins.allow = allow;
     }
@@ -1346,10 +1343,11 @@ test("Harness switches preserve unrestricted and explicit native plugin allowlis
     const configuration = page.getByLabel("Configuration JSON", { exact: true });
     const harness = page.getByLabel("Harness", { exact: true });
 
-    // Omitted and empty allowlists remain unrestricted; a selected allowlist retains native IDs.
+    // Harness wiring changes must neither grant plugins nor erase an authored restriction.
     await harness.selectOption("codex");
     const dedicated = JSON.parse(await configuration.inputValue());
-    assert.deepEqual(dedicated.plugins.allow, codexAllow);
+    assert.deepEqual(dedicated.plugins.allow, allow);
+    assert.deepEqual(dedicated.plugins.deny, values.plugins.deny);
     assert.deepEqual(dedicated.plugins.entries.knowledge, values.plugins.entries.knowledge);
     assert.equal(dedicated.plugins.entries.codex.enabled, true);
     await harness.selectOption("openclaw");
@@ -1373,6 +1371,102 @@ test("Harness switches preserve unrestricted and explicit native plugin allowlis
     );
     assert.equal(saved.status, 200);
     assert.deepEqual(saved.data.values.plugins, values.plugins);
+  }
+});
+
+test("Default Codex policy survives Harness switches, explicit edits and restored drafts", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Codex policy round-trip", { ready: true });
+  const { page } = await newPage(t, fixture);
+  await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
+  await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+  const presets = await fixture.request("GET", `/namespaces/${namespace.id}/presets`);
+  const starter = presets.data.find((preset) => preset.name === "default-codex");
+  // Explicit Preset selection supports restored drafts; the starter shortcut deliberately discards them.
+  await page.getByLabel("Preset template", { exact: true }).selectOption(starter.id);
+  await page.getByRole("button", { name: "Use Preset", exact: true }).click();
+  await openAdvancedSettings(page);
+  const configuration = page.getByLabel("Configuration JSON", { exact: true });
+  const harness = page.getByLabel("Harness", { exact: true });
+  assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins.allow, ["codex"]);
+  await harness.selectOption("openclaw");
+  assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins.allow, ["codex"]);
+  await harness.selectOption("codex");
+  assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins.allow, ["codex"]);
+
+  // An operator's explicit unrestricted policy replaces the preset restriction, even after navigation.
+  const edited = JSON.parse(await configuration.inputValue());
+  edited.plugins.allow = [];
+  await openAdvancedSettings(page);
+  await configuration.fill(JSON.stringify(edited));
+  await page.goBack();
+  await page.goForward();
+  await openAdvancedSettings(page);
+  await harness.selectOption("openclaw");
+  await harness.selectOption("codex");
+  assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins.allow, []);
+});
+
+test("Codex policy conflicts stop Console creation before writes and allow an explicit repair", async (t) => {
+  for (const policy of [{ allow: ["knowledge"] }, { deny: ["codex"] }, { enabled: false }]) {
+    const fixture = await createConsoleAppFixture(t);
+    await fixture.bootstrap();
+    const namespace = await fixture.createNamespace("Codex policy conflict", { ready: true });
+    const secret = await fixture.createSecret(namespace.id, "Model key", "synthetic-model-key");
+    const values = nativeValues("policy-conflict");
+    Object.assign(values.plugins, policy);
+    const preset = await fixture.request("POST", `/namespaces/${namespace.id}/presets`, {
+      body: {
+        name: "Restricted plugins",
+        template: {
+          agent: {
+            name: "Policy conflict Agent",
+            executionMode: "embedded",
+            harnessAuth: { method: "api_key", source: secret.ref },
+          },
+          configuration: { values },
+        },
+      },
+    });
+    assert.equal(preset.status, 201);
+    const { page } = await newPage(t, fixture);
+    await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+    await page.getByLabel("Preset template", { exact: true }).selectOption(preset.data.id);
+    await page.getByRole("button", { name: "Use Preset", exact: true }).click();
+    await openAdvancedSettings(page);
+    const configuration = page.getByLabel("Configuration JSON", { exact: true });
+    await page.getByLabel("Harness", { exact: true }).selectOption("codex");
+    const requests = apiRequests(page, fixture.origin);
+    await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: /Configuration setting plugins\..*Codex Harness/ })
+      .waitFor();
+    assert.deepEqual(nonAuthWriteRequests(requests), []);
+    const blocked = JSON.parse(await configuration.inputValue());
+    for (const [key, value] of Object.entries(policy)) {
+      assert.deepEqual(blocked.plugins[key], value);
+    }
+    // Permission is changed only by the explicit JSON edit, after which the ordinary API save succeeds.
+    blocked.plugins.allow = ["knowledge", "codex"];
+    blocked.plugins.deny = [];
+    blocked.plugins.enabled = true;
+    await configuration.fill(JSON.stringify(blocked));
+    const createdResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/namespaces/${namespace.id}/agents`) &&
+        response.request().method() === "POST",
+    );
+    await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+    const response = await createdResponse;
+    assert.equal(response.status(), 201, await response.text());
+    const created = (await response.json()).data;
+    const saved = await fixture.request(
+      "GET",
+      `/namespaces/${namespace.id}/configurations/${created.configurationId}`,
+    );
+    assert.deepEqual(saved.data.values.plugins, blocked.plugins);
   }
 });
 

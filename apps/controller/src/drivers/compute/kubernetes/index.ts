@@ -109,6 +109,7 @@ import {
   DependencyUnavailableError,
   keyedSettingPath,
   requireOpenClawRoster,
+  resolveConfiguredHarnessId,
   ResourceConflictError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsForbiddenByClusterError,
@@ -140,6 +141,7 @@ import {
   enabledChannelProviders,
   OPENCLAW_GATEWAY_PASSWORD,
   requireChannelTopology,
+  requireCodexPluginPolicy,
   type KubernetesHarnessTopology,
   kubernetesHarnessAuthMethods,
   requireHarnessCredentialBinding,
@@ -3299,6 +3301,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
         "Kubernetes Agent provisioning supports only dedicated execution mode.",
       );
     }
+    if (resolveConfiguredHarnessId(input.configuration) === "codex") {
+      requireCodexPluginPolicy(
+        input.configuration,
+        (setting, requirement) => new ComputeGatewaySettingError(setting, requirement),
+      );
+    }
     this.verifyGatewayRoutingConfiguration({
       configuration: this.namedGatewayConfigurationDocument(input.configuration),
       harness: { id: "codex", version: "provisioning", mode: "dedicated" },
@@ -3448,6 +3456,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       nativeRuntimeConfiguration(configuration, callerSettingError);
     }
     if (codex) {
+      requireCodexPluginPolicy(configuration, callerSettingError);
       requireCodexGatewayConfigurationShape(configuration);
     }
     // Preparation and the Gateway entrypoint would refuse these only after a dedicated

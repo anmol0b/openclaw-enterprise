@@ -139,8 +139,9 @@ combinations; models appear before credentials. **Enter another model ID**
 allows manual entry but does not prove access. Execution mode follows the
 harness; saved tokens require Codex. **Experimental Dedicated OpenClaw** shows
 the runtime-build warning; Embedded OpenClaw does not. In **Native plugins**
-stories, switch to Codex and back; inspect omitted, empty, and selected native
-allowlists and the retained plugin entry.
+stories, inspect unchanged allow/deny policy. **Codex allowlist round-trip** starts
+from Codex. **Native plugins with an allowlist** and **Codex denied by native
+policy** require explicit JSON policy edits before creation.
 
 In **Enter another model ID**, switch to **Choose a model from the list** and
 back: listed models survive both switches, focus moves to the active input, and
