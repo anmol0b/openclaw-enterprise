@@ -27,7 +27,10 @@ import {
   SETUP_WRAPPER_COMMAND,
 } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { nodeProgramArguments } from "../../apps/controller/src/drivers/compute/node-program.ts";
-import { admitLoggingConfiguration } from "../../packages/contracts/src/index.ts";
+import {
+  admitLoggingConfiguration,
+  presetTemplateDefaultsWithPlaceholders,
+} from "../../packages/contracts/src/index.ts";
 import {
   createKubernetesComputeDriver,
   harnessStateRemovalScript,
@@ -4805,7 +4808,12 @@ test("the canonical Kubernetes runtime validates channel proxy configuration", (
   };
   assert.doesNotThrow(() => createKubernetesComputeDriver(options({ runtime })));
 
-  for (const proxyUrl of ["http://10.42.0.15:3128", "https://[2001:db8::15]:8443"]) {
+  for (const proxyUrl of [
+    "http://10.42.0.15:3128",
+    "http://127.0.0.1:8080",
+    " http://192.0.2.10:8080 ",
+    "https://[2001:db8::15]:8443",
+  ]) {
     const channels = { proxyUrl };
     assert.doesNotThrow(() =>
       createKubernetesComputeDriver(options({ runtime: { ...runtime, channels } })),
@@ -4852,6 +4860,22 @@ test("the canonical Kubernetes runtime validates channel proxy configuration", (
     assert.throws(
       () => createKubernetesComputeDriver(options({ runtime: { ...runtime, channels } })),
       /HTTP\(S\) IP endpoint/i,
+    );
+  }
+  for (const proxyUrl of [
+    "http://0177.0.0.1:8080",
+    "http://192.168.1:8080",
+    "http://2130706433:8080",
+    "http://127.1:8080",
+    "http://10.42.0.015:3128",
+  ]) {
+    assert.throws(
+      () =>
+        createKubernetesComputeDriver(options({ runtime: { ...runtime, channels: { proxyUrl } } })),
+      {
+        message:
+          "Channel proxy URL IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
+      },
     );
   }
   for (const channels of [
@@ -8924,33 +8948,62 @@ test("a Preset header name that waits on a variable is checked once filled", () 
   const binding = "model credentials come from the Agent's Harness authentication binding";
   const credentialHeader = (name) =>
     `must not set the credential header "${name}" (its name marks a credential): ${binding}`;
+  const invalidName =
+    /^Configuration setting \S+ must use valid HTTP header names, not "[\w-]*…"\.$/;
   const provider = (name, settings) => ({ models: { providers: { [name]: settings } } });
+  // The Preset save's render: the values with defaults, and where it left placeholders.
+  const preset = (values) => {
+    const { settings, unresolved } = presetTemplateDefaultsWithPlaceholders({
+      variables: { header: { type: "string" }, p: { type: "string" } },
+      configuration: { values },
+    });
+    return [settings.configuration.values, { unresolved }];
+  };
   // Finding 1207: on a Preset save, a header name that waits on an unfilled variable is checked
   // once filled, as on every Compute; a name the rule matches around it is still refused.
-  const unresolved = (text) => text.includes("{{ vars.");
   for (const headers of [
     { headers: { "{{ vars.header }}": "v" } },
     { request: { headers: { "{{ vars.header }}": "v" } } },
     { models: [{ id: "m", headers: { "{{ vars.header }}": "v" } }] },
+    { headers: { "Authorization-{{ vars.header }}": "v" } },
   ]) {
-    const values = provider("p", headers);
-    driver.validateConfiguration(values, { unresolved });
+    const [values, saving] = preset(provider("p", headers));
+    driver.validateConfiguration(values, saving);
     assert.throws(() => driver.validateConfiguration(values), {
       name: "ConfigurationHarnessError",
-      message: /^Configuration setting \S+ must use valid HTTP header names, not "…"\.$/,
+      message: invalidName,
     });
   }
   assert.throws(
     () =>
       driver.validateConfiguration(
-        provider("p", { headers: { "{{ vars.p }}-Authorization": "v" } }),
-        { unresolved },
+        ...preset(provider("p", { headers: { "{{ vars.p }}-Authorization": "v" } })),
       ),
     {
       name: "ConfigurationHarnessError",
       message: `Configuration setting models.providers.p.headers ${credentialHeader("{{ vars.p }}-Authorization")}.`,
     },
   );
+  // Finding 1221: the text around the variable must be valid too. Finding 1220: an escaped token
+  // that reads like a placeholder in another provider stays literal.
+  for (const values of [
+    provider("p", { headers: { "{{ vars.header }} ": "v" } }),
+    provider("p", { models: [{ id: "m", headers: { "{{ vars.header }}\u200b": "v" } }] }),
+    provider("p", { request: { headers: { "\\{{ vars.p }}-{{ vars.header }}": "v" } } }),
+    {
+      models: {
+        providers: {
+          a: { headers: { "{{ vars.header }}": "v" } },
+          b: { headers: { "\\{{ vars.header }}": "v" } },
+        },
+      },
+    },
+  ]) {
+    assert.throws(() => driver.validateConfiguration(...preset(values)), {
+      name: "ConfigurationHarnessError",
+      message: invalidName,
+    });
+  }
 });
 
 test("model provider credential headers and request auth are refused on every provider and path", () => {
