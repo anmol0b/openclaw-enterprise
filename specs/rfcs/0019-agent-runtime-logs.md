@@ -2,7 +2,7 @@
 status: Proposed
 implementation_status: Implemented
 author: freeqaz
-status_note: "Retroactive record. The design below is implemented on main (PRs #696 through #811, with follow-ups through #2153) and awaits human review. No acceptance decision has been recorded; Proposed is the closest allowed status."
+status_note: "Retroactive record. The design below is implemented on main (PRs #696 through #811, with follow-ups through #2274) and awaits human review. No acceptance decision has been recorded; Proposed is the closest allowed status."
 ---
 
 # Proposal: Agent runtime status and log reads
@@ -15,7 +15,7 @@ status_note: "Retroactive record. The design below is implemented on main (PRs #
   [#747], [#793], [#807], [#811]. Follow-ups: [#863], [#869], [#876], [#879], [#896],
   [#928], [#933], [#939], [#967], [#969], [#973], [#1096], [#1102], [#1108], [#1187],
   [#1354], [#1362], [#1371], [#1591], [#1896], [#1918], [#1922], [#1934], [#1938], [#1946],
-  [#1981], [#1994], [#2076], [#2089], [#2110], [#2139], [#2147], [#2153]
+  [#1981], [#1994], [#2076], [#2089], [#2110], [#2139], [#2147], [#2153], [#2274]
 - **Related:** [Default production observability](0012-production-observability.md) (the
   Collector boundary), [Agent access](0010-agent-access.md) (native admin audience),
   [RFC-0001](0001-oidc-sign-in.md) (sign-in provider outages)
@@ -215,15 +215,15 @@ RFC-0012's Collector boundary is unchanged, apart from these bounded additions:
 
 ## Security and threat model
 
-| Threat                             | Control as landed                                                                                                                                                                                                                                |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A reader sees another Agent's logs | Exact-Agent grants; the Driver reads only Pods carrying the revision's labels and re-checks them and the container. RBAC cannot separate Agents, so this check carries the weight.                                                               |
-| Credentials in output              | Allowlist classification, then pattern redaction. PEM state survives container page cuts. Canary tests run planted credentials through the real handler and download. Cursor line hashes remain (see Known gaps).                                |
-| Chat content in output             | Payload keys dropped; Codex protocol output and subsystem-less OpenClaw records below warn withheld; Codex messages keep text only for reviewed targets and formats. Kept operational and plain text can still carry fragments (see Known gaps). |
-| Forged or rebound cursors          | HMAC binding to principal, Agent, revision and source; mismatch is `400`. The same principal may replay a cursor within its hour.                                                                                                                |
-| Unaudited reads                    | Audit before any log text is read; audit failure means no content.                                                                                                                                                                               |
-| Lateral cluster actions            | Log reads add only read grants: `pods/log get`, `events get,list`, OpenShell `sandbox:read`.                                                                                                                                                     |
-| Resource abuse                     | Byte, line and time bounds, plus the token bucket and the concurrency cap.                                                                                                                                                                       |
+| Threat                             | Control as landed                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A reader sees another Agent's logs | Exact-Agent grants; the Driver reads only Pods carrying the revision's labels and re-checks them and the container. RBAC cannot separate Agents, so this check carries the weight.                                                                                                                                                          |
+| Credentials in output              | Allowlist classification, then pattern redaction. PEM state survives container page cuts. Canary tests run planted credentials through the real handler and download. Cursor line and window hashes are 96-bit HMACs under a subkey of the cursor secret, so readers cannot test guesses offline ([#2274]); a verified `v1` cursor expires. |
+| Chat content in output             | Payload keys dropped; Codex protocol output and subsystem-less OpenClaw records below warn withheld; Codex messages keep text only for reviewed targets and formats. Kept operational and plain text can still carry fragments (see Known gaps).                                                                                            |
+| Forged or rebound cursors          | HMAC binding to principal, Agent, revision and source; mismatch is `400`. The same principal may replay a cursor within its hour.                                                                                                                                                                                                           |
+| Unaudited reads                    | Audit before any log text is read; audit failure means no content.                                                                                                                                                                                                                                                                          |
+| Lateral cluster actions            | Log reads add only read grants: `pods/log get`, `events get,list`, OpenShell `sandbox:read`.                                                                                                                                                                                                                                                |
+| Resource abuse                     | Byte, line and time bounds, plus the token bucket and the concurrency cap.                                                                                                                                                                                                                                                                  |
 
 The `501` switch runs before authorization, so a principal with no grants learns only
 whether the feature is on. The rate and concurrency limits wrap only the Driver reads
@@ -250,10 +250,6 @@ whether the feature is on. The rate and concurrency limits wrap only the Driver 
 - Content labels are not a guarantee. Kept text can carry fragments of prompts, replies or
   tool output: plain text up to 4 KiB, OpenClaw records with a `subsystem` (any level) or
   at warn or error, messages from reviewed Codex targets, and sandbox `cmd_line` and `url`.
-- Cursors carry unsalted, 96-bit truncated SHA-256 hashes of raw, unredacted lines (up to
-  16 per container cursor, 48 per sandbox cursor) and checkpoint window hashes. A log
-  reader can decode them and test guesses offline against a low-entropy secret in a known
-  line shape, such as `password=…`.
 - Following is not lossless. Identical replacement windows are unobservable, and resets
   may replay lines ([#1981]). When a container cursor cannot prove its position, repeated
   frontier lines are dropped with no gap and are lost once time advances.
@@ -291,7 +287,8 @@ whether the feature is on. The rate and concurrency limits wrap only the Driver 
 
 Slices 1 to 3 ([#696] to [#811]) landed on 2026-09-30 and 2026-10-01, with hardening
 through 2026-10-05 and resume, budget, container and timestamp follow-ups from 2026-10-09
-to 2026-10-12. [#1591] and [#1213] only moved code.
+to 2026-10-12. [#2274] (2026-10-13) keyed cursor hashes; `v1` cursors expire. [#1591]
+and [#1213] only moved code.
 
 ## References
 
@@ -355,3 +352,4 @@ to 2026-10-12. [#1591] and [#1213] only moved code.
 [#2139]: https://github.com/openclaw/openclaw-enterprise/pull/2139
 [#2147]: https://github.com/openclaw/openclaw-enterprise/pull/2147
 [#2153]: https://github.com/openclaw/openclaw-enterprise/pull/2153
+[#2274]: https://github.com/openclaw/openclaw-enterprise/pull/2274
