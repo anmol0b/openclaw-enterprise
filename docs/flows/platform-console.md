@@ -1,7 +1,7 @@
 ---
 created: 2026-09-01
-updated: 2026-10-12
-last_updated_session: authoring-run/5d7618e0-3207-4553-a028-5149ef0697e2
+updated: 2026-10-13
+last_updated_session: authoring-run/de7ed7a0-de53-4712-b6bd-1baf0d296d55
 ---
 
 # Platform console request flow
@@ -153,7 +153,8 @@ their pinned `x-occ-session-key`, so a replaced cookie yields login.
 `authReason` of `membership` or `membership-unavailable` explains a GitHub
 [allowlist](../reference/authentication/external-sign-in.md#organization-and-team-allowlist)
 refusal instead. With any provider, `account-disabled` says the account is disabled and to ask
-an administrator to enable it. The
+an administrator to enable it; `provider-unavailable` and `unavailable` say to try again
+later. The
 [authentication flow](local-password-authentication.md#3-construct-session-authentication)
 owns the server side.
 
@@ -242,12 +243,12 @@ Ordinary drafts post `{kind: "agent", values, secretBindings}` to
 OCC stages all four workspace textareas, including unchanged/empty values, outside
 Agent/Configuration for [workspace setup](workspace-files.md).
 
-`create.mjs:grantConfigurationSecretAccess` deduplicates saved same-Namespace
-`env` Secret sources, rejecting unsupported bindings first.
-`agents/secret-access.mjs:ensureSecretOperateBinding` reads/creates exact
-`operate` grants requiring Installation administration. Secret use cannot delegate.
-**Retry credential access** retains IDs and rereads grants without duplicates.
-Failed Agent writes retain locked Configuration; drafts start no runtime.
+`create.mjs:grantConfigurationSecretAccess` delegates unique saved same-Namespace
+`env` sources through `agents/secret-access.mjs:ensureSecretOperateBinding`;
+exact `operate` grants require Installation administration.
+**Retry credential access** retains IDs and reuses grants. Failed Agent writes
+lock retained Configuration JSON/Harness. Writes never retry automatically;
+drafts create no revisions or runtime.
 
 `agents/harness-auth.mjs` edits bindings and shows
 [Secret identities](platform-console/agent-editing.md#4-render-draft-revision-or-channels),
@@ -374,8 +375,8 @@ refresh and inspection.
 
 ## Changelog
 
-- 2026-10-12 15:31: Refresh upstream. (authoring-run/5d7618e0-3207-4553-a028-5149ef0697e2 - 06bb7d0e6e18ea337ba7dbcac892337e96b206a1)
-- 2026-10-10 22:15: Trace saved Configuration Secret enumeration and existing IAM delegation checks. (01a11ac0-ab87-7d21-8df5-a306d8563a19 - 80725162a946f80652b939a32a57ee4e922eeb5c)
+- 2026-10-13 14:40: Trace Configuration Secret grants. (authoring-run/de7ed7a0-de53-4712-b6bd-1baf0d296d55 - 1d7772d11b2874ae7fb1f5253a998bd0463395b2)
+- 2026-10-13 12:00: Explain outage sign-in reasons. (kc-guide-fix)
 - 2026-10-09 21:10: Preserve cancellation, deadline and transport failures during response body reads (authoring-run/2e195d67-c77d-43d0-8c32-2179523eb3a2 - 013bcf5f76819ca280a164745d470855fc5b74cd)
 
 - 2026-10-08 15:59: Trace responsive drawer and tab visibility, destination focus, scoped authentication feedback, and compact plugin setup. (01a11d68-d6e8-7033-ab93-03767bced2da - 58daaa5a3ac4c64bc5fb3af00759b59b365b20ca)

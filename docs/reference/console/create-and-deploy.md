@@ -74,8 +74,9 @@ still block initial workspace files and Secret-backed environment projection.
    [initial contents](../agents.md#initial-contents-at-creation) for limits.
 8. Select **Create Agent** to submit Configuration, Secret references, Agent inputs,
    repositories, and workspace files for supported Dedicated provisioning.
-   After provisioning, Console opens Agent details while deployment continues.
-   Follow startup and failures with **Deployment activity → Refresh deployment**.
+   Provisioning stays pending until the first deployment activates or fails.
+   Success opens Agent details. Failure links to the same Agent and revision;
+   correct its cause and deploy again through **Deployment activity**.
    Ordinary creation saves Configuration first and opens a draft on **Create new version**,
    without a workload. After deployment, use the
    [workspace editor](../console.md#edit-workspace-files). Pending inputs have no
@@ -147,14 +148,14 @@ provider acceptance or runtime readiness. See
 
 Successful draft-save steps retain IDs and freeze inputs, including authentication.
 Correct conflicting names or permissions, then retry those resources.
-For an ordinary draft, the Console grants its ServicePrincipal exact `operate`
-access to the model Secret and every unique same-Namespace Secret in the saved
-Configuration's environment bindings, including Preset bindings. These IAM writes
-require [Installation administration](../authorization.md#manage-namespace-policy);
-permission to use a Secret does not authorize delegation.
-If a grant fails after Agent creation, select **Retry credential access** or ask
-an administrator to check its grants. The saved Agent and Configuration remain;
-the retry rereads existing grants instead of duplicating them.
+Ordinary draft creation grants the Agent's service principal exact `operate`
+access to the model Secret and each unique same-Namespace Secret in the saved
+Configuration's environment bindings, including Preset bindings. Delegation
+requires [Installation administration](../authorization.md#manage-namespace-policy);
+Secret-use permission is insufficient.
+If a grant fails after creation, **Retry credential access** reuses the saved
+Agent and Configuration without duplicating grants. An administrator can check
+its grants.
 Uncertain responses block another attempt: check displayed IDs and the Agents list;
 give the request ID to your operator if the outcome remains unknown.
 
@@ -166,6 +167,10 @@ one, such as a deleted Secret; **Create Agent** then submits a new request. Save
 Secrets are reused, never deleted automatically. After a lost Secret save, check
 existing Namespace Secrets before starting again.
 See the [provisioning flow](../../flows/agent-provisioning.md) for the API sequence.
+
+After the first revision is admitted, a deployment failure cannot retry
+provisioning or create another Agent. Open the retained Agent, correct its
+settings or credential source, and submit a new deployment.
 
 Repository discovery is independent of model authentication. Small catalogs offer
 **Add**; larger ones support search and paging.
