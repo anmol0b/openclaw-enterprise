@@ -4,17 +4,17 @@ implementation_status: Implemented
 author: freeqaz
 ---
 
-# Proposal: GitHub organization and team allowlist for sign-in
+# RFC: GitHub organization and team allowlist for sign-in
 
 - **ID:** RFC-0019
-- **Owner:** freeqaz (proposal); authentication maintainers for the sign-in callback.
+- **Owner:** freeqaz (design); authentication maintainers for the sign-in callback.
 - **Created:** 2026-10-04
-- **Last updated:** 2026-10-04
+- **Last updated:** 2026-10-13
 - **RFC PR:** [#1229](https://github.com/openclaw/openclaw-enterprise/pull/1229)
-- **Implementation plan:** none; delivery is one pull request,
-  [#1231](https://github.com/openclaw/openclaw-enterprise/pull/1231), listed under Delivery.
+- **Implementation:** [#1231](https://github.com/openclaw/openclaw-enterprise/pull/1231), merged
+  2026-10-04. This RFC records the landed behaviour for review; see Delivery.
 - **Related:** [RFC-0007 GitHub sign-in](0007-human-federated-sign-in/index.md);
-  [external sign-in reference](../../docs/reference/authentication/external-sign-in.md);
+  [external sign-in reference](../../docs/reference/authentication/external-sign-in.md#organization-and-team-allowlist);
   [production settings](../../docs/reference/settings/production.md#github-sign-in-and-trusted-proxies);
   Google's hosted-domain allowlist (`OCC_AUTH_GOOGLE_ALLOWED_DOMAINS`), the nearest precedent.
 
@@ -29,33 +29,34 @@ team. Someone who is not is refused before OCE looks up their account. The refus
 as `MEMBERSHIP_REQUIRED` and the Console tells them why. If GitHub cannot answer the
 membership question, sign-in fails closed as `MEMBERSHIP_UNAVAILABLE`, with its own audit
 code, operator log line and Console message. The list is off by default. Membership is checked
-only at sign-in; what happens to live sessions when someone leaves the organization stays an
-open question below.
+only at sign-in; live sessions are not rechecked, which stays an open question below.
 
 ## Motivation
 
-GitHub sign-in admits any GitHub user ID an administrator attached to an OCE account, whatever
-that person's GitHub organization or team membership (board finding 410, from the GitHub
-sign-in bug hunt). Today the callback exchanges the code, calls only
+Without an allowlist, GitHub sign-in admits any GitHub user ID an administrator attached to an
+OCE account, whatever that person's organization or team membership (board finding 410, from
+the GitHub sign-in bug hunt). The callback exchanges the code, calls only
 [`GET /user`](https://docs.github.com/en/rest/users/users#get-the-authenticated-user), keys
 the person by numeric user ID, and discards the token
 ([`exchangeGithubSubject`](../../apps/controller/src/auth/github.ts)). Sessions last a fixed
 8 hours with no refresh.
 
-So leaving the company's GitHub organization, being suspended by GitHub, or deleting the
-GitHub account changes nothing in OCE. Offboarding is an OCE action (disable the account, or
-detach its GitHub method). That is documented for OIDC
-([oidc-sign-in.md](../../docs/guides/deploy/oidc-sign-in.md)) and is being added for GitHub
-(PR #1225). Operators who already manage access through GitHub organizations and teams want
-GitHub to be the gate too, so that removing someone from the team stops their next sign-in
-without a second step in OCE.
+GitHub suspending or deleting the account does block a fresh sign-in: the token exchange or
+`GET /user` then fails, and the callback refuses before any session is issued. Two gaps
+remain. Removing someone from the company's GitHub organization or team changes nothing for
+their next sign-in, and live OCE sessions keep working until they expire. Offboarding is an
+OCE action (disable the account, or detach its GitHub method), as documented for OIDC
+([oidc-sign-in.md](../../docs/guides/deploy/oidc-sign-in.md)) and, since #1225, for GitHub.
+Operators who already manage access through GitHub organizations and teams want GitHub to be
+the gate too, so that removing someone from the team stops their next sign-in without a second
+step in OCE. The allowlist closes the first gap, not the second.
 
 <a id="scope"></a>
 
 ## Goals
 
-- **Off by default.** No setting means today's behaviour, byte for byte: no extra GitHub
-  request, no new audit code.
+- **Off by default.** With no setting the callback behaves as it did before the allowlist: no
+  extra GitHub request, no new audit code (`hasAllowlist` gates the step).
 - **Org or team gate at sign-in.** With a list, only an active member of a listed
   organization, or of a listed team (GitHub counts child-team members), gets a session.
   Pending invitations do not count.
@@ -78,7 +79,7 @@ without a second step in OCE.
 
 <a id="design"></a>
 
-## Proposal
+## Design
 
 ### GitHub App, not OAuth App
 
@@ -101,7 +102,8 @@ and the team-membership endpoint as Members: read for user and installation toke
 ([permissions for GitHub Apps](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps#organization-permissions-for-members)).
 Members: read is read-only and covers membership lists, not code or settings. Adding it to an
 existing App needs each organization owner to accept the new permission; until they do the
-lookup returns 403, which fails closed (below).
+lookup returns 403, which fails closed (below). These permission semantics come from GitHub's
+documentation; the tests use fakes.
 
 An operator who wants a smaller blast radius can register a sign-in-only GitHub App with just
 Members: read and no repository permissions, so the user token can do nothing else. That
@@ -117,12 +119,16 @@ changes the client ID, which is a new provider instance and needs every identity
 
 - Both unset or empty: off. Either set: the check runs, and a person needs to match **any**
   entry in either list.
-- Values are trimmed and lowercased. Organization logins are letters, digits and hyphens,
-  starting with a letter or digit, up to 39 characters (looser than GitHub's current rule, so
-  older names still fit); team slugs are lowercase letters, digits, `-` and `_`. At most 10 entries in total, so the number of GitHub requests per
-  sign-in stays bounded. Anything else fails startup, Helm refuses to render it, and the
-  installation profile renderer refuses it at preflight.
-- Either variable without the GitHub client ID and secret fails startup.
+- `githubLoginConfiguration` in `apps/controller/src/auth/github.ts` trims, lowercases and
+  deduplicates entries. Organization logins are letters, digits and hyphens, starting with a
+  letter or digit, up to 39 characters (looser than GitHub's current rule, so older names still
+  fit); team slugs are lowercase letters, digits, `-` and `_`, up to 100 characters. At most 10
+  entries in total, so the number of GitHub requests per sign-in stays bounded.
+- Anything else fails startup, as does either variable without the GitHub client ID, client
+  secret and recovery user ID. The chart (`templates/_helpers.tpl`) applies the same rules at
+  render time and also refuses either list without `auth.github.enabled`. The installation
+  profile renderer (`scripts/render-installation-profile.mjs`, `controlPlane.github`) refuses
+  invalid or non-lowercase entries at preflight.
 - API process only, like the other GitHub sign-in settings.
 
 ### Check at sign-in
@@ -153,13 +159,14 @@ sequenceDiagram
   end
 ```
 
-_Proposed flow. Unconfigured, the loop is skipped and the callback is unchanged._
+_Implemented flow (`githubMembership` in `github.ts`, `providerMembership` in
+`provider-transport.ts`). Unconfigured, the loop is skipped._
 
 - The check runs after `GET /user` and **before** the attached-identity lookup, so a refusal
   says nothing about whether an OCE account exists for that GitHub user. The person already
   knows their own memberships.
 - Organization entry: `200` with `state: active` is a match. `404` (not affiliated) and
-  `state: pending` are not.
+  `state: pending` are not. Any other `state` is a malformed answer, so a lookup failure.
 - Team entry: the team's organization membership is read first (and reused when the same
   organization is also listed). Only an active organization member's team membership is read,
   so a non-member's answer from the team endpoint (which GitHub may give as 403 or 404) never
@@ -168,33 +175,41 @@ _Proposed flow. Unconfigured, the loop is skipped and the callback is unchanged.
   lookup failed: the person proved one listed membership.
 - The token exchange, profile and membership requests share the existing 10-second deadline
   and the 64 KiB response cap. Requests never follow redirects. The token is used only for
-  these requests and then discarded, as today. The login used in the team URL comes from the
-  same `GET /user` answer, is validated, and is URL-encoded.
+  these requests and then discarded. The login used in the team URL comes from the
+  same `GET /user` answer, is validated (a malformed login fails the team lookup), and is
+  URL-encoded. Once the deadline passes, no further entry is tried and the failure is a
+  timeout.
 
 ### Refusal and audit
 
-Following the reason-code precedent of #1164 and #1184, the two outcomes get their own
-`authentication.login` denial codes beside `INVALID_ATTEMPT`, `EXTERNAL_IDENTITY_REJECTED`
-and `PROVIDER_UNAVAILABLE`:
+Following the reason-code precedent of #1164 and #1184, the two outcomes have their own
+`authentication.login` denial codes in `HumanAuthenticationDenial`
+(`packages/occ/src/state/human-authentication.ts`), beside `INVALID_CREDENTIALS`,
+`EXTERNAL_IDENTITY_REJECTED`, `SESSION_REJECTED`, `PROVIDER_UNAVAILABLE` and the later
+`ACCOUNT_DISABLED`. `MEMBERSHIP_DENIALS` in `github.ts` names them; `refuseMembership` audits
+them, and `apps/controller/src/auth/index.ts` maps them to the Console reasons `membership`
+and `membership-unavailable`:
 
 | Reason code              | When                                        | `details`                                              | Console message                                                                                                                                                                                          |
 | ------------------------ | ------------------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MEMBERSHIP_REQUIRED`    | Every entry answered "not an active member" | `provider: github`, `subject` (numeric GitHub user ID) | "Your GitHub account is not a member of an organization or team allowed to sign in here. If you were invited, accept the invitation on GitHub and try again; otherwise ask an administrator for access." |
 | `MEMBERSHIP_UNAVAILABLE` | No match, and at least one lookup failed    | `provider: github`, `subject`                          | "Could not check your GitHub organization membership. Try again later; if this keeps happening, ask an administrator."                                                                                   |
 
-Recording the numeric subject is new for a denial. It is safe here because GitHub has already
+This was the first denial to record the numeric subject. It is safe here because GitHub has already
 authenticated the person, and it lets an administrator answer "why can't this person sign in"
 from the audit log. Unauthenticated junk callbacks never reach this step, so the rows are
 bounded by real GitHub sign-ins.
 
-The Console reads `authReason` only from the fixed values above; anything else falls back to
-the generic provider error. With password sign-in available, both messages add "or use your
-password".
+The Console (`githubMembershipFailures` in `apps/controller/src/console/console.mjs`) reads
+`authReason` only from the fixed values above, and only for `authError=github`; anything else
+falls back to the generic provider error. With password sign-in available, the first message
+adds "or use your password" and the second becomes "Try again later or use your password."
 
 ### GitHub outage
 
-A membership lookup "fails" on a transport error, the deadline, a redirect, `429`, `5xx`, a
-`401` or `403`, an oversized body or a malformed answer. Then:
+A membership lookup "fails" on a transport error, the deadline, a redirect, any status other
+than `200` or `404` (so `401`, `403`, `429` and `5xx`), an oversized body or a malformed
+answer. Then:
 
 - the denial is audited as `MEMBERSHIP_UNAVAILABLE` (not `MEMBERSHIP_REQUIRED`, not
   `PROVIDER_UNAVAILABLE`);
@@ -207,39 +222,21 @@ A `403` at this step usually means configuration, not an outage: the organizatio
 App, its owner has not accepted Members: read, or SAML SSO enforcement wants a session the user
 lacks. GitHub may instead answer `404` for an organization without the App installed or a
 misspelled slug, which refuses every member as `MEMBERSHIP_REQUIRED` with no warning log; the
-operator guide gives the check for both. An outage in the earlier token or profile step stays
-`PROVIDER_UNAVAILABLE`, as today.
+external sign-in reference gives the check for both. An outage in the earlier token or profile
+step stays `PROVIDER_UNAVAILABLE`.
 
-## Delivery and verification
+## Residual risk
 
-One implementation pull request, [#1231](https://github.com/openclaw/openclaw-enterprise/pull/1231)
-`feat(auth): optional github org allowlist at sign-in`:
-
-1. Parse and validate the two variables with the GitHub settings; render them from Helm and
-   the installation profile with matching validation.
-2. Add the membership step to the GitHub exchange, the two audit codes in State, the callback
-   redirect reason, and the Console messages. The log collector exports `step: membership`.
-3. Document the variables, the App permission, the refusal codes and the 403 checklist in the
-   external sign-in reference, production settings, the environment cheatsheet, the
-   deployment guide and the Helm values.
-
-Required evidence, all against loopback fakes of `github.com` and `api.github.com` (never
-real GitHub):
-
-- Transport suite: off makes no membership request; an active org member and an active team
-  member are admitted; pending, `404` and a non-member of the team's organization are refused
-  as `MEMBERSHIP_REQUIRED` without an account lookup; `5xx`, `429`, `403`, a stall, a redirect
-  and an oversized body are `MEMBERSHIP_UNAVAILABLE` with one `step: membership` log line; a
-  later match admits after an earlier failure; requested URLs are exactly the expected ones.
-- Configuration and chart parity: valid values parse, invalid ones and either list without the
-  client fail startup and Helm rendering, and the API accepts exactly what the chart renders.
-- PostgreSQL composition: a refused member gets no session, the redirect carries the reason,
-  and the persisted audit rows carry the reason code and subject.
-- Browser Console: both messages render, and an unknown `authReason` shows the generic one.
-
-Migration: none. The settings are new and default off; there is no schema change. Turning the
-list on applies to the next sign-in after the API restarts. Sessions issued before that keep
-working until they expire (at most 8 hours); revoke them to apply the list at once.
+- **Live sessions outlast membership.** Membership is read only at sign-in. Turning the list
+  on applies from the next sign-in after the API restarts; sessions issued before that, and
+  sessions of someone removed later, run until they expire (at most 8 hours). Revoke, disable
+  or detach in OCE to end them at once.
+- **Silent misconfiguration.** A `404` misconfiguration refuses everyone with no warning log
+  (above).
+- **Broader App permission.** Members: read also lets the App's installation token list each
+  listed organization's members and teams.
+- **No live GitHub qualification.** All evidence uses loopback fakes of GitHub; see open
+  question 2.
 
 <a id="alternatives-and-open-decisions"></a>
 
@@ -261,9 +258,10 @@ working until they expire (at most 8 hours); revoke them to apply the list at on
 
 <a id="mid-session-membership"></a>
 
-1. **Membership changes during a session.** Owner: freeqaz. Today someone removed from the
-   team keeps a live session for up to 8 hours and the attached identity still exists. Options,
-   none implemented here:
+1. **Membership changes during a session.** Owner: freeqaz. Implemented default: no recheck.
+   Someone removed from the organization or team keeps a live session for up to 8 hours, the
+   attached identity still exists, and their next GitHub sign-in is refused. Options, none
+   implemented:
    - **Shorter GitHub sessions** (a separate session lifetime when the allowlist is on, for
      example 1 hour). Cheap; costs more sign-ins; still a window.
    - **Periodic recheck.** Either keep the user's expiring token and refresh token (stores a
@@ -278,12 +276,32 @@ working until they expire (at most 8 hours); revoke them to apply the list at on
 2. **What GitHub answers for misconfiguration and SAML.** Unverified against real GitHub (the
    tests use fakes): whether an organization without the App installed, or a SAML-enforced
    organization without an active SAML session, answers `403` (`MEMBERSHIP_UNAVAILABLE`, with a
-   warning log) or `404` (`MEMBERSHIP_REQUIRED`, silently). Either way it fails closed. Needs
-   one check against a real organization, and a SAML-enforced one, before we claim support or
-   tune the operator advice.
+   warning log) or `404` (`MEMBERSHIP_REQUIRED`, silently). Implemented default: both fail
+   closed, and the operator guide names both cases. Needs one check against a real
+   organization, and a SAML-enforced one, before we claim support or tune the advice.
 3. **Dedicated sign-in App.** Should the guide recommend a sign-in-only App (Members: read,
    no repository permissions) instead of reusing the repository integration's App? Better
    least privilege; costs a client-ID change and re-attachment for existing installations.
+   Implemented default: the guide reuses the repository integration's App and adds Members:
+   read to it.
+
+## Delivery and verification
+
+The allowlist landed in one pull request,
+[#1231](https://github.com/openclaw/openclaw-enterprise/pull/1231)
+`feat(auth): optional github org allowlist at sign-in`, merged 2026-10-04 while this RFC was
+open (the owner asked not to block implementation on review). It also added the collector's
+`step: membership` export (`deploy/logging/collector.yaml`) and the operator docs. #1225 had
+documented the earlier behaviour the same day.
+
+Evidence, all against loopback fakes of GitHub, in `tests/integration/`:
+`github-login-transport.test.mjs` (admission, each refusal and outage cause, a later match
+after a failure, exact request URLs, settings parsing), `sign-in-chart-parity.test.mjs` and
+`profile-renderer.test.mjs` (render-time validation), and
+`postgres-github-org-allowlist.test.mjs` (no session, persisted audit rows);
+`tests/browser/console.test.mjs` covers both messages.
+
+Migration: none. The settings are new and default off; there is no schema change.
 
 ## References
 
@@ -292,4 +310,5 @@ working until they expire (at most 8 hours); revoke them to apply the list at on
   (bounded transport and failure causes).
 - [GitHub: organization membership for the authenticated user](https://docs.github.com/en/rest/orgs/members#get-an-organization-membership-for-the-authenticated-user)
   and [team membership for a user](https://docs.github.com/en/rest/teams/members#get-team-membership-for-a-user).
-- Board finding 410; PR #1225 (documents the current behaviour).
+- Board finding 410; PR #1225 (documented the behaviour without an allowlist); PR #1231
+  (implementation). Code comments cite this RFC by its pre-renumbering ID, RFC-0061.
