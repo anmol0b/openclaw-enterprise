@@ -47,6 +47,7 @@ export function bindPlatformUnitOfWork(
     secrets: bindRepository(repositories.secrets, lifetime, [
       "findSecret",
       "listSecrets",
+      "listReferences",
       "lockSecret",
       "createSecret",
       "deleteSecret",
@@ -62,9 +63,11 @@ export function bindPlatformUnitOfWork(
       "replaceCredentialSourceSecrets",
       "deleteCredentialSource",
       "hasReferences",
+      "findBlockingReference",
       "findCredentialWithdrawal",
       "listCredentialWithdrawals",
       "requestCredentialWithdrawal",
+      "reassignCredentialWithdrawal",
       "recordCredentialWithdrawalAttempt",
       "markCredentialWithdrawalRevoked",
     ]),
@@ -77,6 +80,7 @@ export function bindPlatformUnitOfWork(
       "updateCredential",
       "deleteServiceAccount",
       "hasReferences",
+      "findIssuedCredentialBinding",
     ]),
     workspaceSetups: bindRepository(repositories.workspaceSetups, lifetime, [
       "find",
@@ -114,6 +118,9 @@ export function bindPlatformUnitOfWork(
       "listRestrictionsTargeting",
       "createAccessBinding",
       "deleteAccessBinding",
+      "listServicePrincipals",
+      "getServicePrincipal",
+      "createServicePrincipal",
     ]),
     repositorySessions: bindRepository(repositories.repositorySessions, lifetime, [
       "findAttempt",
@@ -154,6 +161,7 @@ export function bindPlatformUnitOfWork(
       "hasOutstandingCredentialWithdrawalWork",
       "retryFailedAgentDeletion",
       "retryFailedNamespaceDeletion",
+      "expediteCredentialWithdrawalWork",
     ]),
   });
 }

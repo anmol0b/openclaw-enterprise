@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -171,6 +171,82 @@ test("service API keys authenticate scoped automation without replacing sessions
       const inspected = await request("GET", "/api/auth/session", { headers });
       assert.equal(inspected.data, null);
       assert.equal((await request("GET", "/installation")).status, 200);
+    },
+  );
+
+  await t.test(
+    "audit rows name the service key that acted, apart from its principal's other keys",
+    async () => {
+      const second = await issue();
+      assert.equal(second.status, 201);
+      const configurationIds = [];
+      for (const key of [issued.data, second.data]) {
+        const created = await request("POST", `/namespaces/${namespaceId}/configurations`, {
+          headers: { "x-api-key": key.key },
+          body: { kind: "agent", values: { model: "gpt-test" } },
+        });
+        assert.equal(created.status, 201);
+        configurationIds.push(created.data.id);
+        const mutation = auditSink.events.find(
+          (event) =>
+            event.action === "openclaw.configurations.create" &&
+            event.resource.id === created.data.id,
+        );
+        assert.equal(mutation.actorId, principal.id);
+        assert.equal(mutation.details?.actorServiceKeyId, key.id);
+      }
+      // A denial names the key too; the key's Role reads Presets but cannot create them.
+      const deniedBefore = auditSink.events.length;
+      assert.equal(
+        (
+          await request("POST", `/namespaces/${namespaceId}/presets`, {
+            headers: { "x-api-key": second.data.key },
+            body: { name: "denied-preset", template: { agent: { name: "Denied" } } },
+          })
+        ).status,
+        403,
+      );
+      const denial = auditSink.events
+        .slice(deniedBefore)
+        .find((event) => event.kind === "authorization_denial");
+      assert.equal(denial.actorId, principal.id);
+      assert.equal(denial.details?.actorServiceKeyId, second.data.id);
+      // The acting key joins the denial's IAM evidence; it does not replace it.
+      assert.equal(denial.details.iamEvidence.identityId, principal.id);
+      // Session requests carry no key; key management names the key acted on and its name.
+      for (const id of configurationIds) {
+        const deleted = await fetch(`${origin}/namespaces/${namespaceId}/configurations/${id}`, {
+          method: "DELETE",
+          headers: { cookie: session.cookie, origin: authOptions.baseURL },
+        });
+        assert.equal(deleted.status, 204);
+      }
+      assert.equal(
+        (await request("DELETE", `/api/auth/service-keys/${second.data.id}`)).status,
+        200,
+      );
+      for (const action of ["create", "revoke"]) {
+        const managed = auditSink.events.find(
+          (event) =>
+            event.action === `openclaw.auth.service-keys.${action}` &&
+            event.details.serviceKeyId === second.data.id,
+        );
+        assert.equal(managed.actorId, seed.principal.id);
+        assert.equal(managed.details.serviceKeyName, "tenant-automation");
+        assert.equal(Object.hasOwn(managed.details, "actorServiceKeyId"), false);
+      }
+      const sessionDeletes = auditSink.events.filter(
+        (event) =>
+          event.action === "openclaw.configurations.delete" &&
+          configurationIds.includes(event.resource.id),
+      );
+      assert.equal(sessionDeletes.length, 2);
+      for (const event of sessionDeletes) {
+        assert.equal(event.details?.actorServiceKeyId, undefined);
+      }
+      const recorded = JSON.stringify(auditSink.events);
+      assert.equal(recorded.includes(issued.data.key), false);
+      assert.equal(recorded.includes(second.data.key), false);
     },
   );
 
@@ -428,6 +504,171 @@ test("service API keys authenticate scoped automation without replacing sessions
       { env: adminEnv },
     );
     assert.deepEqual(JSON.parse(bindingRead.stdout), binding);
+
+    // An Installation administrator creates a Namespace ServicePrincipal for a member's CLI.
+    // It holds no grant until an AccessBinding names it (proved with PostgreSQL policy in
+    // postgres-service-api-keys.test.mjs).
+    const principalCreated = await run(
+      occCli,
+      ["iam", "service-principal", "create", "-o", "json"],
+      { env: adminEnv },
+    );
+    const createdPrincipal = JSON.parse(principalCreated.stdout);
+    assert.match(createdPrincipal.id, /^spn_/);
+    assert.equal(createdPrincipal.namespaceId, namespaceId);
+    const principalList = await run(occCli, ["iam", "service-principal", "list", "-o", "json"], {
+      env: adminEnv,
+    });
+    assert.deepEqual(JSON.parse(principalList.stdout), [createdPrincipal]);
+    const principalRead = await run(
+      occCli,
+      ["iam", "service-principal", "get", createdPrincipal.id, "-o", "json"],
+      { env: adminEnv },
+    );
+    assert.deepEqual(JSON.parse(principalRead.stdout), createdPrincipal);
+
+    // occ service-key create writes a private key file that occ itself accepts, and never
+    // prints the key. The administrator key covers its own grants, so it may rotate itself.
+    const rotatedKeyFile = join(directory, "rotated-admin-key.json");
+    const { OCC_NAMESPACE: _namespace, ...installationEnv } = adminEnv;
+    const rotated = await run(
+      occCli,
+      [
+        "service-key",
+        "create",
+        "--service-principal",
+        installationPrincipal.id,
+        "--name",
+        "cli-rotated",
+        "--expires-in-days",
+        "2",
+        "--out",
+        rotatedKeyFile,
+        "-o",
+        "json",
+      ],
+      { env: installationEnv },
+    );
+    const rotatedDetails = JSON.parse(rotated.stdout);
+    assert.equal(rotatedDetails.servicePrincipalId, installationPrincipal.id);
+    assert.equal(rotatedDetails.key, undefined);
+    // Read mode and content through one handle so both describe the same file.
+    const rotatedHandle = await open(rotatedKeyFile);
+    let rotatedKey;
+    try {
+      assert.equal((await rotatedHandle.stat()).mode & 0o777, 0o600);
+      rotatedKey = JSON.parse(await rotatedHandle.readFile("utf8")).data;
+    } finally {
+      await rotatedHandle.close();
+    }
+    assert.equal(rotatedKey.id, rotatedDetails.id);
+    assert.ok(!rotated.stdout.includes(rotatedKey.key));
+    const rotatedEnv = { ...adminEnv, OCC_SERVICE_KEY_FILE: rotatedKeyFile };
+    await run(occCli, ["iam", "service-principal", "list"], { env: rotatedEnv });
+    // An existing file is never overwritten, and no key is issued for it.
+    const keysBeforeClobber = memoryDatabase.apikey.length;
+    await assert.rejects(
+      run(
+        occCli,
+        [
+          "service-key",
+          "create",
+          "--service-principal",
+          installationPrincipal.id,
+          "--name",
+          "cli-clobber",
+          "--out",
+          rotatedKeyFile,
+        ],
+        { env: installationEnv },
+      ),
+      /failed to create key file/,
+    );
+    assert.equal(memoryDatabase.apikey.length, keysBeforeClobber);
+    // An explicit zero is invalid, not the API's omitted 30-day default.
+    const zeroExpiryFile = join(directory, "zero-expiry-key.json");
+    await assert.rejects(
+      run(
+        occCli,
+        [
+          "service-key",
+          "create",
+          "--service-principal",
+          installationPrincipal.id,
+          "--name",
+          "zero-expiry",
+          "--out",
+          zeroExpiryFile,
+          "--expires-in-days=0",
+        ],
+        { env: installationEnv },
+      ),
+      { stderr: /between 1 and 365/ },
+    );
+    await assert.rejects(open(zeroExpiryFile), { code: "ENOENT" });
+    assert.equal(memoryDatabase.apikey.length, keysBeforeClobber);
+    for (const days of [1, 365]) {
+      const before = Date.now();
+      const created = JSON.parse(
+        (
+          await run(
+            occCli,
+            [
+              "service-key",
+              "create",
+              "--service-principal",
+              installationPrincipal.id,
+              "--name",
+              `expiry-${days}`,
+              "--out",
+              join(directory, `expiry-${days}.json`),
+              `--expires-in-days=${days}`,
+              "-o",
+              "json",
+            ],
+            { env: installationEnv },
+          )
+        ).stdout,
+      );
+      assert.ok(Math.abs(Date.parse(created.expiresAt) - before - days * 86_400_000) < 10_000);
+      await run(occCli, ["service-key", "revoke", created.id], { env: adminEnv });
+    }
+    assert.equal(memoryDatabase.apikey.length, keysBeforeClobber);
+    // The CLI counts the name as the API does: 32 emoji are issued, 33 never leave the CLI.
+    const emojiKeyFile = join(directory, "emoji-key.json");
+    const emojiCreate = (name, out) =>
+      run(
+        occCli,
+        [
+          "service-key",
+          "create",
+          "--service-principal",
+          installationPrincipal.id,
+          "--name",
+          name,
+          "--out",
+          out,
+          "-o",
+          "json",
+        ],
+        { env: installationEnv },
+      );
+    const emoji = JSON.parse((await emojiCreate("😀".repeat(32), emojiKeyFile)).stdout);
+    assert.equal(emoji.name, "😀".repeat(32));
+    await assert.rejects(emojiCreate("😀".repeat(33), join(directory, "emoji-33.json")), {
+      stderr: /1 to 32 characters/,
+    });
+    assert.equal(memoryDatabase.apikey.length, keysBeforeClobber + 1);
+    await run(occCli, ["service-key", "revoke", emoji.id], { env: adminEnv });
+    const revokedRotated = await run(
+      occCli,
+      ["service-key", "revoke", rotatedDetails.id, "-o", "json"],
+      { env: adminEnv },
+    );
+    assert.deepEqual(JSON.parse(revokedRotated.stdout), { id: rotatedDetails.id, revoked: true });
+    await assert.rejects(run(occCli, ["iam", "service-principal", "list"], { env: rotatedEnv }), {
+      stderr: /HTTP 401/,
+    });
     // A secret Role bound to the Namespace could never grant anything there: the CLI shows
     // the API's refusal naming the Permissions instead of reporting a created binding.
     const inapplicableFile = join(directory, "inapplicable-binding.json");
@@ -733,12 +974,13 @@ test("service API keys authenticate scoped automation without replacing sessions
       }
       // Audits attribute issuance/revocation to the service actor, not the human
       // who originally issued its key, and never contain credential material.
-      for (const [action, key] of [
-        ["create", child.data],
-        ["create", replacement.data],
-        ["revoke", created.data],
-        ["revoke", child.data],
-        ["revoke", replacement.data],
+      // Each also names the key that acted (`actorServiceKeyId`) apart from the key acted on.
+      for (const [action, key, actorKey] of [
+        ["create", child.data, created.data],
+        ["create", replacement.data, created.data],
+        ["revoke", created.data, replacement.data],
+        ["revoke", child.data, replacement.data],
+        ["revoke", replacement.data, replacement.data],
       ]) {
         assert.ok(
           auditSink.events.some(
@@ -746,8 +988,11 @@ test("service API keys authenticate scoped automation without replacing sessions
               event.action === `openclaw.auth.service-keys.${action}` &&
               event.actorId === installationPrincipal.id &&
               event.details.serviceKeyId === key.id &&
+              event.details.serviceKeyName === key.name &&
+              event.details.actorServiceKeyId === actorKey.id &&
               event.details.servicePrincipalId === key.servicePrincipalId,
           ),
+          `${action} ${key.name}`,
         );
         assert.equal(JSON.stringify(auditSink.events).includes(key.key), false);
       }
@@ -851,6 +1096,42 @@ test("service API keys authenticate scoped automation without replacing sessions
       (await request("DELETE", `/api/auth/service-keys/${shortLived.data.id}`)).status,
       200,
     );
+  });
+
+  await t.test("key names count code points, as the schema and the CLI do", async () => {
+    const tooLong =
+      "The request does not match the operation contract: body /name is too long (expected at most 32 characters).";
+    // 32 code points that are 64 UTF-16 units still fit, and the name round-trips.
+    for (const name of ["😀".repeat(32), "\u{20000}".repeat(32), `${"a".repeat(31)}😀`]) {
+      const named = await request("POST", "/api/auth/service-keys", { body: { ...body, name } });
+      assert.equal(named.status, 201, name);
+      assert.equal(named.data.name, name);
+      assert.equal(
+        (await request("DELETE", `/api/auth/service-keys/${named.data.id}`)).status,
+        200,
+      );
+    }
+    const keysBefore = memoryDatabase.apikey.length;
+    const over = await request("POST", "/api/auth/service-keys", {
+      body: { ...body, name: "😀".repeat(33) },
+    });
+    assert.equal(over.status, 400);
+    assert.equal(over.error.message, tooLong);
+    assert.deepEqual(over.error.details, [{ path: "/name", code: "TOO_LONG" }]);
+    // Should Better Auth still refuse a name the schema admitted, the caller gets the
+    // schema's 400, not a dependency 503, and no key is stored.
+    const createServiceKey = auth.createServiceKey;
+    auth.createServiceKey = (input) => createServiceKey({ ...input, name: "a".repeat(65) });
+    try {
+      const refused = await issue();
+      assert.equal(refused.status, 400);
+      assert.equal(refused.error.code, "INVALID_REQUEST");
+      assert.equal(refused.error.message, tooLong);
+      assert.deepEqual(refused.error.details, [{ path: "/name", code: "TOO_LONG" }]);
+    } finally {
+      auth.createServiceKey = createServiceKey;
+    }
+    assert.equal(memoryDatabase.apikey.length, keysBefore);
   });
 
   await t.test(

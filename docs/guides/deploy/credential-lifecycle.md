@@ -58,6 +58,9 @@ are separate from channel Secrets; the current initial provisioning flow does no
 rotate an existing generated bundle.
 
 List all affected applications or Agents before restarting or deploying them.
+`occ secret get "$SECRET_ID" -o json` lists a Secret's consuming Agents in
+`consumers.agents`; a nonzero `consumers.unreadable` means some references are
+hidden from you (see [Find a Secret's consumers](../../reference/drivers/kubernetes-secret.md#find-a-secrets-consumers)).
 A running process keeps the environment variables it received, even after the
 source Secret changes. For a model API key, the supported sequence is:
 
@@ -125,6 +128,17 @@ then owns refresh. Later revisions preserve the selected source and reuse the
 current bundle on that disk. The Secret Driver refuses ordinary updates to a
 source once handoff starts; delete it through the Secret API when no Agent uses
 it. Its retained metadata identifies the owning Agent and storage.
+
+If deployment reports `HARNESS_CREDENTIAL_BOOTSTRAP_FAILED` or
+`HARNESS_CREDENTIAL_BOOTSTRAP_TIMEOUT`, initialization stopped before Codex
+started. Check the tenant worker's Job permissions, Pod scheduling, and writable
+private storage, correct the cause, then choose **Deploy** again. Deployment activity shows
+the retained Job/Pod identity, container exits and timestamps, plus separate
+cleanup progress; **Logs** can select the actual writer while its Pod exists.
+After an initial provisioning failure, open its existing Agent to repair it. OCC cleans up
+the failed Job and seed even after a worker restart; it does not restart the
+failed deployment. See the
+[bootstrap retry and cleanup policy](../../reference/drivers/kubernetes-compute/codex-oauth-storage.md#bounded-bootstrap-job).
 
 For plugin changes on an existing Agent, connect again in the plugin editor.
 This login is scoped to that Agent and requires Agent `read`/`update` plus Secret
