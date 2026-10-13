@@ -83,13 +83,13 @@ Kubernetes differences, inspection scope, and unavailable states.
 
 ## Agent creation and deployment
 
-Dedicated provisioning waits for first activation; failure links the original
-request’s existing Agent and revision. Otherwise, creation
+Dedicated provisioning waits for first activation or supersession; Stop or
+failure links the original Agent and revision. Otherwise, creation
 saves a draft: provide model and channel credentials when prompted, then select
-**Deploy new version**. If the Compute Driver requires them, OCC generates
-missing connection credentials during that first deployment.
+**Deploy new version**. OCC generates missing Compute Driver connection
+credentials on that first deployment.
 See [Create and deploy Agents](console/create-and-deploy.md) for the full
-workflow, channel constraints, and partial-write recovery.
+workflow, channel constraints, and recovery.
 Plugin selections follow the API's Agent create/update contract: an omitted map
 is preserved, `{}` clears it, and deployment startup reports unsupported catalog
 or policy choices.
