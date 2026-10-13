@@ -4,352 +4,200 @@ implementation_status: Implemented
 author: freeqaz
 ---
 
-# Proposal: GitHub token authority for local development
+# Proposal: Use a developer’s GitHub token through the local credential gateway
 
-- **ID:** RFC-0019
-- **Owner:** freeqaz (proposal and credential-boundary review); repository-credentials
-  maintainers for the common-owner change.
+- **ID:** RFC-0019 (provisional until merge)
 - **Created:** 2026-10-04
-- **Last updated:** 2026-10-13
+- **Last updated:** 2026-10-15
 - **RFC PR:** [#1196](https://github.com/openclaw/openclaw-enterprise/pull/1196)
-- **Implementation plan:** none. This RFC is a retroactive record of delivered work (#1197,
-  #1206, #1236, #1239, #1257, #1266); a plan for finished work would be moot. Phases 2 and 3
-  are unplanned.
-- **Related:** [RFC-0008 repository credentials](0008-repository-credentials/index.md);
-  [repository credential reference](../../docs/reference/repository-credentials.md);
-  [development token reference](../../docs/reference/repository-credentials/development-token.md)
-  and [guide](../../docs/guides/repository-credentials/development-token.md);
-  [push-ref guardrail](../../docs/reference/repository-credentials/push-ref-guardrail.md);
-  [local repository credentials guide](../../docs/guides/deploy/local-repository-credentials.md);
-  [RFC-0015 credential recovery](0015-repository-credential-recovery.md).
+- **Implementation plan:** None. The implementation [landed October 4](#delivery-and-verification). The decision is still proposed.
 
 <a id="problem-and-decision"></a>
 
-## Summary
+## Decision requested
 
-The standalone repository credential service has a second, development-only authority: a
-static GitHub token (a fine-grained or classic personal access token, or the token the host
-`gh` CLI holds) that the service process owns and lends into the same custody, session, route
-and transport machinery as the GitHub App path. A developer can clone, push and call the GitHub
-API from the client container against a real repository without a GitHub App installation,
-and the token never enters that container. A static token cannot be narrowed per session, so
-the gateway enforces scope: GraphQL is refused unless the token is fine-grained and the
-operator opts in, and then only plain read-only query documents pass; every push is checked
-against a required ref allowlist before any byte reaches GitHub. Production deployments
-cannot select the kind.
+Keep the `github-token` option for developers testing clone, push, and `gh api` against a scratch
+repository with the standalone service and client. It saves setting up a GitHub App, installation,
+and registry just to exercise the real credential path. The developer’s token stays in the
+credential service. The client gets a bearer that works at our gateway, and GitHub sees requests
+as the developer. An agent launched by `occ dev up` would continue to use the GitHub App.
 
-## Motivation
+Consider a developer who allows pushes only to `refs/heads/agent/*`. The gateway can forward a
+push to `agent/demo` and refuse a push to `main` before sending that push body to GitHub, even if
+the client hook is disabled. It checks **which branch changes**, not **what goes on that branch**.
+If a stolen write session can push an Actions workflow to `agent/demo`, that workflow may run with
+the repository’s secrets. Use a token limited to a disposable repository, preferably on a scratch
+account, and revoke it in GitHub when finished. Closing the local session does not revoke it.
 
-Local repository testing otherwise requires a GitHub App private key, an installation and the
-registry flow ([guide](../../docs/guides/deploy/local-repository-credentials.md)). The
-developer's host already holds working GitHub credentials (`gh auth status` and
-`ssh -T git@github.com` succeed). The goal was to use them while keeping the credential out of
-the agent or client container, exactly as the App key is.
-
-The SSH key cannot be that credential: the broker is a smart-HTTP and REST/GraphQL gateway
-end to end. The container's credential helper answers only `protocol=https` for the gateway
-host; [route classification](../../apps/controller/src/drivers/repo/github/credentials/routes/classification.ts)
-admits only `info/refs`, `git-upload-pack`, `git-receive-pack` and allowlisted REST paths; the
-[upstream sender](../../apps/controller/src/drivers/repo/credentials/transport/upstream.ts)
-speaks HTTPS to two fixed origins. An SSH key authenticates none of that and gives no API
-access. A token does, and the host has one.
+The owner’s decision is whether that tradeoff is acceptable for this standalone development path.
+Kubernetes token support, SSH transport, and changes to production push handling would need
+[separate decisions](#alternatives-and-open-decisions).
 
 <a id="scope"></a>
-
-## Goals
-
-- **One seam.** Authority-specific behaviour sits behind `GitHubTokenSource`
-  ([`token-source.ts`](../../apps/controller/src/drivers/repo/github/credentials/token-source.ts)).
-  `createTokenSource` is the only place that selects an implementation; the other kind checks
-  in the driver tree are configuration validation (`config.ts`, `factory.ts`,
-  `registry-factory.ts`) and the grant identity shape (`grants.ts`).
-- **Same custody.** The token enters through the protected-file reader the App key uses, is
-  held by one process-owned owner, and reaches requests only through custody slots. Client
-  material is the same as on the App path.
-- **Scope enforced, not described.** GraphQL off for `git-read`, off by default, read-only
-  when enabled; a required `pushRefAllowlist` checked at the gateway; sessions capped at eight
-  hours; grant identity disjoint from App grants.
-- **Production cannot select it.**
-- **Proven live** (see Delivery).
-
-## Non-goals
-
-- SSH as a credential or transport; never by mounting `~/.ssh` or forwarding `SSH_AUTH_SOCK`.
-- A Kubernetes path (`occ dev up`, Helm, registry) for the token kind.
-- Per-session down-scoping, an acquire-time repository probe, or token revocation by the
-  service. Operators revoke in GitHub.
-- Changing App-path push-ref behaviour, where the allowlist is a client-side hook only.
-
 <a id="design"></a>
 
-## Design (as implemented)
+## Follow the two credentials
 
-### Owners
-
-[`loadConfiguration`](../../apps/controller/src/composition/repository-credentials/config.ts)
-reads either the App key into `createGitHubKeyOwner` or the token file into
-`createGitHubStaticTokenOwner`
-([`static-token.ts`](../../apps/controller/src/drivers/repo/github/credentials/static-token.ts)),
-both through `readProtectedFile` (owner, mode, no symlink, stable inode), both zero-filled on
-`close()`. The owner lends zero-on-return copies through `withToken`. `createTokenSource`
-returns the App source (`token-source/app.ts`, wrapping the existing acquisition, retirement
-and provider transport) or the static source (`token-source/static.ts`). The driver binds a
-session with `source.bind(session)`, getting `acquire` and `retire`; `cleanup` is `revocable`
-for the App and `expiry-only` for the token. Custody, lifecycle, sessions and transport are
-the common owners from [RFC-0008](0008-repository-credentials/index.md).
-
-### Configuration
-
-`backend.kind: "github-token"` takes `tokenFile` (absolute), the literal `developmentOnly:
-true`, a required `pushRefAllowlist` (registry guardrail syntax; `[]` denies every push),
-optional `allowGraphql` (default false) and optional `leaseSeconds` (900..86400, default 3600).
-The loader refuses the kind unless the process was started with `--development-authority`,
-and refuses `sessionPolicy.maximumDurationSeconds` above 28800 and `limits.gitPushInputBytes`
-above 64 MiB. It strips one trailing LF or CRLF from the token file; the owner requires 1 to
-16384 non-space printable ASCII bytes. The owner records a non-secret token class from the
-prefix (`fine-grained`, `classic`, `oauth`, `app-user`, `app-installation`, `unknown`); the
-static source refuses `allowGraphql: true` unless the class is `fine-grained`.
-[`check-config`](../../apps/controller/src/composition/repository-credentials/check-config.ts)
-(which takes the same flag) and one `started` stderr line report `authority:
-"github-token-development"` and the class, never the value.
-
-### Acquisition and custody
-
-The static `acquire`
-([`static-acquisition.ts`](../../apps/controller/src/drivers/repo/github/credentials/driver/static-acquisition.ts))
-performs every admission, abort, deadline and validity check first, then borrows a copy and
-captures it into custody with a `leaseSeconds` lease, marked accepted. It never dispatches, so
-the lifecycle cannot record an uncertain acquisition; `retire` answers `unsupported`. The
-static source refuses a lease shorter than `limits.exchangeMs + 2 * limits.credentialMarginMs`,
-because the [lifecycle](../../apps/controller/src/drivers/repo/credentials/lifecycle.ts)
-demands validity covering an exchange deadline plus its margin.
-
-One common-owner rule supports `expiry-only` backends: in the lifecycle sweep, a settled
-custody record that is not the admitted current credential and has no active use is released
-at once, instead of at its lease deadline. No provider call will end such a credential, so
-holding the bytes has no value. The rule branches only on the declared `cleanup` discipline,
-covers superseded, refused and post-close copies alike, and leaves `revocable` behaviour
-unchanged. For `expiry-only` backends the `expired` counter counts custody leases ended, not
-upstream expiry.
-
-### Scope at the gateway
-
-- **GraphQL.** The route policy carries `graphql: "token-bounded" | "read-only" | "deny"` per
-  profile. The App source answers `token-bounded`. The static source answers `deny` for
-  `git-read` always, and for other profiles unless `allowGraphql` is set; then `read-only`.
-  [`allowsReadOnlyGraphqlInput`](../../apps/controller/src/drivers/repo/github/credentials/graphql-input.ts)
-  accepts only one plain query document: a JSON object with a string `query` and no keys other
-  than `query`, `variables` and `operationName`, so batches, persisted queries, document IDs
-  and extensions are refused. Any string literal containing the `mutation` keyword as a whole
-  name, or the `tempCloneToken` field, is refused. Mutations such as `createRef` or `updateRef`
-  would write refs outside the push allowlist; `gh` commands built on mutations fail.
-- **Pushes.** The static source sets `RequestPlan.inputPolicy` on `git-push` plans to
-  [`allowsReceivePackInput`](../../apps/controller/src/drivers/repo/github/credentials/routes/receive-pack.ts),
-  which reads pkt-lines up to the first flush as `<old> <new> <ref>` commands plus `shallow`
-  lines and never parses the packfile. `push-cert` and other line forms are refused. Each ref
-  must be strict UTF-8, a well-formed branch name with no invisible or bidi characters
-  (U+061C, U+200B to U+200F, U+2028 to U+202E, U+2060, U+2066 to U+2069, U+FEFF), and pass
-  the client hook's `allowsPushRef` matcher, byte for byte with no normalization. A refused ref
-  is answered 400 `unsupported-request` before any byte goes upstream, so `git push
---no-verify` and a replaced `core.hooksPath` change nothing. More than 256 ref commands get
-  413 `push-ref-limit-exceeded`. Receive-pack has no protocol-v2 form and Git does not gzip it.
-  Pushes are buffered; a body over `limits.gitPushInputBytes` gets 413 `limit-exceeded`
-  before the token is used for it.
-- **Identity.** A token grant
-  ([`grants.ts`](../../apps/controller/src/drivers/repo/github/credentials/grants.ts)) hashes
-  `authority: "github-token"`, a static capability policy
-  (`static-token-route-bounded-rest-only-v1` or `…-read-only-graphql-v1`), the push allowlist
-  and the profile's REST write-route map under the name `routePermissions`. App grant JSON is
-  unchanged, so an App binding never matches a token grant and vice versa.
-
-### Architecture
+In the [development setup](../../docs/guides/repository-credentials/development-token.md), the
+developer puts a fine-grained token, classic token, or the host’s `gh` token in a new private file
+(mode 0600). The service reads it through a read-only mount. The client mounts only `/session` and
+`/workspace`. Putting `GH_TOKEN` or the token file in the client would give it direct access to
+GitHub and let it bypass every gateway check below.
 
 ```mermaid
----
-config:
-  theme: base
-  htmlLabels: true
-  themeVariables:
-    fontSize: 14px
-    primaryTextColor: "#344054"
-    lineColor: "#8B949E"
-    edgeLabelBackground: "#FFFFFF"
-  flowchart:
-    curve: linear
-    nodeSpacing: 28
-    rankSpacing: 32
-    padding: 14
----
 flowchart TB
-  Host["<b>Host shell</b><br/>gh auth token &gt; inputs/token (0600)"]
-  Loader["<b>loadConfiguration</b><br/>--development-authority + developmentOnly"]
-  Owner["<b>GitHubStaticTokenOwner</b><br/>one copy, lends zeroed copies"]
-  Source["<b>GitHubTokenSource</b><br/>app | static"]
-  Driver["<b>GitHub driver</b><br/>plan, custody, lease"]
-  Gateway["<b>Gateway</b><br/>bearer -&gt; session -&gt; route -&gt; inspector"]
-  Client["<b>Client container</b><br/>bearer only"]
-  GitHub["<b>github.com / api.github.com</b>"]
-  Host -->|protected file| Loader
-  Loader -->|owner| Source
-  Owner -->|withToken| Source
-  Source -->|bind| Driver
-  Client -->|Basic gateway-session:bearer| Gateway
-  Gateway -->|plan + inputPolicy| Driver
-  Driver -->|x-access-token / Bearer| GitHub
-  classDef actor fill:#F1EEF5,stroke:#A091AD,color:#3A3243,stroke-width:1px
-  classDef gate fill:#F7F1E5,stroke:#B3A078,color:#514532,stroke-width:1px
-  classDef shared fill:#F3F4F6,stroke:#98A2AE,color:#44505F,stroke-width:1px
-  class Host,Client actor
-  class Loader,Gateway gate
-  class Owner,Source,Driver,GitHub shared
-  linkStyle default stroke:#8B949E,stroke-width:1px
+  Host["Developer’s host: private token file"]
+  Client["Client container: Git or gh api"]
+  subgraph Service["Standalone credential service"]
+    Owner["Protected-file reader and token owner"]
+    Custody["GitHub token source and credential custody"]
+    Gate["Gateway: check session, route and request body"]
+    Send["GitHub driver: authenticate an allowed request"]
+    Owner -->|lend a copy| Custody
+    Custody -->|credential for this exchange| Send
+    Gate -->|allowed request| Send
+  end
+  Host -->|read-only mount| Owner
+  Client -->|gateway session bearer| Gate
+  Send -->|developer’s token over HTTPS| GH["github.com or api.github.com"]
 ```
 
-All arrows are implemented paths.
+The [loader](../../apps/controller/src/composition/repository-credentials/config.ts) requires both
+`backend.kind: "github-token"` with literal `developmentOnly: true`, and the process flag
+`--development-authority`. The [file reader](../../apps/controller/src/composition/repository-credentials/protected-file.ts)
+checks ownership, mode, no symlink, and a stable inode. After removing one trailing LF or CRLF, the
+token must be 1 to `limits.accessTokenBytes` non-space printable ASCII bytes (limit ceiling 16,384).
+Invalid startup input yields `invalid-configuration`. [`check-config`](../../apps/controller/src/composition/repository-credentials/check-config.ts)
+and the startup line report `github-token-development` and a token class inferred from its prefix,
+not its value or proof of its permissions. See the [configuration contract](../../docs/reference/repository-credentials/development-token.md)
+and [example](../../deploy/examples/repository-credentials/service-config.development-token.json).
 
-### Request lifecycle
+The change to [RFC-0008’s credential path](0008-repository-credentials/index.md) is a
+[`GitHubTokenSource`](../../apps/controller/src/drivers/repo/github/credentials/token-source.ts),
+rather than a second driver that could drift on routes, URL rewriting, or cleanup. A session binds
+`acquire` and `retire` at that seam. The [grant identity](../../apps/controller/src/drivers/repo/github/credentials/grants.ts)
+includes `authority: "github-token"`, the static route policy, push allowlist, and the profile’s
+REST write routes under `routePermissions`. Neither kind of service accepts the other’s binding.
+
+## What the gateway allows
+
+**Git over HTTPS.** A push starts with two requests to the gateway. Git first asks which refs
+GitHub advertises. The gateway fetches that advertisement from GitHub and streams it back to Git.
+Git then sends the branch update and packfile in a separate request. If the gateway refuses that
+update, GitHub has seen the discovery request but receives none of the push body.
 
 ```mermaid
 sequenceDiagram
-  participant Git as git (client container)
-  participant GW as Gateway
-  participant LC as Lifecycle
-  participant TS as Static source
-  participant GH as github.com
-  Git->>GW: POST git-receive-pack, Basic gateway-session:bearer
-  GW->>GW: route git-push; buffer body; inspect commands
-  alt ref refused by allowlist or ref rules
-    GW-->>Git: 400 unsupported-request (nothing sent upstream)
-  else refs allowed
-    GW->>LC: acquire(deadline)
-    LC->>TS: acquire(attempt, previous, minimumValidity)
-    TS->>TS: checks, borrow copy, custody.capture (lease)
-    TS-->>LC: acquired
-    LC->>GH: body with Basic x-access-token:token
-    GH-->>Git: receive-pack report (URLs rewritten to the gateway)
+  participant C as Git in client
+  participant G as Credential gateway
+  participant H as GitHub
+  C->>G: GET info/refs?service=git-receive-pack, with gateway bearer
+  G->>H: GET info/refs?service=git-receive-pack, with developer’s token
+  H-->>G: Ref advertisement
+  G-->>C: Stream ref advertisement back to Git
+  C->>G: POST git-receive-pack (ref commands and packfile)
+  alt Update main, outside the allowlist
+    G-->>C: 400 unsupported-request (no push body sent to GitHub)
+  else Update agent/demo, on the allowlist
+    G->>H: Send push, with developer’s token
+    H-->>G: Accept or refuse under GitHub’s rules
+    G-->>C: Return receive-pack result
   end
-  Git->>GW: POST /graphql (git-read, or allowGraphql unset)
-  GW-->>Git: 400 unsupported-request
 ```
 
-### Trust boundary and failure
+A `git-read` session cannot reach receive-pack. For a write session, a
+[`pushRefAllowlist`](../../docs/reference/repository-credentials/push-ref-guardrail.md) is required,
+and `[]` denies every push. The gateway [reads all ref commands](../../apps/controller/src/drivers/repo/github/credentials/routes/receive-pack.ts)
+up to the first flush, including creates and deletes. It accepts `shallow` lines, refuses tags,
+signed pushes, and unrecognized command forms, and never parses the packfile. Branch names must
+be valid Git names under `refs/heads/`, encoded in strict UTF-8. The
+[client’s ref rules](../../apps/controller/src/drivers/repo/credentials/client-contracts.ts)
+reject control characters and a specific set of invisible and bidirectional formatting characters.
+The gateway matches the allowlist byte for byte, without normalization. It refuses the whole push
+if any ref is disallowed. More than 256 ref commands get `413 push-ref-limit-exceeded`. Split
+those into smaller batches. A body above the configured limit (at most 64 MiB) gets
+`413 limit-exceeded` before the gateway uses the token for that push. Buffering costs roughly
+twice the push size per concurrent push. Streaming remains open.
 
-The token exists in the service process only: in the owner, in custody slots behind opaque
-refs, and transiently in the `Authorization` header builder. The
-[development compose overlay](../../deploy/examples/repository-credentials/compose.development-token.yaml)
-adds only the process flag; the token file sits in the service's read-only input mount, and
-the client mounts only `/session` and `/workspace`. Errors are fixed codes
-(`invalid-token`, `invalid-backend`, `invalid-configuration`, `authority-unavailable`). The
-new modules import no `node:` builtins, so the
-[boundary script](../../scripts/verify-repository-credentials-boundary.mjs) needed no new
-reviewed import.
+**REST.** The gateway admits the selected profile’s routes for one repository. That is an
+allowlist of requests we send, not a GitHub token narrowed to those permissions. In particular,
+our App grants have `contents: write` without `workflows` permission. A classic or `gh` OAuth
+token with `workflow` scope does not have that protection against pushing a workflow file.
 
-The weakening is scope, not custody: a leaked session bearer reaches what the host token
-reaches, through the route allowlist, as the token owner, for up to the session duration. The
-token is read once per process; rotation is a restart; a revoked token presents as upstream
-401 on the next exchange. Operators are told to prefer a fine-grained token limited to a
-scratch repository, ideally on a scratch account, and to revoke it when done.
+**GraphQL.** Always denied for `git-read`, otherwise denied by default. Only a token classified
+as fine-grained can enable `allowGraphql`, and then reads can reach *every repository that token
+can read*. The [input check](../../apps/controller/src/drivers/repo/github/credentials/graphql-input.ts)
+accepts one plain query document in a JSON object with only `query`, `variables`, and
+`operationName` as possible keys. It refuses batches, persisted queries, document IDs, extensions,
+the credential-bearing `tempCloneToken` field, and the whole name `mutation` even in string
+literals. This deliberately rejects some harmless queries. Allowing mutations such as `updateRef`
+would open a second way to change the very branch the push check protects.
 
-### Production gating
+<a id="residual-risk"></a>
 
-Four independent layers. (1) Kubernetes composition is structurally closed: projected inputs
-refuse the kind (`invalid-projected-inputs`), Helm has no token value or mount, the k3d
-launcher writes the registry kind, and `createGitHubRegistryDriverFactory` accepts only an App
-authority. (2) The standalone loader needs the config literal and the process flag; either
-missing is `invalid-configuration`. (3) `check-config` and the `started` line name the
-authority, and a configuration test asserts that `github-token`, `developmentOnly` and
-`development-authority` are absent from `deploy/helm/**`, `deploy/examples/production/**` and
-the non-development standalone examples. (4) Grant identity is disjoint across kinds.
+## What ends when the session ends
 
-### Later phases (not implemented, unplanned)
+The service caps a session at eight hours. [Static acquisition](../../apps/controller/src/drivers/repo/github/credentials/driver/static-acquisition.ts)
+checks admission, cancellation, deadline, and required validity *before* borrowing a token copy
+for custody. It makes no provider request, cannot have an uncertain acquisition, and returns
+`authority-unavailable` if the owner is closed. The custody lease is configurable from 900 to
+86,400 seconds (default 3,600), and must cover `exchangeMs + 2 * credentialMarginMs`. That hour
+is a local lease, not an assertion that GitHub will expire the token in an hour.
 
-- **Phase 2, Kubernetes development path:** a registry `authority` discriminant, a `token`
-  projected input, a Helm Secret reference mutually exclusive with the App key, and the Go
-  launcher capturing `gh auth token` into a 0600 file. It reopens the path phase 1 keeps
-  closed and needs its own gate review.
-- **Phase 3, SSH transport:** a `RequestPlan` transport discriminant for `git-*` plans, an
-  exchange sender bridging smart-HTTP to SSH with the same limits and outcomes, and an
-  agent-backed authority whose key never enters the service. API routes would still need a
-  token. Separate RFC and security review.
+The App source can retire its credential. The static source returns `unsupported` and declares
+`cleanup: "expiry-only"`. At the next [lifecycle sweep](../../apps/controller/src/drivers/repo/credentials/lifecycle.ts),
+a settled copy that is no longer the admitted credential and has no active use is released, including
+superseded, refused, and post-close copies. A shorter default lease would add renewals without
+releasing those copies sooner. Here `expired` counts ended custody leases, not GitHub revocations.
 
-## Delivery and verification
-
-This RFC was filed alongside the implementation and is kept as a record of what landed, all
-on 2026-10-04:
-
-- **#1197** added the `expiry-only` lifecycle sweep rule, tested failing-first.
-- **#1206** added the token source seam, static owner and acquisition, receive-pack
-  inspector, read-only GraphQL, grant identity, loader and `check-config` flags, the 8-hour
-  and 64 MiB caps, development examples, and the reference and guide.
-- **#1236** made oversized token pushes answer a readable 413 and measured buffering cost
-  (a 60 MB push peaked near 117 MiB).
-- **#1239** added a token mode to the
-  [isolation harness](../../tests/fixtures/repository-credentials-isolation/harness.mjs),
-  proving the token absent from the agent container.
-- **#1257** accepted UTF-8 branch names and named the 256-ref limit; **#1266** then refused
-  invisible and bidi characters.
-
-Evidence on main: `tests/conformance/repository-credentials-github-token.test.mjs`,
-`tests/conformance/repository-credentials-receive-pack.test.mjs`,
-`tests/integration/repository-credentials-github-token.test.mjs`, and the projected-input and
-configuration tests. The live check with #1206 (host `gh` OAuth token, private scratch
-repository) passed: clone, push to `refs/heads/agent/*`, gateway 400 for `--no-verify` pushes
-outside the allowlist with the default branch unchanged, `gh api` 200, GraphQL 400, and no
-token bytes in the client probe, logs or `docker inspect`. That run was not repeated for
-later follow-ups. The RFC-0008 [qualification](0008-repository-credentials/qualification.md)
-does not cover this authority.
-
-Open follow-up: streaming pushes instead of buffering them.
+The loader clears its read buffer (also true for the App key, whose `KeyObject` can only be
+dropped). The [token owner](../../apps/controller/src/drivers/repo/github/credentials/static-token.ts)
+clears lent copies on return and its own copy on close. The host file lasts until the guide’s
+`shred` step, the input mount lasts for the service container’s lifetime, and immutable upstream
+`Authorization` strings can remain until garbage collection. A service heap or core dump may
+therefore expose a long-lived token. To rotate it, replace the file and restart the service.
+To invalidate it, revoke it in GitHub. The next exchange then receives an upstream 401, not a
+local revocation receipt. See also [credential recovery](0015-repository-credential-recovery.md).
 
 <a id="alternatives-and-open-decisions"></a>
 
-## Rationale and alternatives
+## Boundaries a future change would reopen
 
-- **SSH key as the credential (owner's first idea):** rejected; it authenticates nothing the
-  broker speaks and gives no API access. Recorded as a transport, not an authority.
-- **Side channel (`GH_TOKEN` or a mounted token in the client):** rejected; it is the
-  boundary violation the request forbids, and the isolation probe would fail.
-- **A separate `github-pat` driver:** rejected; it would duplicate routing, response
-  rewriting and lifecycle. The seam keeps one driver.
-- **Client-side push allowlist only:** rejected; with an owner token, branch protection no
-  longer backstops the hook, and `--no-verify` bypasses it.
-- **Acquire-time `GET /repos/{repo}` probe:** deferred; it extends the privileged transport,
-  a boundary change needing review.
-- **Shorter default lease:** rejected; unneeded copies are released on the next sweep, so a
-  short lease only adds renewal churn.
+- **Kubernetes development (RFC owner).** Keep `occ dev up` on the App. [Projected inputs](../../apps/controller/src/composition/repository-credentials/projected-inputs.ts)
+  refuse the token kind with `invalid-projected-inputs`, Helm has no token value or mount, the
+  launcher selects the registry, and its factory accepts only an App authority. The two standalone
+  opt-ins are separate. Startup reporting, distinct grants, and a test keeping token options out of
+  shipped production examples are useful checks, not gates on an operator’s own configuration.
+  Supporting a token here would require a registry authority choice, projected token, mutually
+  exclusive Secret input, launcher custody, and a new gate review. It is unplanned.
+- **Push checks for App grants (repository-credentials maintainers).** Keep the existing client
+  hook. Applying this inspector to the App path would also introduce production push buffering.
+  This RFC neither changes App grant identity nor adds an acquire-time repository probe. That
+  probe would expand the privileged transport and needs separate review.
+- **SSH transport.** A host SSH key authenticates neither our [HTTPS sender](../../apps/controller/src/drivers/repo/credentials/transport/upstream.ts)
+  nor GitHub API requests. Do not mount `~/.ssh` or forward `SSH_AUTH_SOCK`. Any future
+  smart-HTTP-to-SSH sender would need equivalent limits, an SSH agent that keeps the private key
+  outside the credential service, and a separate RFC and security review. API calls would still
+  need a token. No such transport is planned.
 
-## Residual risk
+## Delivery and verification
 
-- A leaked bearer acts as the token owner within the route allowlist until the session ends.
-- Pushes are buffered in memory, about twice their size per concurrent push.
-- REST scope is the route allowlist, not provider-checked permissions.
-- The keyword-based GraphQL filter over-denies; it cannot under-deny a mutation, because
-  operation keywords cannot be escaped.
+On October 4, 2026, [#1197](https://github.com/openclaw/openclaw-enterprise/pull/1197) changed the
+custody sweep and [#1206](https://github.com/openclaw/openclaw-enterprise/pull/1206) added the
+development path. Its recorded live check used a host `gh` OAuth token and a private scratch
+repository. Clone and an allowed push succeeded. A push outside the allowlist with the client
+hook disabled got 400 and the default branch stayed unchanged. REST got 200, GraphQL got 400,
+and the client, log, and `docker inspect` probes found no token bytes. Those are bounded
+observations, not proof the token exists nowhere else or that the option is approved for production.
 
-## Unresolved questions
-
-1. **Which local development path?** (Owner.) Default: standalone service and client images
-   only; an agent under `occ dev up` stays on the App. Phase 2 is needed if a k3d agent must
-   push with the host token.
-2. **Gateway push inspection for App grants.** (Repository-credentials maintainers.) Default:
-   off; the App path sets no `pushRefAllowlist` on its source and relies on the client hook.
-   The same inspector could enforce registry allowlists at the cost of buffering production
-   pushes. App grant identity stays unchanged either way.
-
-## References
-
-- [`drivers/repo/github/credentials/factory.ts`](../../apps/controller/src/drivers/repo/github/credentials/factory.ts),
-  [`driver.ts`](../../apps/controller/src/drivers/repo/github/credentials/driver.ts),
-  [`routes.ts`](../../apps/controller/src/drivers/repo/github/credentials/routes.ts),
-  [`profiles.ts`](../../apps/controller/src/drivers/repo/github/credentials/profiles.ts)
-- [`drivers/repo/credentials/backend-contracts.ts`](../../apps/controller/src/drivers/repo/credentials/backend-contracts.ts)
-  (`RepositoryBackend.cleanup`, `RequestPlan.inputPolicy`, `InputVerdict`),
-  [`custody.ts`](../../apps/controller/src/drivers/repo/credentials/custody.ts),
-  [`client-contracts.ts`](../../apps/controller/src/drivers/repo/credentials/client-contracts.ts)
-  (`allowsPushRef`, `decodePushedBranchRef`)
-- [`protected-file.ts`](../../apps/controller/src/composition/repository-credentials/protected-file.ts),
-  [`projected-inputs.ts`](../../apps/controller/src/composition/repository-credentials/projected-inputs.ts),
-  [`repository-credentials.ts`](../../apps/controller/src/repository-credentials.ts)
-- [Development service config](../../deploy/examples/repository-credentials/service-config.development-token.json);
-  [isolation probe](../../tests/fixtures/repository-credentials-isolation/probe.mjs)
-- [Specification process](../../docs/contributing/specifications.md)
+Also on October 4, [#1236](https://github.com/openclaw/openclaw-enterprise/pull/1236) made the
+oversize 413 readable (a 60 MB push peaked near 117 MiB),
+[#1239](https://github.com/openclaw/openclaw-enterprise/pull/1239) extended the
+[client-isolation check](../../tests/fixtures/repository-credentials-isolation/harness.mjs), and
+[#1257](https://github.com/openclaw/openclaw-enterprise/pull/1257) and
+[#1266](https://github.com/openclaw/openclaw-enterprise/pull/1266) tightened the UTF-8 and
+ref-count contract. The original live run did not exercise those later changes. Review the
+[token](../../tests/conformance/repository-credentials-github-token.test.mjs),
+[receive-pack](../../tests/conformance/repository-credentials-receive-pack.test.mjs), and
+[integration](../../tests/integration/repository-credentials-github-token.test.mjs) contracts.
+[RFC-0008 qualification](0008-repository-credentials/qualification.md) does not cover this authority.
