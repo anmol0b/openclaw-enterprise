@@ -9,8 +9,8 @@ status_note: "Retroactive record. Every decision below is already implemented on
 
 - **ID:** RFC-0019
 - **Created:** 2026-10-01
-- **Last updated:** 2026-10-07
-- **Source baseline:** `main` at `521549dff`. Every symbol and number below was read there; rechecked at `04d01d02e` and `bf67a4317`.
+- **Last updated:** 2026-10-13
+- **Source baseline:** `main` at `521549dff`. Every symbol and number below was read there; rechecked at `04d01d02e`, `bf67a4317` and `07590c64e`.
 - **RFC PR:** [#856](https://github.com/openclaw/openclaw-enterprise/pull/856)
 - **Related:** [RFC-0007](0007-human-federated-sign-in/index.md) owns GitHub sign-in, the attempt,
   receipt and session-key design, and the original sign-in admission section, which this record
@@ -82,6 +82,19 @@ moved the external-provider profile's `/oce/password` onto it from attempt-count
   budget and when a full table sends the attempt to the slow lane. Once a reserved account's
   budget is spent, `slowLane` answers it like any other wrong password there:
   `SignInRateLimited` (`429`).
+- **Unstorable email** ([#1343](https://github.com/openclaw/openclaw-enterprise/pull/1343),
+  after this record's window): an email containing a NUL character or an unpaired surrogate is
+  refused inside admission with `400` `INVALID_REQUEST`, without a known-device read, an account
+  read or a password check. It spends the email's budget and is audited as `INVALID_CREDENTIALS`
+  in both profiles (`recordPasswordDenial` in the guarded one); a failed audit is
+  `DenialAuditUnavailable` as above. `isReserved` answers false for it, so a spent one gets the
+  slow lane's `429` without a lookup.
+- **Trusted proxy CIDRs** (#695, [#1599](https://github.com/openclaw/openclaw-enterprise/pull/1599),
+  [#1672](https://github.com/openclaw/openclaw-enterprise/pull/1672)): startup refuses an
+  `OCC_AUTH_TRUSTED_PROXY_CIDRS` entry with prefix `0`, a leading-zero prefix, or an IPv6 subnet
+  containing `::ffff:0:0/96`, which Node's `BlockList` would match against every IPv4 peer.
+  IPv4-mapped spellings of peers, hops and entries normalize to dotted IPv4, so equivalent
+  spellings share one address key (`client-address.ts`).
 - **Visibility** (#695). Without a trusted proxy, startup logs
   `authentication.sign-in-limit-warning` (`TRUSTED_PROXY_NOT_CONFIGURED`) and Helm NOTES warn;
   nothing fails, since a source-preserving load balancer needs no proxy. The first slowed
@@ -156,7 +169,14 @@ RFC-0007 and RFC-0001 own the flow. These PRs tightened it:
   `occ_sign_in_unmatched_callbacks_total`. Since
   [#1202](https://github.com/openclaw/openclaw-enterprise/pull/1202), a token endpoint that
   refuses the configured client is `PROVIDER_UNAVAILABLE` (`client_rejected`), not a rejected
-  identity.
+  identity. Since [#1610](https://github.com/openclaw/openclaw-enterprise/pull/1610), an
+  authenticated identity attached to a disabled, enrolled account is refused with
+  `ACCOUNT_DISABLED` (`refuseDisabled`), audited with that account's `userId`, and the Console
+  gets `authReason=account-disabled`; this also applies to attempts started before the disable.
+  Only the person who just authenticated as that identity, in the browser bound to the attempt,
+  learns the account is disabled. An unattached or unenrolled identity, an attempt older than
+  another account change, and every password refusal (a disabled account's included) stay
+  generic. For GitHub, the membership check runs first.
 - **Provider removed or reconfigured**
   ([#797](https://github.com/openclaw/openclaw-enterprise/pull/797)):
   `PostgresHumanAuthentication.currentSession` checks, in its one query, that an external
