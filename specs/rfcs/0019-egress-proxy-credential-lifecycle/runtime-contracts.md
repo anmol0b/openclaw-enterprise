@@ -214,17 +214,17 @@ that evidence; the stored warm entry itself has no execution binding.
 
 GitHub issuance signs an App JWT and requests an installation token for explicit
 repository IDs/permissions; the key and JWT never become runtime candidates.
-Supported OpenShell OAuth rotation uses the same attempt, replacement and
-validation semantics. The logical hook is specified here; an OAuth-shaped
-OpenShell bridge must still preserve grant, expiry, version and authentication
-evidence. No existing hook or compatible physical transport is claimed.
+For the MVP, OpenShell schedules GitHub renewal through an OAuth-compatible
+OCE issuer. The bridge must preserve evidence of the grant, owner epoch, attempt, material
+identity/version, expiry and authentication. The source schema, bridge protocol
+and physical transport are not yet qualified.
 
 ## Concrete caller flows
 
 | Caller               | Named API sequence and observable result                                                                                                                                                                                                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Static inference     | OCC `applySource` admits live SecretRef; Compute `configureRevision` → Sandbox `installEgress`. `capture` classifies inference; `forward` uses check 1 → `resolve` → `readCredentialInput`/eligible retention → check 2 → injection and safe response.                                                                                            |
-| Scoped GitHub        | OCC admits repository IDs/permissions and `configureRefresh`. Owner `issue` → `validateIssued` → durable commit. Each captured GitHub operation uses `forward` → `resolve` → `readWarm`; cold returns not_ready, without preparation.                                                                                                             |
+| Scoped GitHub        | OCC admits repository IDs/permissions and `configureRefresh`. In the background, OpenShell calls the OCE issuer; OCE exchanges and validates the token; OpenShell commits it. Each captured operation uses fresh check 1 → `resolve`/`readWarm` → fresh check 2 → send. Cold returns `not_ready` without preparation.                             |
 | Optional clone       | Compute observes exact attachment, `refreshStatus` and bounded required readiness; issues repository/execution delegation to bootstrap. Bootstrap uses `capture`/`forward` for every clone operation and returns [completion evidence](lifecycle.md#2-prepare-the-optional-repository). Compute owns the startup gate and cleanup.                |
 | Management discovery | Trusted OCC management service authenticates caller/user and obtains exact preparation Permit before access; `prepare` → inspect/reconcile if needed → capture/forward → fresh check 1 → warm resolve → check 2 after preparation → business provider send. Return sanitized metadata. Issuer's provider calls have separate owner authorization. |
 

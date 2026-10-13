@@ -235,11 +235,11 @@ separate designs.
 The check-to-send race and best-effort cancellation are accepted limits. These
 integration choices remain open:
 
-| Choice                                      | Evidence or constraint                                                                                                                               |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| First sender/custody transport              | Qualify execution bearer issuance, delivery and lifetime, bootstrap delegation and management identity. Identity fields and audiences are specified. |
-| GitHub lifecycle owner and issuer transport | Select one owner; preserve grant, attempt, material and expiry evidence.                                                                             |
-| First provider/operation slice              | Qualify DNS enforcement and Codex WebSocket boundaries or an HTTP/SSE path.                                                                          |
+| Choice                         | Evidence or constraint                                                                                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First sender/custody transport | Qualify execution bearer issuance, delivery and lifetime, bootstrap delegation and management identity. Identity fields and audiences are specified.      |
+| GitHub issuer bridge           | OpenShell owns renewal; qualify source schema, issuer authentication and transport, preserving grant, owner epoch, attempt, material and expiry evidence. |
+| Provider/operation support     | Qualify GitHub, static inference and DNS enforcement. Qualify Codex WebSocket boundaries or an HTTP/SSE path.                                             |
 
 Engineering must choose concrete deadlines, clocks and alert thresholds within
 these contracts. External authorization integration, identity exchange, horizontal

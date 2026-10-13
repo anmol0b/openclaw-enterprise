@@ -194,21 +194,40 @@ visibility. Alert channels and thresholds remain implementation choices.
 
 ### GitHub issuer bridge
 
-Prefer investigating OpenShell scheduling with the
-[CredentialIssuer](runtime-contracts.md#provider-semantics-and-issuer-boundary)
-hook: OCE authenticates the owner/epoch/attempt, maps the admitted repository grant,
-keeps signing custody, exchanges an App JWT and validates the actual returned
-permissions/repositories and expiry. Provider-required baseline permissions are
-normalized explicitly. Issuer returns only a trusted runtime candidate; it does
-not schedule a second loop.
+The MVP selects OpenShell's OAuth refresh mechanism to call an OCE-hosted
+[GitHub issuer](runtime-contracts.md#provider-semantics-and-issuer-boundary).
+OpenShell is the lifecycle owner: it schedules renewal and commits prepared
+installation tokens. OCE retains the App private key and GitHub-specific grant
+validation. The issuer does not run a second renewal loop.
 
-OpenShell's inspected OAuth path accepts a configured endpoint but its response
-parser uses relative expiry and a fallback when expiry is absent
-([source](https://github.com/NVIDIA/OpenShell/blob/4c1b16a4a104581fb0afe8675feff34f00cc2ca8/crates/openshell-server/src/provider_refresh.rs#L1966-L1983)).
-A conforming bridge needs authenticated grant correlation, material identity and
-trustworthy absolute expiry; fallback expiry is not evidence. Logical hook fields
-are specified; physical encoding and transport remain open. An OCE-owned lifecycle
-behind the same contracts is the alternative. Select one owner, never both.
+The proposed paths are separate:
+
+```text
+Background preparation: OpenShell refresher → OCE issuer → GitHub → OpenShell warm store
+Agent/bootstrap request: Capture → fresh OCC check → warm read → fresh OCC check → send
+```
+
+The bridge authenticates the owner and maps an opaque identifier to an
+OCC-admitted installation, repository set and permissions; callers cannot
+expand that grant. OCE signs an App JWT, exchanges it for an installation token,
+validates actual authority and expiry, and returns an OAuth-compatible token
+response. The App key remains in OCE; OpenShell receives only its issuer-call
+credential and the resulting token.
+
+The adapter must correlate the grant, owner epoch, issuance attempt, material
+identity/version and trustworthy expiry across the OAuth exchange and warm read.
+OpenShell's inspected parser uses relative expiry and a fallback when expiry is
+absent ([source](https://github.com/NVIDIA/OpenShell/blob/4c1b16a4a104581fb0afe8675feff34f00cc2ca8/crates/openshell-server/src/provider_refresh.rs#L1966-L1983));
+that fallback is not proof of validity. The source schema and bridge protocol
+require qualification; exact transport and encoding remain implementation
+choices. Agent/bootstrap reads never invoke the issuer or a refresh-capable
+retrieval. Refusal, temporary failure and uncertain issuance
+remain distinct; reconcile unknown effects without blind replay.
+
+An OCE-owned lifecycle remains a fallback behind the same contracts if the
+bridge cannot satisfy these requirements. It requires an explicit implementation
+decision and still must deliver GitHub in the MVP. One credential family has one
+owner at a time.
 
 ## 3. Resolve and forward
 
@@ -289,8 +308,8 @@ preserves its rationale.
 
 [The migration inventory](control-contracts.md#complete-legacy-disposition) covers
 all legacy methods and consumers. Implement admission/attempt state, migrate source
-and egress management, connect runtime checks/Resolver, qualify static and one
-dynamic path, then integrate Harness/optional clone before retiring old exports,
+and egress management, connect runtime checks/Resolver, qualify static inference
+and GitHub, then integrate Harness/optional clone before retiring old exports,
 composition and persistence coupling.
 
 | Area               | Required evidence                                                                                                                                                                                                                                                                                                                                                         |
@@ -315,8 +334,8 @@ qualifies request-path resolution. Dedicated Codex normally uses a
 HTTP/SSE fallback above applies to an initial `426` handshake and still needs
 connected OCE/OpenShell qualification.
 
-The Egress Proxy MVP qualifies its declared bounded provider slice. OCE 1.0 also
-requires static inference, GitHub preclone, Codex OAuth and custom dynamic paths.
+The Egress Proxy MVP qualifies static inference and GitHub, including the issuer
+bridge. OCE 1.0 also requires GitHub preclone, Codex OAuth and custom dynamic paths.
 Rotating OAuth may follow MVP; any slice using rotating inputs must already meet
 its concurrency/restart/recovery requirements. Source, fixture, installed-runtime
 and live-provider evidence support distinct claims; no-op CI and deployment

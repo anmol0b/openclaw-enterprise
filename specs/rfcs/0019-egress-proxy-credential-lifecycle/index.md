@@ -8,14 +8,14 @@ status: Proposed
 
 - **ID:** RFC-0019
 - **Created:** 2026-10-06
-- **Updated:** 2026-10-10
+- **Updated:** 2026-10-13
 - **RFC PR:** [#1530](https://github.com/openclaw/openclaw-enterprise/pull/1530)
 
 ## Problem and proposal
 
 Agents need provider access without receiving credentials, and OCE needs replaceable egress. Today `CredentialGatewayDriver` combines source management with attachments. The [static credential workflow](../../../docs/reference/credential-sources.md#update-a-source) copies values into the gateway, so a Secret change requires a source update and redeployment.
 
-Retire that Driver and introduce `EgressProxyDriver`; retain `SandboxDriver` networking and evolve `SecretDriver` and `CredentialRefreshDriver`. Define internal source control, forwarding, authorization, resolution and provider hooks. OpenShell is the first implementation to qualify, not a reason to defer these OCE contracts. All interfaces and field names here are proposed, not implemented exports.
+Retire that Driver and introduce `EgressProxyDriver`; retain `SandboxDriver` networking and evolve `SecretDriver` and `CredentialRefreshDriver`. Define internal source control, forwarding, authorization, resolution and provider hooks. For the MVP, OpenShell owns GitHub token renewal and calls an OCE-hosted issuer through its OAuth refresh mechanism. OCE holds the App key and validates the admitted grant. The source schema, bridge and interfaces require qualification. All interfaces and field names here are proposed, not implemented exports.
 
 <a id="roles-and-deployment"></a>
 
@@ -41,18 +41,18 @@ Sandbox networking and Egress are distinct contracts. One OpenShell backend can 
 
 ![Proposed credential sources and background preparation](assets/credential-architecture.svg)
 
-_The Token Service names the `CredentialRefreshDriver` responsibility; OpenShell may own the loop with an issuer hook. [Editable diagram](assets/credential-architecture.mmd) · [Configuration and warmup](lifecycle.md#1-configure-and-warm)_
+_The Token Service names the `CredentialRefreshDriver` responsibility; OpenShell owns the MVP GitHub loop and calls the OCE issuer. [Editable diagram](assets/credential-architecture.mmd) · [Configuration and warmup](lifecycle.md#1-configure-and-warm)_
 
 <a id="examples-and-startup"></a>
 
 ## GitHub and inference
 
-|           | GitHub App                                                                                                       | Static inference                                                      |
-| --------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Configure | Admit repository IDs and permissions.                                                                            | Admit a live SecretRef and inference grant.                           |
-| Prepare   | The owner exchanges an App JWT for a scoped installation token in the background and commits validated material. | Resolver reads the current Secret value, subject to retention policy. |
-| Use       | Resolver reads the exact warm grant; a cold request returns `not_ready` without issuance.                        | The same Resolver supplies the current or eligible retained value.    |
-| Change    | Ordinary renewal keeps eligible material usable.                                                                 | A live Secret change needs no source update or redeploy.              |
+|           | GitHub App                                                                                                        | Static inference                                                      |
+| --------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Configure | Admit repository IDs and permissions.                                                                             | Admit a live SecretRef and inference grant.                           |
+| Prepare   | OpenShell calls the OCE issuer, which exchanges an App JWT for a scoped installation token. OpenShell commits it. | Resolver reads the current Secret value, subject to retention policy. |
+| Use       | Resolver reads the exact warm grant; a cold request returns `not_ready` without issuance.                         | The same Resolver supplies the current or eligible retained value.    |
+| Change    | Ordinary renewal keeps eligible material usable.                                                                  | A live Secret change needs no source update or redeploy.              |
 
 Both use the request path below. Optional repository clone waits a bounded time for required warmth and fails closed by default; opt-out does not waive authorization. Compute and bootstrap clean up partial workspaces. See [repository preparation](lifecycle.md#2-prepare-the-optional-repository) and [Secret cutover](lifecycle.md#live-secret-cutover).
 
@@ -99,10 +99,10 @@ An authenticated, expressly authorized management caller may ask the same lifecy
 
 | Scope               | Decision                                                                                                                          | Evidence or follow-up                                                                    |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Egress Proxy MVP    | OpenShell first; qualify the declared provider and protocol slice.                                                                | [Qualification](lifecycle.md#implementation-discovery-and-qualification)                 |
+| Egress Proxy MVP    | OpenShell first; qualify static inference and GitHub, including the issuer bridge and optional clone.                             | [Qualification](lifecycle.md#implementation-discovery-and-qualification)                 |
 | OCE 1.0             | Include static inference, GitHub preparation, rotating Codex OAuth and custom dynamic paths, with safe concurrency and recovery.  | [Lifecycle](lifecycle.md#lifecycle-interface)                                            |
 | CI and local        | Fixtures and no-op egress support fast checks but do not prove enforcement or injection. Compose must report actual capabilities. | [Validation](security.md#required-validation)                                            |
-| Integration choices | Choose authenticated sender/custody transport, GitHub owner and issuer transport, and first qualified operation/protocol slice.   | [OpenShell join](lifecycle.md#implementation-discovery-and-qualification)                |
+| Integration choices | Choose authenticated sender/custody transport and the bridge correlation and warm-read integration.                               | [OpenShell join](lifecycle.md#implementation-discovery-and-qualification)                |
 | Later               | Independent backends, strong local development, loading and packaging, scale and HA need follow-up qualification.                 | [Integration and qualification](lifecycle.md#implementation-discovery-and-qualification) |
 
 The [migration inventory](control-contracts.md#complete-legacy-disposition) maps all eight legacy methods and consumers. Retire old exports and persistence coupling after migration and adapter parity; keep no alias. Prior art: [#924](https://github.com/openclaw/openclaw-enterprise/pull/924), [#1691](https://github.com/openclaw/openclaw-enterprise/pull/1691), [#1749](https://github.com/openclaw/openclaw-enterprise/pull/1749), [OCE #1785](https://github.com/openclaw/openclaw-enterprise/pull/1785), [OpenShell #4357](https://github.com/NVIDIA/OpenShell/pull/4357); see [qualification](lifecycle.md#implementation-discovery-and-qualification).
