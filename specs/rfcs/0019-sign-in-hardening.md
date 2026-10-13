@@ -2,257 +2,221 @@
 status: Proposed
 implementation_status: Implemented
 author: freeqaz
-status_note: "Retroactive record. Every decision below is already implemented on main (PRs 2026-09-28 to 2026-10-01). It records those decisions for human review; it is not accepted, and review may reopen any of them."
+status_note: "Retroactive record of changes landed on main from 2026-09-28 through 2026-10-01, with later corrections identified below. The combined design awaits human review. Review may reopen any decision."
 ---
 
-# Proposal: Human sign-in hardening
+# Proposal: When the controller will check a human sign-in password
 
 - **ID:** RFC-0019
 - **Created:** 2026-10-01
-- **Last updated:** 2026-10-13
-- **Source baseline:** `main` at `521549dff`. Every symbol and number below was read there; rechecked at `04d01d02e`, `bf67a4317` and `07590c64e`.
+- **Last updated:** 2026-10-15
 - **RFC PR:** [#856](https://github.com/openclaw/openclaw-enterprise/pull/856)
-- **Related:** [RFC-0007](0007-human-federated-sign-in/index.md) owns GitHub sign-in, the attempt,
-  receipt and session-key design, and the original sign-in admission section, which this record
-  supersedes for password and external sign-in. [RFC-0001](0001-oidc-sign-in.md) owns generic OIDC. Current
-  behavior: [authentication](../../docs/reference/authentication.md),
-  [external sign-in](../../docs/reference/authentication/external-sign-in.md).
 
 <a id="problem-and-decision"></a>
 
-## Summary
+<a id="summary"></a>
 
-PRs merged between 2026-09-28 and 2026-10-01 changed how people sign in. Each was reviewed on
-its own; no human has reviewed the combined design, which needs an auth design review. This
-record states what landed, why, and what it costs, so a reviewer can accept, change, or reopen it.
+## Decide when ten wrong guesses should block a correct password
 
-Password sign-in in both profiles uses one failure-counting limiter, keyed on email and (only
-behind a trusted proxy) client address. Spent budgets pace attempts instead of dropping them.
-Administrators and the recovery account are paced, never refused by sequential guessing. A
-browser that signed in before gets its own lane through a known-device cookie. Operators can
-limit password sign-in to the recovery account. External sign-in keeps RFC-0007's flow with
-tighter edges, and sessions from a removed or reconfigured provider end.
+A stranger makes ten wrong guesses in a minute for `emma@example.test`. Emma then types the
+**correct password** on a new laptop. The controller waits, replies `429` with `Retry-After`, and
+**never checks her password**. There is no administrator unlock for this limit. If Emma has no
+recognized browser or other sign-in method she can use, she can try after the minute resets, but
+someone can spend the next minute’s allowance too.
 
-## Context
+A browser we recognize gives Emma a separate allowance. For the designated recovery account, we
+can still check the password on a new laptop if there is room in the queue. Someone can occupy
+both slots and all sixteen waiting places. The person trying to recover has no guaranteed place.
 
-Before [#613](https://github.com/openclaw/openclaw-enterprise/pull/613), the password-only
-profile called Better Auth's server API directly, which skips its router limiter, so guessing
-was unlimited. An earlier fix (10 per minute per address and email) was reverted before launch
-because anyone who knew the only administrator's email could lock them out. The analysis
-behind the follow-ups named five threats: T1, per-email lockout of a known user; T2, crowding an
-administrator out of a paced lane; T3, budgets in memory per controller; T4, without a trusted
-proxy every browser behind the ingress shared one budget; T5, anyone could spend the recovery
-account's lane. Enabling GitHub or Google was not a mitigation: every account kept a password,
-under an older, harsher limiter.
+**Decision requested.** Keep that distinction, or change whose password we will check after ten
+failures. Refusing ordinary attempts limits guessing but lets someone who knows Emma's email
+keep her out. Pacing and checking every attempt instead would allow roughly 25 guesses a minute
+per email, about 36,000 a day. We merged the pieces between September 28 and October 1; no human
+has yet reviewed the policy as a whole. Please record the decision in
+[#856](https://github.com/openclaw/openclaw-enterprise/pull/856), including what Emma can do if
+the refusal continues and whether recovery needs a guaranteed place. Merging this record as
+`Proposed` leaves those decisions open.
 
-## Decision as landed
+This record replaces only [RFC-0007's sign-in admission section](0007-human-federated-sign-in/index.md#sign-in-admission).
+[RFC-0007](0007-human-federated-sign-in/index.md) still defines GitHub sign-in, browser receipts and session keys; [RFC-0001](0001-oidc-sign-in.md)
+defines OpenID Connect (OIDC). For operating instructions, use [password and session authentication](../../docs/reference/authentication.md)
+and [external sign-in](../../docs/reference/authentication/external-sign-in.md).
 
-### Password admission (both profiles)
+<a id="context"></a>
 
-`passwordFailureAdmission` in [`admission.ts`](../../apps/controller/src/auth/admission.ts),
-behind the `PasswordSignInAdmission` seam. [#727](https://github.com/openclaw/openclaw-enterprise/pull/727)
-moved the external-provider profile's `/oce/password` onto it from attempt-counting
-`keyedAdmission` and dropped that profile's global 4+1 password concurrency cap.
+<a id="decision-as-landed"></a>
+<a id="password-admission-both-profiles"></a>
 
-- **Lanes.** 10 failures per minute per email; 20 per client address, only when
-  `OCC_AUTH_TRUSTED_PROXY_CIDRS` resolves the address. In-flight attempts count, so concurrent
-  guesses cannot overrun a lane. Successes never spend budget, and a success in the shared lane
-  clears the email's failures, not the address's
-  ([#613](https://github.com/openclaw/openclaw-enterprise/pull/613),
-  [#695](https://github.com/openclaw/openclaw-enterprise/pull/695)).
-- **Refusals create nothing.** Admission checks existing entries before claiming any. A claim
-  never evicts an entry that is in flight or has spent budget this window, so flooding new keys
-  cannot reset someone's budget. The table holds 4,096 entries; when it is full of spent
-  entries, a new key goes to the slow lane and its password is still checked.
-- **Slow lane.** Past the budget, an attempt waits for one of two slots for its email (16 may
-  wait, 1,024 across all emails, 16 password checks at once) and holds the slot for a floor
-  that doubles from 1 s to 8 s. Only a reserved account's password is then checked. Every
-  other outcome is `429` with `Retry-After` after the same floor, so status and timing do not
-  reveal whether the email exists or is reserved. Reserved means an Installation administrator
-  (`passwordAdministrator`) or, with an external provider, the designated recovery account;
-  under `recovery-only`, only the recovery account.
-- **Audit.** Every password sign-in whose password is checked writes `authentication.login`; a
-  wrong password or unknown email is denied with `INVALID_CREDENTIALS` and no account. Audit
-  writes fail closed, ordinarily with `503`. A wrong password whose denial audit fails still
-  counts as a failure (`DenialAuditUnavailable`, `countsAsSignInFailure`), so an audit outage
-  cannot open unlimited guessing
-  ([#707](https://github.com/openclaw/openclaw-enterprise/pull/707) password-only,
-  [#738](https://github.com/openclaw/openclaw-enterprise/pull/738) guarded, via
-  `refusePassword` and `PASSWORD_DENIAL_AUDIT_UNAVAILABLE`). That failure is `503` within the
-  budget and when a full table sends the attempt to the slow lane. Once a reserved account's
-  budget is spent, `slowLane` answers it like any other wrong password there:
-  `SignInRateLimited` (`429`).
-- **Unstorable email** ([#1343](https://github.com/openclaw/openclaw-enterprise/pull/1343),
-  after this record's window): an email containing a NUL character or an unpaired surrogate is
-  refused inside admission with `400` `INVALID_REQUEST`, without a known-device read, an account
-  read or a password check. It spends the email's budget and is audited as `INVALID_CREDENTIALS`
-  in both profiles (`recordPasswordDenial` in the guarded one); a failed audit is
-  `DenialAuditUnavailable` as above. `isReserved` answers false for it, so a spent one gets the
-  slow lane's `429` without a lookup.
-- **Trusted proxy CIDRs** (#695, [#1599](https://github.com/openclaw/openclaw-enterprise/pull/1599),
-  [#1672](https://github.com/openclaw/openclaw-enterprise/pull/1672)): startup refuses an
-  `OCC_AUTH_TRUSTED_PROXY_CIDRS` entry with prefix `0`, a leading-zero prefix, or an IPv6 subnet
-  containing `::ffff:0:0/96`, which Node's `BlockList` would match against every IPv4 peer.
-  IPv4-mapped spellings of peers, hops and entries normalize to dotted IPv4, so equivalent
-  spellings share one address key (`client-address.ts`).
-- **Visibility** (#695). Without a trusted proxy, startup logs
-  `authentication.sign-in-limit-warning` (`TRUSTED_PROXY_NOT_CONFIGURED`) and Helm NOTES warn;
-  nothing fails, since a source-preserving load balancer needs no proxy. The first slowed
-  attempt per lane per minute logs `authentication.sign-in-limited` with the lane and a keyed
-  hash, never the email or address.
+## Follow Emma's attempt through the controller
 
-### Known-device exemption
+The password-only configuration calls Better Auth's server API directly, so its router limit
+never protected this path. With GitHub, Google or OIDC configured, the controller instead uses
+its private `/oce/password` endpoint to check a password and issue a session. Both paths now use
+[`passwordFailureAdmission`](../../apps/controller/src/auth/admission.ts). Admission decides whether
+to try the password; only a successful sign-in can establish a session.
 
-[`known-device.ts`](../../apps/controller/src/auth/known-device.ts)
-([#697](https://github.com/openclaw/openclaw-enterprise/pull/697),
-[#728](https://github.com/openclaw/openclaw-enterprise/pull/728),
-[#760](https://github.com/openclaw/openclaw-enterprise/pull/760)):
+| What the controller finds | What it does |
+| --- | --- |
+| Room in every applicable budget | Check the password. Allow ten failures per minute for the email **or** verified browser entry, and twenty for the client address when configured. Count in-flight attempts. Success clears this email's or browser's failures, never everyone else's at the address. |
+| A tracked budget is spent; ordinary account | Delay, then refuse with `429` and `Retry-After`. That header describes the budget window; it does not reserve Emma's next attempt or mean her password was wrong. |
+| A tracked budget is spent; reserved account | With room in the slow lane, check the password and wait out the delay. A correct password can work; a wrong one gets the same `429`, without spending next minute's budget. Reserve this path for an Installation administrator or the designated recovery user; in `recovery-only` mode, reserve it only for the latter. |
+| **No budget is exhausted, but the table has no room for a new key.** | If admitted to the slow lane, start the minimum-delay timer and check the password, even for an ordinary account. Hold the slot until both finish. A new key cannot evict an entry in use or one that recorded any failure in its current window, so filling the table cannot erase Emma’s limit. |
 
-- Every successful sign-in (external only when the account has a password) sets `__Host-occ_known_device` (`occ_known_device` when cookies are not Secure, as on an HTTP base URL): HttpOnly, `SameSite=Strict`, host-only, 90 days,
-  up to three `v2` entries. Each entry is a MAC over a hash of the email, the issue time and a
-  nonce, plus a second MAC binding it to the account's password state (user, password method,
-  that method's `authentication_version`; in the guarded profile only enrolled, enabled
-  accounts have a state). The cookie never carries the email and never authenticates.
-- A verified entry replaces the email lane with a per-entry lane of the same size and its own
-  slow-lane slots. The address lane still applies. A wrong password with a valid cookie is
-  `401` and spends that browser's lane.
-- Revocation: a password reset or account recreation revokes every earlier entry; a disabled
-  account's entries verify nothing while it stays disabled; rotating `OCC_AUTH_SECRET` revokes
-  all. The account's own `version` is excluded so attaching an identity does not strand a
-  browser.
-- Verification reads account state only after the entry's MAC matches the attempted email.
-  Those reads are bounded (`knownDeviceReads`): 30 per entry per minute and 2 active, 600 per
-  minute and 16 active per controller. A refused or failed read grants no exemption, and the
-  entry keys stay as extra constraints on the shared lane, so losing proof cannot reopen a spent
-  device budget.
+The slow lane doubles its minimum delay from one second up to eight. For one email, two attempts
+can hold slots and sixteen more can wait. Across emails, up to 1,024 attempts can hold or wait for
+slots, with at most sixteen account lookups or password checks running at once. We use the same
+delay floor and refusal for an unknown, ordinary or reserved email; this is not a claim that
+all response times are identical. [#727](https://github.com/openclaw/openclaw-enterprise/pull/727)
+removed the old global limit of four password attempts plus one recovery slot. The sixteen-check
+limit applies in the slow lane, not to password hashing across the controller.
 
-### Recovery-only password sign-in
+### What to look for when someone reports a refusal
 
-`OCC_AUTH_PASSWORD_SIGN_IN` (`passwordSignInPolicy`; Helm `auth.passwordSignIn`) is `all` by
-default or `recovery-only`, which requires GitHub, Google or OIDC
-([#723](https://github.com/openclaw/openclaw-enterprise/pull/723)). Under `recovery-only`,
-`/oce/password` answers every non-recovery email with the ordinary bad-credential refusal
-after hashing the password, without reading an account. `GET /api/auth/providers` reports
-`password: false` and the Console shows a **Recovery sign-in** link instead of the form.
-Startup warns (`EXTERNAL_IDENTITY_MISSING`) about enabled non-recovery accounts with no
-identity at a configured provider; it still starts.
+A password decision normally writes `authentication.login`. Wrong password and unknown email
+both yield `401`, spend budget, and record `INVALID_CREDENTIALS` without identifying an account.
+If we cannot audit that denial, we fail closed with `503` and still count the guess. The guarded
+endpoint signals this internally as `PASSWORD_DENIAL_AUDIT_UNAVAILABLE`. On the spent-budget
+reserved path, the caller instead gets `429` whether that denial audit succeeded or failed.
+An actual dependency failure, including a Better Auth server error, yields `503`
+(`DEPENDENCY_UNAVAILABLE`) and does not count as a wrong guess. See [the controller's error and
+budget handling](../../apps/controller/src/auth/index.ts).
 
-### External sign-in invariants
+Two input boundaries matter when reconciling counts. In the guarded configuration, a password
+outside 12–128 characters or an email longer than 254 yields `401` and spends budget without a
+login audit. An email containing NUL or an unpaired surrogate instead yields `400 INVALID_REQUEST`
+inside admission: both configurations count and audit the refusal without reading device or
+account state. It is never reserved; once its budget is spent, it gets the delayed `429`.
 
-RFC-0007 and RFC-0001 own the flow. These PRs tightened it:
+<a id="known-device-exemption"></a>
 
-- **Tab binding** ([#522](https://github.com/openclaw/openclaw-enterprise/pull/522), RFC-0007
-  M2): a two-minute receipt cookie plus `attemptId` is exchanged once for a `sessionKey`, and
-  `x-occ-session-key` can only narrow which cookie session a request uses.
-- **Receipt names its provider instance**
-  ([#844](https://github.com/openclaw/openclaw-enterprise/pull/844)): `signLoginReceipt` writes
-  `v: 2` with the provider ID; `verifyLoginReceipt` checks it before the session lookup or
-  consumption. A wrong-route refusal leaves the receipt usable at its own route; old unbound
-  receipts force a restart.
-- **Pending attempts** ([#625](https://github.com/openclaw/openclaw-enterprise/pull/625)):
-  State keeps at most 1,000 (`pendingAttemptCapacity`) and evicts the oldest instead of refusing
-  new starts.
-- **Lanes** (#727): start, callback and result each have 30 per minute and 4 active per key, 8
-  active per step. Behind a trusted proxy the key is the address; without one, callback and
-  result key on the browser's attempt or receipt cookie and start has only the active cap.
-- **Origin** ([#509](https://github.com/openclaw/openclaw-enterprise/pull/509),
-  [#647](https://github.com/openclaw/openclaw-enterprise/pull/647)): every unsafe
-  cookie-authenticated request without an API key needs the exact Console `Origin` and, when
-  present, `Sec-Fetch-Site: same-origin` (`verifyControllerRequest` →
-  `requireSessionMutationOrigin`). Sign-out, the result exchange and, since #647, provider
-  start apply the same gate. #647 also made the guarded adapter hide raw session rows from
-  listing and counting.
-- **Denial codes** ([#636](https://github.com/openclaw/openclaw-enterprise/pull/636)):
-  callbacks audit `PROVIDER_UNAVAILABLE` or `EXTERNAL_IDENTITY_REJECTED`. #636 also audited
-  `INVALID_ATTEMPT`; since [#1228](https://github.com/openclaw/openclaw-enterprise/pull/1228),
-  a callback that matches no pending attempt writes no audit row and is counted in
-  `occ_sign_in_unmatched_callbacks_total`. Since
-  [#1202](https://github.com/openclaw/openclaw-enterprise/pull/1202), a token endpoint that
-  refuses the configured client is `PROVIDER_UNAVAILABLE` (`client_rejected`), not a rejected
-  identity. Since [#1610](https://github.com/openclaw/openclaw-enterprise/pull/1610), an
-  authenticated identity attached to a disabled, enrolled account is refused with
-  `ACCOUNT_DISABLED` (`refuseDisabled`), audited with that account's `userId`, and the Console
-  gets `authReason=account-disabled`; this also applies to attempts started before the disable.
-  Only the person who just authenticated as that identity, in the browser bound to the attempt,
-  learns the account is disabled. An unattached or unenrolled identity, an attempt older than
-  another account change, and every password refusal (a disabled account's included) stay
-  generic. For GitHub, the membership check runs first.
-- **Provider removed or reconfigured**
-  ([#797](https://github.com/openclaw/openclaw-enterprise/pull/797)):
-  `PostgresHumanAuthentication.currentSession` checks, in its one query, that an external
-  session's provider instance (client ID digest, plus issuer for OIDC) is in
-  `externalProviderIds`; if not, it deletes the session and audits `authentication.session.end`
-  (`PROVIDER_NOT_CONFIGURED`) once. Password sessions and client secret rotation are unaffected.
-- **GitHub membership** ([#1231](https://github.com/openclaw/openclaw-enterprise/pull/1231),
-  after this record's window): optional `OCC_AUTH_GITHUB_ALLOWED_ORGS` and
-  `OCC_AUTH_GITHUB_ALLOWED_TEAMS` refuse a GitHub callback before the account lookup, audited
-  `MEMBERSHIP_REQUIRED` or `MEMBERSHIP_UNAVAILABLE`. Its design is draft
-  [#1229](https://github.com/openclaw/openclaw-enterprise/pull/1229), not this record.
+## Why Emma's familiar browser may still work
 
-## Lockout and denial-of-service trade-offs
+[`__Host-occ_known_device`](../../apps/controller/src/auth/known-device.ts) gives a browser its
+own ten-failure budget and slow-lane slots for this email. Emma still needs her password, and
+the address and controller limits still apply. Successful sign-in sets a host-only, HttpOnly,
+`SameSite=Strict` cookie for ninety days, with up to three `v2` entries. Without Secure cookies
+the name is `occ_known_device`. External sign-in marks the browser only if the account has a
+password; on the password-only path, failure to read account state skips marking, not sign-in.
 
-Who can keep whom out, after these changes. "New browser" means no valid known-device entry.
+Each entry authenticates an email hash, issue time and nonce, then separately binds the user,
+password method and `authentication_version`. The cookie contains no email address. Only a
+matching message authentication code (MAC) permits an account-state read. Each entry is limited
+to thirty reads a minute and two in progress. Across the controller the limits are six hundred a
+minute and sixteen in progress. Both limits apply.
+If proof is unavailable, shared admission applies *with* the signed entry's limits, so losing
+proof cannot replenish a spent browser budget.
 
-| Target                                                  | Attacker needs                                                                                                                        | Result                                                                                                                           |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Ordinary account, known browser                         | Spend the email lane                                                                                                                  | No effect while proof reads succeed                                                                                              |
-| Ordinary account, new browser (password-only, or `all`) | 10 failures per minute at the email, from anywhere                                                                                    | `429` for that minute, renewable (T1 remains)                                                                                    |
-| Administrator or recovery, new browser                  | About 18 concurrent attempts at the email                                                                                             | Crowded out of the slow lane; fewer only delays them (T2 remains)                                                                |
-| Administrator or recovery, known browser                | Spend the email lane                                                                                                                  | No effect: own lane and slots                                                                                                    |
-| Any known browser                                       | 600 proof reads per minute across about 20 MAC-valid entries, which only a signed-in user can mint                                    | Every known browser falls back to the shared lane for that minute (inferred from code, not tested)                               |
-| Everyone, no trusted proxy                              | Spray failures at about 4,096 distinct emails per minute from one source                                                              | Each attempt hashes a password; the table fills and new keys are paced by one shared floor (up to 8 s), still checked (inferred) |
-| External start                                          | Keep 8 starts active (one source without a trusted proxy, two addresses with one), or about 1,000 starts during one user's round trip | Other starts get `429`, or that user's attempt is evicted and must restart                                                       |
+Resetting the password or recreating the account invalidates old entries. Rotating `OCC_AUTH_SECRET`
+invalidates them all. In the guarded configuration only an enrolled, enabled account has password
+state. Disabling it suspends recognition; re-enabling it restores recognition if the password did
+not change. Attaching an external identity does not invalidate the browser. There is no operation
+to revoke just one browser's or one account's entries.
 
-Reserved accounts are paced, not refused: guessing continues at about 15 per minute per email
-past the budget so a stranger cannot keep them out sequentially. The per-email lane accepts T1
-for new browsers; without it a distributed attacker guesses each email freely.
+<a id="lockout-and-denial-of-service-trade-offs"></a>
+<a id="known-gaps-and-residual-risk"></a>
 
-## Alternatives considered
+## Where these protections run out
 
-- **Per-(address, email) limit with no bypass:** reverted before launch; locks out the only
-  administrator.
-- **Pace everyone, refuse no one:** removes T1 but allows about 36,000 guesses per email per day
-  and spreads T2 to every account.
-- **Require a trusted proxy in Helm:** rejected for valid source-preserving setups and existing
-  upgrades; warnings instead.
-- **Durable State-owned budgets (#557, #565):** drafts closed unmerged. They fix T3, not who can be locked out,
-  and add a database round trip to every sign-in. The seam remains.
-- **Bind known devices to the account version:** rejected; identity attach would strand browsers.
-- **Captcha, proof of work, passkeys:** out of scope for launch.
+These are consequences of the recorded limits, **not measured attack costs or availability promises**.
 
-## Known gaps and residual risk
+- **Recovery under contention.** Sequential guessing alone does not exclude a recovery holder on
+  a new browser. About eighteen simultaneous attempts to that email can occupy both slots and all
+  sixteen waiting places. A recognized browser avoids that email queue while proof reads succeed.
+- **Loss of browser recognition.** We infer that about twenty MAC-valid entries could spend the
+  six-hundred-read minute for everyone. One account holder can retain cookies from twenty sign-ins;
+  the three-entry limit is per cookie, not a limit on how many cookies exist.
+- **One address for an entire site.** With `OCC_AUTH_TRUSTED_PROXY_CIDRS` set, trust a forwarded
+  address only from a trusted socket peer. Otherwise, or for a malformed header, use the peer
+  itself. Missing the actual ingress peer in that list silently puts all its browsers in the same
+  twenty-failure budget. Log the first slowdown per key per minute as `authentication.sign-in-limited`,
+  with the lane and a keyed hash, never the address or email. Reject prefix zero, leading-zero
+  prefixes and IPv6 subnets covering `::ffff:0:0/96`; normalize IPv4-mapped addresses to one key.
+  An IPv6 client can still rotate addresses within a prefix.
+- **Guessing across emails or controllers.** With no trusted-proxy setting we warn
+  (`TRUSTED_PROXY_NOT_CONFIGURED`) and apply no address budget, preserving direct-source deployments.
+  We infer one source could try roughly 4,096 distinct emails a minute, fill the tracking table
+  and keep causing password checks on the shared-delay path. Budgets, the receipt ledger and
+  proof-read limits live in one controller's memory. Restart resets them; the recorded chart uses
+  one API Pod with `Recreate`.
 
-- T1, T2 and the inferred floods in the table above.
-- T3: budgets, the receipt ledger and proof-read limits live in one controller's memory. A
-  restart resets them; the chart runs one API Pod with `Recreate`.
-- No global cap on concurrent password hashing in the shared lane since #727.
-- Re-enabling an account restores entries issued before the disable if the password did not
-  change. There is no per-device or per-account revoke short of a reset or secret rotation.
-- Address keys hash the full address, so an IPv6 client can rotate within its prefix.
-- `recovery-only` strands accounts without an external identity; startup only warns.
-- #797 ends sessions on next use; an unused stale session never authenticates but stays until
-  it expires.
-- `recovery-only` gates new password sign-ins only. Existing password sessions keep working for
-  up to 8 hours (`session.expiresIn`), as does the former holder's after the recovery
-  designation moves; revoke or `purge-sessions` ends them
-  ([#891](https://github.com/openclaw/openclaw-enterprise/pull/891) documents this).
-- Evidence is source review and PostgreSQL integration tests in each PR. There is no live
-  GitHub App test. A dogfood install exercised OIDC sign-in against Keycloak and the #797
-  session end; the lockout trade-offs above have not been load-tested.
+<a id="alternatives-considered"></a>
 
-## Open questions for reviewers
+A limit on each (address, email) pair let a stranger lock out the only administrator; we reverted
+it before launch. Removing the email limit would let distributed guesses avoid it. State-owned
+budgets in [#557](https://github.com/openclaw/openclaw-enterprise/pull/557) and
+[#565](https://github.com/openclaw/openclaw-enterprise/pull/565) were closed, unmerged proposals.
+Durable accounting would add a database round trip and would still leave us to decide whose
+password to check. CAPTCHA, proof of work and passkeys were outside launch scope.
 
-1. Should `recovery-only` become the default when an external provider is configured?
-   **Implemented:** `all`.
-2. Should a missing trusted proxy fail installation when external sign-in is enabled?
-   **Implemented:** warn only.
-3. Are 90 days and three entries right for known devices, and should disabling revoke for good?
-   **Implemented:** 90 days, three entries; re-enable restores unchanged-password entries.
-4. Should the shared lane cap concurrent password hashing per controller?
-   **Implemented:** no cap.
-5. Is losing known-device exemptions under proof-read saturation acceptable, or should reads be
-   cached? **Implemented:** fail closed to the shared lane, no cache.
-6. Do we need an administrator unlock or durable budgets before running more than one
-   controller? **Implemented:** neither; one controller.
-7. Should ending a provider's sessions on reconfiguration require an operator step instead of
-   happening at restart? **Implemented:** automatic, audited once per session.
+<a id="recovery-only-password-sign-in"></a>
+
+## Recovery and external sign-in have different session rules
+
+**Restricting passwords affects new sign-ins.** `OCC_AUTH_PASSWORD_SIGN_IN` defaults to `all`.
+With an external provider, an operator may select `recovery-only` (Helm `auth.passwordSignIn`).
+The Console then offers *Recovery sign-in*, while `GET /api/auth/providers` reports `password: false`.
+For other emails, `/oce/password` hashes the submission and gives the ordinary bad-credential
+response without reading an account. Startup warns `EXTERNAL_IDENTITY_MISSING` but continues if
+an enabled non-recovery user lacks an identity at a configured provider; that user can be left
+with no sign-in path. Existing password sessions, even a previous recovery holder's, can last
+eight hours. Revoke them or use `purge-sessions` to end them earlier.
+
+<a id="external-sign-in-invariants"></a>
+
+**Changing an external provider affects existing sessions on use.** The tab exchanges its
+two-minute receipt and `attemptId` once for a `sessionKey`; `x-occ-session-key` narrows which cookie
+session a request can use. The `v: 2` receipt binds the provider ID before lookup or consumption:
+the wrong route leaves it usable at the right one; an unbound receipt requires a new start.
+[`currentSession`](../../packages/occ/src/state/human-authentication.ts) checks the provider's
+client ID digest and, for OIDC, issuer in the session query. If no longer configured, end the
+session and audit `PROVIDER_NOT_CONFIGURED` once, on use. An unused stale row can remain until
+expiry but cannot authenticate. Client-secret rotation and password sessions are unaffected.
+
+Start, callback and result allow thirty requests a minute and four active per key, eight active
+per step. Without a trusted proxy, start has only the active cap; callback and result use the
+attempt and receipt cookies, respectively. Eight occupied starts can block a newcomer (one source without a
+trusted proxy, two addresses with one). PostgreSQL keeps 1,000 pending attempts per Installation,
+evicting the oldest to admit a new one; a returning user may have to start again. Browser
+mutations, including sign-out, result exchange and provider start, require the exact Console
+`Origin` and, if sent, `Sec-Fetch-Site: same-origin` for unsafe cookie requests without an API key.
+The guarded adapter also hides raw session rows from list and count operations.
+
+Unmatched callbacks increment `occ_sign_in_unmatched_callbacks_total` without a denial audit.
+On a matched attempt, audit `EXTERNAL_IDENTITY_REJECTED` or `PROVIDER_UNAVAILABLE`; a provider
+refusing our client is the latter. The bound browser can distinguish `provider-unavailable` from
+`unavailable` inside OCE. An identity authenticated for a disabled, enrolled account can receive
+`account-disabled`; we audit `ACCOUNT_DISABLED` with the user ID. Unattached or unenrolled identities,
+attempts predating other account changes, and password refusals stay generic. GitHub's optional
+organization or team check can refuse before account lookup, with `MEMBERSHIP_REQUIRED` or
+`MEMBERSHIP_UNAVAILABLE`; its separate design is in
+[#1229](https://github.com/openclaw/openclaw-enterprise/pull/1229).
+
+<a id="open-questions-for-reviewers"></a>
+
+## What the authentication maintainer still needs to settle
+
+Start with Emma's renewable lockout and the lack of a guaranteed recovery slot. Then record
+which of these defaults to keep and which need a follow-up change.
+
+1. Default passwords to `all` or, when an external provider is configured, to `recovery-only`?
+2. Warn when no trusted proxy is configured, or refuse installation?
+3. Keep ninety-day, three-entry cookies and recognition after re-enabling an account?
+4. Add a controller-wide limit on concurrent password hashing outside the slow lane?
+5. Cache proof reads to preserve browser allowances under pressure, or keep the bounded fallback?
+6. Require an administrator unlock mechanism or durable budgets before adding a controller?
+7. Keep automatic session refusal on use after provider reconfiguration and restart, or require
+   a separate operator action?
+
+Source baseline: `main` at `521549dff`, reviewed through `07590c64e`; relevant controller and
+State files compared with `00bbc7cd9` on October 15. The original record cites the implementation
+PRs' PostgreSQL integration tests and an OIDC sign-in and provider-removal exercise with Keycloak.
+It reports neither a live GitHub App test nor load tests of these lockout scenarios.
+
+For the implementation and its tests, follow the change relevant to the decision:
+
+- Password budgets and denial accounting ([#613](https://github.com/openclaw/openclaw-enterprise/pull/613), [#695](https://github.com/openclaw/openclaw-enterprise/pull/695), [#707](https://github.com/openclaw/openclaw-enterprise/pull/707), [#727](https://github.com/openclaw/openclaw-enterprise/pull/727), [#738](https://github.com/openclaw/openclaw-enterprise/pull/738), [#1343](https://github.com/openclaw/openclaw-enterprise/pull/1343)).
+- Recognized browsers and bounded proof reads ([#697](https://github.com/openclaw/openclaw-enterprise/pull/697), [#728](https://github.com/openclaw/openclaw-enterprise/pull/728), [#760](https://github.com/openclaw/openclaw-enterprise/pull/760)).
+- Trusted address handling ([#1599](https://github.com/openclaw/openclaw-enterprise/pull/1599), [#1672](https://github.com/openclaw/openclaw-enterprise/pull/1672)).
+- Recovery policy and surviving password sessions ([#723](https://github.com/openclaw/openclaw-enterprise/pull/723), [#891](https://github.com/openclaw/openclaw-enterprise/pull/891)).
+- Browser origin, tab receipts, pending attempts and provider-bound sessions ([#509](https://github.com/openclaw/openclaw-enterprise/pull/509), [#522](https://github.com/openclaw/openclaw-enterprise/pull/522), [#625](https://github.com/openclaw/openclaw-enterprise/pull/625), [#647](https://github.com/openclaw/openclaw-enterprise/pull/647), [#797](https://github.com/openclaw/openclaw-enterprise/pull/797), [#844](https://github.com/openclaw/openclaw-enterprise/pull/844)).
+- Which callback failures the browser can distinguish ([#636](https://github.com/openclaw/openclaw-enterprise/pull/636), [#1202](https://github.com/openclaw/openclaw-enterprise/pull/1202), [#1228](https://github.com/openclaw/openclaw-enterprise/pull/1228), [#1231](https://github.com/openclaw/openclaw-enterprise/pull/1231), [#1610](https://github.com/openclaw/openclaw-enterprise/pull/1610)).
