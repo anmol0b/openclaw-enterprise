@@ -326,6 +326,21 @@ test("the controller selects explicitly registered Sandbox Drivers with closed f
       }),
     DriverSelectionError,
   );
+  // Compute renders Harness-local paths under a declared Harness HOME.
+  controller.registerDriver({
+    ...createSandboxDriver({ id: "declared-home" }),
+    harnessHome: "/sandbox/home",
+  });
+  for (const harnessHome of ["sandbox/home", "/sandbox//home", "/sandbox/../home", "/", 1]) {
+    assert.throws(
+      () =>
+        controller.registerDriver({
+          ...createSandboxDriver({ id: `invalid-home-${String(harnessHome)}` }),
+          harnessHome,
+        }),
+      DriverSelectionError,
+    );
+  }
   for (const hook of ["ensureNamespace", "provisionHarness", "cleanup"]) {
     assert.throws(
       () =>
@@ -460,7 +475,26 @@ test("a stored Installation or configured default Preset name follows the API Na
 });
 
 test("direct controller creates and renames apply the API Name rule", async () => {
-  const { controller } = createController();
+  // Provisioning authorizes its Namespace-level grants, Installation administration included,
+  // before it reads the plan, so the administrator needs that grant to reach the Name rule.
+  const { controller } = createController(
+    createIAMDriver({
+      roles: [
+        {
+          id: "role-installation-admin",
+          permissions: [{ action: "administer", resourceKind: "installation" }],
+        },
+      ],
+      bindings: [
+        {
+          id: "binding-installation-admin",
+          subjectKind: "identity",
+          subjectId: "principal-admin",
+          roleId: "role-installation-admin",
+        },
+      ],
+    }),
+  );
   const namespaceId = "ns_00000000-0000-4000-8000-000000000999";
   for (const name of namesOutsideTheNameRule) {
     const label = JSON.stringify(name);
@@ -1175,13 +1209,16 @@ test("deploy names the Agent service principal and the permission it lacks", asy
 });
 
 test("selected Sandbox Drivers fail closed for embedded Agents regardless of declared facets", async () => {
+  // Agent save refuses the pair every deployment refuses (finding 1117), with deployment's
+  // message; an Agent stored before the Sandbox Driver was selected still reads and deployment
+  // still refuses it.
+  const message =
+    "The selected Sandbox Driver supports only dedicated Harness execution; this Agent uses embedded execution. Set executionMode to dedicated.";
   for (const sandbox of [
     createSandboxDriver(),
     createSandboxDriver({ id: "partial-sandbox", facets: ["networking"] }),
   ]) {
     const { controller } = createController();
-    controller.registerDriver(sandbox);
-    controller.selectDriver("sandbox", sandbox.id);
     const namespace = await controller.createNamespace("principal-admin", {
       name: `Sandbox rejection ${sandbox.id}`,
     });
@@ -1195,19 +1232,51 @@ test("selected Sandbox Drivers fail closed for embedded Agents regardless of dec
       configurationId: configuration.id,
       executionMode: "embedded",
     });
+    controller.registerDriver(sandbox);
+    controller.selectDriver("sandbox", sandbox.id);
 
+    // An omitted executionMode is embedded.
+    for (const mode of [{ executionMode: "embedded" }, {}]) {
+      await assert.rejects(
+        controller.createAgent("principal-admin", {
+          namespaceId: namespace.id,
+          name: `Refused ${sandbox.id}`,
+          configurationId: configuration.id,
+          ...mode,
+        }),
+        { name: "ConfigurationHarnessError", message },
+      );
+    }
+    await assert.rejects(
+      controller.updateAgent("principal-admin", {
+        namespaceId: namespace.id,
+        agentId: agent.id,
+        configurationId: configuration.id,
+      }),
+      { name: "ConfigurationHarnessError", message },
+    );
+    const stored = await controller.getAgent("principal-admin", namespace.id, agent.id);
+    assert.equal(stored.executionMode, "embedded");
     await assert.rejects(
       controller.deployAgent(
         "principal-admin",
         { namespaceId: namespace.id, agentId: agent.id },
         resolveApprovedDevelopmentHarness,
       ),
-      ScopeViolationError,
+      { name: "ConfigurationHarnessError", message },
     );
     assert.deepEqual(
       await controller.transact((state) => state.revisions.listRevisions(namespace.id, agent.id)),
       [],
     );
+    // The update that fixes the pair saves.
+    const fixed = await controller.updateAgent("principal-admin", {
+      namespaceId: namespace.id,
+      agentId: agent.id,
+      configurationId: configuration.id,
+      executionMode: "dedicated",
+    });
+    assert.equal(fixed.executionMode, "dedicated");
   }
 });
 
