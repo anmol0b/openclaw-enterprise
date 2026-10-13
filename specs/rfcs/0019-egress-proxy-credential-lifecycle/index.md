@@ -56,11 +56,35 @@ _The Token Service names the `CredentialRefreshDriver` responsibility; OpenShell
 
 Both use the request path below. Optional repository clone waits a bounded time for required warmth and fails closed by default; opt-out does not waive authorization. Compute and bootstrap clean up partial workspaces. See [repository preparation](lifecycle.md#2-prepare-the-optional-repository) and [Secret cutover](lifecycle.md#live-secret-cutover).
 
+## Declare access, then bind the request
+
+Configuration maps **Agent → binding → source → backend/provider**, with an
+allowed grant. Capture binds the verified caller context and actual request to
+that declaration, not to a cached authorization or token value.
+
+| Declaration (illustrative, not public configuration syntax)                                    | Request behavior                                                             |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `build-agent → repo-reader → company-github → OpenShell/GitHub`; repository `123`, read access | A matching GitHub read selects it automatically when unique.                 |
+| `build-agent → inference → model-source → OpenShell/model provider`; approved model            | Inference uses the same capture/forward path with static resolution.         |
+| A second GitHub binding also matches the repository                                            | Configure an explicit binding selector; ambiguous automatic selection fails. |
+
+Explicit selection is a supported path through the same contracts. A configured
+placeholder or trusted integration identifies the binding; it cannot grant access,
+choose an arbitrary Driver or change scope. Invalid selection, denied authority or
+credential failure never falls back to another identity.
+See [selection rules](runtime-contracts.md#binding-selection).
+
+Trusted integrations capture once, handle refusal, then call
+`EgressForwarder.forward(operation)`. The Forwarder owns both checks,
+resolution, injection and response handling. A request-scoped SDK facade may wrap
+these calls; ordinary Agent clients neither orchestrate security calls nor receive
+tokens or material handles.
+
 <a id="authorization-and-forwarding"></a>
 
 ## One request
 
-1. **Capture:** Authenticate the caller and select the admitted route, grant and operation.
+1. **Capture:** Authenticate the caller; select the unique matching route automatically or through an explicit binding selector; capture the grant and operation.
 2. **Check:** OCC evaluates current authority before material access.
 3. **Resolve:** For a credentialed request, the Resolver selects static or warm dynamic material and creates a request-bound handle.
 4. **Check again:** OCC evaluates the actual operation and selected material identity and version, or explicit absence of material.

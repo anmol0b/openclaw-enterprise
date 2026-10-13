@@ -56,7 +56,9 @@ binding. Shared material reuse still requires explicit isolation admission.
 Dynamic roots go only to the lifecycle owner/issuer. Generic egress provisioning
 receives `SourceProjection`: key, schemaVersion, custody and input kind, with
 familyId for dynamic inputs; no Secret/root references. Cross-Namespace references,
-ambiguous routes, unsupported schemas and grants are refused before effects.
+unsupported schemas and grants are refused before effects. Bindings may overlap
+for explicit selection; capture must select one exact route. Admission refuses
+indistinguishable routes within a binding. See [binding selection](runtime-contracts.md#binding-selection).
 
 Provider registration supplies versioned closed Input, Grant and Classification
 schemas, validators, normalizers and trusted injection definitions. An admitted

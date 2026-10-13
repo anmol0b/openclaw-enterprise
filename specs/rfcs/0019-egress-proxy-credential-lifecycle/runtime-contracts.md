@@ -22,10 +22,10 @@ workload JSON cannot supply these identities.
 | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Caller`          | `agent`: Execution; `bootstrap`: Execution plus executorId, delegationId, repositoryId; `management`: the admitted Management context. All identifiers are immutable Ids.                                                                                                                                                                                                              |
 | `Peer`            | Authenticated channel handle, trusted sender Ref, identity evidence handle; both handles are issued by the transport verifier and bound to its audience, expiry and anti-replay state.                                                                                                                                                                                                 |
-| `Exchange`        | Transport-owned immutable request plus response sink, connection evidence and absolute deadline. No caller-provided function may receive material.                                                                                                                                                                                                                                     |
+| `Exchange`        | Transport-owned immutable request plus response sink, connection evidence, absolute deadline and optional `selection: Selection` (default `automatic`). No caller-provided function may receive material.                                                                                                                                                                              |
 | `Request`         | `method: HTTP method`, canonical HTTPS URL, ordered header name/value pairs, body representation below, connection `{address: IP, port: integer, tlsName: string, httpAuthority: string}`.                                                                                                                                                                                             |
 | `Body`            | `bounded`: sealed bytes and size limit; `stream`: sealed reader, registered operation-policy Ref, finite byte limit and grammar state. Both expose policy-relevant fields to OCC before dispatch; digest alone is insufficient.                                                                                                                                                        |
-| `Use`             | `{id: Id, caller: Caller, route: Route, request: Request, classification: Classification, capturedAt: UTC timestamp, deadlineAt: UTC timestamp}`                                                                                                                                                                                                                                       |
+| `Use`             | `{id: Id, caller: Caller, route: Route, request: Request, classification: Classification, selection: Selection, capturedAt: UTC timestamp, deadlineAt: UTC timestamp}`                                                                                                                                                                                                                 |
 | `Classification`  | Initial closed schemas: inference `generate{model: string}` or `list_models{}`; GitHub `repository{repositoryId: Id, action: clone\|read\|write}` or `list_repositories{installationId: Id}`; OAuth/API `{operationPolicy: Ref, action: string}` validated against that versioned policy's closed action list. Extensions use the registered provider schema, never arbitrary context. |
 | `OperationHandle` | Opaque runtime reference to sealed Use and response sink, bound to peer/sender and deadline; single-use dispatch.                                                                                                                                                                                                                                                                      |
 
@@ -38,12 +38,41 @@ Discovery operations use separately admitted policy and applicable management
 authority. Listing models or repositories requires no invented model/repository
 ID and cannot borrow broader authority from an Agent binding.
 
-Capture resolves the unique admitted Route and freezes the provider operation
-after permitted noncredential transformations. Streaming support pins all
-policy-relevant semantics and enforces the admitted grammar without buffering an
-unbounded body. A later frame that needs another decision is another operation;
-unsupported/opaque streams are refused. Runtime material injection cannot change
-the authorized operation. Changed content requires new capture and checks.
+### Binding selection
+
+`Selection` is `automatic` or `explicit{binding: Ref}`. The trusted transport
+maps a configured placeholder or integration selector to a binding Ref in the
+authenticated context. Missing selection means automatic. Malformed, conflicting
+or unknown explicit selectors are refused. Selection is untrusted intent, not
+identity or permission; its adapter-specific encoding must be qualified.
+
+Capture matches admitted routes using caller context, destination, method and
+provider-classified operation, including repository/model and relevant body. It
+uses configuration and request semantics; selection reads no credential or issues
+material.
+
+| Selection                                                                    | Result                                                                              |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Automatic; exactly one route matches                                         | Capture that route and its binding, or its explicit credential-free use.            |
+| Automatic; zero or multiple routes match                                     | Refuse; multiple matches return `ambiguous_route`. No priority or first-match rule. |
+| Explicit binding; exactly one matching route uses it                         | Capture that route; validate context, current generations and operation.            |
+| Explicit binding is invalid, foreign or mismatched, or several routes remain | Refuse without trying another binding or a credential-free route.                   |
+
+A selector cannot grant authority, choose an arbitrary Driver, widen a grant or
+change scope.
+Errors disclose no foreign binding inventory. Both paths use the same checks,
+resolution and forwarding; denial, unavailable material or a cold token never
+causes identity fallback.
+Control selectors are removed before provider dispatch and cannot be smuggled
+through conflicting authentication fields.
+
+Capture freezes the verified context, selection, request and operation after
+permitted noncredential transformations. Streaming support pins policy-relevant
+semantics and enforces the admitted grammar without buffering an unbounded body.
+A later frame needing another decision is another operation; unsupported/opaque
+streams are refused. Injection cannot change the authorized operation. Changed
+content requires new capture and checks. The handle binds no token value or cached
+authorization; rotation is resolved at use.
 
 ## Two policy checks and common resolution
 
