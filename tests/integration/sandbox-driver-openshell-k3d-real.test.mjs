@@ -1200,6 +1200,12 @@ function createIntegrationSandboxDriverFactory(
           context,
         ).harnessStatus(context);
       },
+      async workspaceNodePeerLabels(context) {
+        const endpoint = existingEndpointForNamespace(context);
+        return await delegate(undefined, context.namespace.name, endpoint).workspaceNodePeerLabels(
+          context,
+        );
+      },
       async readSandboxLogs(context, request) {
         const endpoint = existingEndpointForNamespace(context);
         return await delegate(undefined, context.namespace.name, endpoint).readSandboxLogs(
@@ -2074,6 +2080,8 @@ async function prepareProductionInstallation(
     pauseWorker,
     resumeWorker: startWorker,
     provisioningFailure: (revisionId) => createSandboxDriver.provisioningFailures.get(revisionId),
+    waitForAgentWorkerCompleted: (agentId, revisionId) =>
+      assertWorkerCompleted({ pool: observerPool, events, namespaceId, agentId, revisionId }),
     diagnoseAgentRevision: (agentId, revisionId) =>
       writeWorkerCompletionDiagnostics({
         pool: observerPool,
@@ -3974,13 +3982,24 @@ async function createSecondNativeAgent(topology) {
     assert.equal(observed.status, 200);
     return observed.data.activeRevisionId === deployed.data.id ? true : undefined;
   });
+  // Activation publishes the revision before the deployment worker finishes its
+  // Gateway rollout. Use the same completion boundary as Agent A's setup.
+  await topology.waitForAgentWorkerCompleted(agent.id, deployed.data.id);
   const sandbox = await waitForSandbox(topology.placement, deployed.data);
   const harnessPod = await waitForProviderHarnessPod(topology.placement, deployed.data);
-  await assertProviderOwnedHarness(topology.placement, deployed.data, sandbox, harnessPod);
+  // Native Harnesses request no projected identity. OpenShell retains the namespace
+  // gateway's Agent A ServiceAccount; Agent B remains isolated by Gateway authority.
+  await assertProviderOwnedHarness(
+    topology.placement,
+    deployed.data,
+    sandbox,
+    harnessPod,
+    openShellAgentName(topology.agent.id),
+  );
   const gatewayPod = (await resources("pods", topology.gatewayPlacement)).find(
     (pod) =>
       pod.metadata.labels?.["openclaw.dev/workload-role"] === "gateway" &&
-      pod.metadata.labels?.["openclaw.dev/agent-id"] === agent.id,
+      pod.metadata.labels?.["openclaw.dev/agent"] === agent.id,
   );
   assert.ok(gatewayPod, "Agent B must have its own live Gateway");
   assert.notEqual(gatewayPod.metadata.uid, topology.gatewayPod.metadata.uid);
@@ -4038,9 +4057,21 @@ async function assertNativeAuthorityChain(context, topology, positive) {
     "unexpected upstream setup TTL: review the live lane timeout instead of shortening authority",
   );
   const peer = await createSecondNativeAgent(topology);
+  const adminB = await connectNativeAdministrator(context, peer);
+  const peerNodeSecret = await resource(
+    "secret",
+    "workspace-node-" + hash(peer.agent.id) + "-" + hash("harness:openclaw"),
+    peer.placement,
+  );
+  const peerNodeId = Buffer.from(peerNodeSecret.data.deviceId, "base64").toString();
+  assert.ok(peerNodeId.length > 0);
+  // Sandbox readiness precedes native node enrollment. Observe the Gateway's real
+  // connection before exercising workspace operations; do not retry those mutations.
+  await waitFor("native Agent B workspace node connected", async () =>
+    (await adminB("node.describe", { nodeId: peerNodeId })).connected === true ? true : undefined,
+  );
   await assertNativeOpenClawWorkspaceFiles(peer);
   const peerTurns = await requestNativeOpenClawTurns(context, peer);
-  const adminB = await connectNativeAdministrator(context, peer);
   nativeAuthorityTrace(context, "positive-native-workspace-and-successive-turns", { agents: 2 });
 
   const deviceIdentity = createProbeDeviceIdentity();
