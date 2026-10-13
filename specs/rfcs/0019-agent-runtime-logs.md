@@ -7,288 +7,222 @@ status_note: "Retroactive record. The design below is implemented on main (PRs #
 
 # Proposal: Agent runtime status and log reads
 
-- **ID:** RFC-0019
+- **ID on this branch:** RFC-0019. Before merge,
+  [use the current base to renumber](../../docs/contributing/specifications.md#files-and-numbering)
+  this proposal, its file, index entry and links.
 - **Created:** 2026-10-01
-- **Last updated:** 2026-10-13
+- **Last updated:** 2026-10-15
 - **RFC PR:** https://github.com/openclaw/openclaw-enterprise/pull/854
-- **Implementation:** [#696], [#711], [#726], [#730], [#737], [#739], [#741], [#742], [#745],
-  [#747], [#793], [#807], [#811]. Follow-ups: [#863], [#869], [#876], [#879], [#896],
-  [#928], [#933], [#939], [#967], [#969], [#973], [#1096], [#1102], [#1108], [#1187],
-  [#1354], [#1362], [#1371], [#1591], [#1896], [#1918], [#1922], [#1934], [#1938], [#1946],
-  [#1981], [#1994], [#2076], [#2089], [#2110], [#2139], [#2147], [#2153], [#2274]
-- **Related:** [Default production observability](0012-production-observability.md) (the
-  Collector boundary), [Agent access](0010-agent-access.md) (native admin audience),
-  [RFC-0001](0001-oidc-sign-in.md) (sign-in provider outages)
-- **Source baseline:** `main` at `07590c64e`. Symbols below were checked there.
 
 <a id="problem-and-decision"></a>
 
-## Summary
+## Read the container that just exited
 
-An Agent administrator can see why a deployed Agent version crashes, restarts or stops
-serving, without cluster access. OpenClaw Control Plane (OCC) exposes two routes: runtime
-status (Pods, containers, restarts, Pod Events, log sources, Harness Sandbox state) and
-one bounded, redacted page of log text per request, surfaced in the console's Logs tab
-and `occ agent runtime` / `occ agent logs`. Sources are the Gateway and Agent Pods'
-containers and, for OpenShell Harnesses, the sandbox's policy decisions. OCC stores no
-log text; the Collector gained only the bounded additions below. Every log view and
-download is audited, as kind `access`, before any log text is read. A delegable
-`read_logs` Agent permission grants log text without full administration.
+An Agent keeps restarting. The person on call can run `occ agent runtime AGENT_ID` to see
+the last exit and restart count, then `occ agent logs AGENT_ID --source agent --previous`
+to ask for that instance’s output. Reading the current container would show the _next_
+attempt. Waiting through one more restart can put the useful output beyond reach. Before
+[#696], getting those lines meant obtaining cluster access and using `kubectl`.
 
-Step-by-step behaviour is in the
-[runtime logs flow](../../docs/flows/agent-runtime-logs.md).
+**Decision requested.** Keep a separately authorized, audited way to read recent runtime
+text in the console and CLI, without building a central log archive. The implementation
+landed before this RFC. We need a human decision on the access and disclosure defaults
+below, particularly who may read across redeployments and whether a diagnostic that can
+silently miss lines is sufficient. Record any required change against the implementation;
+merging a description cannot narrow an existing permission.
 
-## Motivation
+OpenClaw Control Plane (OCC) records who opened the view
+_before_ reading log text. If that write fails, the reader gets `503` and OCC reads no text.
+OCC stores no log text, but the reader can download what it returns. Filtering can leave
+a secret, a reply or tool output visible. Grant `read_logs` to someone trusted with that
+possibility, not simply to everyone who can see whether an Agent is healthy.
 
-Before [#696], finding a failing Agent's cause (a bad model key, a crash loop, a blocked
-egress request) needed `kubectl`; the bundled Collector strips text by design.
+<a id="design"></a>
 
-## Decision as landed
+## From a reader’s permission to the first page
 
-### Routes and tiers
+```mermaid
+sequenceDiagram
+    actor Reader
+    participant OCC as OpenClaw Control Plane
+    participant Audit as Access audit
+    participant Source as Runtime log source
+    Reader->>OCC: Open a log view for this Agent
+    Note over OCC: Authorize reader, then resolve source (may list Pods)
+    OCC->>Audit: Record who opened which view, without log text
+    alt Audit write fails
+        OCC-->>Reader: 503, no log text read
+    else Audit write succeeds
+        OCC->>Source: Read a bounded window
+        Source-->>OCC: Raw lines
+        OCC-->>Reader: Sanitized page and signed cursor (may omit lines silently)
+    end
+```
 
-| Route (`GET`, under `…/agents/:agentId/deployments/:deploymentId`) | Grants                                                                         |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| `/runtime`                                                         | Agent `operate` + `read`, revision `read`                                      |
-| `/runtime/logs`                                                    | Agent `read_logs` (or `administer`) + Agent `read`, any revision of that Agent |
+This is the implemented order for opening a view. OCC authorizes every poll but audits
+admission once per view. The [runtime logs flow](../../docs/flows/agent-runtime-logs.md)
+traces the requests. In the example above, a delegated reader may be allowed to run
+`occ agent logs` without permission to run `occ agent runtime`.
 
-`OpenClawController.describeAgentRuntime` and `readAgentRuntimeLogs`
-([packages/occ/src/index.ts](../../packages/occ/src/index.ts)) own the decisions;
-`runtimeLogTarget` resolves the revision inside the exact Agent and Namespace.
-`authorizeRuntimeLogRead` tries `read_logs` first. It falls back to `administer` only when
-no Restriction applies to `read_logs`, so a `read_logs` Restriction blocks an
-administrator too. [#745] dropped the revision `read` requirement for log text so a
-delegated reader keeps access across redeploys; status still needs it.
-`RuntimeLogLimiter` gates both routes after authorization ([#1187]): a per-principal,
-per-Agent token bucket (2/s, burst 10, else `429`) and 16 concurrent Driver reads per API
-replica (else `503 RUNTIME_LOGS_UNAVAILABLE`).
+1. **Authorize this Agent.** Both routes are under `…/agents/:agentId/deployments/:deploymentId`.
+   For `GET /runtime`, require Agent `operate` and `read`, plus `read` on the revision. For
+   `GET /runtime/logs`, require Agent `read` and either `read_logs` or qualifying `administer`.
+   The [controller](../../packages/occ/src/index.ts) resolves the revision within the
+   exact Agent and Namespace. It tries `read_logs` first and considers `administer` only if
+   no [Restriction](../../migrations/0041_restriction_read_logs.sql) applies to `read_logs`.
+   Under the [IAM contract](../../packages/contracts/src/index.ts), no action implies
+   `read_logs`, and `read_logs` implies no other action. An administrator can _grant_ it;
+   bootstrap does not grant it ([#737], [#739]). Text access follows the Agent across
+   revisions without a separate revision grant ([#745]).
+2. **Limit the read, then resolve the source.** After authorization, both routes allow
+   two tokens per second, burst ten, per principal and Agent; exhaustion returns `429`.
+   Each API replica admits up to 16 concurrent reads, then returns `503 RUNTIME_LOGS_UNAVAILABLE`.
+   OCC audits an access denial without spending a token ([#1187]). Resolving a container
+   can involve listing Pods before the view audit. The ordering guarantee concerns the
+   first read of _text_, not the first contact with Kubernetes.
+3. **Record admission, then ask for text.** OCC writes an `access` audit,
+   `openclaw.agents.runtime_logs.view` (or `.download` for each download), with the
+   admitting action, source, Pod, container, `previous` and tail, never the text.
+   The row shows who opened which view, not every line they received. A different Pod,
+   container or `previous` selection opens another view. A restart or new UID under the
+   same Pod name continues this one. OCC authorizes each poll; expiry starts another
+   audited view. Status reads are not audited.
+4. **Return only the sanitized page.** The [HTTP handler](../../apps/controller/src/http/runtime-logs.ts)
+   accepts `source` (`gateway`, `agent`, `sandbox`), `pod`, `container`, `previous`,
+   `tailLines` (1–1000), `sinceSeconds`, `cursor`, `download` and `minLevel`. It returns
+   [fixed errors](../../apps/controller/src/http/errors.ts), never Driver or cluster error text.
 
-`read_logs` ([packages/contracts/src/index.ts](../../packages/contracts/src/index.ts)) is
-orthogonal for authorization: it implies nothing and nothing implies it. For IAM grant
-coverage only, an `administer` grant covers a `read_logs` delegation. Bootstrap does not
-grant it ([#737]). Migration
-[`0041_restriction_read_logs.sql`](../../migrations/0041_restriction_read_logs.sql) widened
-the Restriction action CHECK so such a Restriction can be stored ([#739]).
+### What the runtime can actually provide
 
-The log query (`AgentRuntimeLogsQuery`) is closed: `source` (`gateway`, `agent`,
-`sandbox`), `pod`, `container`, `previous`, `tailLines` (1 to 1000), `sinceSeconds`,
-`cursor`, `download`, `minLevel`. Failures map to fixed `RUNTIME_LOGS_*` codes
-([apps/controller/src/http/errors.ts](../../apps/controller/src/http/errors.ts)); Driver
-and cluster error text never reaches a client.
+**Kubernetes.** Cluster roles cannot distinguish one Agent’s logs from another’s. Both
+Helm charts default `agentRuntimeLogs.enabled` to true, granting the tenant API, Gateway
+observer and execution roles `get` on `pods/log` and `get,list` on `events` ([#967]). Turning
+the switch off makes both routes return `501` before authorization, disclosing the setting.
+The roles retain `get,list` on `pods` and `get` on `pods/proxy`.
 
-### Sources and Driver contract
+The Driver resolves revision labels, Pod ownership and the declared container. Status
+covers up to eight Pods per role, 16 main and init containers per Pod ([#1994]), and the
+newest 100 Pod Events ([#1938]). Events name the container. The CLI prints Events and Harness status, the console exposes
+failure `code` on collapsed rows, and status reports the current termination if available,
+otherwise the prior one ([#747], [#1946]). A settled volume-binding retry is suppressed
+once the Pod has a node ([#1354]). Status rejects invalid or offset timestamps
+([#2139], [#2153]); log timestamps accept kubelet offsets and preserve precision ([#1934]).
+Docker and SSH omit the optional runtime methods. Driver-owned logging returns `501`.
 
-- `ComputeDriver.describeAgentRuntime?` and `readAgentRuntimeLogs?` return raw lines. Only
-  the Kubernetes Driver implements them; Docker and SSH omit them, and
-  `runtimeLogging: "driver"` gets `501`. The Kubernetes Driver lists at most 8 Pods per
-  role by label, up to 16 main and init containers per Pod ([#1994]), and each Pod's
-  newest 100 Events ([#1938]). A log read re-checks Pod ownership and the container, reads
-  `pods/log` (1 MiB limit, timestamps), then re-reads the Pod to detect a replaced
-  instance; if the Pod is gone, the requested UID and restart count stand. Any `400` on a
-  `previous` read, or on a container still being prepared, yields an empty page ([#1922]).
-- Timestamps: in runtime status, `validRuntimeDescription` rejects malformed, impossible
-  or offset values, so status becomes unavailable rather than showing a different instant
-  ([#2139], [#2153]). In log lines, the Driver converts kubelet's numeric offsets to UTC
-  without losing precision ([#1934]). The OpenShell client refuses an impossible
-  `since_time` ([#2147]).
-- `SandboxDriver.readSandboxLogs?` ([#726]) calls OpenShell's read-only `GetSandboxLogs`
-  through a reader that exposes only that method. The source is listed only when the
-  selected Sandbox Driver provisioned the revision. OpenShell `NOT_FOUND` (absent, still
-  provisioning, or concealed by Workspace membership) becomes
-  `RUNTIME_LOGS_SANDBOX_NOT_FOUND` and never says which.
-- For a dedicated OpenShell Harness, status also carries `harness` from
-  `SandboxDriver.observeHarness`: `running`, `starting`, `lost` (OCC will not restart it,
-  [#2076]) or `unknown`. `HARNESS_RESTARTING` adds the last exit code and restart number
-  ([#2089]).
-- Helm `agentRuntimeLogs.enabled` (default `true`, in both charts) grants `pods/log get`
-  and `events get,list` to the tenant API, Gateway observer and execution roles ([#967]).
-  Off, both routes answer `501`; the roles keep `pods get,list` and `pods/proxy get`.
+For the opening example, the CLI chooses the first main container and has no container
+flag. The Driver requests timestamped `pods/log` with a 1 MiB limit, then checks the Pod
+again for replacement. If it is gone, the requested UID and restart count stand. Any
+Kubernetes `400` on a _previous_ read becomes an empty page, so an empty result does not
+establish that the process wrote nothing. On a _current_ read, [#1922] deliberately asks
+for logs even if status still says `ContainerCreating`. Only a never-started container (no restart, container ID or prior termination)
+and kubelet’s matching `400 BadRequest` naming that Pod, container and `ContainerCreating` or
+`PodInitializing` become an empty page. Stale status cannot hide output already available.
 
-### Sanitization: one chokepoint
+**OpenShell.** Here `source=sandbox` means policy and supervisor activity, not Harness
+stdout or stderr. OCC offers it only for a revision provisioned by the selected Sandbox
+Driver, using `sandbox:read` and a client exposing only `GetSandboxLogs`. Impossible `since_time` values are rejected ([#726], [#2147]).
+“Not found” also covers provisioning or concealment by Workspace membership. Dedicated
+Harness status distinguishes running, starting, lost (OCC will not restart it), unknown,
+and a restart with last exit code and restart number ([#2076], [#2089]). Reading Harness
+output would require attach and `sandbox:write`; this path does not escalate to it.
+The 2000-line buffer disappears on gateway restart, push drops are inferred, and CONNECT
+allows lack a policy generation. Existing tests use synthetic lines and loopback gRPC.
 
-`sanitizeRuntimeLogChunk` and `sanitizeSandboxLogLines`
-([packages/occ/src/runtime-logs/sanitize.ts](../../packages/occ/src/runtime-logs/sanitize.ts))
-are the only producers of the branded `SanitizedRuntimeLogRecord`. The JSON serializer
-and the download writer
-([apps/controller/src/http/runtime-logs.ts](../../apps/controller/src/http/runtime-logs.ts))
-accept only that type.
+### What can reach the reader
 
-- **Classify by allowlist.** Kept: wrapper events with per-event fields; OpenClaw JSON
-  console records with fixed keys (without a `subsystem`, only at warn or error, since
-  below that it is a `runtime.log` write such as a chat reply, [#869]); Codex tracing
-  records; plain text up to 4 KiB. A Codex record keeps its message only for reviewed
-  targets and fixed formats; otherwise it reads `Codex message withheld` ([#928], [#969]). Payload keys such as
-  `prompt`, `content`, `messages`, `body` and `headers` are never kept. Other JSON,
-  including Codex JSON-RPC and pretty-printed JSON ([#742]), is withheld and counted.
-- **Redact every kept string.** In container text, PEM blocks are masked across lines and
-  pages ([#741]); sandbox messages get only the single-string PEM rule. Also masked: auth
-  and cookie headers, JWTs, known token prefixes, cloud keys, URL userinfo, query values,
-  credential-named key/value pairs, `Bearer` tokens, and 40+ character runs that are hex
-  or base64 mixing upper case and digits. Argv credentials (`-u user:pass`, `-p pass`) are
-  masked first ([#869]). Replacements are `[redacted:<pattern>]`.
-- **Content labels.** Container lines are labelled `operational`, sandbox lines
-  `activity`; nothing is labelled `content` (the serializer throws on it). Labels do not
-  guarantee that no chat content remains (see Known gaps).
-- **Bounds.** 32 KiB in and 8 KiB out per line, at most 1000 lines, 10 s per request.
-  Since [#1981] the 512 KiB response limit covers the serialized page, cursor and
-  envelope; the reader returns a fitting prefix, not a maximal one.
-- Pod Event messages have node, image, Secret and ConfigMap names masked in standard
-  kubelet and scheduler shapes.
-- The console and `occ agent logs` show invisible or direction-changing characters in kept
-  text as escapes such as `\u202e` ([#1362], [#1371]).
+[One sanitizer boundary](../../packages/occ/src/runtime-logs/sanitize.ts) supplies both JSON
+and download. It labels container records `operational` and Sandbox records `activity`;
+the serializer rejects a `content` label. That is a check on classification, not a guarantee
+that the body is free of conversation or credentials.
 
-### Views, cursors and audit
+- Keep recognized wrapper fields and OpenClaw console keys. Without a subsystem, retain
+  only warning or error, because lower levels can carry chat replies ([#869]). Unrecognized
+  Codex tracing text becomes `Codex message withheld` ([#928], [#969]). Drop payload keys
+  such as `prompt`, `messages`, `body` and `headers`; count withheld structured runs, including
+  multiline JSON and Codex JSON-RPC ([#742]). Plain text can still contribute up to 4 KiB.
+- Redact retained strings, including argv credentials, auth and cookie headers, JWTs, token
+  prefixes, cloud keys, URL credentials and query values. Long-token heuristics cover
+  particular hex or mixed-case-and-digit base64 shapes of at least 40 characters. Short or
+  unfamiliar secrets can survive, as can prompt or tool fragments in text, Sandbox
+  `cmd_line` or `url`. PEM masking spans container lines and pages, but only one string at
+  a time in Sandbox messages ([#741]). Mask infrastructure names in standard Kubernetes
+  Events; console and CLI escape invisible or direction-changing characters ([#1362], [#1371]).
+- Accept up to 32 KiB per input line, emit up to 8 KiB, and bound a read to 1000 lines and
+  ten seconds. The 512 KiB response limit includes envelope and cursor. Measure a prefix
+  that fits; do not promise the largest possible prefix ([#1981], [#2270]). Apply
+  `minLevel` _after_ sanitizing and signing the cursor. Unknown levels, gaps and withheld
+  counts survive. A sparse page does not trigger a deeper read to fill it. The CLI offers
+  `--level` and rejects an explicit zero or subsecond `--since` ([#807], [#2110]).
 
-A page carries a cursor ([cursor.ts](../../packages/occ/src/runtime-logs/cursor.ts)),
-HMAC-signed (not encrypted), bound to principal, Agent, revision and source, and valid
-for 1 h. Clients treat it as opaque and poll about every 2 s (the CLI with
-`tailLines=1000`). Continuity is rebuilt from re-reads; the
-[flow](../../docs/flows/agent-runtime-logs.md#3-read-one-page) has the steps. The
-_frontier_ is the newest delivered timestamp; a _checkpoint_ is a signed record of the
-raw Driver window a cut page came from, so the next poll continues inside it.
+### What following can miss
 
-Resume guarantees:
+Polling about every two seconds avoids a held kubelet connection per viewer and repeats
+authorization. It rereads overlapping windows, not a durable sequence. The
+[signed cursor](../../packages/occ/src/runtime-logs/cursor.ts) is not encrypted. It binds
+principal, Agent, revision and source; mismatch returns `400`. The CLI follows with `tailLines=1000`. The same principal can
+replay the cursor for up to an hour. Version 2 uses 96-bit keyed hashes under a cursor-secret
+subkey, so the reader cannot test guesses about a secret line offline. A verified
+version 1 cursor expires into a newly audited view ([#2274]).
 
-- A delivered line is not shown again, except after a visible reset, which may replay.
-- Loss the API can see becomes a `gap`: `stream_replaced` (restart or new Pod UID),
-  `window_exceeded` (usually more than `tailLines` lines between polls, or one over-long
-  line skipped, [#1102], [#1108]), `cursor_expired`, `truncated`, or `buffer_lost`.
-- Not guaranteed: when position is unproven, container lines at the frontier can be
-  dropped with no gap (below).
+For containers, reread two seconds of overlap. At the last delivered timestamp, remember
+how many lines were delivered, whether the count is complete, and up to 16 line hashes
+([#1896], [#1918]). If ordered timestamps, the complete count and hashes establish position,
+skip exactly that count. Otherwise identical new lines can be suppressed _without a gap_,
+potentially every new line at that instant once there are more than 16. A response-size
+cut saves the raw-window position and masking state. A Driver byte cut normally resumes
+by time and reports truncation; skipping an overlong line reports `window_exceeded`.
 
-Per source:
+For Sandbox, reread five seconds of overlap and consume up to 48 remembered hashes once
+each. After a response-size cut, verify a keyed hash of the observed window before using
+the saved position. Both sources can flag `stream_replaced`, `window_exceeded`,
+`cursor_expired`, `truncated` or `buffer_lost`, as applicable. A reset can repeat lines;
+an identical replacement can be undetectable. See [Read one page](../../docs/flows/agent-runtime-logs.md#3-read-one-page)
+for the algorithm. A quiet follow is not evidence that nothing happened.
 
-- **Container.** A resume reads `sinceSeconds` plus 2 s of overlap (the client has no
-  `sinceTime`). The cursor stores the frontier, the count of lines delivered at it,
-  whether that count is complete, and the last 16 of their hashes ([#1896], [#1918]). When
-  the re-read proves position (complete count, the group's start re-read, ordered times,
-  hashes matching the run's end), the first _count_ lines at the frontier are skipped
-  whatever their text. Otherwise hashes decide: until time advances,
-  a line repeating delivered text is dropped unless the count was complete, and past 16
-  lines at one instant every new line there is dropped. Only a response-limit cut creates
-  a checkpoint ([#1981]); a 1 MiB Driver cut alone gives `truncated` and resumes by time.
-  PEM and withholding state from undelivered lines carry forward.
-- **Sandbox.** OpenShell batches lines, so a resume reads 5 s behind the newest delivered
-  line and consumes one stored hash per re-read line (up to 48): repeats and late lines
-  are delivered. There is no 1 MiB read or checkpoint; ring loss is `buffer_lost`.
+## Decisions a human reviewer still owns
 
-A quiet view resumes from its previous read ([#933], [#939], [#973]).
+The implemented answers below are open to review. If one is unacceptable, identify the
+permission, runtime or Collector change needed, rather than recording a stronger promise here.
 
-A view is audited once, after the Pod listing and before any log text is read, as
-`openclaw.agents.runtime_logs.view` (or `.download` per download) with kind `access`.
-It records the admitting action (`read_logs` or `administer`) and the source, Pod,
-container, `previous` and tail, never text. A different Pod, container or `previous`
-starts a new view; a restart or new Pod UID under the same
-name continues it. An expired cursor starts a new, audited view. If the audit write
-fails, the request returns `503` with no content. Other polls are re-authorized but not
-re-audited. Status reads are not audited, like diagnostics.
+| Choice | Implemented default and its consequence |
+| --- | --- |
+| Enable the cluster permission by default? | Yes. OCC and the Driver, rather than cluster RBAC alone, enforce the Agent boundary. |
+| Who can read across redeployments? | Agent `read` plus `read_logs` or qualifying `administer`, without revision `read`. Delegate through the Namespace IAM Role API; there is no log-only share in the console. |
+| What must the audit prove? | Admission of each view and download. It does not reconstruct which lines the reader saw. |
+| Is best-effort follow sufficient? | Yes for recent diagnostics, including sparse level-filtered pages and possible silent loss. A complete incident record would need a different source and retention decision. |
+| What if Sandbox activity is insufficient? | The read-only path stops there. Filing the missing OpenShell capabilities upstream remains open. |
+| May operational message text reach the logging backend? | Yes, in the narrow cases below. Backend retention and access are a separate disclosure boundary. |
 
-### Failure surfacing and noise ([#747], [#793], [#807])
+[Production observability](0012-production-observability.md) owns the Collector. Gateway
+`logs.tail` cannot diagnose a down Gateway; using Loki as the source would require retaining
+text the Collector normally strips. The [Harness wrapper](../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts)
+also removes expected Codex stderr noise unless `RUST_LOG` starts at debug or trace. At
+the recorded baseline its filters matched 0.158 shapes, while the image had moved to
+0.163.0-alpha.2 ([#2029]); renamed records could let noise through. Startup probes preserve
+a bounded failure cause, including provider usage limits ([#1096], [#2289]).
 
-- Runtime Events carry `container`; `occ agent runtime` prints Events and the Harness
-  Sandbox state; the console shows a record's `code` on the collapsed row. A terminated
-  container reports its current termination, otherwise the prior one ([#1946]). Since
-  [#1096], failed model probe events keep a closed `runtimeFailureCause`.
-- Status drops the PVC binding-conflict `FailedScheduling` retry once the Pod has a node
-  ([#1354]).
-- The Harness wrapper pipes Codex stderr through `CODEX_STDERR_FILTER_HELPER`
-  ([runtime-entrypoints.ts](../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts)).
-  Unless `RUST_LOG` starts at `debug` or `trace`, it drops INFO span lifecycle records
-  (except the `turn` span's `new`/`close`) and a fixed list of idle or expected lines
-  ([#876]).
-- `minLevel` is a server-side floor applied after the page is read, sanitized and its
-  cursor signed; unknown-level lines, gaps and withheld counts are always kept. The CLI
-  has `--level` and refuses an explicit zero or sub-second `--since` ([#2110]).
+Collector `codex.turn` and `codex.tool_call` bodies are fixed. `codex.operational` retains
+short message text only for `codex_app_server` targets and two fixed retries, excluding
+credential words and argv credentials; `gateway.startup_failed` follows those rules.
+Failed startup phases retain `occ.code`. Gateway settings overrides export a warning
+without attributes, and sign-in provider outage warnings use four fixed-vocabulary
+attributes ([#806], [#811], [#863], [#879], [#896]). Operators upgrading the Collector
+must refresh its configuration Secret.
 
-### Collector export ([#793], [#811], [#863], [#879], [#896])
+## Implementation and source boundary
 
-RFC-0012's Collector boundary is unchanged, apart from these bounded additions:
+The initial slices ([#696]–[#811]) merged September 30–October 1, 2026. Follow-ups through
+[#2274] merged by October 13. This is a retrospective proposal, not an acceptance or
+deployment record. The original source baseline was `07590c64e`, with keyed cursors at
+`84755c0ab`. A selective comparison to `main` at `00bbc7cd9` on October 15 also found the
+page-sizing and startup-probe changes ([#2270], [#2289]); it was not a runtime test.
+Related decisions: [Agent access](0010-agent-access.md) and [sign-in](0001-oidc-sign-in.md).
 
-- `codex.turn` and `codex.tool_call` have fixed bodies. A `codex.operational` body keeps
-  Codex's message only for `codex_app_server` targets and two fixed retry messages, and
-  only as short plain text with no credential words or argv credentials ([#879]); other
-  Codex warnings are dropped ([#863]). `gateway.startup_failed` follows the same rules.
-- A failed `runtime.startup_phase` keeps its cause as `occ.code` ([#863]).
-  `runtime.gateway_settings_overridden` is exported as WARN with no attributes ([#896]).
-- `authentication.provider-unavailable-warning` ([#806]) keeps four fixed-vocabulary
-  attributes.
-
-## Security and threat model
-
-| Threat                             | Control as landed                                                                                                                                                                                                                                                                                                                           |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A reader sees another Agent's logs | Exact-Agent grants; the Driver reads only Pods carrying the revision's labels and re-checks them and the container. RBAC cannot separate Agents, so this check carries the weight.                                                                                                                                                          |
-| Credentials in output              | Allowlist classification, then pattern redaction. PEM state survives container page cuts. Canary tests run planted credentials through the real handler and download. Cursor line and window hashes are 96-bit HMACs under a subkey of the cursor secret, so readers cannot test guesses offline ([#2274]); a verified `v1` cursor expires. |
-| Chat content in output             | Payload keys dropped; Codex protocol output and subsystem-less OpenClaw records below warn withheld; Codex messages keep text only for reviewed targets and formats. Kept operational and plain text can still carry fragments (see Known gaps).                                                                                            |
-| Forged or rebound cursors          | HMAC binding to principal, Agent, revision and source; mismatch is `400`. The same principal may replay a cursor within its hour.                                                                                                                                                                                                           |
-| Unaudited reads                    | Audit before any log text is read; audit failure means no content.                                                                                                                                                                                                                                                                          |
-| Lateral cluster actions            | Log reads add only read grants: `pods/log get`, `events get,list`, OpenShell `sandbox:read`.                                                                                                                                                                                                                                                |
-| Resource abuse                     | Byte, line and time bounds, plus the token bucket and the concurrency cap.                                                                                                                                                                                                                                                                  |
-
-The `501` switch runs before authorization, so a principal with no grants learns only
-whether the feature is on. The rate and concurrency limits wrap only the Driver reads
-([#1187]): every denial is refused and audited, and spends no token.
-
-## Rationale and alternatives
-
-- **Gateway `logs.tail` RPC.** Rejected: needs a live Gateway; misses crash loops.
-- **Read from Loki or another log store.** Rejected for text: the Collector strips bodies
-  and OCE keeps no store.
-- **Streaming (SSE).** Deferred. Polling reuses request authorization and holds no kubelet
-  connection per viewer, at the cost of the resume machinery.
-- **`administer` only.** Slice 1 used it, following the native admin precedent;
-  `read_logs` lets log reading be delegated.
-- **Audit as `mutation`.** Slice 1 did this; [#737] moved views and downloads to `access`.
-- **`RUST_LOG` to quiet Codex.** It cannot drop span events alone.
-- **Client-side level filtering only.** Debug lines filled the page first ([#807]).
-
-## Known gaps and residual risk
-
-- Redaction is pattern-based. Opaque tokens with no known prefix, key name or `Bearer` can
-  still appear when under 40 characters or not credential-shaped (for example, lower case
-  and digits only).
-- Content labels are not a guarantee. Kept text can carry fragments of prompts, replies or
-  tool output: plain text up to 4 KiB, OpenClaw records with a `subsystem` (any level) or
-  at warn or error, messages from reviewed Codex targets, and sandbox `cmd_line` and `url`.
-- Following is not lossless. Identical replacement windows are unobservable, and resets
-  may replay lines ([#1981]). When a container cursor cannot prove its position, repeated
-  frontier lines are dropped with no gap and are lost once time advances.
-- Harness stdout and stderr inside an OpenShell sandbox are not readable without attach
-  (`sandbox:write`). This needs an upstream read-only RPC.
-- Sandbox decisions often show policy generation "unknown": OpenShell does not stamp it on
-  CONNECT allows. The 2000-line ring is lost on gateway restart, and push drops are
-  inferred, not reported. Sandbox tests use synthetic lines and loopback gRPC, not a live
-  OpenShell.
-- Kubernetes keeps only the current and previous container instance.
-- `occ agent logs` has no container flag; it reads the default first main container.
-- The Codex stderr filter is keyed to Codex 0.158 shapes; the image ships 0.163.0-alpha.2
-  since [#2029]. A rename lets noise back rather than hiding other lines.
-- Rate and concurrency limits are per API replica.
-- Operators must refresh the Collector config Secret on upgrade to get the export changes.
-
-## Open questions for reviewers
-
-1. Should `agentRuntimeLogs.enabled` default to on? **Implemented:** yes.
-2. Should `administer` keep admitting log text? **Implemented:** yes, unless a `read_logs`
-   Restriction applies.
-3. Should log text cover every revision while status needs revision `read`?
-   **Implemented:** yes ([#745]).
-4. Is one audit row per view enough? **Implemented:** yes.
-5. Should Codex message text be exported? **Implemented:** yes, as listed above.
-6. Should `minLevel` read more lines to fill the page? **Implemented:** no; a page can show
-   fewer lines than requested.
-7. Is a best-effort follow acceptable without a backend sequence number, given visible
-   resets and silent frontier drops? **Implemented:** yes; no sequence was added.
-8. Should the OpenShell gaps above be filed upstream? **Implemented:** not yet.
-9. Should the console offer a log-only share? **Implemented:** no; only the Namespace IAM
-   Role API grants `read_logs`.
-
-## Delivery history
-
-Slices 1 to 3 ([#696] to [#811]) landed on 2026-09-30 and 2026-10-01, with hardening
-through 2026-10-05 and resume, budget, container and timestamp follow-ups from 2026-10-09
-to 2026-10-12. [#2274] (2026-10-13) keyed cursor hashes; `v1` cursors expire. [#1591]
-and [#1213] only moved code.
+For the implementation rationale, see CLI and download ([#711]), fixtures and policy
+provenance ([#730]), and Harness noise filtering ([#793], [#876]). Follow behavior changed
+with quiet-view resume ([#933]), byte limits and bursts ([#939], [#973]), and oversized
+lines ([#1102], [#1108]). The console ([#1213]) and CLI ([#1591]) later separated log
+presentation from their other commands and views.
 
 ## References
 
@@ -353,3 +287,6 @@ and [#1213] only moved code.
 [#2147]: https://github.com/openclaw/openclaw-enterprise/pull/2147
 [#2153]: https://github.com/openclaw/openclaw-enterprise/pull/2153
 [#2274]: https://github.com/openclaw/openclaw-enterprise/pull/2274
+
+[#2270]: https://github.com/openclaw/openclaw-enterprise/pull/2270
+[#2289]: https://github.com/openclaw/openclaw-enterprise/pull/2289
