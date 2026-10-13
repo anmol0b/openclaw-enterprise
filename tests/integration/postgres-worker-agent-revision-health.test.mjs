@@ -7,12 +7,13 @@ import { waitFor } from "../helpers/wait-for.mjs";
 import { createWorkerRevisionFixtures } from "../helpers/postgres-worker-revision-fixture.mjs";
 import { repositoryAttempts } from "../helpers/postgres-worker-revision-support.mjs";
 
-// Worker health, readiness, leases and outages. Withdrawal, deployment and dispatch cases are
-// in postgres-worker-agent-revision.test.mjs; repository sessions, Agent stop and deletion, and
-// Namespace teardown are in postgres-worker-agent-revision-teardown.test.mjs; exclusive
-// replacement and refused candidates are in the -replacement sibling, a refused candidate's stop
-// and its wait in the -refused-stop and -refused-wait siblings, and redeploys whose predecessor
-// stop yields in the -yielded-redeploy sibling. The lane runs the revision files at once.
+// Worker health, readiness, leases and outages. Deployment and dispatch cases are in
+// postgres-worker-agent-revision.test.mjs, credential-source withdrawals in its
+// -credential-sources sibling; repository sessions are in its -teardown sibling, and Agent stop
+// and deletion and Namespace teardown in its -stop sibling; exclusive replacement and refused
+// candidates are in the -replacement sibling, a refused candidate's stop and its wait in the
+// -refused-stop and -refused-wait siblings, and redeploys whose predecessor stop yields in the
+// -yielded-redeploy sibling. The lane runs the revision files at once.
 
 const { setup, cleanup } = createWorkerRevisionFixtures(import.meta.url);
 after(cleanup);
@@ -61,6 +62,50 @@ test(
       // Release Compute before the registered owner teardown joins its worker.
       release.resolve();
     }
+  },
+);
+
+// Finding 1209: a file hung 22 minutes in teardown, past its job's timeout, naming nothing.
+// Node's test timeout does not cover after hooks, and pg's pool.end() waits for every
+// checked-out client, so one client a failed test never released hung the file. Each teardown
+// step now has a limit: the stuck step is named, and the database drop still runs, ending the
+// leaked session.
+test(
+  "worker fixture teardown names a pool that never ends and still drops the database",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (context) => {
+    // This test runs the teardown itself and expects it to fail, so the fixture registers its
+    // after hooks with this stand-in; the fallback runs them only if the test fails first.
+    const hooks = [];
+    let leaked;
+    let disposed = false;
+    context.after(async () => {
+      leaked?.release(true);
+      if (!disposed) {
+        for (const hook of hooks) {
+          await Promise.resolve()
+            .then(hook)
+            .catch(() => {});
+        }
+      }
+    });
+    const fixture = await setup(
+      { after: (hook) => hooks.push(hook) },
+      { disposeLimitsMs: { "pool end": 1_000 } },
+    );
+    leaked = await fixture.observerPool.connect();
+    // A terminated session errors twice (the server's notice, then the closed socket).
+    const terminated = new Promise((resolve) => leaked.on("error", resolve));
+
+    disposed = true;
+    await assert.rejects(fixture.database.dispose(), {
+      message: "revision fixture teardown: pool end did not finish within 1000 ms",
+    });
+    // The drop (WITH (FORCE)) ended the leaked client's session, which nothing else would.
+    const ended = await Promise.race([terminated, delay(10_000, undefined, { ref: false })]);
+    assert.ok(ended instanceof Error, "the database drop ended the leaked connection");
+    leaked.release(true);
+    leaked = undefined;
   },
 );
 
