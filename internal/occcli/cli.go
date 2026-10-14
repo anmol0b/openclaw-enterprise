@@ -606,7 +606,7 @@ func (app *application) credentialSourceCommand() *cobra.Command {
 		&updateFile,
 		"file",
 		"",
-		"JSON document with replacement secrets; omit to re-send the current Secret values (refused for oauth2-refresh-token: put a new sign-in's refresh token in a new Secret)",
+		"JSON document with Secret inputs; required for refresh sources (issuer-rotated fields need a different Secret ID from the last committed handoff); omit only for static sources to re-send current values",
 	)
 
 	rotate := &cobra.Command{

@@ -1,18 +1,17 @@
 ---
 created: "2026-09-26"
-updated: 2026-10-13
-last_updated_session: authoring-run/01a136d4-3550-7042-834c-cf11f51f41f2
+updated: "2026-10-14"
+last_updated_session: authoring-run/92488d54-b44d-449b-b76a-5ac69c9965d2
 ---
 
 # Credential source lifecycle Flow
 
 ## Overview
 
-An authorized caller registers a Namespace Secret with the Credential Gateway,
-binds it to an Agent, deploys, updates or withdraws it, and deletes the source.
-The gateway holds Secret values; OCC stores metadata and references. Admission
-freezes identity in the AgentRevision; the worker passes the live record to Compute.
-[OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md) covers attachment and readiness.
+An authorized caller registers, binds, deploys, updates, withdraws and deletes a
+credential source. OCC stores metadata; the gateway holds values. Admission freezes
+identity; Compute receives the live record.
+[OpenShell provisioning](openshell-sandbox-provisioning.md) owns attachment and readiness.
 
 ## Entry Points
 
@@ -98,18 +97,18 @@ labels, UID, and key before decoding it. A Driver without `withValue` returns `5
 `packages/occ/src/index.ts:abandonCredentialRegistration`,
 `apps/controller/src/drivers/credential-gateway/openshell.ts:registerSource`
 
-The transaction inserts `registering` source and Secret-reference rows. The
-OpenShell provider name derives from the source ID. Compute's `resolveSandboxNamespace`
-supplies the Sandbox placement. OCC calls `registerSource` with a 30-second timeout; the
-Driver checks existing provider ownership, ensures the source's profile, and
-creates the labeled provider. It rechecks ownership on a creation collision; the
+The transaction inserts `registering` source and Secret-reference rows. Compute's
+`resolveSandboxNamespace` supplies placement. OCC calls `registerSource` with a
+30-second timeout. The Driver checks ownership, ensures the profile and creates
+the labeled provider named from the source ID. Creation collisions recheck ownership;
 gateway calls are not atomic.
 
 For terminal `failed` or `absent` results, `abandonCredentialRegistration`
 removes the provider and record, retaining a `deleting` record if removal fails.
 Thrown calls always retain `deleting` after cleanup: a timed-out create may still
 land, requiring another DELETE. Success commits `ready` and the mutation audit
-together. A failed commit or process exit leaves `registering`, ineligible for
+together; refresh types also [commit handoff IDs and release references](credential-source-refresh.md).
+A failed commit or process exit leaves `registering`, ineligible for
 binding or admission but deletable. If concurrent DELETE already removed the
 record, OCC repeats remote removal and returns `409`.
 
@@ -211,7 +210,8 @@ References and success audit commit together. Failure after the gateway call rol
 back references, leaves newer gateway values for a repeated request to converge,
 and records a `failure` audit. `absent` or `failed` returns `503`. OpenShell rejects
 empty values because `UpdateProvider` merges them; only subsequently started
-processes receive updates.
+processes receive updates. Refresh types use the
+[explicit handoff and preserved ID guard](credential-source-refresh.md#4-update-and-rotation).
 
 ### 9. Withdraw a source from an Agent
 
@@ -311,6 +311,8 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 03:10: Release refresh bootstrap references while preserving last-committed Secret-ID rejection. (authoring-run/92488d54-b44d-449b-b76a-5ac69c9965d2 - b749f9e2b992f16169b69a3695a257239196b991)
 
 - 2026-10-13 20:07: Check provider ownership before profile updates. (authoring-run/01a136d4-3550-7042-834c-cf11f51f41f2 - 146c80ef66b5860cb9bea296d2574156468a103c)
 

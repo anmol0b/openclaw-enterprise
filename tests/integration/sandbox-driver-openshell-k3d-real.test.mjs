@@ -2956,6 +2956,23 @@ async function registerRefreshSources(request, namespaceId, tokenEcho, keycloak,
     // A refresh source is ready only once the gateway has minted its first token.
     assert.equal(source.data.status.state, "ready");
     assert.equal(source.data.status.refresh.state, "ready", JSON.stringify(source.data.status));
+    assert.deepEqual(
+      source.data.secrets,
+      {},
+      "successful refresh registration releases bootstrap references",
+    );
+    for (const reference of Object.values(secrets)) {
+      const removed = await request("DELETE", `/namespaces/${namespaceId}/secrets/${reference.id}`);
+      assert.equal(removed.status, 204, JSON.stringify(removed.error));
+    }
+    if (type === "oauth2-refresh-token") {
+      const replay = await request(
+        "PATCH",
+        `/namespaces/${namespaceId}/credential-sources/${source.data.id}`,
+        { secrets },
+      );
+      assert.equal(replay.status, 409, "deleted bootstrap ID still refuses issuer-rotated resend");
+    }
     return {
       id: source.data.id,
       type,
@@ -2997,7 +3014,7 @@ async function registerRefreshSources(request, namespaceId, tokenEcho, keycloak,
       "TOOL_SPARE_TOKEN",
       "/oauth-spare",
       keycloakServiceClient,
-      { client_secret: clientSecret },
+      { client_secret: await secret(keycloak.clientSecret) },
     ),
     secret,
   };
@@ -3119,7 +3136,7 @@ async function assertRefreshCredentialSources(topology) {
   assert.equal(reauthorize.state, "failed", JSON.stringify(reauthorize));
   assert.equal(reauthorize.recoveryAction, "reauthorize");
 
-  // An update whose mint fails is a 503. OCC keeps naming the last material that minted, and
+  // An update whose mint fails is a 503. OCC retains its last committed handoff IDs internally, and
   // the source keeps reporting the failure for the owner to act on.
   const beforeFailedUpdate = await request("GET", sourcePath(refreshToken));
   assert.equal(beforeFailedUpdate.status, 200, JSON.stringify(beforeFailedUpdate.error));
@@ -3136,11 +3153,26 @@ async function assertRefreshCredentialSources(topology) {
 
   // New material from a fresh sign-in restores minting through the regular update API.
   const reconfiguredAt = Math.floor(Date.now() / 1000);
+  const reauthorizedSecret = await refreshSources.secret(await keycloak.signInRefreshToken());
   const resigned = await request("PATCH", sourcePath(refreshToken), {
-    secrets: { refresh_token: await refreshSources.secret(await keycloak.signInRefreshToken()) },
+    secrets: { refresh_token: reauthorizedSecret },
   });
   assert.equal(resigned.status, 200, JSON.stringify(resigned.error));
   assert.equal(resigned.data.status.refresh.state, "ready");
+  assert.deepEqual(resigned.data.secrets, {});
+  const released = await request(
+    "DELETE",
+    `/namespaces/${namespaceId}/secrets/${reauthorizedSecret.id}`,
+  );
+  assert.equal(released.status, 204, JSON.stringify(released.error));
+  const refusedResend = await request("PATCH", sourcePath(refreshToken), {
+    secrets: { refresh_token: reauthorizedSecret },
+  });
+  assert.equal(
+    refusedResend.status,
+    409,
+    "reauthentication handoff keeps its last-committed ID guard",
+  );
   // Reconfiguring starts a new OpenShell authorization epoch, which revokes the running
   // Sandbox's stable handle, so the reference requires a redeploy. A token minted before the
   // update can stay cached in the Sandbox and remains a valid JWT until it expires; a token

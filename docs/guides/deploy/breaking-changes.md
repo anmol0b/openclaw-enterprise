@@ -1,17 +1,23 @@
 # Breaking-change notices
 
-OpenClaw Enterprise (OCE) is pre-alpha and has no stable release, so a newer
-main can refuse or break an Installation that an older build created. Each
-change like that gets an entry here: what breaks, who is affected, how to tell,
-and the steps. Before an upgrade, read every entry dated after the source commit
-you run now, here, in the [earlier notices](breaking-changes-archive.md), in the
-[notices before 2026-10-11](breaking-changes-before-2026-10-11.md) and in the
-[notices before 2026-10-10](breaking-changes-before-2026-10-10.md),
-then follow the [upgrade checklist](upgrade-checklist.md) and
+OpenClaw Enterprise is pre-alpha; upgrades may break existing Installations.
+Before upgrading, read notices newer than your commit here, in the
+[earlier notices](breaking-changes-archive.md),
+[notices before October 11](breaking-changes-before-2026-10-11.md), and
+[notices before October 10](breaking-changes-before-2026-10-10.md).
+Follow the [upgrade checklist](upgrade-checklist.md) and
 [production image upgrades](production-upgrade.md).
+Entries are newest first. Untested steps lack real-Installation proof.
 
-Entries are newest first. Steps marked _untested_ have not been run against a
-real Installation.
+## 2026-10-14: refresh sources release bootstrap references
+
+Refresh registration and reauthorization return `secrets: {}`. Refresh updates
+require explicit inputs; empty updates return `409`. The last-committed
+issuer-rotated Secret-ID guard survives deletion and value changes.
+
+Apply qualified migration0054 first; its catalog fingerprint and real upgrade
+validation remain unqualified in this candidate. Missing legacy history stays
+unavailable. See [handoff, recovery and deletion limits](../../reference/credential-sources.md#update-a-source).
 
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
 

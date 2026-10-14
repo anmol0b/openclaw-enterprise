@@ -983,14 +983,14 @@ function assertCredentialGatewayHoldsSource(status: CredentialSourceStatus): voi
  */
 function refuseIssuerRotatedResend(
   type: Readonly<CredentialSourceType>,
-  recorded: Readonly<Record<string, SecretReference>>,
+  recorded: Readonly<Record<string, string>>,
   next: Readonly<Record<string, SecretReference>>,
 ): void {
   for (const { name, issuerRotated } of type.secrets) {
     if (
       issuerRotated === true &&
       recorded[name] !== undefined &&
-      next[name]?.id === recorded[name].id
+      next[name]?.id === recorded[name]
     ) {
       throw new ResourceStateConflictError(
         `The gateway may already hold a newer ${name} than the source's Secret, so the update must reference a new Secret, even if you replaced this Secret's value. Complete a new sign-in, store its ${name} in a new Secret, and update the source to reference that Secret.`,
@@ -4543,10 +4543,16 @@ export class OpenClawController {
     // A commit failure leaves the record `registering`; deleting it removes any stored copy.
     const ready = await this.mutate(async (state) => {
       await this.lockNamespace(state, namespace.id);
-      const marked = await state.credentialSources.markCredentialSourceReady(
-        namespace.id,
-        source.id,
-      );
+      let marked = await state.credentialSources.markCredentialSourceReady(namespace.id, source.id);
+      if (marked !== undefined && refresh !== undefined) {
+        // Only a definite successful first mint releases bootstrap references. The ready
+        // transition, last-committed IDs, reference release and audit share this commit.
+        marked = await state.credentialSources.handoffCredentialSourceSecrets(
+          namespace.id,
+          source.id,
+          secretRefs,
+        );
+      }
       if (marked !== undefined && audit !== undefined) {
         await state.audit.append(audit(this.credentialSourceMetadata(marked)));
       }
@@ -4667,10 +4673,35 @@ export class OpenClawController {
       }
       const gateway = this.ownedCredentialGatewayDriver(source.driverId);
       const type = await this.credentialSourceType(gateway, source.type);
+      if (type.rotation === "refresh" && input.secrets === undefined) {
+        throw new ResourceStateConflictError(
+          "A refresh source update requires explicit Secret inputs. Complete a new sign-in and reference a new Secret for each issuer-rotated field.",
+        );
+      }
       const secretRefs = Object.freeze({ ...(input.secrets ?? source.secrets) });
       credentialSourceFieldsMatch("secrets", type.secrets, secretRefs);
       if (type.rotation === "refresh") {
-        refuseIssuerRotatedResend(type, source.secrets, secretRefs);
+        const handoff = await state.credentialSources.findCredentialSourceHandoff(
+          namespace.id,
+          source.id,
+        );
+        // Legacy live bindings are actual last-committed evidence, not guessed history.
+        // Never dereference these IDs: the handed-off Secrets may already be deleted.
+        const recorded =
+          Object.keys(source.secrets).length > 0
+            ? Object.fromEntries(
+                Object.entries(source.secrets).map(([field, reference]) => [field, reference.id]),
+              )
+            : handoff;
+        if (
+          recorded === undefined &&
+          type.secrets.some(({ issuerRotated }) => issuerRotated === true)
+        ) {
+          throw new DependencyUnavailableError(
+            "The credential source has no retained Secret-ID handoff history; its issuer-rotated material cannot be safely re-sent.",
+          );
+        }
+        refuseIssuerRotatedResend(type, recorded ?? {}, secretRefs);
       }
       const values = await this.readCredentialSourceSecrets(
         state,
@@ -4688,7 +4719,7 @@ export class OpenClawController {
       let status: CredentialSourceStatus;
       if (type.rotation === "refresh") {
         // A refresh type keeps no static value at the gateway: new material replaces the
-        // refresh configuration, and the next mint proves it before OCC commits the references.
+        // refresh configuration, and the next mint proves it before OCC commits the handoff IDs.
         const refresh = this.credentialRefreshDriver();
         status = await this.credentialGatewayOperation(() => gateway.sourceStatus(context()));
         assertCredentialGatewayHoldsSource(status);
@@ -4717,13 +4748,19 @@ export class OpenClawController {
         assertCredentialGatewayHoldsSource(status);
       }
       const updated =
-        input.secrets === undefined
-          ? source
-          : await state.credentialSources.replaceCredentialSourceSecrets(
+        type.rotation === "refresh"
+          ? await state.credentialSources.handoffCredentialSourceSecrets(
               namespace.id,
               source.id,
               secretRefs,
-            );
+            )
+          : input.secrets === undefined
+            ? source
+            : await state.credentialSources.replaceCredentialSourceSecrets(
+                namespace.id,
+                source.id,
+                secretRefs,
+              );
       if (updated === undefined) {
         throw new ResourceStateConflictError("The credential source changed during the update.");
       }
