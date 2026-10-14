@@ -2759,9 +2759,27 @@ test(
       ).rows[0].count,
       1,
     );
+    // The ownership FK uses RESTRICT: require that specific denial, not an unrelated failure.
     await assert.rejects(
       db.app.query("DELETE FROM occ.secrets WHERE id=$1", [secret]),
-      (error) => error.code === "23503",
+      (error) =>
+        error.code === "23001" &&
+        error.constraint === "credential_source_secrets_secret_owner" &&
+        error.schema === "occ" &&
+        error.table === "credential_source_secrets",
+    );
+    assert.deepEqual(
+      (await db.app.query("SELECT id FROM occ.secrets WHERE id=$1", [secret])).rows,
+      [{ id: secret }],
+    );
+    assert.deepEqual(
+      (
+        await db.app.query(
+          "SELECT secret_id FROM occ.credential_source_secrets WHERE credential_source_id=$1",
+          [ready],
+        )
+      ).rows,
+      [{ secret_id: secret }],
     );
     await db.app.query("DELETE FROM occ.credential_source_secrets WHERE credential_source_id=$1", [
       ready,
