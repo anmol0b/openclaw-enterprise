@@ -477,20 +477,46 @@ class OpenShellGatewayRequestFailure extends DependencyUnavailableError {
     // A failure without a gRPC status (a local client error) keeps only its class: its message
     // can be any library text, and the API logs this message for a 503 (http.dependency_unavailable).
     const detail =
-      method === "CreateSandbox"
-        ? sanitizedErrorDetail(error)
-        : grpcStatus === undefined &&
-            error instanceof Error &&
-            /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.name)
-          ? error.name
-          : undefined;
+      grpcStatus === undefined &&
+      error instanceof Error &&
+      /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.name)
+        ? error.name
+        : undefined;
     super(
       `OpenShell ${method} failed${
         grpcStatus === undefined ? "" : ` with gRPC status ${grpcStatus}`
       }${detail === undefined ? "." : `: ${detail}`}`,
+      grpcStatus === undefined
+        ? undefined
+        : {
+            method,
+            grpcStatus,
+            validationCategory: createSandboxValidationCategory(method, grpcStatus, error),
+          },
     );
     this.grpcStatus = grpcStatus;
   }
+}
+
+function createSandboxValidationCategory(
+  method: OpenShellMethod,
+  grpcStatus: number,
+  error: unknown,
+): NonNullable<DependencyUnavailableError["requestDiagnostic"]>["validationCategory"] {
+  const details = asRecord(error)?.details;
+  // Pinned supplier 246bac67400487c03595f7d883dd2b5256f4baf0:
+  // grpc/validation.rs and middleware.rs wrap CreateSandbox policy errors with these exact
+  // prefixes. Do not normalize text or match embedded prefixes: other validation stays unknown.
+  if (method !== "CreateSandbox" || grpcStatus !== 3 || typeof details !== "string") {
+    return "UNKNOWN";
+  }
+  if (details.startsWith("policy contains unsafe content: ")) {
+    return "POLICY_SAFETY";
+  }
+  if (details.startsWith("policy middleware validation failed: ")) {
+    return "POLICY_MIDDLEWARE_VALIDATION";
+  }
+  return "UNKNOWN";
 }
 const CLIENT_MODULE = "@grpc/grpc-js";
 const LOADER_MODULE = "@grpc/proto-loader";
@@ -518,26 +544,12 @@ function deadline(timeoutMs: number): Date {
 
 function rawStatusCode(error: unknown): number | undefined {
   const candidate = asRecord(error)?.code;
-  return typeof candidate === "number" ? candidate : undefined;
-}
-
-function sanitizedErrorDetail(error: unknown): string | undefined {
-  return sanitizedText(asRecord(error)?.details);
-}
-
-function sanitizedText(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const normalized = [...value]
-    .map((character) => {
-      const code = character.charCodeAt(0);
-      return code <= 31 || code === 127 ? " " : character;
-    })
-    .join("")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return normalized.length === 0 ? undefined : normalized.slice(0, 512);
+  return typeof candidate === "number" &&
+    Number.isInteger(candidate) &&
+    candidate >= 0 &&
+    candidate <= 16
+    ? candidate
+    : undefined;
 }
 
 function workspaceResponse(response: RecordValue, operation: string): OpenShellWorkspaceResponse {

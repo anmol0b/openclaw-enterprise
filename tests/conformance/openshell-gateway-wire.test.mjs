@@ -367,10 +367,12 @@ test("OpenShell client serializes v0.1.3-pre.2 create-time service exposure", as
         assert.ok(error instanceof DependencyUnavailableError);
         assert.equal(error.grpcStatus, grpc.status.INVALID_ARGUMENT);
         assert.equal(error.code, undefined);
-        assert.equal(
-          error.message,
-          "OpenShell CreateSandbox failed with gRPC status 3: sandbox spec rejected by the Kubernetes driver",
-        );
+        assert.equal(error.message, "OpenShell CreateSandbox failed with gRPC status 3.");
+        assert.deepEqual(error.requestDiagnostic, {
+          method: "CreateSandbox",
+          grpcStatus: grpc.status.INVALID_ARGUMENT,
+          validationCategory: "UNKNOWN",
+        });
         return true;
       },
     );

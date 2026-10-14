@@ -1,7 +1,7 @@
 ---
 created: "2026-09-21"
 updated: 2026-10-14
-last_updated_session: authoring-run/c696045b-5231-4253-a4bd-823334718d6a
+last_updated_session: authoring-run/0bb26444-920f-4713-8f19-4c0b7f35e048
 ---
 
 # OpenShell Sandbox provisioning flow
@@ -244,38 +244,41 @@ first-Agent path.
 
 `apps/controller/src/drivers/sandbox/openshell-gateway-client.ts:createSandbox`
 
-The client sends the Sandbox identity, spec, Namespace Workspace scope, and a
-`request_id`: the revision UUID first. OpenShell keeps a `request_id` whose create
-errored server-side unresolved forever, so when the Gateway refuses one
-(`REQUEST_OUTCOME_UNCERTAIN`, `REQUEST_ID_PAYLOAD_MISMATCH`, or
-`REQUEST_REPLAY_UNAVAILABLE`) and `getSandbox` finds no Sandbox, the Driver tries
-the next of 16 IDs: the revision UUID, then 15 derived from it. Each failing pass
-spends one ID; the Workspace-unique Sandbox name prevents duplicates. Unresolved
-IDs never expire. Once the controller
-identity holds 1000 unresolved or unexpired admission records, OpenShell rejects
-every new `request_id` with `RESOURCE_EXHAUSTED`, so repeated server-side create
-failures count against that quota. Completed records expire after 24 hours.
-`unary` maps that exact refusal to `OpenShellAdmissionLimitError`, a
-`TransientDependencyError` (`SANDBOX_ADMISSION_LIMIT_REACHED`): revision
-provisioning waits for it until the convergence deadline without spending
-attempts; Namespace work retries it as usual. Codex requests one unnamed
-bearer-passthrough exposure for `APP_SERVER_PORT` and requires its `service_urls`
-entry. Native
-OpenClaw connects outbound, so it requests no exposure and rejects any returned
-URL. The Driver
-calls `getSandbox` first and creates only an absent Sandbox; it adopts an
-existing or `ALREADY_EXISTS` Sandbox only when its Workspace, labels,
-annotations, and full spec match the request and it is not deleting or stopped.
-For Codex, `GetService` must also return the unnamed bearer-passthrough endpoint
-on the admitted port. Workspace `sandbox:write` is the trust boundary because a
-holder can replace the Sandbox.
+The client sends the Sandbox identity, spec, Workspace scope and `request_id`.
+OpenShell retains unresolved server-side create failures indefinitely. After
+`REQUEST_OUTCOME_UNCERTAIN`, `REQUEST_ID_PAYLOAD_MISMATCH` or
+`REQUEST_REPLAY_UNAVAILABLE`, the Driver requires an absent `getSandbox` result
+before advancing through 16 IDs: the revision UUID, then 15 derived IDs. Each
+failing pass spends one ID; the Workspace-unique name prevents duplicates.
+At 1000 unresolved or unexpired admissions per controller identity, OpenShell
+rejects new IDs with `RESOURCE_EXHAUSTED`; completed admissions expire after
+24 hours. `unary` maps that exact refusal to `OpenShellAdmissionLimitError`, a
+`TransientDependencyError` (`SANDBOX_ADMISSION_LIMIT_REACHED`). Revision
+provisioning waits until the convergence deadline without spending attempts;
+Namespace work retries as usual.
 
-The Backend shares one client per endpoint and retries failed setup. Unary calls
+Codex requests one unnamed bearer-passthrough exposure on `APP_SERVER_PORT` and
+requires its `service_urls` entry. Native OpenClaw connects outbound, requests
+no exposure and rejects returned URLs. The Driver creates only after `getSandbox`
+finds no Sandbox. Adoption, including `ALREADY_EXISTS`, requires matching
+Workspace, labels, annotations and full spec, with neither deleting nor stopped
+state. For Codex, `GetService` must confirm the unnamed bearer-passthrough
+endpoint on the admitted port. Workspace `sandbox:write` permits replacement
+and is the trust boundary.
+
+`apps/controller/src/drivers/sandbox/openshell-gateway-client.ts:OpenShellGatewayRequestFailure`
+drops supplier text and attaches fixed `method`, `grpcStatus` and
+`validationCategory` fields. `apps/controller/src/worker.ts:revisionFailureLogFields`
+logs them without changing retries. Categories are `POLICY_SAFETY`,
+`POLICY_MIDDLEWARE_VALIDATION` or `UNKNOWN`; only exact `CreateSandbox` status-3
+policy prefixes qualify. Request values never enter these fields or the exception
+message.
+
+The Backend shares clients by endpoint and retries setup failures. Unary calls
 check cancellation after setup and credential preparation, before dispatch.
-Setup cancellation waits for the pending step; it cannot bound stalled
-initialization or file reads. After dispatch, cancellation rejects the caller and
-cancels local gRPC, not necessarily the remote mutation. The lifecycle must
-recover uncertain effects.
+Cancellation cannot bound stalled initialization or file reads. After dispatch,
+it rejects the caller and cancels local gRPC; remote effects may still need
+reconciliation.
 
 `GetService` distinguishes the local client URL from its advertised origin.
 `harnessEndpoint` validates the exposure and returns that WebSocket origin,
@@ -361,6 +364,8 @@ networking. Native OpenClaw remains verification-only.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 17:56: Trace closed gRPC validation diagnostics in the accompanying uncommitted change. (authoring-run/0bb26444-920f-4713-8f19-4c0b7f35e048 - 18c3d7449ca95914c2e248455ccc72b044a27855)
 
 - 2026-10-14 16:28: Trace public Harness endpoint trust projection and retirement in the accompanying uncommitted change. (authoring-run/c696045b-5231-4253-a4bd-823334718d6a - a071498ddb2ac4dd5d9a22ec678cf0d602c61a0a)
 

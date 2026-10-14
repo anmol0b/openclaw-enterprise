@@ -53,6 +53,7 @@ import {
   ActivationPendingError,
   CredentialSourceRevisionError,
   CredentialWithdrawalRefusedError,
+  DependencyUnavailableError,
   SandboxRevisionUnsupportedError,
   ScopeViolationError,
   TransientDependencyError,
@@ -256,14 +257,17 @@ function causeStatusLogFields(error: object): {
 /**
  * Log fields that say which dependency failed and why, without provider text:
  * a transient dependency names itself and a closed reason; any other failure
- * gives only its error class. Either adds the HTTP status of an SDK error, its
- * own or its cause's, and the Status reason a cause keeps.
+ * gives its error class and any fixed Driver request diagnostic. Other errors add
+ * the HTTP status of an SDK error, its own or its cause's, and the Status reason a cause keeps.
  */
 function revisionFailureLogFields(error: unknown): {
   readonly dependency?: string;
   readonly cause?: string;
   readonly status?: number;
   readonly reason?: string;
+  readonly method?: string;
+  readonly grpcStatus?: number;
+  readonly validationCategory?: string;
 } {
   if (error instanceof TransientDependencyError) {
     return { dependency: error.dependency, cause: error.reason, ...causeStatusLogFields(error) };
@@ -279,6 +283,10 @@ function revisionFailureLogFields(error: unknown): {
             LOGGED_ERROR_NAME.test(candidate),
         );
   const errorClass = name ?? "Error";
+  if (error instanceof DependencyUnavailableError && error.requestDiagnostic !== undefined) {
+    const { method, grpcStatus, validationCategory } = error.requestDiagnostic;
+    return { cause: errorClass, method, grpcStatus, validationCategory };
+  }
   // Kubernetes SDK errors carry the HTTP status in `code`.
   const status = loggedHttpStatus(record);
   if (status !== undefined) {

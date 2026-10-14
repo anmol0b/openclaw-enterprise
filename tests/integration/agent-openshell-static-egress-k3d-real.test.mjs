@@ -432,9 +432,21 @@ test(
         202,
       );
       await checkpoint("deployed", { agentId: agent.id, revisionId: revision.id });
+      const deploymentPath = `${namespacePath}/agents/${agent.id}/deployments/${revision.id}`;
       await waitFor(
         "protected Agent activation with genuine installed evidence",
         async () => {
+          const deployment = await api("GET", deploymentPath);
+          if (deployment.status === "failed") {
+            // The status endpoint owns fixed deployment codes. Keep response text and
+            // evidence out of the ledger, including when the error has no known code.
+            const code = deployment.error?.code;
+            await checkpoint("activation-failed", {
+              code:
+                typeof code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : "UNKNOWN",
+            });
+            assert.fail("The protected Agent deployment failed; inspect the safe checkpoint");
+          }
           const current = await api("GET", `${namespacePath}/agents/${agent.id}`);
           return current.activeRevisionId === revision.id ? current : undefined;
         },
@@ -822,7 +834,6 @@ test(
         provider.setMode("answer");
         await successfulTurn(`${mode}-recovery`, "rotated");
       }
-      const deploymentPath = `${namespacePath}/agents/${agent.id}/deployments/${revision.id}`;
       const runtime = await api("GET", `${deploymentPath}/runtime`);
       const logs = runtime.sources.filter(({ available }) => available);
       assert.ok(logs.length > 0);

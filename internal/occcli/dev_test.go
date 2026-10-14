@@ -79,6 +79,11 @@ func TestDevUpProtectedProfileEntrypoints(t *testing.T) {
 			for _, scenario := range cases {
 				t.Run(entrypoint+"/"+compute+"/"+scenario.name, func(t *testing.T) {
 					directory := t.TempDir()
+					// The real launcher requires a private bootstrap-key parent,
+					// independently of the test runner's umask.
+					if err := os.Chmod(directory, 0o700); err != nil {
+						t.Fatal(err)
+					}
 					engineLog := filepath.Join(directory, "engine.log")
 					dispatchLog := filepath.Join(directory, "dispatch.log")
 					key := filepath.Join(directory, "key.json")
