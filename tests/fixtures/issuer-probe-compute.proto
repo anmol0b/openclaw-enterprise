@@ -1,0 +1,24 @@
+syntax = "proto3";
+package openshell.compute.v1;
+
+// Minimal startup-only dependency for the issuer experiment. No workload RPC
+// is implemented. The gateway under test owns all credential behavior.
+service ComputeDriver {
+  rpc GetCapabilities(Empty) returns (Capabilities);
+  rpc ListSandboxes(Empty) returns (Empty);
+  rpc WatchSandboxes(Empty) returns (stream Empty);
+}
+message Empty {}
+message Version { uint32 major = 1; uint32 minor = 2; }
+message Peer {
+  Version protocol_version = 1;
+  string implementation_name = 2;
+  string implementation_version = 3;
+  repeated string supported_capabilities = 4;
+  repeated string required_capabilities = 5;
+}
+message Capabilities {
+  string driver_name = 1;
+  Peer extension = 12;
+  string resource_admission_policy = 13;
+}

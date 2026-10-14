@@ -43,7 +43,8 @@
     "runtime-image-fixture": "./test-suites/runtime-image-fixture.json",
     "qa-matrix": "./test-suites/qa-matrix.json",
     "keycloak-oidc": "./test-suites/keycloak-oidc.json",
-    "egress-connected": "./test-suites/egress-connected.json"
+    "egress-connected": "./test-suites/egress-connected.json",
+    "issuer-compatibility": "./test-suites/issuer-compatibility.json"
   },
   "groups": {
     "ci": [

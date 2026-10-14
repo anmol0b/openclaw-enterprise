@@ -88,6 +88,45 @@ delay. Its deadline remains creation plus 30 seconds. The consumer checks that
 historical operation refuses before material access. These two captures come from
 different synthetic component fixtures, not one installed Sandbox.
 
+## Check whether OpenShell refresh preserves issuance evidence
+
+Select a prebuilt gateway with SHA-256
+`5764f256c7a6772832591f2b5478e7b5939bfd06cad148dfb6beb6c075785c2a`
+(supplier source `0f6786167e8c1e37b6804243cf3ebdb5c1daf6b2`):
+
+```sh
+OCC_TEST_ISSUER_GATEWAY_BINARY=/absolute/path/to/openshell-gateway \
+  node --test tests/integration/openshell-issuer-compatibility.test.mjs
+```
+
+The manual `issuer-compatibility` lane owns this test; it is outside `ci` and
+`full`. An absent selector skips discovery; an invalid selected binary fails.
+The test owns temporary SQLite, generated authentication keys, loopback issuer
+and OIDC listeners, and a Unix-socket compute fixture that implements no workload
+operations. It uses the OCE gRPC client and actual Rust refresh implementation,
+with no host compute, provider account, or installed controller.
+
+The issuer sees the same authenticated form on two distinct attempts. It
+contains only `grant_type`, `client_id`, `client_secret`, and `scope`. In the
+first attempt the issuer refuses, and the refusal survives restart. In the
+second, the gateway's background worker receives only a synthetic `access_token`.
+OpenShell reports `refreshed`, substitutes a one-hour expiry, and publishes a new
+provider version. Both the reported expiry and provider version survive restart.
+A provider resource version identifies that publication, not the admitted grant
+or an authoritative expiry. Reading refresh status is not a warm credential lookup.
+
+The GitHub fixture in `tests/conformance/repository-credentials-github.test.mjs`
+separately exercises App signing with a generated key, rejects a widened repository
+list, missing rights, or absent provider expiry, and retires the refused candidate.
+
+To join these paths, the lifecycle owner must durably admit each attempt before
+dispatch. Give the issuer an authenticated attempt reference bound to the exact
+grant, input family and owner epoch. Commit the validated returned rights, actual
+provider expiry and material version together before a read-only lookup can report
+the grant warm. The [issuer contract](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/runtime-contracts.md#provider-semantics-and-issuer-boundary)
+defines that boundary. This pinned gateway does not establish it; keep dynamic
+GitHub credentials disabled until the complete path is qualified.
+
 ## PostgreSQL state
 
 With a migrated disposable database selected through `OCC_TEST_DATABASE_URL`, run:

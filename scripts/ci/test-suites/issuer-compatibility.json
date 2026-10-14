@@ -1,0 +1,13 @@
+{
+  "env": {},
+  "requiredEnv": ["OCC_TEST_ISSUER_GATEWAY_BINARY"],
+  "prepare": {},
+  "files": [
+    {
+      "path": "tests/integration/openshell-issuer-compatibility.test.mjs",
+      "expectedTests": [
+        "pinned OpenShell background refresh persists issuance without provider expiry"
+      ]
+    }
+  ]
+}
