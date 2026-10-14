@@ -540,7 +540,7 @@ export const CredentialSourceStatusSchema = Type.Object(
   {
     additionalProperties: false,
     description:
-      "Live status reported by the selected Credential Gateway. It never contains credential values.",
+      "Source admission or selected Credential Gateway status. For protected sources, ready does not attest an installed enforcing Sandbox; current supervisor evidence is checked separately. Never contains credential values.",
   },
 );
 
@@ -554,7 +554,11 @@ export const CredentialSourceSchema = Type.Object(
     egress: Type.Optional(
       Type.Object(
         { adoption: Type.Literal("live"), retention: Type.Literal("none") },
-        { additionalProperties: false },
+        {
+          additionalProperties: false,
+          description:
+            "Protected live static reads with no retained material. The first inference grant permits the configured model and local Harness tools; provider-executed tools are unsupported. Runtime readiness requires current authenticated supervisor evidence.",
+        },
       ),
     ),
     secrets: CredentialSourceSecrets,

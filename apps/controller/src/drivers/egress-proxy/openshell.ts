@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
   Backend,
@@ -29,6 +30,7 @@ function wirePolicy(value: unknown): unknown {
   return record
     ? Object.fromEntries(
         Object.entries(record)
+          .sort(([left], [right]) => left.localeCompare(right, "en"))
           .map(([key, item]) => [key, wirePolicy(item)])
           .filter(
             ([, item]) =>
@@ -44,6 +46,66 @@ function wirePolicy(value: unknown): unknown {
 }
 
 const capability = "openshell.supervisor-middleware.http-credential-access.v1";
+
+// Retain uint64 revisions as decimal strings: Number would lose generation precision.
+function revisionNumber(value: unknown): string | undefined {
+  // Proto3 omits a scalar zero; the enclosing evidence message remains mandatory.
+  if (value === undefined) {
+    return "0";
+  }
+  return typeof value === "string" &&
+    /^(0|[1-9][0-9]{0,19})$/.test(value) &&
+    BigInt(value) <= 18446744073709551615n
+    ? value
+    : undefined;
+}
+
+function enforcementEvidence(
+  status: Readonly<Record<string, unknown>>,
+  sandboxId: string,
+  policyVersion: number,
+): EgressInstallation["enforcement"] | undefined {
+  const revision = asRecord(status.revision);
+  const evidence = asRecord(status.loaded_enforcement);
+  if (
+    !revision ||
+    !evidence ||
+    evidence.sandbox_id !== sandboxId ||
+    typeof evidence.instance_id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      evidence.instance_id,
+    ) ||
+    revision.version !== policyVersion ||
+    status.active_version !== policyVersion ||
+    ![2, "POLICY_STATUS_LOADED"].includes(revision.status as string | number) ||
+    evidence.policy_version !== policyVersion ||
+    typeof evidence.policy_hash !== "string" ||
+    !/^[0-9a-f]{64}$/.test(evidence.policy_hash) ||
+    evidence.policy_hash !== revision.policy_hash ||
+    revisionNumber(evidence.config_revision) === undefined ||
+    revisionNumber(evidence.provider_env_revision) === undefined ||
+    !isDeepStrictEqual(evidence.enforced_capabilities, [capability])
+  ) {
+    return undefined;
+  }
+  return {
+    instanceId: evidence.instance_id,
+    configurationId: createHash("sha256")
+      .update(
+        JSON.stringify([
+          sandboxId,
+          evidence.instance_id,
+          policyVersion,
+          evidence.policy_hash,
+          revisionNumber(evidence.config_revision),
+          revisionNumber(evidence.provider_env_revision),
+          capability,
+          wirePolicy(revision.policy),
+        ]),
+      )
+      .digest("hex"),
+  };
+}
 
 /** Nonsecret, exact routing consumed and independently checked by the paired Sandbox. */
 export function openShellEgressConfiguration(
@@ -271,11 +333,52 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
         "The installed egress policy differs from its admitted routes.",
       );
     }
-    // A loaded gateway policy and extension manifest do not attest that the
-    // currently running supervisor understood and enforced credential authority.
-    // Refuse readiness until an authenticated, instance-fenced applied-capability
-    // receipt is implemented and matched to this exact installation.
-    return undefined;
+    const enforcement = enforcementEvidence(status, existing.id, context.plan.generation);
+    return enforcement === undefined
+      ? undefined
+      : immutableCopy({
+          plan: context.plan,
+          sandboxId: existing.id,
+          sender: this.sourceControl.sender,
+          installedAt: new Date().toISOString(),
+          enforcement,
+        });
+  }
+
+  async verifyInstallation(
+    context: EgressRevisionContext,
+    installation: EgressInstallation,
+  ): Promise<boolean> {
+    this.assertPlan(context);
+    if (
+      !installation.enforcement ||
+      !isDeepStrictEqual(installation.plan, context.plan) ||
+      !isDeepStrictEqual(installation.sender, this.sourceControl.sender)
+    ) {
+      return false;
+    }
+    await this.sourceControl.assertAvailable(context.signal);
+    const ref = this.sandbox.harnessResource!(context);
+    const client = this.backend.client.clientForNamespace(ref.namespaceName);
+    const existing = await client.getSandbox(
+      { workspace: openShellWorkspaceName(context.namespace), name: ref.resourceName },
+      context.signal,
+    );
+    if (!existing || existing.id !== installation.sandboxId || !client.getSandboxPolicyStatus) {
+      return false;
+    }
+    this.assertOwned(existing.annotations, context);
+    const status = await client.getSandboxPolicyStatus(
+      openShellWorkspaceName(context.namespace),
+      ref.resourceName,
+      context.signal,
+    );
+    // The supplier revalidates registration, effective config and installed registry under
+    // its sandbox mutation lock. Exact equality also refuses replacements of our saved fence.
+    return isDeepStrictEqual(
+      enforcementEvidence(status, existing.id, context.plan.generation),
+      installation.enforcement,
+    );
   }
 
   async withdrawBinding(context: EgressRevisionContext, binding: EgressRef): Promise<boolean> {

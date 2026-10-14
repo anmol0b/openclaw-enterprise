@@ -362,13 +362,18 @@ export const CreateCredentialSourceBody = Type.Object(
 
 export const UpdateCredentialSourceBody = Type.Object(
   {
-    adoption: Type.Optional(Type.Literal("live")),
+    adoption: Type.Optional(
+      Type.Literal("live", {
+        description:
+          "Explicitly opt an unbound static source into protected live Secret reads. Requires source update and Secret operate permission; failure preserves the existing source.",
+      }),
+    ),
     secrets: Type.Optional(CredentialSourceSecrets),
   },
   {
     additionalProperties: false,
     description:
-      "Re-reads the source's Secret values, or those of replacement Secret references, and updates the Credential Gateway copy. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
+      "Without adoption, re-reads Secret inputs and updates the legacy Credential Gateway copy. adoption: live explicitly selects protected per-operation reads through the configured egress Driver for an unbound static source. Existing sources never opt in merely because their Secret changes. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
   },
 );
 

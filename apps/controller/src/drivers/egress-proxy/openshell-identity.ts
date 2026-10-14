@@ -11,6 +11,13 @@ export interface OpenShellEgressIdentityOptions {
   readonly sender: EgressRef;
 }
 
+function instanceId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
 /** Verifies gateway-issued extension identities; sandbox names and request JSON grant nothing. */
 export class OpenShellEgressIdentity implements EgressPeerVerifier {
   readonly audience: string;
@@ -91,6 +98,7 @@ export class OpenShellEgressIdentity implements EgressPeerVerifier {
       claims.caller_kind !== "supervisor" ||
       typeof claims.sandbox_id !== "string" ||
       !claims.sandbox_id ||
+      !instanceId(claims.instance_id) ||
       claims.sub !== `spiffe://openshell/sandbox/${claims.sandbox_id}`
     ) {
       return undefined;
@@ -98,6 +106,7 @@ export class OpenShellEgressIdentity implements EgressPeerVerifier {
     return {
       sender: this.options.sender,
       sandboxId: claims.sandbox_id,
+      instanceId: claims.instance_id,
       expiresAt: new Date(Number(claims.exp) * 1000).toISOString(),
     };
   }
@@ -110,6 +119,7 @@ export class OpenShellEgressIdentity implements EgressPeerVerifier {
         claims.sub === this.options.issuer &&
         claims.sandbox_id === undefined) ||
         (claims.caller_kind === "supervisor" &&
+          instanceId(claims.instance_id) &&
           typeof claims.sandbox_id === "string" &&
           claims.sub === `spiffe://openshell/sandbox/${claims.sandbox_id}`))
     );

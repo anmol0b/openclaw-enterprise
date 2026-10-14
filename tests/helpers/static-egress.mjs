@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID, randomBytes, sign } from "node:crypto";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
@@ -8,8 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConsoleAppFixture } from "./console-app.mjs";
 import { createDevelopmentComputeDriver } from "./development.mjs";
+import { createTestKubernetesComputeDriver } from "./kubernetes-compute.mjs";
 import { KubernetesSecretDriver } from "../../apps/controller/src/drivers/secret/kubernetes/index.ts";
 import { createOpenShellBackend } from "../../apps/controller/src/backends/openshell.ts";
+import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
 import { OpenShellSandboxDriver } from "../../apps/controller/src/drivers/sandbox/openshell.ts";
 import { OpenShellCredentialGatewayDriver } from "../../apps/controller/src/drivers/credential-gateway/openshell.ts";
 import { OpenShellEgressProxyDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
@@ -27,12 +29,20 @@ export const wireTime = (millis) => ({
   seconds: Math.floor(millis / 1000),
   nanos: (millis % 1000) * 1e6,
 });
-export const unary = (client, method, request, metadata) =>
+export function requestId(createdAt = Date.now()) {
+  const bytes = randomBytes(16);
+  bytes.writeUIntBE(createdAt, 0, 6);
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+export const unary = (client, method, request, metadata, timeoutMs = 5000) =>
   new Promise((resolve, reject) =>
     client[method](
       request,
       metadata ?? new grpc.Metadata(),
-      { deadline: Date.now() + 5000 },
+      { deadline: Date.now() + timeoutMs },
       (error, result) => (error ? reject(error) : resolve(result)),
     ),
   );
@@ -43,7 +53,14 @@ const listen = (server) =>
  * not a Kubernetes API server or an OpenShell supervisor. No authorization/provider logic is mocked. */
 export async function staticEgressFixture(
   t,
-  { appFactory = createConsoleAppFixture, includeLegacy = false } = {},
+  {
+    appFactory = createConsoleAppFixture,
+    includeLegacy = false,
+    now = () => new Date(),
+    physicalPlacement = false,
+    recordInstallation = true,
+    serviceTransport,
+  } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "oce-egress-wire-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -75,7 +92,9 @@ export async function staticEgressFixture(
   const [key, cert] = await Promise.all([readFile(keyPath), readFile(certPath)]);
   const objects = new Map();
   let namespace;
+  let runtimeNamespace;
   let secretReads = 0;
+  let secretReadBarrier;
   const kubeRequests = [];
   const kube = createHttpsServer({ key, cert }, async (request, response) => {
     response.setHeader("content-type", "application/json");
@@ -83,7 +102,11 @@ export async function staticEgressFixture(
     kubeRequests.push([request.method, url.pathname]);
     if (url.pathname === "/api/v1/namespaces") {
       const nsId = namespace.id;
-      assert.equal(url.searchParams.get("labelSelector"), `openclaw.dev/gateway-namespace=${nsId}`);
+      assert.ok(
+        [`openclaw.dev/gateway-namespace=${nsId}`, `openclaw.dev/namespace=${nsId}`].includes(
+          url.searchParams.get("labelSelector"),
+        ),
+      );
       response.end(
         JSON.stringify({
           apiVersion: "v1",
@@ -142,6 +165,7 @@ export async function staticEgressFixture(
       response.writeHead(request.method === "POST" ? 201 : 200).end(JSON.stringify(stored));
     } else if (request.method === "GET" && previous) {
       secretReads += 1;
+      await secretReadBarrier;
       response.end(JSON.stringify(previous));
     } else {
       response.writeHead(404).end(JSON.stringify({ code: 404 }));
@@ -235,16 +259,39 @@ export async function staticEgressFixture(
         callback({ code: grpc.status.NOT_FOUND });
         return;
       }
-      assert.equal(call.request.workspace_scope.workspace, namespace.name);
+      if (call.request.workspace_scope.workspace !== runtimeNamespace.name) {
+        callback({ code: grpc.status.NOT_FOUND });
+        return;
+      }
       assert.equal(call.request.name, observed.sandbox.name);
       callback(null, {
         sandbox: { metadata: observed.sandbox, status: { phase: "SANDBOX_PHASE_READY" } },
       });
     },
+    GetService(call, callback) {
+      if (
+        !observed.service ||
+        call.request.sandbox !== observed.sandbox?.name ||
+        call.request.workspace_scope.workspace !== runtimeNamespace.name
+      ) {
+        callback({ code: grpc.status.NOT_FOUND });
+        return;
+      }
+      callback(null, observed.service);
+    },
     GetSandboxPolicyStatus(call, callback) {
-      assert.equal(call.request.workspace_scope.workspace, namespace.name);
+      if (call.request.workspace_scope.workspace !== runtimeNamespace.name) {
+        callback({ code: grpc.status.NOT_FOUND });
+        return;
+      }
       callback(null, {
-        revision: { version: 1, status: 2, policy: observed.policy },
+        revision: {
+          version: 1,
+          status: 2,
+          policy: observed.policy,
+          policy_hash: observed.policyHash,
+        },
+        loaded_enforcement: observed.evidence,
         active_version: 1,
       });
     },
@@ -263,16 +310,44 @@ export async function staticEgressFixture(
     ),
   );
   t.after(() => gateway.forceShutdown());
-  const backend = createOpenShellBackend({
-    id: "openshell-test",
-    type: "openshell",
-    configuration: { endpoint: `https://127.0.0.1:${gatewayPort}`, rootCertificatePath: certPath },
-    drivers: {
-      sandbox: "openshell-sandbox",
-      credential_gateway: "openshell-credentials",
-      egress_proxy: "openshell-egress",
-    },
+  const transport = new GrpcOpenShellGatewayClient({
+    endpoint: `https://127.0.0.1:${gatewayPort}`,
+    rootCertificatePath: certPath,
   });
+  // The fixture's gRPC metadata and local Harness HTTP listener occupy separate
+  // ports. Both transports are production clients; no enrollment decision is mocked.
+  const gatewayClient =
+    serviceTransport === undefined
+      ? transport
+      : new Proxy(transport, {
+          get(target, property) {
+            const owner = [
+              "getServiceDocument",
+              "postServiceDocument",
+              "serviceWebSocketHandshake",
+            ].includes(property)
+              ? serviceTransport
+              : target;
+            const value = owner[property];
+            return typeof value === "function" ? value.bind(owner) : value;
+          },
+        });
+  const backend = createOpenShellBackend(
+    {
+      id: "openshell-test",
+      type: "openshell",
+      configuration: {
+        endpoint: `https://127.0.0.1:${gatewayPort}`,
+        rootCertificatePath: certPath,
+      },
+      drivers: {
+        sandbox: "openshell-sandbox",
+        credential_gateway: "openshell-credentials",
+        egress_proxy: "openshell-egress",
+      },
+    },
+    { gatewayClient },
+  );
   t.after(() => backend.client.close());
   const egressOptions = { middlewareName: "oce-authority", binaries: ["/usr/bin/model-client"] };
   const sandbox = new OpenShellSandboxDriver(
@@ -310,13 +385,17 @@ export async function staticEgressFixture(
     { binaries: egressOptions.binaries },
     { id: "openshell-credentials", backend },
   );
+  const placement = createTestKubernetesComputeDriver("placement", {
+    authentication: { mode: "kubeconfig", kubeconfigPath, context: "fixture" },
+  });
   const app = await appFactory(t, {
+    now,
     provisionedPeople: [],
     secretDriver,
     computeDriver: {
       ...createDevelopmentComputeDriver(),
       async resolveSandboxNamespace(value) {
-        return value;
+        return physicalPlacement ? placement.resolveSandboxNamespace(value) : value;
       },
     },
   });
@@ -326,6 +405,9 @@ export async function staticEgressFixture(
     app.controller.selectDriver(driver.capability, driver.id);
   }
   namespace = await app.createNamespace(`egress-${randomUUID().slice(0, 8)}`, { ready: true });
+  runtimeNamespace = physicalPlacement
+    ? await placement.resolveSandboxNamespace(namespace)
+    : namespace;
   const createdSecret = await app.request("POST", `/namespaces/${namespace.id}/secrets`, {
     body: { name: "provider-key", value: "synthetic-key-initial" },
   });
@@ -350,7 +432,9 @@ export async function staticEgressFixture(
       body: JSON.parse(Buffer.concat(body)),
     });
     response
-      .writeHead(providerResponse.status, { "content-type": "application/json" })
+      .writeHead(providerResponse.status, {
+        "content-type": providerResponse.contentType ?? "application/json",
+      })
       .end(providerResponse.rawBody ?? JSON.stringify(providerResponse.body));
   });
   const providerPort = await listen(provider);
@@ -422,7 +506,7 @@ export async function staticEgressFixture(
   );
   assert.ok(revision.egressPlan, "deployment must admit the consumed protected plan");
   const context = {
-    namespace,
+    namespace: runtimeNamespace,
     revision,
     plan: revision.egressPlan,
     signal: AbortSignal.timeout(5000),
@@ -447,18 +531,26 @@ export async function staticEgressFixture(
     undefined,
     "a loaded gateway policy without an applied-capability receipt must not become ready",
   );
-  // This synthetic record exercises the authority independently of runtime
-  // installation. It is not evidence of an enforcing supervisor or readiness.
-  const installation = {
-    plan: context.plan,
-    sandboxId,
-    sender: egress.sourceControl.sender,
-    installedAt: new Date().toISOString(),
+  // Supplier observations are fixtures; the production adapter must consume their
+  // exact protobuf shape. No hand-written installation bypasses its readiness checks.
+  observed.policyHash = "1a".repeat(32);
+  observed.evidence = {
+    sandbox_id: sandboxId,
+    instance_id: randomUUID(),
+    policy_version: 1,
+    policy_hash: observed.policyHash,
+    config_revision: "17395563786422799999",
+    provider_env_revision: "9019556378642279999",
+    enforced_capabilities: [capability],
   };
-  await app.controller.transact((unit) =>
-    unit.credentialSources.recordEgressInstallation(installation),
-  );
-  await app.activateRevision(namespace.id, agent.id, revision.id);
+  const installation = await egress.attachmentStatus(context, attachment);
+  assert.ok(installation, "the adapter must validate the complete supplier observation");
+  if (recordInstallation) {
+    await app.controller.transact((unit) =>
+      unit.credentialSources.recordEgressInstallation(installation),
+    );
+    await app.activateRevision(namespace.id, agent.id, revision.id);
+  }
 
   const keys = generateKeyPairSync("ed25519");
   const identity = new OpenShellEgressIdentity({
@@ -508,6 +600,7 @@ export async function staticEgressFixture(
         jti: randomUUID(),
         caller_kind: "supervisor",
         sandbox_id: sandboxId,
+        instance_id: installation.enforcement.instanceId,
         ...overrides,
       }),
     ).toString("base64url");
@@ -518,9 +611,9 @@ export async function staticEgressFixture(
   };
   const capture = (body = { model: "fixture-model", input: "hello", store: false }) => ({
     audience: "oce-egress",
-    deadline: wireTime(Date.now() + 20_000),
+    deadline: wireTime(now().getTime() + 20_000),
     request: {
-      context: { request_id: randomUUID(), sandbox_id: sandboxId },
+      context: { request_id: requestId(now().getTime()), sandbox_id: sandboxId },
       target: {
         scheme: "https",
         host: "provider.example.test",
@@ -609,6 +702,7 @@ export async function staticEgressFixture(
   return {
     ...app,
     namespace,
+    runtimeNamespace,
     secret,
     source,
     legacySource,
@@ -619,6 +713,9 @@ export async function staticEgressFixture(
     context,
     attachment,
     egress,
+    installation,
+    sandboxDriver: sandbox,
+    gatewayClient: backend.client.clientForNamespace(runtimeNamespace.name),
     observed,
     clients,
     metadata,
@@ -632,6 +729,14 @@ export async function staticEgressFixture(
     },
     get secretReads() {
       return secretReads;
+    },
+    pauseSecretReads() {
+      const paused = Promise.withResolvers();
+      secretReadBarrier = paused.promise;
+      return () => {
+        secretReadBarrier = undefined;
+        paused.resolve();
+      };
     },
     async revoke() {
       const result = await app.request(

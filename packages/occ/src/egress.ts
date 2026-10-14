@@ -18,6 +18,7 @@ import { immutableCopy } from "@openclaw-enterprise/utils";
 export interface EgressPeer {
   readonly sender: EgressRef;
   readonly sandboxId: string;
+  readonly instanceId: string;
   readonly expiresAt: string;
 }
 
@@ -74,7 +75,8 @@ interface OperationRecord {
   readonly evidence: StaticMaterialEvidence;
   readonly digest: string;
   value: string;
-  phase: "resolved" | "checking" | "sent";
+  phase: "resolved" | "checking" | "sent" | "protecting";
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 function refuse(
@@ -87,6 +89,13 @@ function sameSecret(left: string, right: string): boolean {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** UUIDv7 creation time fixes the replay horizon independently of a resubmitted deadline. */
+function operationCreatedAt(id: string): number | undefined {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
+    ? Number.parseInt(id.slice(0, 8) + id.slice(9, 13), 16)
+    : undefined;
 }
 
 /** Matches the wire contract: ordered UTF-8 names and values with u64 big-endian lengths. */
@@ -110,18 +119,24 @@ export function egressInjectionDigest(headers: readonly (readonly [string, strin
 export class EgressForwarder {
   private readonly records = new Map<string, OperationRecord>();
   private readonly requests = new Map<string, number>();
+  private pendingResolutions = 0;
   private readonly ports: EgressAuthorityPorts;
 
   constructor(ports: EgressAuthorityPorts) {
     this.ports = ports;
   }
 
+  private discard(handle: string, record: OperationRecord): void {
+    clearTimeout(record.timer);
+    record.value = "";
+    this.records.delete(handle);
+  }
+
   private prune(): void {
     const now = this.ports.now();
     for (const [handle, record] of this.records) {
       if (Date.parse(record.use.request.deadlineAt) <= now) {
-        record.value = "";
-        this.records.delete(handle);
+        this.discard(handle, record);
       }
     }
     for (const [key, expiresAt] of this.requests) {
@@ -138,6 +153,25 @@ export class EgressForwarder {
     signal: AbortSignal,
   ): Promise<EgressResolution> {
     this.prune();
+    // Reserve before authentication or any other await. Pending Secret/policy I/O
+    // consumes the same capacity as an outstanding material handle.
+    if (this.pendingResolutions + this.records.size >= 1024) {
+      return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
+    }
+    this.pendingResolutions += 1;
+    try {
+      return await this.resolveReserved(authorization, sandboxId, input, signal);
+    } finally {
+      this.pendingResolutions -= 1;
+    }
+  }
+
+  private async resolveReserved(
+    authorization: string,
+    sandboxId: string,
+    input: EgressRequest,
+    signal: AbortSignal,
+  ): Promise<EgressResolution> {
     if (signal.aborted) {
       return { kind: "refused", error: { kind: "cancelled" } };
     }
@@ -147,34 +181,40 @@ export class EgressForwarder {
       return refuse("identity");
     }
     const deadline = Date.parse(input.deadlineAt);
+    const createdAt = operationCreatedAt(input.id);
     if (
+      createdAt === undefined ||
+      createdAt > now + 1000 ||
       !Number.isFinite(deadline) ||
       deadline <= now ||
-      deadline > now + 30_000 ||
+      deadline <= createdAt ||
+      deadline > createdAt + 30_000 ||
       deadline > Date.parse(peer.expiresAt)
     ) {
       return { kind: "refused", error: { kind: "deadline_exceeded" } };
     }
-    if (
-      input.body.byteLength > 1024 * 1024 ||
-      !/^[0-9a-f-]{36}$/i.test(input.id) ||
-      this.records.size >= 1024 ||
-      this.requests.size >= 4096
-    ) {
+    if (input.body.byteLength > 1024 * 1024) {
       return refuse("unsupported_operation");
     }
-    const replayKey = JSON.stringify([peer.sender, sandboxId, input.id]);
+    const replayKey = JSON.stringify([peer.sender, sandboxId, peer.instanceId, input.id]);
     if (this.requests.has(replayKey)) {
       return refuse("invalid_handle");
     }
+    if (this.requests.size >= 4096) {
+      return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
+    }
     // Reserve before the first await. Failed attempts cannot reuse their transport request ID.
-    this.requests.set(replayKey, Date.parse(peer.expiresAt));
+    this.requests.set(replayKey, createdAt + 30_000);
     const request = {
       ...immutableCopy({ ...input, body: undefined }),
       body: new Uint8Array(input.body),
     } as EgressRequest;
     const installation = await this.ports.installation(peer);
-    if (!installation || !isDeepStrictEqual(installation.sender, peer.sender)) {
+    if (
+      !installation ||
+      !isDeepStrictEqual(installation.sender, peer.sender) ||
+      installation.enforcement?.instanceId !== peer.instanceId
+    ) {
       return { kind: "refused", error: { kind: "not_ready", code: "attachment_pending" } };
     }
     const matches = installation.plan.routes.flatMap((route) => {
@@ -189,7 +229,7 @@ export class EgressForwarder {
       return refuse(matches.length > 1 ? "ambiguous_route" : "unsupported_operation");
     }
     const { route, provider, operation } = matches[0]!;
-    if (deadline > now + route.deadlineMs) {
+    if (deadline > createdAt + route.deadlineMs) {
       return { kind: "refused", error: { kind: "deadline_exceeded" } };
     }
     const use = immutableCopy({
@@ -260,10 +300,9 @@ export class EgressForwarder {
         phase: "resolved",
       };
       this.records.set(handle, record);
-      setTimeout(
+      record.timer = setTimeout(
         () => {
-          record.value = "";
-          this.records.delete(handle);
+          this.discard(handle, record);
         },
         Math.max(1, deadline - this.ports.now()),
       ).unref();
@@ -291,6 +330,7 @@ export class EgressForwarder {
       !peer ||
       peer.sandboxId !== sandboxId ||
       !isDeepStrictEqual(peer.sender, record.use.peer.sender) ||
+      peer.instanceId !== record.use.peer.instanceId ||
       sandboxId !== record.use.peer.sandboxId ||
       requestId !== record.use.request.id ||
       deadlineAt !== record.use.request.deadlineAt ||
@@ -305,13 +345,11 @@ export class EgressForwarder {
     try {
       decision = await this.ports.check(record.use, record.evidence);
     } catch {
-      record.value = "";
-      this.records.delete(handle);
+      this.discard(handle, record);
       return { kind: "refused", error: { kind: "unavailable", code: "authority" } };
     }
     if (!("key" in decision) || !isDeepStrictEqual(decision, record.source)) {
-      record.value = "";
-      this.records.delete(handle);
+      this.discard(handle, record);
       return "key" in decision
         ? refuse("stale_configuration")
         : { kind: "refused", error: decision };
@@ -323,8 +361,7 @@ export class EgressForwarder {
       Date.parse(peer.expiresAt),
     );
     if (sendStartBy <= now) {
-      record.value = "";
-      this.records.delete(handle);
+      this.discard(handle, record);
       return { kind: "refused", error: { kind: "deadline_exceeded" } };
     }
     record.phase = "sent";
@@ -351,20 +388,32 @@ export class EgressForwarder {
         record.phase === "sent" &&
         record.use.request.id === requestId &&
         record.use.peer.sandboxId === sandboxId &&
+        record.use.peer.instanceId === peer.instanceId &&
         isDeepStrictEqual(record.use.peer.sender, peer.sender),
     );
     if (!entry) {
       return undefined;
     }
     const [handle, record] = entry;
-    this.records.delete(handle);
+    record.phase = "protecting";
     try {
       if (response.status === 401) {
         await this.ports.reject(record.evidence);
       }
-      return record.provider.protectResponse(response, record.value);
+      if (Date.parse(record.use.request.deadlineAt) <= this.ports.now()) {
+        return undefined;
+      }
+      const protectedResponse = record.provider.protectResponse(
+        response,
+        record.value,
+        record.use.request,
+        record.use.operation,
+      );
+      return Date.parse(record.use.request.deadlineAt) <= this.ports.now()
+        ? undefined
+        : protectedResponse;
     } finally {
-      record.value = "";
+      this.discard(handle, record);
     }
   }
 }

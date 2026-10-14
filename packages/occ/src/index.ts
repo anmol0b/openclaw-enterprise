@@ -4627,6 +4627,25 @@ export class OpenClawController {
       ) {
         return deny("stale_configuration");
       }
+      const remaining = Date.parse(use.request.deadlineAt) - this.clock().getTime();
+      if (remaining <= 0) {
+        return { kind: "deadline_exceeded" };
+      }
+      // A stored installation is an immutable association, not a readiness lease.
+      // The selected adapter rechecks the current authenticated runtime at both checks.
+      if (
+        !(await driver.verifyInstallation(
+          {
+            namespace: await this.credentialNamespace(namespace),
+            revision,
+            plan: use.installation.plan,
+            signal: AbortSignal.timeout(Math.ceil(remaining)),
+          },
+          use.installation,
+        ))
+      ) {
+        return deny("stale_configuration");
+      }
       const provider = control.providers.find((entry) =>
         isDeepStrictEqual(entry.ref, admitted.key.provider),
       );
@@ -4797,7 +4816,7 @@ export class OpenClawController {
       if (!provider || !isDeepStrictEqual(driver.sourceControl.backend, admitted.key.backend)) {
         throw new DependencyUnavailableError("The admitted egress composition is unavailable.");
       }
-      const grant = { kind: "inference" as const, models: [modelId] };
+      const grant = provider.normalizeGrant([modelId]);
       return provider.routes(source, {
         binding: { id: crypto.randomUUID(), generation: 1 },
         execution,

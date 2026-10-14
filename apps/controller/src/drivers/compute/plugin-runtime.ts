@@ -5,6 +5,7 @@ import {
   validPluginApprovers,
 } from "@openclaw-enterprise/contracts";
 import { codexApprovalPolicy } from "@openclaw-enterprise/occ";
+import { harnessEgressEnrollment, type HarnessEgressEnrollment } from "./egress-enrollment.ts";
 
 export const PLUGIN_RUNTIME_DIRECTORY = "/etc/openclaw/plugin-runtime";
 export const PLUGIN_RUNTIME_MANIFEST = "runtime.json";
@@ -60,6 +61,8 @@ export type PluginRuntimeSpec =
       readonly pluginApprovers?: AgentRevision["pluginApprovers"];
       readonly repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy;
       readonly modelEndpoint?: CodexModelEndpoint;
+      readonly providerTools?: "none";
+      readonly egressEnrollment?: HarnessEgressEnrollment;
     };
 
 function validateDriverMatchesRuntime(
@@ -104,6 +107,12 @@ function pluginFreeRuntimeForRevision(
       kind: "codex",
       selections: {},
       approvalPolicy: codexSessionApprovalPolicy(revision),
+      ...(revision.egressPlan === undefined
+        ? {}
+        : {
+            providerTools: protectedProviderTools(revision),
+            egressEnrollment: harnessEgressEnrollment(revision.egressPlan),
+          }),
       ...(revision.pluginApprovers === undefined
         ? {}
         : { pluginApprovers: revision.pluginApprovers }),
@@ -150,6 +159,12 @@ export function pluginRuntimeSpecForRevision(
           kind: "codex",
           selections: state.plugins,
           approvalPolicy: codexSessionApprovalPolicy(revision),
+          ...(revision.egressPlan === undefined
+            ? {}
+            : {
+                providerTools: protectedProviderTools(revision),
+                egressEnrollment: harnessEgressEnrollment(revision.egressPlan),
+              }),
           pluginApprovers: revision.pluginApprovers,
           ...(openaiBaseUrl === undefined
             ? {}
@@ -159,6 +174,14 @@ export function pluginRuntimeSpecForRevision(
       : { kind: "openclaw", selections: state.plugins, pluginApprovers: revision.pluginApprovers };
   validateDriverMatchesRuntime(revision, runtime);
   return runtime;
+}
+
+function protectedProviderTools(revision: Readonly<AgentRevision>): "none" {
+  const routes = revision.egressPlan?.routes;
+  if (!routes?.length || routes.some((route) => route.binding.grant.providerTools !== "none")) {
+    throw new Error("Unsupported protected inference tool grant.");
+  }
+  return "none";
 }
 
 // The admission rule (codexApprovalPolicy), checked again on the revision being prepared.
@@ -180,13 +203,17 @@ function codexToml(
       : CODEX_SELECTED_PLUGIN_FEATURES_TOML
   }${pluginDefaults ? CODEX_PLUGIN_DEFAULTS_TOML : ""}`;
   const configuration =
-    approvalPolicy === undefined
+    (runtime.providerTools === "none" ? 'web_search = "disabled"\n\n' : "") +
+    (approvalPolicy === undefined
       ? plugins
-      : `approval_policy = ${JSON.stringify(approvalPolicy)}\n\n${plugins}`;
+      : `approval_policy = ${JSON.stringify(approvalPolicy)}\n\n${plugins}`);
   const endpoint = runtime.modelEndpoint;
+  if (runtime.providerTools === "none" && endpoint === undefined) {
+    throw new Error("Protected inference requires an explicit normalized model endpoint.");
+  }
   return endpoint === undefined
     ? configuration
-    : `model_provider = ${JSON.stringify(endpoint.modelProvider)}\n\n${configuration}\n[model_providers.${endpoint.modelProvider}]\nname = "OpenAI-compatible"\nbase_url = ${JSON.stringify(endpoint.baseUrl)}\nwire_api = "responses"\nrequires_openai_auth = true\nsupports_websockets = false\n`;
+    : `model_provider = ${JSON.stringify(endpoint.modelProvider)}\n\n${configuration}\n[model_providers.${endpoint.modelProvider}]\nname = "OpenAI-compatible"\nbase_url = ${JSON.stringify(endpoint.baseUrl)}\nwire_api = "responses"\nrequires_openai_auth = true\nsupports_websockets = false\n${runtime.providerTools === "none" ? "request_max_retries = 0\nstream_max_retries = 0\n" : ""}`;
 }
 
 /**
@@ -267,6 +294,12 @@ function runtimeManifest(runtime: PluginRuntimeSpec): Readonly<Record<string, un
   return {
     kind: runtime.kind,
     selections: runtime.selections,
+    ...(runtime.kind === "codex" && runtime.egressEnrollment !== undefined
+      ? { egressEnrollment: runtime.egressEnrollment }
+      : {}),
+    ...(runtime.kind === "codex" && runtime.providerTools !== undefined
+      ? { providerTools: runtime.providerTools }
+      : {}),
     ...(runtime.kind === "codex" && runtime.modelEndpoint !== undefined
       ? { modelEndpoint: runtime.modelEndpoint }
       : {}),

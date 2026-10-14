@@ -65,14 +65,23 @@ export function driverHasCapabilityContract(driver: Driver): boolean {
         const provider = asRecord(value);
         return (
           provider !== undefined &&
-          ["normalizeConfig", "routes", "classify", "inject", "protectResponse"].every(
-            (operation) => typeof provider[operation] === "function",
-          )
+          [
+            "normalizeConfig",
+            "normalizeGrant",
+            "routes",
+            "classify",
+            "inject",
+            "protectResponse",
+          ].every((operation) => typeof provider[operation] === "function")
         );
       }) &&
-      ["configureRevision", "attachmentStatus", "withdrawBinding", "removeRevision"].every(
-        (operation) => typeof candidate[operation] === "function",
-      )
+      [
+        "configureRevision",
+        "attachmentStatus",
+        "verifyInstallation",
+        "withdrawBinding",
+        "removeRevision",
+      ].every((operation) => typeof candidate[operation] === "function")
     );
   }
   if (driver.capability === "credential_gateway") {

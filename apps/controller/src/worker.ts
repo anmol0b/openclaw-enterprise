@@ -4195,7 +4195,23 @@ export class ControllerWorker {
       ) {
         return { result: { outcome: "permanent", code: "HARNESS_AUTH_SOURCE_UNAVAILABLE" } };
       }
-      harnessAuth = { ...auth, source };
+      if (source.egress !== undefined) {
+        const control = this.egressProxy?.sourceControl;
+        const provider = control?.providers.find((entry) =>
+          isDeepStrictEqual(entry.ref, source.egress!.key.provider),
+        );
+        if (!provider || !isDeepStrictEqual(control?.backend, source.egress.key.backend)) {
+          return { result: { outcome: "permanent", code: "EGRESS_PROVIDER_UNAVAILABLE" } };
+        }
+        // Provider defaults must reach the normal Harness too. In particular, a
+        // source with an omitted optional endpoint cannot escape its protected profile.
+        harnessAuth = {
+          ...auth,
+          source: { ...source, config: provider.normalizeConfig(source.config) },
+        };
+      } else {
+        harnessAuth = { ...auth, source };
+      }
     } else {
       harnessAuth = revision.harnessAuth;
     }

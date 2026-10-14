@@ -1881,7 +1881,12 @@ function repositories(
       }
       const key = JSON.stringify([installation.sender.id, installation.sandboxId]);
       const prior = snapshot.egressInstallations.get(key);
-      if (prior !== undefined && !isDeepStrictEqual(prior.plan, installation.plan)) {
+      if (
+        prior !== undefined &&
+        (!isDeepStrictEqual(prior.plan, installation.plan) ||
+          !isDeepStrictEqual(prior.sender, installation.sender) ||
+          !isDeepStrictEqual(prior.enforcement, installation.enforcement))
+      ) {
         throw new ResourceStateConflictError("Egress execution identity is already bound.");
       }
       if (
