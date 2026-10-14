@@ -1,7 +1,7 @@
 ---
 created: "2026-09-21"
-updated: 2026-10-13
-last_updated_session: agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110
+updated: 2026-10-14
+last_updated_session: authoring-run/217a5c5f-ae2d-47c4-9dd6-d16ed0244627
 ---
 
 # OpenShell Sandbox provisioning flow
@@ -21,9 +21,6 @@ revision-owned provider file. The Harness signs the bootstrap token that the
 Gateway receives, while network policy limits its use to the node executable
 and Agent Gateway endpoint. This exposes the token to the Sandbox and is not a
 production credential-delivery contract.
-
-Both Kubernetes-only and Compose development control planes install the pinned
-Gateway and render the workspace chart, without compatibility projections.
 
 ## Entry Points
 
@@ -93,43 +90,48 @@ graph TD
 `internal/occdev/openshell.go:prepareOpenShell`,
 `internal/occdev/kubernetes.go:writeInstallation`
 
-The written Installation declares the `openshell` Backend, Gateway endpoint,
-Sandbox and a Credential Gateway whose `binaries` list holds native Codex for
-x64 and ARM64 runtimes, whatever the launcher host. Credential-source profiles,
-not Sandbox policy, govern egress.
+The Installation declares the `openshell` Backend, Gateway endpoint, Sandbox and
+Credential Gateway; `binaries` lists native Codex for x64/ARM64 regardless of host.
+Credential-source profiles, not Sandbox policy, govern egress.
 
-`scripts/dev-up` validates Kubernetes/OpenShell and invokes `occ dev up`.
-Compose is default; `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes` selects
-Kubernetes-only. Before state creation, Kubernetes-only rejects API-port
-collisions and records engine, cluster, namespace, port and key destination.
-Both verify the pinned archive, package charts and import digest-pinned
-Gateway/Sandbox/supervisor images. Kubernetes-only builds or selects controller/runtime images, imports them
-with PostgreSQL and resolves in-cluster digests.
+`scripts/dev-up` invokes `occ dev up`; `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes`
+selects Kubernetes-only. Its preflight rejects port collisions before recording
+engine, cluster, namespace, port and key destination.
 
-After Agent Sandbox rollout failure, `prepareOpenShell` calls
+Before resource creation, both launchers call
+`internal/occdev/openshell.go:selectOpenShellImages` and
+`internal/occdev/openshell.go:validateOpenShellImageRevisions`. Candidates require
+three local SHA-256 references with revision labels matching a full OpenShell
+commit; absent selectors retain releases. `prepareOpenShell` rechecks candidates,
+verifies pinned or selects local assets, then calls
+`internal/occdev/openshell.go:importOpenShellImage`. Import forbids candidate pulls,
+retains staging-collision/Linux checks and cleanup, and prints source/containerd
+references. `internal/occdev/openshell.go:installOpenShellGateway` supplies the
+three imported Helm images with pull policy `Never`. See
+[candidate digest/provenance verification](../guides/deploy/local-openshell-images.md). Kubernetes-only also imports
+controller/runtime and PostgreSQL images and resolves in-cluster digests.
+
+On Agent Sandbox rollout failure, `prepareOpenShell` calls
 `internal/occdev/agent_sandbox_rollout_diagnostics.go:captureAgentSandboxRollout`
-once before returning the original error for rollback. Synchronous capture
-selects the fixed Deployment, controller-UID-linked ReplicaSets/Pods and associated Warning
-reasons. It excludes messages, environment, full labels and logs, and marks
-unavailable, malformed or oversized results.
+once, then returns the original error for rollback. Capture reads the fixed
+Deployment, controller-UID-linked ReplicaSets/Pods and associated Warning reasons;
+omits messages, environment, full labels and logs; and marks unavailable,
+malformed or oversized results.
 
-Capture gets a fresh 15-second context, three-second request/command timeouts,
-256 KiB/command and a 32 KiB record cap. Direct commands are awaited; 200 ms pipe
-draining does not terminate arbitrary descendants. Error-output writes ignore
-failures; writer latency/durability are outside the subprocess budget. Capture
-neither retries nor diagnoses the failure.
+Limits: fresh 15-second context, three seconds/request/command, 256 KiB/command,
+32 KiB/record. Commands are awaited; 200 ms pipe draining cannot terminate arbitrary
+descendants. Output-write errors are ignored; writer latency/durability remain
+outside the budget. Capture neither retries nor diagnoses.
 
-After Helm, `network.providerHarness` records Gateway
-ClusterIP, Pod selector and TCP/8080. The Agent Gateway aliases only the advertised hostname to that IP, preserving
-HTTP Host for routing. NetworkPolicy lets it reach only those Pods/port.
+After Helm, `network.providerHarness` records Gateway ClusterIP, Pod selector and
+TCP/8080. The Agent Gateway aliases only the advertised hostname, preserving HTTP
+Host; NetworkPolicy restricts access to those Pods/port.
 
-Compose runs PostgreSQL, OCC and its k3d-targeting worker; Kubernetes-only uses
-`oce-system` and in-cluster authentication. Both install private Envoy routing
-and operator Workspaces, limiting Gateway access to API, worker, supervisor
-callbacks and dedicated Agent Gateways. See
-[local deployment guides](../guides/deploy/local-kubernetes-development.md).
-
-Cleanup validates recorded engine/state before deleting the named cluster and
+Compose runs PostgreSQL/OCC/worker; Kubernetes-only uses `oce-system` and
+in-cluster authentication. Both install private Envoy routing and operator
+Workspaces; only API, worker, supervisors and dedicated Gateways reach the Gateway.
+[Local development](../guides/deploy/local-kubernetes-development.md) owns topology
+and cleanup: validated engine/state bounds deletion to the recorded cluster and
 Compose project/volumes; partial cleanup retains recovery state.
 
 ### 1. Prepare the Namespace and OpenShell Workspace
@@ -357,6 +359,8 @@ networking. Native OpenClaw remains verification-only.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 12:17: Document candidate preflight/import in the accompanying uncommitted change. (authoring-run/217a5c5f-ae2d-47c4-9dd6-d16ed0244627 - dc5648b67d2618cc43ef07562298e986a94674e7)
 
 - 2026-10-13 14:11: Reconcile setup-Secret ordering and preserve service-IPv6 history alongside credential endpoint safeguards. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - 90268463bbd255c3c13a0e0bdeb437728189eb1a)
 
