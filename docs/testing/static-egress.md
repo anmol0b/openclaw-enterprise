@@ -1,6 +1,12 @@
 # Verify protected static inference
 
-Run the bounded authority integration with the installed workspace dependencies:
+Use these checks to distinguish the OCE source and fixture paths from an installed
+OpenShell deployment and a real provider. Run them with the installed workspace
+dependencies; an individual suite's coverage does not establish a deployment result.
+
+## Authority and provider fixtures
+
+Run the bounded authority integration:
 
 ```sh
 node --test tests/integration/static-egress.test.mjs
@@ -30,9 +36,9 @@ on delivery. The provider is a genuine HTTPS wire fixture, not a model turn.
 
 `tests/fixtures/static-egress/codex-responses.json` preserves a selected Codex
 0.163.0-alpha.2 packaged CLI request and finite synthetic SSE response consumed by
-that CLI. Prompt, model, identity, local tool names and descriptive values are sanitized; field and
-local-tool schema shapes are retained. The protected profile disables provider web
-search while keeping local functions and namespaces. The default remote web-search
+that CLI. Prompt, model, identity, local tool names and descriptive values are sanitized;
+field and local-tool schema shapes are retained. The protected profile disables
+provider web search while keeping local functions and namespaces. The default remote web-search
 tool is a refusal vector. The application test sends these bytes through actual
 classification, credential access, send authorization and whole-response protection.
 It also rejects unknown fields/events, remote tools, duplicate JSON keys, incomplete
@@ -44,6 +50,8 @@ It does not establish byte identity with a runtime image, generated Harness exec
 a real model response or installed OpenShell enforcement. A separate interrupted
 response probe with request/stream retry counts set to zero observed one request
 and a failed CLI turn; it is not a provider-effect recovery test.
+
+## Startup enrollment
 
 Run the startup coordination integration separately:
 
@@ -62,6 +70,8 @@ through preparation and activation` separately checks commit ordering and change
 evidence using Driver dependencies. Generated-wrapper conformance covers explicit
 zero retry arguments, protected timeout failure and unchanged legacy retry behavior.
 
+## Captured supplier wires
+
 The companion `openshell-receipt.json` contains actual protobuf bytes from the
 supplier's connected gateway token, TLS registry, OPA installation and receipt-query
 fixture. The consumer decodes those bytes, preserving uint64 values, and verifies
@@ -71,6 +81,8 @@ it does not reuse or establish custody of the producer's token. The separate
 delay. Its deadline remains creation plus 30 seconds. The consumer checks that
 historical operation refuses before material access. These two captures come from
 different synthetic component fixtures, not one installed Sandbox.
+
+## PostgreSQL state
 
 With a migrated disposable database selected through `OCC_TEST_DATABASE_URL`, run:
 
@@ -83,6 +95,8 @@ with `occ_app`. This test uses persisted authentication and native IAM, source a
 revision state, exact installation identity, rejection fences and database
 constraints. A separate state reader verifies persisted observations. It does not
 claim an application-process restart or provider outcome recovery.
+
+## Installed runtime and provider qualification
 
 End-to-end qualification needs a fresh protected revision rendered by the updated
 controller, matching gateway/supervisor candidates, persisted installation evidence,
@@ -97,9 +111,10 @@ the credential-access capability, binds the exact loaded policy, refuses missing
 counterparts, withholds response bytes until protection completes, and prevents
 workload bypass. Use the [OpenShell qualification contract](../reference/drivers/openshell-sandbox.md#qualification-contract)
 and [real runtime procedures](kubernetes.md). The bundled legacy release is not
-qualified by these tests. Indefinite streaming, WebSockets and dynamic credentials remain unsupported.
+qualified by these tests. Indefinite streaming, WebSockets and dynamic credentials
+remain unsupported.
 Finite SSE must finish within the original 30 seconds and 4 MiB before any bytes
 are released. Fresh revisions with matching gateway/supervisor candidates are the
-intended installed scope; mixed-version hot activation and no-bypass networking
-require separate runtime proof. There is no successful installed native model-turn
+intended installed scope; mixed-version hot upgrades are unsupported and
+no-bypass networking requires separate runtime proof. There is no successful installed native model-turn
 evidence in this consumer suite.
