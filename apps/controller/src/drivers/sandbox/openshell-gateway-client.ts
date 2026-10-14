@@ -22,6 +22,7 @@ import { checkServerIdentity, connect as tlsConnect, createSecureContext } from 
 import { fileURLToPath } from "node:url";
 import {
   getServiceDocument,
+  postServiceDocument,
   serviceWebSocketHandshake,
   type OpenShellServiceDocument,
 } from "./openshell-service-transport.ts";
@@ -322,6 +323,13 @@ export interface OpenShellGatewayClient
     serviceUrl: string,
     path: string,
     bearer: string,
+    signal: AbortSignal,
+  ): Promise<OpenShellServiceDocument>;
+  postServiceDocument(
+    serviceUrl: string,
+    path: string,
+    bearer: string,
+    body: Readonly<Record<string, unknown>>,
     signal: AbortSignal,
   ): Promise<OpenShellServiceDocument>;
   /** True when the service completes an authenticated WebSocket handshake. */
@@ -1015,6 +1023,23 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     signal: AbortSignal,
   ): Promise<OpenShellServiceDocument> {
     return getServiceDocument(this.serviceTransportOptions(), serviceUrl, path, bearer, signal);
+  }
+
+  async postServiceDocument(
+    serviceUrl: string,
+    path: string,
+    bearer: string,
+    body: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+  ): Promise<OpenShellServiceDocument> {
+    return postServiceDocument(
+      this.serviceTransportOptions(),
+      serviceUrl,
+      path,
+      bearer,
+      body,
+      signal,
+    );
   }
 
   async serviceWebSocketHandshake(

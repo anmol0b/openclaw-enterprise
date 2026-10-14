@@ -123,7 +123,7 @@ function protectedResponse(
       }
     } else {
       const parsed: unknown = parseUnambiguousJson(body);
-      if (!asRecord(parsed) || !scan(parsed)) {
+      if (!asRecord(parsed) || !scan(parsed) || !protectedResponseOutput(parsed, scan)) {
         return undefined;
       }
     }
@@ -135,6 +135,36 @@ function protectedResponse(
   } catch {
     return undefined;
   }
+}
+
+// Decode exactly the JSON layer defined for function arguments. Strings inside
+// that object remain strings; this is not a general-purpose encoding decoder.
+function protectedArguments(value: unknown, scan: (value: unknown) => boolean): boolean {
+  if (typeof value !== "string" || Buffer.byteLength(value) > 1024 * 1024) {
+    return false;
+  }
+  const parsed = parseUnambiguousJson(value);
+  return asRecord(parsed) !== undefined && scan(parsed);
+}
+
+function protectedResponseOutput(value: unknown, scan: (value: unknown) => boolean): boolean {
+  const output = asRecord(value)?.output;
+  return (
+    !Array.isArray(output) ||
+    output.every(
+      (item) =>
+        asRecord(item)?.type !== "function_call" || protectedArguments(item.arguments, scan),
+    )
+  );
+}
+
+interface ResponseItemState {
+  readonly id: string;
+  readonly type: string;
+  done: boolean;
+  readonly arguments: string[];
+  argumentBytes: number;
+  argumentsDone: boolean;
 }
 
 function protectedEvents(
@@ -153,6 +183,8 @@ function protectedEvents(
   let sequence = -1;
   let count = 0;
   const fragments = new Map<string, string>();
+  const items = new Map<number, ResponseItemState>();
+  const itemIds = new Set<string>();
   for (const block of normalized.split("\n\n")) {
     if (!block) {
       continue;
@@ -202,15 +234,89 @@ function protectedEvents(
         return false;
       }
       responseId = String(response.id);
+      if (!protectedResponseOutput(response, scan)) {
+        return false;
+      }
+    }
+    const item = asRecord(event.item);
+    const outputIndex = Number(event.output_index);
+    if (event.type === "response.output_item.added") {
+      if (
+        typeof item?.id !== "string" ||
+        items.has(outputIndex) ||
+        itemIds.has(item.id) ||
+        items.size >= 4096
+      ) {
+        return false;
+      }
+      itemIds.add(item.id);
+      items.set(outputIndex, {
+        id: item.id,
+        type: String(item.type),
+        done: false,
+        arguments: [],
+        argumentBytes: 0,
+        argumentsDone: false,
+      });
+      if (
+        item.type === "function_call" &&
+        item.arguments !== "" &&
+        !protectedArguments(item.arguments, scan)
+      ) {
+        return false;
+      }
+    } else if (event.output_index !== undefined) {
+      const state = items.get(outputIndex);
+      if (!state || state.done || (item?.id ?? event.item_id) !== state.id) {
+        return false;
+      }
+      if (event.type === "response.output_item.done") {
+        if (
+          item?.type !== state.type ||
+          (state.type === "function_call" &&
+            (!protectedArguments(item.arguments, scan) ||
+              (state.arguments.length > 0 && state.arguments.join("") !== item.arguments)))
+        ) {
+          return false;
+        }
+        state.done = true;
+      } else if (String(event.type).startsWith("response.function_call_arguments.")) {
+        if (state.type !== "function_call" || state.argumentsDone) {
+          return false;
+        }
+        if (typeof event.delta === "string") {
+          state.argumentBytes += Buffer.byteLength(event.delta);
+          if (state.argumentBytes > 1024 * 1024) {
+            return false;
+          }
+          state.arguments.push(event.delta);
+        } else {
+          const accumulated = state.arguments.join("");
+          if (
+            !protectedArguments(event.arguments, scan) ||
+            (state.arguments.length > 0 &&
+              (!protectedArguments(accumulated, scan) || accumulated !== event.arguments))
+          ) {
+            return false;
+          }
+          state.argumentsDone = true;
+        }
+      } else {
+        let expectedType = "message";
+        if (String(event.type).startsWith("response.reasoning_")) {
+          expectedType = "reasoning";
+        } else if (String(event.type).startsWith("response.custom_tool_call_input.")) {
+          expectedType = "custom_tool_call";
+        }
+        if (state.type !== expectedType) {
+          return false;
+        }
+      }
     }
     if (typeof event.delta === "string") {
-      const key = JSON.stringify([
-        event.type,
-        event.item_id,
-        event.output_index,
-        event.content_index,
-        event.summary_index,
-      ]);
+      // The selected Codex consumer emits OutputTextDelta(delta), dropping item
+      // IDs. Scan that observable concatenation even across valid item lifecycles.
+      const key = String(event.type);
       const joined = (fragments.get(key) ?? "") + event.delta;
       if (leaked(joined)) {
         return false;
@@ -222,7 +328,16 @@ function protectedEvents(
       String(event.type),
     );
   }
-  return terminal;
+  // Complete accumulated arguments must be decoded even if a provider omitted
+  // their .done event or supplied a different terminal snapshot.
+  return (
+    terminal &&
+    [...items.values()].every(
+      (item) =>
+        item.done &&
+        (item.arguments.length === 0 || protectedArguments(item.arguments.join(""), scan)),
+    )
+  );
 }
 
 /** Bounded inference with Harness-local tools and complete finite Responses SSE custody. */

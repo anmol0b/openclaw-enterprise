@@ -1517,6 +1517,16 @@ export interface SandboxDriver extends Driver {
   ensureNamespace?(context: SandboxNamespaceContext): Promise<void>;
   provisionHarness?(context: SandboxHarnessContext): Promise<SandboxResourceRef>;
   /**
+   * Release the exact protected Harness startup only after Compute has committed
+   * this current installation. Authenticate the transport peer and bind its fresh
+   * startup challenge to the admitted execution/plan. No material or send authority
+   * is conveyed. A starting transport may remain pending until the next reconcile.
+   */
+  enrollHarness?(
+    context: SandboxHarnessStatusContext,
+    installation: EgressInstallation,
+  ): Promise<void>;
+  /**
    * Returns the provider-owned transport for the exact provisioned Harness. When present,
    * Compute must route the Agent Gateway through this endpoint instead of its native Harness
    * Service. Implementations must fail closed until the endpoint is observable and exact.

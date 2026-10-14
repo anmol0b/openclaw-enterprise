@@ -1,0 +1,346 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import test from "node:test";
+import { AGENT_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
+import { HARNESS_EGRESS_ENROLLMENT_PATH } from "../../apps/controller/src/drivers/compute/egress-enrollment.ts";
+import {
+  pluginRuntimeEnvironment,
+  pluginRuntimeSpecForRevision,
+} from "../../apps/controller/src/drivers/compute/plugin-runtime.ts";
+import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
+import { staticEgressFixture, unary } from "../helpers/static-egress.mjs";
+
+const token = "synthetic-harness-transport";
+const serviceUrl = "http://fixture-harness.example.test/";
+const path = HARNESS_EGRESS_ENROLLMENT_PATH;
+const listen = async (server) => {
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  return server.address().port;
+};
+const close = async (server) => {
+  server.closeAllConnections?.();
+  await new Promise((resolve) => server.close(resolve));
+};
+async function waitFor(description, check) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const result = await check();
+    if (result) {
+      return result;
+    }
+    await delay(20);
+  }
+  assert.fail(`Timed out waiting for ${description}`);
+}
+
+// The native CLI is the only substituted process. Its exec command sends one
+// local HTTP request through the real authority fixture, and its app-server
+// implements only the authenticated transport handshake. This proves generated
+// startup coordination, not packaged Codex or installed supervisor enforcement.
+function nativeCli(callsPath, modelUrl) {
+  return `#!${process.execPath}
+const fs = require("node:fs");
+const { createHash } = require("node:crypto");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");
+if (args.includes("login")) {
+  fs.readFileSync(0, "utf8");
+} else if (args.includes("exec")) {
+  fetch(${JSON.stringify(modelUrl)}, { method: "POST", headers: {"content-type": "application/json"},
+    body: JSON.stringify({ model: "fixture-model", input: "READY", store: false }) }).then(async (response) => {
+      if (response.status !== 200) throw new Error("fixture request refused");
+      await response.arrayBuffer();
+      console.log(JSON.stringify({ type: "turn.started" }));
+      console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "READY" } }));
+      console.log(JSON.stringify({ type: "turn.completed" }));
+    }).catch(() => { process.exitCode = 1; });
+} else if (args.includes("app-server")) {
+  const verifier = args[args.indexOf("--ws-token-sha256") + 1];
+  const server = require("node:http").createServer((_request, response) => response.writeHead(404).end());
+  server.on("upgrade", (request, socket) => {
+    if (createHash("sha256").update((request.headers.authorization ?? "").slice(7)).digest("hex") !== verifier) {
+      socket.end("HTTP/1.1 401 Unauthorized\\r\\nConnection: close\\r\\n\\r\\n");
+      return;
+    }
+    const accept = createHash("sha1").update(request.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+    socket.end("HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: " + accept + "\\r\\n\\r\\n");
+  });
+  server.listen(Number(new URL(args[args.indexOf("--listen") + 1]).port), "127.0.0.1");
+} else {
+  process.exitCode = 1;
+}
+`;
+}
+
+test(
+  "protected Harness waits for committed installation and rejects stale startup releases before its first model request",
+  { timeout: 30000 },
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "egress-enrollment-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const reservation = createServer();
+    const port = await listen(reservation);
+    await close(reservation);
+    const transport = new GrpcOpenShellGatewayClient({ endpoint: `http://127.0.0.1:${port}` });
+    t.after(() => transport.close());
+    const f = await staticEgressFixture(t, {
+      recordInstallation: false,
+      physicalPlacement: true,
+      serviceTransport: transport,
+    });
+    f.observed.service = {
+      url: serviceUrl,
+      endpoint: {
+        sandbox: f.observed.sandbox.name,
+        name: "",
+        target_port: port,
+        authorization_mode: 2,
+      },
+    };
+    let businessRequests = 0;
+    const model = createServer(async (request, response) => {
+      businessRequests++;
+      try {
+        const chunks = [];
+        for await (const chunk of request) {
+          chunks.push(chunk);
+        }
+        const captured = f.capture(JSON.parse(Buffer.concat(chunks)));
+        const resolved = await unary(
+          f.clients.HttpCredentialAccess,
+          "Resolve",
+          captured,
+          f.metadata(),
+        );
+        assert.ok(
+          resolved.ready,
+          "the first business request must find genuine committed enrollment",
+        );
+        const permit = await unary(
+          f.clients.HttpCredentialAccess,
+          "AuthorizeSend",
+          f.permitRequest(captured, resolved.ready),
+          f.metadata(),
+        );
+        assert.ok(permit.allowed);
+        const protectedResponse = await f.protect(captured, await f.send(captured, resolved.ready));
+        assert.ok(protectedResponse.body_result.transform);
+        response.writeHead(200).end(protectedResponse.body_result.transform.data);
+      } catch {
+        response.writeHead(503).end();
+      }
+    });
+    const modelPort = await listen(model);
+    t.after(() => close(model));
+    const callsPath = join(directory, "calls.jsonl");
+    const script = join(directory, "entrypoint.cjs");
+    await writeFile(script, AGENT_RUNTIME_ENTRYPOINT);
+    await writeFile(callsPath, "");
+    await writeFile(
+      join(directory, "codex"),
+      nativeCli(callsPath, `http://127.0.0.1:${modelPort}/v1/responses`),
+      { mode: 0o700 },
+    );
+    const runtime = pluginRuntimeSpecForRevision(
+      f.revision,
+      undefined,
+      "https://provider.example.test/v1",
+    );
+    const environment = {
+      PATH: `${directory}:${dirname(process.execPath)}`,
+      HOME: directory,
+      TMPDIR: directory,
+      CODEX_HOME: join(directory, "home"),
+      CODEX_LOGIN_MODE: "api_key",
+      OPENAI_API_KEY: "nonsecret-client-marker",
+      OPENCLAW_HARNESS_MODEL: "codex/fixture-model",
+      OPENCLAW_WORKSPACE_DIR: join(directory, "workspace"),
+      OPENCLAW_AGENT_REVISION_ID: f.revision.id,
+      APP_SERVER_PORT: String(port),
+      APP_TOKEN_SHA: createHash("sha256").update(token).digest("hex"),
+      ...pluginRuntimeEnvironment(runtime),
+    };
+    const children = [];
+    const start = () => {
+      const child = spawn(process.execPath, [script], {
+        env: environment,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const exited = once(child, "exit");
+      let diagnostics = "";
+      child.stderr.on("data", (chunk) => {
+        diagnostics += chunk;
+      });
+      child.stdout.resume();
+      const started = { child, exited, diagnostics: () => diagnostics };
+      children.push(started);
+      return started;
+    };
+    const stop = async ({ child, exited }) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
+      child.kill("SIGTERM");
+      await exited;
+    };
+    t.after(async () => {
+      for (const child of children) {
+        await stop(child);
+      }
+    });
+    const getChallenge = async () =>
+      waitFor("authenticated enrollment challenge", async () => {
+        assert.equal(
+          businessRequests,
+          0,
+          "startup must not send a business request before enrollment",
+        );
+        try {
+          const document = await transport.getServiceDocument(
+            serviceUrl,
+            path,
+            token,
+            AbortSignal.timeout(1000),
+          );
+          return document.status === 200 && document.json;
+        } catch {
+          return undefined;
+        }
+      });
+    const calls = async () =>
+      (await readFile(callsPath, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse);
+    const first = start();
+    const oldChallenge = await getChallenge();
+    assert.equal(oldChallenge.execution.executionId, f.revision.egressPlan.execution.executionId);
+    assert.equal(businessRequests, 0);
+    assert.equal((await calls()).filter((args) => args.includes("exec")).length, 0);
+    assert.equal(f.providerRequests.length, 0);
+    assert.equal(
+      await f.controller.transact((unit) =>
+        unit.credentialSources.findEgressInstallation(
+          f.installation.sender.id,
+          f.installation.sandboxId,
+        ),
+      ),
+      undefined,
+    );
+
+    const post = (body, bearer = token) =>
+      transport.postServiceDocument(serviceUrl, path, bearer, body, AbortSignal.timeout(2000));
+    assert.equal((await post(oldChallenge, "wrong-token")).status, 401);
+    assert.equal(
+      (
+        await post({
+          ...oldChallenge,
+          execution: { ...oldChallenge.execution, executionId: "wrong-execution" },
+        })
+      ).status,
+      409,
+    );
+    assert.equal(
+      (await post({ ...oldChallenge, plan: { ...oldChallenge.plan, generation: 2 } })).status,
+      409,
+    );
+    assert.equal(businessRequests, 0);
+
+    // Restart creates a new challenge even for the same admitted plan. A response
+    // held by an earlier controller request cannot release the replacement process.
+    await stop(first);
+    const second = start();
+    const currentChallenge = await getChallenge();
+    assert.notEqual(currentChallenge.startupId, oldChallenge.startupId);
+    assert.equal((await post(oldChallenge)).status, 409);
+    assert.equal(businessRequests, 0);
+
+    const signal = AbortSignal.timeout(10000);
+    const enrollmentContext = {
+      ...f.context,
+      kubernetes: {},
+      signal,
+      transportToken: token,
+      requirements: {
+        loginMode: "api_key",
+        image: "harness-fixture:local",
+        command: ["node", script],
+        workspaceMounts: [],
+        credentialAttachments: [],
+        egressAttachment: f.attachment,
+        labels: { "openclaw.dev/revision": f.revision.id },
+        files: [],
+        environment: Object.entries(environment).map(([name, value]) => ({ name, value })),
+      },
+    };
+    // Unsupported Harnesses must refuse before provisioning starts a process that
+    // lacks this enrollment gate. The legacy unprotected path remains separate.
+    await assert.rejects(
+      f.sandboxDriver.provisionHarness({
+        ...enrollmentContext,
+        revision: { ...f.revision, harness: { ...f.revision.harness, id: "openclaw" } },
+      }),
+      { code: "SANDBOX_HARNESS_UNSUPPORTED" },
+    );
+    // Consume the same independently verified adapter observation that Compute
+    // commits. State is real; this test does not manufacture an installation receipt.
+    const installed = await f.egress.attachmentStatus({ ...f.context, signal }, f.attachment);
+    assert.ok(installed);
+    await f.controller.transact((unit) =>
+      unit.credentialSources.recordEgressInstallation(installed),
+    );
+    assert.equal(businessRequests, 0, "committing alone must not start a model request");
+    await assert.rejects(
+      f.sandboxDriver.enrollHarness(enrollmentContext, {
+        ...installed,
+        sandboxId: "another-sandbox-instance",
+      }),
+      /installed Sandbox/,
+    );
+    const wrongExecutionPlan = {
+      ...installed.plan,
+      execution: { ...installed.plan.execution, executionId: "another-execution" },
+    };
+    await assert.rejects(
+      f.sandboxDriver.enrollHarness(
+        { ...enrollmentContext, revision: { ...f.revision, egressPlan: wrongExecutionPlan } },
+        { ...installed, plan: wrongExecutionPlan },
+      ),
+      /admitted execution/,
+    );
+    assert.equal(
+      businessRequests,
+      0,
+      "a different installed instance or execution cannot release startup",
+    );
+    await f.sandboxDriver.enrollHarness(enrollmentContext, installed);
+    await waitFor("authenticated app-server", async () => {
+      try {
+        return await transport.serviceWebSocketHandshake(
+          serviceUrl,
+          token,
+          AbortSignal.timeout(1000),
+        );
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(businessRequests, 1, second.diagnostics());
+    assert.equal(f.providerRequests.length, 1);
+    const probes = (await calls()).filter((args) => args.includes("exec"));
+    assert.equal(probes.length, 1);
+    assert.ok(probes[0].includes("model_providers.openai-compatible.request_max_retries=0"));
+    assert.ok(probes[0].includes("model_providers.openai-compatible.stream_max_retries=0"));
+    // A repeated reconciliation observes the already-serving Harness and cannot
+    // replay either the release or the first model request.
+    await f.sandboxDriver.enrollHarness(enrollmentContext, installed);
+    assert.equal(businessRequests, 1);
+    assert.equal((await calls()).filter((args) => args.includes("exec")).length, 1);
+    await stop(second);
+  },
+);

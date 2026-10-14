@@ -64,6 +64,7 @@ import {
 } from "../../apps/controller/src/drivers/compute/operation-context.ts";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
+import { openAiStaticProvider } from "../../apps/controller/src/drivers/egress-proxy/openai-provider.ts";
 import {
   conformanceKubeconfig,
   conformanceKubernetesOptions,
@@ -11577,6 +11578,11 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
         resourceName: "provider-sandbox",
         agentId: context.revision.agentId,
         revisionId: context.revision.id,
+        ...(context.requirements.egressAttachment === undefined
+          ? {}
+          : {
+              egressAttachment: context.requirements.egressAttachment,
+            }),
       };
     },
     async harnessEndpoint(context) {
@@ -12215,6 +12221,180 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
     assert.deepEqual(attachmentChecks.slice(checksBefore), [[toolSource.id]]);
     assert.equal(harnessObservations.length, observedBeforeSourced + 1);
     assert.equal(harnessObservations.at(-1).revision, sourced);
+  }
+
+  {
+    // A separately admitted protected revision waits for the installation commit.
+    // These Driver dependencies expose ordering; actual authenticated release and
+    // first model-request behavior are covered by the enrollment integration test.
+    const protectedId = "ar_00000000-0000-4000-8000-000000000547";
+    const execution = {
+      installationId: "ins_00000000-0000-4000-8000-000000000001",
+      namespaceId: tenant.id,
+      agentId: revision.agentId,
+      servicePrincipalId: revision.servicePrincipalId,
+      revisionId: protectedId,
+      executionId: "00000000-0000-4000-8000-000000000547",
+    };
+    const protectedSourceId = "cs_00000000-0000-4000-8000-000000000547";
+    const sourceKey = {
+      installationId: execution.installationId,
+      namespaceId: tenant.id,
+      source: { id: protectedSourceId, generation: 1 },
+      backend: { id: "static-input", generation: 1 },
+      provider: openAiStaticProvider.ref,
+    };
+    const source = {
+      ...toolSource,
+      id: protectedSourceId,
+      name: "model",
+      type: "openai",
+      config: openAiStaticProvider.normalizeConfig({}),
+      egress: {
+        key: sourceKey,
+        schemaVersion: 1,
+        adoption: "live",
+        retention: "none",
+        materialRefId: "material-model",
+        secret: {
+          kind: "secret",
+          id: "sec_00000000-0000-4000-8000-000000000550",
+          namespaceId: tenant.id,
+        },
+        secretDriver: { id: "secrets", generation: 1 },
+        sender: { id: "supervisor", generation: 1 },
+        resolver: { id: "resolver", generation: 1 },
+      },
+    };
+    const grant = openAiStaticProvider.normalizeGrant(["gpt-5"]);
+    const plan = {
+      id: "00000000-0000-4000-8000-000000000548",
+      generation: 1,
+      execution,
+      sandboxDriverId: fixture.sandbox.id,
+      egressDriverId: "protected-egress",
+      routes: openAiStaticProvider.routes(source, {
+        binding: { id: "00000000-0000-4000-8000-000000000549", generation: 1 },
+        execution,
+        source: sourceKey,
+        grant,
+        grantHash: createHash("sha256").update(JSON.stringify(grant)).digest("hex"),
+        isolationId: revision.agentId,
+      }),
+    };
+    const protectedAuth = {
+      method: "credential_source",
+      sourceId: source.id,
+      credentialGatewayId: source.driverId,
+      sourceType: source.type,
+      loginMode: "api_key",
+    };
+    const protectedRevision = {
+      ...revision,
+      id: protectedId,
+      revision: revision.revision + 1,
+      harnessAuth: protectedAuth,
+      egressPlan: plan,
+      credentialSources: [
+        { sourceId: source.id, credentialGatewayId: source.driverId, sourceType: source.type },
+      ],
+    };
+    const attachment = { plan, configuration: { middleware: "protected-attachment" } };
+    const installed = {
+      plan,
+      sandboxId: "installed-sandbox",
+      sender: source.egress.sender,
+      installedAt: "2026-10-14T00:00:00.000Z",
+      enforcement: { instanceId: "current-instance", configurationId: "current-configuration" },
+    };
+    const events = [];
+    let observation = installed;
+    let current = true;
+    driver.credentialGatewayDriver.listSourceTypes = async () => [openAiStaticProvider.sourceType];
+    driver.egressProxyDriver = {
+      id: plan.egressDriverId,
+      async configureRevision() {
+        return attachment;
+      },
+      async attachmentStatus() {
+        events.push("observe");
+        return observation;
+      },
+      async verifyInstallation() {
+        events.push("verify-current");
+        return current;
+      },
+    };
+    const released = new DependencyUnavailableError("stop after authenticated enrollment boundary");
+    fixture.sandbox.enrollHarness = async (context, receipt) => {
+      assert.equal(context.transportToken, "test-transport");
+      assert.equal(context.revision, protectedRevision);
+      assert.equal(receipt, installed);
+      events.push("enroll");
+      throw released;
+    };
+    // A new revision has its own node setup; the already-ready Gateway remains the
+    // predecessor. Its setup Secret is independently seeded, not made ready by writes.
+    const protectedSetup = enrollmentSecret({ name: driver.workspaceNodeName(revision) });
+    const setup = await protectedSetup;
+    save({
+      ...setup,
+      metadata: {
+        ...setup.metadata,
+        name: driver.workspaceNodeName(protectedRevision),
+        labels: { ...setup.metadata.labels, "openclaw.dev/revision": protectedId },
+      },
+    });
+    const protectedContext = {
+      harnessAuth: { ...protectedAuth, source },
+      credentialSources: [source],
+      async recordEgressInstallation() {
+        events.push("commit");
+      },
+    };
+    observation = undefined;
+    assert.equal((await driver.prepareRevision(protectedRevision, protectedContext)).ready, false);
+    assert.deepEqual(events.splice(0), ["observe"]);
+    observation = installed;
+    const commitFailure = new Error("installation commit failed");
+    await assert.rejects(
+      driver.prepareRevision(protectedRevision, {
+        ...protectedContext,
+        async recordEgressInstallation() {
+          events.push("commit-rejected");
+          throw commitFailure;
+        },
+      }),
+      (error) => error === commitFailure,
+    );
+    assert.deepEqual(events.splice(0), ["observe", "commit-rejected"]);
+    current = false;
+    assert.equal((await driver.prepareRevision(protectedRevision, protectedContext)).ready, false);
+    assert.deepEqual(events.splice(0), ["observe", "commit", "verify-current"]);
+    current = true;
+    const entered = Promise.withResolvers();
+    const commit = Promise.withResolvers();
+    const preparing = driver.prepareRevision(protectedRevision, {
+      ...protectedContext,
+      async recordEgressInstallation() {
+        events.push("commit-start");
+        entered.resolve();
+        await commit.promise;
+        events.push("commit-finished");
+      },
+    });
+    // Await both branches so an earlier preparation failure cannot leave the test hanging.
+    await Promise.race([entered.promise, preparing]);
+    assert.deepEqual(events, ["observe", "commit-start"]);
+    commit.resolve();
+    await assert.rejects(preparing, (error) => error === released);
+    assert.deepEqual(events.splice(0), [
+      "observe",
+      "commit-start",
+      "commit-finished",
+      "verify-current",
+      "enroll",
+    ]);
   }
 
   // An unreachable Harness transport is a Sandbox provisioning failure in diagnostics.

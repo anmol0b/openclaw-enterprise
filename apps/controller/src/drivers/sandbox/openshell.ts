@@ -13,6 +13,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import type {
   AgentRevision,
+  EgressInstallation,
+  EgressPlan,
   Backend,
   HarnessWorkloadRequirements,
   KubernetesNamespacedResource,
@@ -55,6 +57,10 @@ import {
 } from "./openshell-gateway-client.ts";
 import { RUNTIME_WRAPPER_COMMAND } from "../compute/kubernetes/runtime-entrypoints.ts";
 import { nodeProgramArguments } from "../compute/node-program.ts";
+import {
+  HARNESS_EGRESS_ENROLLMENT_PATH,
+  harnessEgressEnrollment,
+} from "../compute/egress-enrollment.ts";
 
 type ConfigurationRecord = Readonly<Record<string, unknown>>;
 
@@ -578,7 +584,10 @@ interface CodexRuntimeFiles {
   readonly profile: OpenShellProviderProfile;
 }
 
-function codexRuntimeFiles(requirements: HarnessWorkloadRequirements): CodexRuntimeFiles {
+function codexRuntimeFiles(
+  requirements: HarnessWorkloadRequirements,
+  plan?: EgressPlan,
+): CodexRuntimeFiles {
   const expected = new Map([
     ["runtime.json", PLUGIN_RUNTIME_MANIFEST_ENVIRONMENT],
     ["config.toml", PLUGIN_RUNTIME_CODEX_CONFIG_ENVIRONMENT],
@@ -608,6 +617,17 @@ function codexRuntimeFiles(requirements: HarnessWorkloadRequirements): CodexRunt
     throw new SandboxRevisionUnsupportedError(
       "SANDBOX_HARNESS_UNSUPPORTED",
       "OpenShell dedicated Codex requires a valid plugin-runtime manifest.",
+    );
+  }
+  if (
+    !isDeepStrictEqual(
+      manifest.egressEnrollment,
+      plan === undefined ? undefined : harnessEgressEnrollment(plan),
+    ) ||
+    (plan !== undefined && manifest.providerTools !== "none")
+  ) {
+    throw new OpenShellSandboxConfigurationFailure(
+      "Protected Harness startup must match the admitted egress plan.",
     );
   }
   const selections = configurationObject(manifest.selections, "Codex plugin-runtime selections");
@@ -2102,6 +2122,12 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         "Protected egress attachment must match the admitted revision.",
       );
     }
+    if (context.revision.egressPlan !== undefined && context.revision.harness.id !== "codex") {
+      throw new SandboxRevisionUnsupportedError(
+        "SANDBOX_HARNESS_UNSUPPORTED",
+        "Protected inference startup enrollment requires the dedicated Codex Harness.",
+      );
+    }
     if (
       context.revision.harness.mode !== "dedicated" ||
       (context.revision.harness.id !== "codex" && context.revision.harness.id !== "openclaw")
@@ -2138,7 +2164,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     };
     if (codex) {
       codexTransportVerifier(context.requirements);
-      const runtimeFiles = codexRuntimeFiles(context.requirements);
+      const runtimeFiles = codexRuntimeFiles(context.requirements, context.revision.egressPlan);
       runtimeCredentialMaterial = await codexRuntimeCredentials(context);
       await this.ensureRuntimeProfile(client, workspace, runtimeFiles.profile, context.signal);
       const ensured = await this.ensureRuntimeProvider(
@@ -2289,6 +2315,80 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       validateHarnessServiceUrl(service.url);
     }
     return result;
+  }
+
+  async enrollHarness(
+    context: SandboxHarnessStatusContext,
+    installation: EgressInstallation,
+  ): Promise<void> {
+    if (
+      !context.revision.egressPlan ||
+      !isDeepStrictEqual(installation.plan, context.revision.egressPlan)
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "Harness enrollment must match the admitted egress plan.",
+      );
+    }
+    const { client, service } = await this.exactHarnessService(
+      context,
+      "enroll a protected Harness",
+    );
+    const ref = this.sandboxRef(context);
+    const sandbox = await client.getSandbox(
+      { name: ref.resourceName, workspace: workspaceName(context.namespace) },
+      context.signal,
+    );
+    if (sandbox?.id !== installation.sandboxId) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "Harness enrollment must match the installed Sandbox.",
+      );
+    }
+    if (
+      await client.serviceWebSocketHandshake(service.url, context.transportToken, context.signal)
+    ) {
+      return;
+    }
+    const document = await client.getServiceDocument(
+      service.url,
+      HARNESS_EGRESS_ENROLLMENT_PATH,
+      context.transportToken,
+      context.signal,
+    );
+    // A service may still be starting, or may already serve Codex/a held failure.
+    // Normal Harness observation decides readiness; none of these answers releases startup.
+    if (document.status !== 200) {
+      return;
+    }
+    const challenge = asRecord(document.json);
+    const { startupId, ...binding } = challenge ?? {};
+    if (
+      !challenge ||
+      typeof startupId !== "string" ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(startupId) ||
+      !isDeepStrictEqual(binding, harnessEgressEnrollment(installation.plan))
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "Harness enrollment challenge does not match the admitted execution.",
+      );
+    }
+    const released = await client.postServiceDocument(
+      service.url,
+      HARNESS_EGRESS_ENROLLMENT_PATH,
+      context.transportToken,
+      challenge,
+      context.signal,
+    );
+    // A restarted Harness refuses the old challenge. The next reconcile observes
+    // fresh installation evidence and obtains its new challenge before trying again.
+    if (released.status === 409 || released.status === 410) {
+      return;
+    }
+    if (
+      released.status !== 200 ||
+      !isDeepStrictEqual(released.json, { enrolled: true, startupId })
+    ) {
+      throw new OpenShellSandboxConfigurationFailure("Harness enrollment was not acknowledged.");
+    }
   }
 
   async harnessEndpoint(context: SandboxHarnessContext): Promise<SandboxHarnessEndpoint> {

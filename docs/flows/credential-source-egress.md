@@ -73,6 +73,23 @@ counterpart, receipt or mismatched policy leaves provisioning incomplete or fail
 The gateway producer must fence reports and queries against current registration
 and effective configuration; this consumer does not infer evidence from a manifest.
 
+`apps/controller/src/drivers/compute/egress-enrollment.ts:HARNESS_EGRESS_ENROLLMENT_HELPER`,
+`apps/controller/src/drivers/sandbox/openshell.ts:enrollHarness`
+
+The generated Harness opens a temporary authenticated enrollment listener on its
+existing service port before running the first model probe. Compute awaits the
+installation commit, requeries current evidence and calls the selected Sandbox
+Driver. The Driver checks the exact Sandbox and service, reads the execution/plan
+challenge and echoes its fresh process nonce using the existing transport token.
+The Harness closes that listener before starting Codex. Restart creates a new
+challenge; a stale release cannot unlock the replacement. The 180-second wait
+fails closed with a held startup failure. Reconciliation can repeat readiness
+exchanges, but enrollment neither resolves material nor retries business requests.
+The active-revision branch in `apps/controller/src/worker.ts:prepareRevision` can
+repeat this sequence when work is queued. The default Kubernetes selection has no
+periodic maintenance interval, so Harness-only restart recovery is not automatic;
+see the [supported recovery boundary](../reference/credential-sources/protected-inference.md#installation-configuration).
+
 ### 2. Capture identity, operation and first authority decision
 
 `apps/controller/src/drivers/egress-proxy/openshell-identity.ts:verify`,
@@ -92,8 +109,9 @@ refuse before Secret access. Replay reservations and outstanding handles are bou
 Each check opens a fresh platform transaction. An enclosing controller transaction
 is refused, so native IAM cannot reuse one policy snapshot for both checks. The
 check verifies current Namespace/Agent state, admitted revision, installation,
-source generation, withdrawal and exact Agent source permission. The Driver
-requeries current policy-status evidence during each check and compares it with
+source generation, withdrawal and exact Agent source permission. The existing
+`credentialNamespace` mapping supplies Compute's runtime placement to the Driver;
+IAM and audit retain logical Namespace identity. The Driver requeries current policy-status evidence during each check and compares it with
 the stored fence. Replacement, missing evidence or changed configuration refuses
 even when the saved installation was once valid. Denials record
 phase and internal request attribution without material.
@@ -124,7 +142,11 @@ The response service requests whole-body inspection, matches the original peer
 and request ID, and removes visible headers outside its allowlist. The provider
 policy parses bounded JSON or complete finite SSE using closed provider event
 schemas and rejects unsupported responses or selected-material reflection, including
-joined text deltas. No SSE event is released early. The original deadline and
+text deltas joined across item IDs as exposed by the Codex consumer. Indexed
+events must belong to an unfinished item. Supported function-call arguments are
+parsed once as bounded JSON, including their completed delta accumulation, before
+release. This does not recursively decode arbitrary string encodings. No SSE event
+is released early. The original deadline and
 4 MiB limit still apply. A provider 401 persists a version-specific rejection. Material is
 removed after response handling or the original deadline. Restart loses handles
 and fails closed; no send outcome is reconstructed.
@@ -138,7 +160,9 @@ The worker obtains nonsecret endpoint configuration through the registered
 provider's normalizer. The admitted inference grant disables provider tools in
 protected Codex configuration while retaining local tools and ordinary Harness
 components. HTTP Responses is selected with WebSockets and automatic request/stream
-retries disabled. The provider-owned classifier recognizes the bounded selected
+retries disabled. The runtime manifest preserves that profile; the generated
+`--ignore-user-config` probe passes explicit zero request/stream retries and does
+not repeat a protected probe after timeout. The provider-owned classifier recognizes the bounded selected
 client payload; unknown operations fail before credential access.
 
 ## Debugging and Verification
@@ -148,6 +172,11 @@ authentication, native IAM, controller, versioned Kubernetes Driver and TLS gRPC
 provider wires. Run `node --test tests/integration/postgres-static-egress.test.mjs`
 with the [PostgreSQL prerequisites](../testing/postgresql.md) for persisted plans,
 constraints, installation idempotency, rejection fencing and fresh native IAM.
+
+Run `node --test tests/integration/egress-enrollment.test.mjs` for the actual
+generated entrypoint and selected Sandbox Driver exchange before the first local
+fixture model request, including restart and stale-release refusal. The external
+CLI process is substituted; this is not packaged runtime execution.
 
 These tests use passive storage and runtime-observation fixtures. They do not
 prove a real model turn, supervisor enforcement, Kubernetes NetworkPolicies,

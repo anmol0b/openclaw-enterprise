@@ -15,8 +15,9 @@ the supplier protobuf contract. The suite checks missing receipts refuse, then
 records only the installation returned by the actual Driver consumer. It tests
 current evidence again at access and send, including replacement and stale records.
 These fixtures do not establish that a supervisor produced or enforced a receipt.
-Compute placement is passive;
-no real Sandbox, model service or cluster is launched by this suite.
+The physical-placement case uses the selected Kubernetes Compute resolver against
+the TLS fixture, with logical and runtime Namespace names deliberately different.
+No real Sandbox, model service or cluster is launched by this suite.
 
 The cases protect separate failures: current permission revoked between the two
 checks; authoritative material rotation; forged identity and unsupported operation
@@ -35,13 +36,31 @@ search while keeping local functions and namespaces. The default remote web-sear
 tool is a refusal vector. The application test sends these bytes through actual
 classification, credential access, send authorization and whole-response protection.
 It also rejects unknown fields/events, remote tools, duplicate JSON keys, incomplete
-SSE and credential reflection split across deltas.
+SSE, credential reflection split across distinct output-item IDs, and credentials
+escaped inside function-argument JSON or its accumulated streaming deltas.
 
 This capture proves the selected direct CLI wire shape against a synthetic provider.
 It does not establish byte identity with a runtime image, generated Harness execution,
 a real model response or installed OpenShell enforcement. A separate interrupted
 response probe with request/stream retry counts set to zero observed one request
 and a failed CLI turn; it is not a provider-effect recovery test.
+
+Run the startup coordination integration separately:
+
+```sh
+node --test tests/integration/egress-enrollment.test.mjs
+```
+
+It launches the actual generated entrypoint and uses the selected Sandbox Driver's
+real service client against local HTTP fixtures. A substituted CLI process makes
+one local request through the real authority path after enrollment. The test proves
+that an absent receipt blocks the first request, a committed receipt alone does not
+release startup, and stale, wrong-instance or wrong-execution releases refuse. A
+restart gets a fresh challenge. It does not execute packaged Codex or a supervisor.
+The Compute conformance case `provider Harness endpoint owns Gateway transport
+through preparation and activation` separately checks commit ordering and changed
+evidence using Driver dependencies. Generated-wrapper conformance covers explicit
+zero retry arguments, protected timeout failure and unchanged legacy retry behavior.
 
 The companion `openshell-receipt.json` contains actual protobuf bytes from the
 supplier's connected gateway token, TLS registry, OPA installation and receipt-query
@@ -64,6 +83,14 @@ with `occ_app`. This test uses persisted authentication and native IAM, source a
 revision state, exact installation identity, rejection fences and database
 constraints. A separate state reader verifies persisted observations. It does not
 claim an application-process restart or provider outcome recovery.
+
+End-to-end qualification needs a fresh protected revision rendered by the updated
+controller, matching gateway/supervisor candidates, persisted installation evidence,
+and a reachable authenticated bearer-passthrough Harness service. Observe no model
+request before commit/enrollment, one initial probe afterward, and a fresh challenge
+after process restart. This nonce check does not establish automatic recovery:
+the default Kubernetes selection queues no periodic active-revision maintenance.
+Also verify timeout holds startup without a business retry.
 
 Before qualifying a deployment, additionally prove the actual supervisor requires
 the credential-access capability, binds the exact loaded policy, refuses missing

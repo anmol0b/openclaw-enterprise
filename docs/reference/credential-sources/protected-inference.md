@@ -12,7 +12,7 @@ protected readiness. Installed runtime qualification remains separate.
 
 ## Supported boundary
 
-The first provider admits one static `openai` source, one dedicated Agent
+The first provider admits one static `openai` source, one dedicated Codex Agent
 execution, and its explicitly configured primary model. It accepts HTTPS POST
 requests to `/v1/responses` with explicit `store: false`, text input, bounded
 reasoning state and local function/custom tools, including namespaces. The closed
@@ -24,7 +24,9 @@ model selection and discovery refuse before credential access.
 The provider normalizes an inference-only grant with `providerTools: none`.
 Normal protected Codex configuration derives `web_search="disabled"`,
 `supports_websockets=false`, `request_max_retries=0` and `stream_max_retries=0`
-from that grant. Local tools and ordinary Harness components remain enabled;
+from that grant. The startup authentication probe also passes both zero-retry
+settings explicitly because it runs with `--ignore-user-config`. A protected
+probe timeout fails startup without a second model request. Local tools and ordinary Harness components remain enabled;
 unprotected Agents keep their existing configuration. Custom endpoints do not
 imply arbitrary provider compatibility: they must implement this same closed
 protocol and response policy.
@@ -76,9 +78,14 @@ accepted check-to-send race remains; no automatic retry is authorized.
 The response policy requires a complete JSON object or a finite Responses SSE
 sequence of at most 4 MiB. SSE events use a closed JSON schema, consistent response
 identity, ordered sequence numbers when present and a terminal response event.
-Duplicate JSON keys, incomplete/unknown events and unsupported framing refuse.
-Credential protection scans decoded strings and joined text deltas, including
-URL encoding and base64 forms. This is a conservative supported-format policy,
+Output items have bounded, unique identities and must finish before release;
+indexed events must belong to their open item. Duplicate JSON keys,
+incomplete/unknown events and unsupported framing refuse. Credential protection
+scans decoded strings and the text-delta concatenation exposed by Codex, even
+across distinct item IDs, including URL encoding and base64 forms. Supported
+function-call arguments are decoded through their protocol-defined JSON layer,
+including completed accumulated deltas, with a 1 MiB argument bound and bounded
+object depth and size. Strings inside that object are not decoded recursively. This is a conservative supported-format policy,
 not a proof against arbitrary provider transformations. The counterpart must
 withhold incomplete responses and strip protected headers and trailers. A 401
 fences that store-qualified material version in PostgreSQL; a new version can
@@ -142,6 +149,26 @@ rejected, replaced or stale evidence refuses; a cached manifest cannot substitut
 The gateway must validate current registration and effective configuration when
 reporting and querying this evidence. A global policy override that does not match
 the admitted Sandbox revision cannot qualify.
+
+Before the first model probe, the generated Harness waits up to 180 seconds for
+authenticated enrollment through its existing bearer-passthrough service.
+Compute observes enforcement, commits the installation and verifies it is still
+current before the selected Sandbox Driver releases startup. The challenge binds
+the admitted execution and plan to a fresh nonce for each Harness process.
+Wrong-instance, stale and replayed releases refuse. Enrollment carries no provider
+material or send permission; both request authority checks still run. An expired
+wait holds an `egress-enrollment` startup failure. A protected manifest without
+enrollment input refuses before starting a native process. Inspect installation
+evidence and Harness service reachability before deploying again.
+
+A Harness-only process restart also waits on a fresh challenge. The default
+Kubernetes Compute selection does not schedule periodic active-revision
+maintenance, so automatic release after that restart is not supported by this
+slice. A new deployment is the supported recovery procedure; an old release is
+never reused.
+
+The adapter receives the runtime Namespace selected by Compute. IAM decisions,
+persisted execution identity and audit evidence retain the logical Namespace ID.
 
 A first-slice withdrawal destroys only that owned single-binding Sandbox and
 confirms absence. A policy-only reduction for multiple bindings is not implemented.

@@ -68,7 +68,9 @@ test("supplier-produced receipt protobuf and registered-instance claims decode t
 });
 
 test("protected inference uses real admission, fresh IAM, versioned Secret reads and TLS authority/provider wires", async (t) => {
-  const f = await staticEgressFixture(t);
+  const f = await staticEgressFixture(t, { physicalPlacement: true });
+  assert.notEqual(f.namespace.name, f.runtimeNamespace.name);
+  assert.equal(f.namespace.id, f.runtimeNamespace.id);
   assert.deepEqual(f.source.egress, { adoption: "live", retention: "none" });
   assert.throws(
     () => pluginRuntimeConfigMapData(pluginRuntimeSpecForRevision(f.revision)),
@@ -145,6 +147,24 @@ test("protected inference uses real admission, fresh IAM, versioned Secret reads
     (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
   );
   assert.equal(f.secretReads, beforeReads, "current IAM denial must precede Secret access");
+  const denials = (await f.controller.transact((unit) => unit.audit.list())).filter(
+    (event) => event.action === "openclaw.egress.authorize",
+  );
+  assert.deepEqual(
+    denials.map(({ namespaceId, actorId, resource, details }) => ({
+      namespaceId,
+      actorId,
+      resource,
+      phase: details.phase,
+    })),
+    ["before_send", "before_access"].map((phase) => ({
+      namespaceId: f.namespace.id,
+      actorId: f.revision.servicePrincipalId,
+      resource: { kind: "credential_source", namespaceId: f.namespace.id, id: f.source.id },
+      phase,
+    })),
+    "runtime placement must not replace logical IAM or audit identity",
+  );
 });
 
 test("protected authority refuses forged execution, unsupported operations, replay and changed selected-material evidence", async (t) => {
@@ -276,6 +296,29 @@ test("provider authentication rejection fences the exact material version and en
   assert.ok(
     (await exchange()).body_result.block_delivery,
     "duplicate JSON keys cannot conceal reflected material from parsing",
+  );
+  // Function arguments have their own protocol-defined JSON layer. Ordinary tool
+  // decoding must never recover the protected value from escaped response text.
+  const escaped = [..."synthetic-key-initial"]
+    .map((character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0"))
+    .join("");
+  f.setResponse({
+    status: 200,
+    body: {
+      output: [
+        {
+          type: "function_call",
+          id: "call-escaped",
+          call_id: "tool-escaped",
+          name: "fixture_function_0",
+          arguments: '{"cmd":"' + escaped + '"}',
+        },
+      ],
+    },
+  });
+  assert.ok(
+    (await exchange()).body_result.block_delivery,
+    "decoding supported JSON function arguments cannot expose credential material",
   );
   f.setResponse({ status: 401, body: { error: "invalid credential" } });
   assert.ok((await exchange()).body_result.transform);
@@ -541,6 +584,92 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
     { ...delta, delta: "synthetic-key-" },
     { ...delta, delta: "initial" },
   );
+  const switched = structuredClone(wire.responseEvents);
+  const firstMessage = switched
+    .slice(1, -1)
+    .map((event) => JSON.parse(JSON.stringify(event).replaceAll("READY", "synthetic-key-")));
+  const secondMessage = switched.slice(1, -1).map((event) => ({
+    ...JSON.parse(
+      JSON.stringify(event)
+        .replaceAll("READY", "initial")
+        .replaceAll("msg_runtime_probe", "msg_second"),
+    ),
+    output_index: 1,
+  }));
+  switched.splice(1, switched.length - 2, ...firstMessage, ...secondMessage);
+  switched.at(-1).response.output = [firstMessage.at(-1).item, secondMessage.at(-1).item];
+  assert.ok(
+    (await exchange(encode(switched))).body_result.block_delivery,
+    "OutputTextDelta drops item IDs, so the consumer-observable concatenation must be scanned",
+  );
+  // Function arguments have a protocol-defined JSON layer, including when
+  // unicode escapes straddle deltas. A harmless terminal snapshot cannot erase
+  // arguments that a local tool consumer already accumulated.
+  const functionEvents = (argumentsText) => {
+    const item = {
+      type: "function_call",
+      id: "fc_local",
+      call_id: "call_local",
+      name: "fixture_function_0",
+      arguments: argumentsText,
+      status: "completed",
+    };
+    const end = structuredClone(wire.responseEvents.at(-1));
+    end.response.output = [item];
+    const middle = Math.floor(argumentsText.length / 2);
+    return [
+      structuredClone(wire.responseEvents[0]),
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { ...item, arguments: "", status: "in_progress" },
+      },
+      ...[argumentsText.slice(0, middle), argumentsText.slice(middle)].map((delta) => ({
+        type: "response.function_call_arguments.delta",
+        output_index: 0,
+        item_id: item.id,
+        delta,
+      })),
+      {
+        type: "response.function_call_arguments.done",
+        output_index: 0,
+        item_id: item.id,
+        arguments: argumentsText,
+      },
+      { type: "response.output_item.done", output_index: 0, item },
+      end,
+    ];
+  };
+  const safeFunction = functionEvents('{"cmd":"printf READY"}');
+  assert.ok(
+    (await exchange(encode(safeFunction))).body_result.transform,
+    "ordinary Harness-local function tools remain supported",
+  );
+  const escapedCredential = [..."synthetic-key-initial"]
+    .map((character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0"))
+    .join("");
+  const escapedFunction = functionEvents('{"cmd":"' + escapedCredential + '"}');
+  const disguisedFunction = structuredClone(escapedFunction);
+  disguisedFunction.splice(4, 1);
+  disguisedFunction.at(-2).item.arguments = '{"cmd":"printf READY"}';
+  disguisedFunction.at(-1).response.output = [];
+  const wrongAssociation = structuredClone(safeFunction);
+  wrongAssociation[3].item_id = "fc_unassociated";
+  const afterDone = structuredClone(safeFunction);
+  afterDone.splice(-1, 0, safeFunction[2]);
+  for (const events of [
+    escapedFunction,
+    disguisedFunction,
+    wrongAssociation,
+    afterDone,
+    functionEvents('{"cmd":"unterminated'),
+    functionEvents('{"cmd":"ok","cmd":"other"}'),
+  ]) {
+    assert.ok(
+      (await exchange(encode(events))).body_result.block_delivery,
+      "argument decoding, item association and completion all precede release",
+    );
+  }
   const remote = structuredClone(wire.responseEvents);
   remote[1].item = { type: "web_search_call", id: "remote-effect", status: "completed" };
   const wrongModel = structuredClone(wire.responseEvents);
