@@ -2486,6 +2486,7 @@ export class OpenClawController {
         configurationInput.secretBindings,
         harnessAuth,
       );
+      await configurationDriver.validateSize?.(configurationInput.values);
       this.validateConfigurationContent(configurationInput.values);
       await configurationDriver.validate({
         id: "cfg_00000000-0000-4000-8000-000000000000",
@@ -5074,6 +5075,8 @@ export class OpenClawController {
         values,
         createdAt: this.timestamp(),
       });
+      // A document too large to store is refused before the content rules walk it (finding 1317).
+      await driver.validateSize?.(values);
       this.validateConfigurationContent(values);
       await driver.validate(configuration);
       const metadata = await state.configurations.createConfiguration({
@@ -5415,6 +5418,8 @@ export class OpenClawController {
         values,
         createdAt: advanced.createdAt,
       });
+      // A document too large to store is refused before the content rules walk it (finding 1317).
+      await driver.validateSize?.(values);
       // A stored Configuration that predates these rules still reads, and deployment refuses it
       // as before; only a replacement that keeps the refused value fails.
       this.validateConfigurationContent(values);
