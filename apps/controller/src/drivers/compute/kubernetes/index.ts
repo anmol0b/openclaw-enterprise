@@ -5875,14 +5875,25 @@ export class KubernetesComputeDriver implements ComputeDriver {
           egressContext === undefined
             ? undefined
             : await this.egressProxyDriver!.configureRevision(egressContext);
+        const harnessRequirements = this.harnessRequirementsFromDeployment(
+          agentDeployment,
+          harnessAuth.loginMode,
+          attachments,
+          this.sandboxWorkloadFiles(pluginRuntime),
+        );
         const requirements = {
-          ...this.harnessRequirementsFromDeployment(
-            agentDeployment,
-            harnessAuth.loginMode,
-            attachments,
-            this.sandboxWorkloadFiles(pluginRuntime),
-          ),
-          ...(egressAttachment === undefined ? {} : { egressAttachment }),
+          ...harnessRequirements,
+          ...(egressAttachment === undefined
+            ? {}
+            : {
+                egressAttachment,
+                // Bind enrollment to the immutable admitted revision without
+                // exposing Compute's private status identity to the provider.
+                environment: [
+                  ...harnessRequirements.environment,
+                  { name: "OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID", value: revision.id },
+                ],
+              }),
         };
         const sandbox = await this.prepareRevisionStage("sandbox_provision", () =>
           sandboxDriver.provisionHarness!({

@@ -3689,6 +3689,9 @@ test("Codex runtime gates startup and readiness on a successful native authentic
                 : { APP_SERVER_TOKEN: "fixture-transport-token" }),
               APP_SERVER_PORT: "4500",
               ...(scenario.protectedInference
+                ? { OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID: revisionId }
+                : {}),
+              ...(scenario.protectedInference
                 ? pluginRuntimeEnvironment({
                     kind: "codex",
                     selections: {},

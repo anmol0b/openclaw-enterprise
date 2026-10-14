@@ -209,6 +209,11 @@ authenticated enrollment through its existing bearer-passthrough service.
 Compute observes enforcement, commits the installation and verifies it is still
 current before the selected Sandbox Driver releases startup. The challenge binds
 the admitted execution and plan to a fresh nonce for each Harness process.
+Before listening, the Harness requires its enrollment revision to match
+`OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID`, a literal supplied by Compute from the
+immutable admitted revision only for protected provider Harnesses. Missing or
+mismatched identity refuses; Compute's private status environment and raw
+transport token remain unavailable to the provider workload.
 Wrong-instance, stale and replayed releases refuse. Enrollment carries no provider
 material or send permission; both request authority checks still run. An expired
 wait holds an `egress-enrollment` startup failure with code `UNAVAILABLE`. A

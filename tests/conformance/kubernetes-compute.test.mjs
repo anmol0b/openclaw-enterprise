@@ -17,6 +17,12 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer as createHttpsServer } from "node:https";
+import { createServer } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  HARNESS_EGRESS_ENROLLMENT_HELPER,
+  HARNESS_EGRESS_ENROLLMENT_PATH,
+} from "../../apps/controller/src/drivers/compute/egress-enrollment.ts";
 import { once } from "node:events";
 import { inspect } from "node:util";
 import { inflateRawSync } from "node:zlib";
@@ -12466,11 +12472,13 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
         return current;
       },
     };
+    let enrollmentRequirements;
     const released = new DependencyUnavailableError("stop after authenticated enrollment boundary");
     fixture.sandbox.enrollHarness = async (context, receipt) => {
       assert.equal(context.transportToken, "test-transport");
       assert.equal(context.revision, protectedRevision);
       assert.equal(receipt, installed);
+      enrollmentRequirements = context.requirements;
       events.push("enroll");
       throw released;
     };
@@ -12536,6 +12544,138 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
       "verify-current",
       "enroll",
     ]);
+
+    // Exercise the actual producer's output, not a hand-built environment that
+    // can accidentally restore the revision variable removed during projection.
+    const manifest = JSON.parse(
+      enrollmentRequirements.files.find(
+        (file) => file.environmentVariable === "OPENCLAW_PLUGIN_RUNTIME_MANIFEST",
+      ).content,
+    );
+    const environment = Object.fromEntries(
+      enrollmentRequirements.environment
+        .filter((entry) => "value" in entry)
+        .map(({ name, value }) => [name, value]),
+    );
+    for (const name of [
+      "OPENCLAW_AGENT_REVISION_ID",
+      "OPENCLAW_RUNTIME_STATUS_PORT",
+      "OPENCLAW_RUNTIME_STATUS_CONTAINER",
+      "OPENCLAW_POD_UID",
+      "APP_SERVER_TOKEN",
+    ]) {
+      assert.equal(
+        enrollmentRequirements.environment.some((entry) => entry.name === name),
+        false,
+      );
+    }
+    assert.equal(
+      provisions[0].requirements.environment.some(
+        (entry) => entry.name === "OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID",
+      ),
+      false,
+      "unprotected provider Harnesses do not receive enrollment identity",
+    );
+    const reservation = createServer();
+    reservation.listen(0, "127.0.0.1");
+    await once(reservation, "listening");
+    const port = reservation.address().port;
+    await new Promise((resolve) => reservation.close(resolve));
+    // Only remap the service port to an available loopback test port. All
+    // enrollment identity and authentication inputs come from prepareRevision.
+    environment.APP_SERVER_PORT = String(port);
+    const program = `
+      function isPlainObject(value) {
+        return value !== null && typeof value === "object" &&
+          Object.getPrototypeOf(value) === Object.prototype;
+      }
+      ${HARNESS_EGRESS_ENROLLMENT_HELPER}
+      waitForHarnessEgressEnrollment(${JSON.stringify(manifest.egressEnrollment)})
+        .then(() => process.exit(0), (error) => {
+          console.error(error.message); process.exit(1);
+        });
+    `;
+    await t.test(
+      "production provider requirements open the authenticated enrollment challenge",
+      async (t) => {
+        const child = spawn(process.execPath, ["-e", program], {
+          env: environment,
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        const exited = once(child, "exit");
+        let diagnostics = "";
+        child.stderr.on("data", (chunk) => {
+          diagnostics += chunk;
+        });
+        t.after(async () => {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill();
+            await exited;
+          }
+        });
+        const url = `http://127.0.0.1:${port}${HARNESS_EGRESS_ENROLLMENT_PATH}`;
+        let response;
+        for (let attempt = 0; attempt < 100; attempt++) {
+          assert.equal(child.exitCode, null, diagnostics);
+          response = await fetch(url, {
+            headers: { authorization: "Bearer test-transport" },
+          }).catch(() => undefined);
+          if (response) {
+            break;
+          }
+          await delay(20);
+        }
+        assert.equal(response?.status, 200, diagnostics);
+        const challenge = await response.json();
+        assert.deepEqual(challenge.execution, plan.execution);
+        assert.deepEqual(challenge.plan, { id: plan.id, generation: plan.generation });
+        assert.equal((await fetch(url)).status, 401);
+        const release = (body) =>
+          fetch(url, {
+            method: "POST",
+            headers: {
+              authorization: "Bearer test-transport",
+              "content-type": "application/json",
+            },
+            body: JSON.stringify(body),
+          });
+        assert.equal(
+          (
+            await release({
+              ...challenge,
+              execution: { ...challenge.execution, revisionId: "wrong-revision" },
+            })
+          ).status,
+          409,
+        );
+        assert.equal((await release(challenge)).status, 200);
+        assert.deepEqual(await exited, [0, null]);
+      },
+    );
+    for (const [name, value, extra] of [
+      ["mismatched revision", "wrong-revision", {}],
+      ["omitted revision", undefined, {}],
+      [
+        "private status identity cannot substitute",
+        undefined,
+        { OPENCLAW_AGENT_REVISION_ID: protectedRevision.id },
+      ],
+    ]) {
+      await t.test(name, () => {
+        const env = { ...environment, ...extra };
+        delete env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID;
+        if (value !== undefined) {
+          env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID = value;
+        }
+        const result = spawnSync(process.execPath, ["-e", program], {
+          env,
+          encoding: "utf8",
+          timeout: 3000,
+        });
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, /Protected Harness enrollment configuration is invalid/);
+      });
+    }
   }
 
   // An unreachable Harness transport is a Sandbox provisioning failure in diagnostics.

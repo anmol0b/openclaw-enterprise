@@ -163,7 +163,7 @@ test(
       OPENAI_API_KEY: "nonsecret-client-marker",
       OPENCLAW_HARNESS_MODEL: "codex/fixture-model",
       OPENCLAW_WORKSPACE_DIR: join(directory, "workspace"),
-      OPENCLAW_AGENT_REVISION_ID: f.revision.id,
+      OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID: f.revision.id,
       APP_SERVER_PORT: String(port),
       APP_TOKEN_SHA: createHash("sha256").update(token).digest("hex"),
       ...pluginRuntimeEnvironment(runtime),

@@ -30,7 +30,7 @@ function waitForHarnessEgressEnrollment(enrollment) {
       !isPlainObject(enrollment.execution) || Object.keys(enrollment.execution).length !== executionKeys.length ||
       executionKeys.some((key) => typeof enrollment.execution[key] !== "string" ||
         !enrollment.execution[key] || enrollment.execution[key].length > 256) ||
-      enrollment.execution.revisionId !== process.env.OPENCLAW_AGENT_REVISION_ID) {
+      enrollment.execution.revisionId !== process.env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID) {
     return Promise.reject(new Error("Protected Harness enrollment configuration is invalid."));
   }
   const expected = Buffer.from(verifier, "hex");

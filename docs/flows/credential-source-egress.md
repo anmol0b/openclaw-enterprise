@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-14"
-last_updated_session: 01a13a97-c578-77a2-81a7-7366f1380110
+last_updated_session: authoring-run/a26c0140-0882-40ec-949d-c5fc6eecd0da
 ---
 
 # Protected credential request flow
@@ -90,8 +90,15 @@ and before send.
 `apps/controller/src/drivers/compute/egress-enrollment.ts:HARNESS_EGRESS_ENROLLMENT_HELPER`,
 `apps/controller/src/drivers/sandbox/openshell.ts:enrollHarness`
 
-The generated Harness opens a temporary authenticated enrollment listener on its
-existing service port before running the first model probe. Compute awaits the
+Compute adds `OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID` from the immutable admitted
+revision only to protected provider Harness requirements. The generated helper
+requires exact equality between this literal and the manifest's enrollment
+execution revision before opening its authenticated listener on the existing
+service port. Missing or mismatched values refuse. Compute's private status
+revision, port, container name and Pod UID remain suppressed; the provider
+receives the transport verifier, not the raw transport token.
+
+The generated Harness waits on this listener before running the first model probe. Compute awaits the
 installation commit, requeries current evidence and calls the selected Sandbox
 Driver. The Driver checks the exact Sandbox and service, reads the execution/plan
 challenge and echoes its fresh process nonce using the existing transport token.
@@ -192,7 +199,11 @@ real API, IAM, controller and TLS wire paths with storage and runtime-observatio
 fixtures. The PostgreSQL integration covers persisted plans, installation and
 rejection state with a disposable database. The enrollment integration runs the
 actual generated entrypoint and selected Sandbox Driver against local fixtures,
-with a substituted CLI.
+with a substituted CLI. The provider preparation case in
+`tests/conformance/kubernetes-compute.test.mjs` also runs the enrollment helper
+with the environment and manifest produced by `prepareRevision`. It exercises a
+real local HTTP challenge, revision refusals and private-field suppression;
+Kubernetes and provider dependencies remain fixtures.
 
 Those checks do not establish a packaged model turn, installed supervisor
 response protection, Kubernetes NetworkPolicies, chart installation or published
@@ -210,6 +221,8 @@ image compatibility.
 None.
 
 ## Changelog
+
+- 2026-10-14 21:15: Bind protected provider enrollment to a dedicated admitted-revision literal in the accompanying source fix. (authoring-run/a26c0140-0882-40ec-949d-c5fc6eecd0da - 765f1ef22aeba3e98c58a739700c9a0ffba14af4)
 
 - 2026-10-14 14:11: Consume current instance-fenced evidence, finite replay identity and selected Responses HTTP/SSE profile. (01a13a97-c578-77a2-81a7-7366f1380110 - e42cb1674fadaf14ba3d61a4164d1ad3fde9935c)
 
