@@ -178,8 +178,12 @@ Either `endpoint` or `serviceName` is required. Both `drivers.sandbox` and
 optional `drivers.credential_refresh` member must match the selected
 [Credential Refresh Driver](drivers/credential-refresh.md); OpenShell keeps
 refresh state on the gateway's provider records, so the two roles share this
-Backend. One OpenShell Backend is supported. Composition builds one gateway client object
-and injects it into both members, which cache one client per resolved endpoint.
+Backend. Optional `drivers.egress_proxy` selects the paired
+[protected static inference adapter](credential-sources/protected-inference.md).
+That path requires an authenticated HTTPS gateway and a negotiated credential
+access counterpart; legacy provider substitution cannot satisfy it.
+One OpenShell Backend is supported. Composition builds one gateway client object
+and injects it into its members, which cache one client per resolved endpoint.
 The API and the worker each construct it, so both need the token file and gateway access.
 
 ## Driver and client contract

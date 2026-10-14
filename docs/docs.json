@@ -189,6 +189,10 @@
                     "label": "Credential Withdrawal"
                   },
                   {
+                    "page": "reference/credential-sources/protected-inference",
+                    "label": "Protected Inference"
+                  },
+                  {
                     "page": "guides/topics/audit-log",
                     "label": "Audit Log"
                   }
@@ -1010,7 +1014,9 @@
               "testing/repository-credentials",
               "testing/repository-credentials-artifacts",
               "testing/repository-credentials-platform",
-              "flows/agent-presets"
+              "flows/agent-presets",
+              "flows/credential-source-egress",
+              "testing/static-egress"
             ]
           }
         ]

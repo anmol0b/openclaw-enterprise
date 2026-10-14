@@ -29,6 +29,11 @@ token authentication to OCC, and general credential-free model inference remain
 planned. The two-cluster profile is experimental.
 
 <a id="openclaw-as-the-open-enterprise-agent-platform"></a>
+An optional [static egress implementation](reference/credential-sources/protected-inference.md)
+adds exact request-bound source authority and versioned Secret resolution. Its
+source implementation and wire tests do not qualify a deployed OpenShell runtime
+or complete RFC 0020.
+
 <a id="summary"></a>
 <a id="motivation"></a>
 <a id="goals"></a>

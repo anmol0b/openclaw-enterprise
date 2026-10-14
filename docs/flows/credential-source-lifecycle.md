@@ -1,18 +1,24 @@
 ---
 created: "2026-09-26"
-updated: 2026-10-13
-last_updated_session: authoring-run/01a136d4-3550-7042-834c-cf11f51f41f2
+updated: "2026-10-14"
+last_updated_session: authoring-run/fe204745-17c9-4662-82e0-e194d7c187cb
 ---
 
 # Credential source lifecycle Flow
 
 ## Overview
 
-An authorized caller registers a Namespace Secret with the Credential Gateway,
-binds it to an Agent, deploys, updates or withdraws it, and deletes the source.
-The gateway holds Secret values; OCC stores metadata and references. Admission
-freezes identity in the AgentRevision; the worker passes the live record to Compute.
+The Credential Gateway holds registered Secret values; OCC stores references.
+Admission freezes source identity in the AgentRevision; dispatch supplies the live
+record to Compute. This flow covers registration through withdrawal and deletion.
 [OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md) covers attachment and readiness.
+
+With `egress_proxy` selected, new static sources instead admit live versioned
+Secret references. Existing sources need exact source-update opt-in while unbound.
+They skip legacy gateway registration; source readiness alone does not establish
+installed protection. The [protected request flow](credential-source-egress.md)
+owns that path and its runtime qualification limits. The gateway-copy trace below
+continues to describe sources without a protected descriptor.
 
 ## Entry Points
 
@@ -266,37 +272,26 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 
 ## Debugging and Verification
 
-- `node --test tests/conformance/credential-source-occ.test.mjs` covers catalog
-  validation, grants, registration compensation and recovery, audit, deletion,
-  Namespace gating, admission snapshots, and Secret-backed method rejection,
-  with an in-process gateway double.
-- `node --test tests/integration/credential-source-api.test.mjs` exercises
-  Fastify, IAM, OCC, and the OpenShell Driver: invalid endpoint rejection without
-  residual records, invalid-row deletion recovery, profile isolation, and custom
-  endpoint lifecycle. Gateway storage and Compute placement are test doubles;
-  this does not prove OpenShell runtime execution.
-- `node --test tests/conformance/openshell-gateway-wire.test.mjs` checks the
-  provider, profile, update, detach, and recheck RPCs against the pinned `v0.1.3-pre.2`
-  wire fixture.
-- The credential withdrawal cases in
-  `tests/integration/postgres-worker-agent-revision.test.mjs` run the real queue
-  and worker against PostgreSQL with a Compute double: retries, outages, replays,
-  refusals, maintenance, denials, other revisions, lost grants, and late creates.
-- The real OpenShell test updates the source and withdraws a `bearer-token`
-  source (its placeholder stops reaching an echo service), then the model
-  source (the next model turn fails).
-- `OCC_TEST_OPENSHELL_K3D_REAL=1 node --env-file="$TEST_ENV_FILE" --test tests/integration/sandbox-driver-openshell-k3d-real.test.mjs`
-  registers an `openai` source through the production API against a real
-  gateway and reads its live `ready` status. See [OpenShell tests](../testing/openshell.md).
-- A source stuck in `deleting` returns `503` on delete until the gateway is
-  reachable; `GET` shows its live `status`.
-- Worker reason codes `CREDENTIAL_GATEWAY_MISMATCH` and
-  `HARNESS_AUTH_SOURCE_UNAVAILABLE` mean a changed selection or an unavailable
-  source; `CREDENTIAL_WITHDRAWN` a withdrawn revision source, and
-  `CREDENTIAL_WITHDRAWAL_PENDING` an unconfirmed revocation. `CREDENTIALS_WITHDRAWN` and `WITHDRAWAL_REVISION_RETIRED` complete the work,
-  and `CREDENTIAL_WITHDRAWAL_UNSUPPORTED`, `COMPUTE_DRIVER_MISMATCH`,
-  `CREDENTIAL_WITHDRAWAL_MISCONFIGURED`, `CREDENTIAL_WITHDRAWAL_OWNERSHIP_CONFLICT`,
-  and `AUTHORIZATION_DENIED` fail it at once.
+- `node --test tests/conformance/credential-source-occ.test.mjs`: catalog,
+  grants, compensation, audit, deletion and admission with an in-process gateway.
+- `node --test tests/integration/credential-source-api.test.mjs`: Fastify, IAM,
+  OCC and the OpenShell Driver; storage and placement are doubles, not runtime proof.
+- `node --test tests/conformance/openshell-gateway-wire.test.mjs`: provider,
+  profile, update, detach and recheck RPCs against the `v0.1.3-pre.2` wire fixture.
+- `tests/integration/postgres-worker-agent-revision.test.mjs`: real PostgreSQL
+  queue and worker, with a Compute double, covering withdrawal recovery and denials.
+- `OCC_TEST_OPENSHELL_K3D_REAL=1 node --env-file="$TEST_ENV_FILE" --test tests/integration/sandbox-driver-openshell-k3d-real.test.mjs`:
+  real API registration, model turns, source updates and tool/model withdrawal.
+  Follow [OpenShell prerequisites](../testing/openshell.md).
+
+A `deleting` source returns `503` until gateway cleanup succeeds; GET shows live
+status. Worker `CREDENTIAL_GATEWAY_MISMATCH`, `HARNESS_AUTH_SOURCE_UNAVAILABLE`,
+`CREDENTIAL_WITHDRAWN` and `CREDENTIAL_WITHDRAWAL_PENDING` identify selection,
+availability, withdrawal and pending-confirmation failures respectively.
+`CREDENTIALS_WITHDRAWN` and `WITHDRAWAL_REVISION_RETIRED` complete withdrawal work.
+Unsupported withdrawal, Compute mismatch, misconfiguration, ownership conflict
+and authorization denial fail immediately. See the
+[source reference](../reference/credential-sources.md) for operator recovery.
 
 ## Related docs
 
@@ -311,6 +306,8 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 12:34: Distinguish protected source admission from legacy gateway copies. (authoring-run/fe204745-17c9-4662-82e0-e194d7c187cb - dc5648b67d2618cc43ef07562298e986a94674e7)
 
 - 2026-10-13 20:07: Check provider ownership before profile updates. (authoring-run/01a136d4-3550-7042-834c-cf11f51f41f2 - 146c80ef66b5860cb9bea296d2574156468a103c)
 
