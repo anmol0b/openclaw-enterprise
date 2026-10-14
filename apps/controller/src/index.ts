@@ -6,6 +6,10 @@ import {
   AgentRuntimeCredentialResponse,
   AgentRuntimeLogsResponse,
   AgentRuntimeResponse,
+  AgentNetworkPolicyResponse,
+  AgentPolicySimulationResponse,
+  AgentPolicySimulationResultResponse,
+  AgentNetworkPolicyEvaluationResponse,
   CredentialSourceResponse,
   ErrorDetail as ErrorDetailSchema,
   ErrorResponse,
@@ -34,6 +38,8 @@ import {
   type ResourceKind,
   type ResourceRef,
   type SandboxDriver,
+  type SandboxNetworkPolicyRequest,
+  type PolicySimulationRequest,
   type SecretDriver,
   type SecretReference,
   type UpdateWorkspaceFileBody,
@@ -867,7 +873,13 @@ function requiredPermissions(operation: OccApiRoute): readonly RequiredPermissio
     ];
   }
 
-  if (operation.operationId === "getAgentDeploymentRuntime") {
+  if (
+    operation.operationId === "getAgentDeploymentRuntime" ||
+    operation.operationId === "getAgentDeploymentNetworkPolicy" ||
+    operation.operationId === "evaluateAgentDeploymentNetworkPolicy" ||
+    operation.operationId === "getAgentDeploymentPolicySimulation" ||
+    operation.operationId === "simulateAgentDeploymentPolicy"
+  ) {
     return [
       { action: "operate", resourceKind: "agent", scope: "requested" },
       { action: "read", resourceKind: "agent", scope: "requested" },
@@ -2512,6 +2524,82 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     }
 
     if (
+      operation.operationId === "getAgentDeploymentNetworkPolicy" ||
+      operation.operationId === "evaluateAgentDeploymentNetworkPolicy" ||
+      operation.operationId === "getAgentDeploymentPolicySimulation" ||
+      operation.operationId === "simulateAgentDeploymentPolicy"
+    ) {
+      const target: ResourceRef = { kind: "agent", id: agentId, namespaceId };
+      const disconnected = new AbortController();
+      const onClose = () => {
+        if (!reply.raw.writableEnded) {
+          disconnected.abort();
+        }
+      };
+      reply.raw.once("close", onClose);
+      const admitRead = <T>(read: () => Promise<T>): Promise<T> => {
+        runtimeLogLimiter.admit(context.actorId, agentId);
+        return runtimeLogLimiter.run(async () => {
+          try {
+            await options.auditSink.append(
+              event(operation, request, target, "access", context, undefined, {
+                outcome: "success",
+                details: { revisionId: params.deploymentId },
+              }),
+            );
+          } catch {
+            throw new DependencyUnavailableError("The network policy read could not be audited.");
+          }
+          return read();
+        });
+      };
+      try {
+        const data =
+          operation.operationId === "getAgentDeploymentPolicySimulation"
+            ? await controller!.describeAgentPolicySimulation(
+                context.actorId,
+                namespaceId,
+                agentId,
+                params.deploymentId as string,
+                disconnected.signal,
+                admitRead,
+              )
+            : operation.operationId === "simulateAgentDeploymentPolicy"
+              ? await controller!.simulateAgentPolicy(
+                  context.actorId,
+                  namespaceId,
+                  agentId,
+                  params.deploymentId as string,
+                  request.body as PolicySimulationRequest,
+                  disconnected.signal,
+                  admitRead,
+                )
+              : operation.operationId === "getAgentDeploymentNetworkPolicy"
+                ? await controller!.describeAgentNetworkPolicy(
+                    context.actorId,
+                    namespaceId,
+                    agentId,
+                    params.deploymentId as string,
+                    disconnected.signal,
+                    admitRead,
+                  )
+                : await controller!.evaluateAgentNetworkPolicy(
+                    context.actorId,
+                    namespaceId,
+                    agentId,
+                    params.deploymentId as string,
+                    request.body as SandboxNetworkPolicyRequest,
+                    disconnected.signal,
+                    admitRead,
+                  );
+        reply.send({ data, meta: { requestId: request.id } });
+      } finally {
+        reply.raw.off("close", onClose);
+      }
+      return;
+    }
+
+    if (
       operation.operationId === "getAgentDeploymentRuntime" ||
       operation.operationId === "getAgentDeploymentRuntimeLogs"
     ) {
@@ -3899,6 +3987,10 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     routes.addSchema(ErrorResponse);
     routes.addSchema(AgentDeploymentDiagnosticsResponse);
     routes.addSchema(AgentRuntimeResponse);
+    routes.addSchema(AgentNetworkPolicyResponse);
+    routes.addSchema(AgentPolicySimulationResponse);
+    routes.addSchema(AgentPolicySimulationResultResponse);
+    routes.addSchema(AgentNetworkPolicyEvaluationResponse);
     routes.addSchema(AgentRuntimeLogsResponse);
     routes.addSchema(AgentRuntimeCredentialResponse);
     routes.addSchema(SecretResponse);

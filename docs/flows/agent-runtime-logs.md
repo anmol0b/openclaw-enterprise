@@ -1,7 +1,7 @@
 ---
 created: 2026-09-30
 updated: 2026-10-13
-last_updated_session: authoring-run/adccd418-cf61-4fbb-b3ba-0fcad194d907
+last_updated_session: authoring-run/57611bd1-494b-4484-940a-7767f8814376
 ---
 
 # Agent runtime logs flow
@@ -60,15 +60,12 @@ graph TD
 
 ### 1. Admit and authorize
 
-`packages/contracts/src/api/routes.ts:occApiRoutes` declares both GET routes with
-a closed query schema. `apps/controller/src/index.ts:perform` answers `501` when
-`agentRuntimeLogs` is disabled. `OpenClawController.runtimeLogTarget` authorizes
-the tier action and Agent `read` (plus revision `read` for status only), resolves
-the revision within the exact Agent, then rejects a Driver without
-`describeAgentRuntime` or with `runtimeLogging: "driver"`. Only then does
-`admitRead` apply the replica-local
-`apps/controller/src/http/runtime-logs.ts:RuntimeLogLimiter` to Driver reads, so
-a denial is always audited and spends no token.
+`apps/controller/src/index.ts:perform` rejects disabled runtime reads with `501`.
+`OpenClawController.agentRuntimeTarget` authorizes the tier action and Agent
+`read`, plus revision `read` for status. It resolves the exact revision and
+recorded Compute Driver, rejecting unsupported or Driver-owned logging.
+Only authorized reads reach `apps/controller/src/http/runtime-logs.ts:RuntimeLogLimiter`;
+denials are audited and spend no token.
 
 ### 2. Describe the runtime
 
@@ -235,6 +232,8 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-13 13:43: Rename the shared exact-runtime authorization entry point. (authoring-run/57611bd1-494b-4484-940a-7767f8814376 - 0989be91e37275f690a9c048a9ff001b269f3aa6)
 
 - 2026-10-13: Key cursor hashes; `v1` cursors expire. (#2274)
 

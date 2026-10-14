@@ -1,6 +1,7 @@
 import { element, button } from "../dom.mjs";
 import { displayDate, namespacePath } from "./list.mjs";
 import { SOURCE_LABELS, podCard, recordRow, visibleText } from "./logs-view.mjs";
+import { createPolicyTester } from "./network-policy.mjs";
 
 const STATUS_POLL_MS = 10_000;
 const FOLLOW_POLL_MS = 2_000;
@@ -88,6 +89,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     revisionId,
   ]);
   const section = element("section", { className: "agent-logs" });
+  const policyTester = createPolicyTester(context, { base });
   const strip = element("div", { className: "runtime-strip", "aria-live": "polite" });
   const stripStatus = element(
     "p",
@@ -268,6 +270,9 @@ export function renderAgentLogs(context, { agent, revisionId }) {
       : (available?.id ?? description.sources[0]?.id ?? "");
     const source = selectedSource();
     const chosenPod = podSelect.value;
+    // Policy access is independent of log access; a runtime operator can test even
+    // when log denial disables the source picker or the Gateway source is selected.
+    policyTester.openButton.hidden = !description.sources.some(({ id }) => id === "sandbox");
     podSelect.replaceChildren(
       ...(source?.pods ?? []).map((pod) =>
         element(
@@ -412,7 +417,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
   function appendRecords(records) {
     const atBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 24;
     for (const record of records) {
-      const row = recordRow(record);
+      const row = recordRow(record, { inspectPolicy: policyTester.open });
       row.hidden = !rowVisible(row);
       pane.append(row);
       rows += 1;
@@ -677,7 +682,14 @@ export function renderAgentLogs(context, { agent, revisionId }) {
             element("label", { className: "log-option" }, previous, " Previous instance"),
             element("label", { className: "log-option" }, includeDebug, " Include debug"),
           ),
-          element("div", { className: "log-actions" }, followButton, refreshButton, downloadButton),
+          element(
+            "div",
+            { className: "log-actions" },
+            followButton,
+            refreshButton,
+            downloadButton,
+            policyTester.openButton,
+          ),
         ),
         element(
           "div",
@@ -703,6 +715,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
       pane,
       retention,
     ),
+    policyTester.host,
   );
   if (logsDenied) {
     showLogError(runtimeErrorText({ status: 403 }, "logs"));

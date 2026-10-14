@@ -1678,6 +1678,13 @@ function createIntegrationSandboxDriverFactory(
           backend: backendFor(undefined),
         }).harnessResource(context);
       },
+      describePolicySimulation(context) {
+        return new OpenShellSandboxDriver(selection.configuration, {
+          id: selection.id,
+          implementation: "openshell",
+          backend: backendFor(undefined),
+        }).describePolicySimulation(context);
+      },
       async ensureNamespace(context) {
         try {
           const endpoint = await endpointForNamespace(context);
@@ -4212,6 +4219,31 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
   assert.notEqual(escapedCommand.exitCode, 0, "OpenShell must deny writes outside the workspace.");
   assert.equal(approvedCommand.exitCode, 0, "OpenShell must allow the approved destination.");
   assert.notEqual(deniedCommand.exitCode, 0, "OpenShell must deny the unapproved destination.");
+  const simulationPath = `/namespaces/${topology.namespaceId}/agents/${topology.agent.id}/deployments/${topology.revision.id}/runtime/policy-simulation`;
+  const description = await topology.request("GET", simulationPath);
+  assert.equal(description.status, 200);
+  assert.ok(
+    description.data.network,
+    "the regular Agent flow must expose authored network simulation",
+  );
+  for (const { host, expected } of [
+    { host: "www.openclaw.org", expected: "allow" },
+    { host: "acme.com", expected: "deny" },
+  ]) {
+    const prediction = await topology.request("POST", simulationPath, {
+      kind: "network",
+      host,
+      port: 443,
+      binaryPath: "/usr/bin/curl",
+      expectedSimulationHash: description.data.network.simulationHash,
+    });
+    assert.equal(prediction.status, 200);
+    assert.equal(
+      prediction.data.decision,
+      expected,
+      "OCE prediction must agree with the real Harness network outcome",
+    );
+  }
   assert.match(result.assistant, new RegExp(nonce));
   assert.match(result.assistant, /WORKSPACE_WRITABLE/);
   assert.match(result.assistant, /APPROVED_PATH_READABLE/);

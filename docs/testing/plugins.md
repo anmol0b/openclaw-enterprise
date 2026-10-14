@@ -243,3 +243,25 @@ historical port evidence.
 - [Kubernetes testing](kubernetes.md)
 - [PostgreSQL testing](postgresql.md)
 - [ChatGPT service accounts](service-accounts.md)
+
+## Policy simulation conformance
+
+The policy tester predicts authored OCE intent separately from native state.
+`tests/conformance/plugin-driver.test.mjs` exercises actual Driver descriptors
+and independent precedence expectations. Existing real plugin lanes compare
+these predictions with normal Agent tool outcomes when their prerequisites exist.
+
+Sandbox conformance can run the actual translated protobuf policy through the
+OpenShell native evaluator built from a matching source checkout:
+
+```sh
+OCC_TEST_OPENSHELL_NATIVE_SOURCE=/path/to/OpenShell \
+  node --test --test-name-pattern='OpenShell authored simulation' \
+  tests/integration/sandbox-driver-startup.test.mjs
+```
+
+This explicit native-source option runs the ignored Rust conformance test with
+a captured production translation. It proves supported selector/REST evaluator
+parity, without deploying a Sandbox or exercising DNS, credentials and workload
+identity. Without the option, the native bridge is skipped explicitly. The
+regular OpenShell Kubernetes and plugin Agent tests remain separate runtime proof.

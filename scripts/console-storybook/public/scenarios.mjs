@@ -8,6 +8,19 @@ const candidateVersion =
   "/console/agents/agt_00000000-0000-4000-8000-000000000001?namespace=ns_00000000-0000-4000-8000-000000000001&revision=rev_00000000-0000-4000-8000-000000000007";
 const create = "/console/agents/new?namespace=ns_00000000-0000-4000-8000-000000000001";
 const click = (text) => ({ click: text });
+const networkPolicyPreview = {
+  group: "Pages/Agent detail",
+  path: `${candidateVersion}&tab=logs`,
+  deployed: true,
+  candidateDeploymentStatus: "succeeded",
+  networkPolicy: true,
+  gap: "Policy inventories, logs and simulation responses are Storybook fixtures. This preview does not evaluate a real policy, send a network request, or invoke a tool.",
+};
+const testNetworkAction = [
+  click("Inspect / test action"),
+  { selector: "#policy-binary", value: "/usr/bin/curl" },
+  click("Simulate policy"),
+];
 const form = [click("Start with default Preset")];
 const oauthForm = [...form, { selector: "#agent-auth-method", value: "oauth" }];
 const startOAuthLogin = [...oauthForm, click("Sign in with OAuth")];
@@ -3122,6 +3135,124 @@ export const scenarios = {
       "Select Follow, confirm it changes to Following, then select Following to stop. Resize the preview to 390px and check that controls remain usable and log metadata wraps without clipping messages.",
     ],
     gap: "Runtime records and refreshes are simulated UI evidence; source reads, filtering, and following require real backend verification.",
+  },
+  networkPolicyInspect: {
+    ...networkPolicyPreview,
+    name: "Network policy: inspect observed decision",
+    actions: [click("Inspect / test action")],
+    description:
+      "A Sandbox decision opens its sanitized action, observed rule and generation beside a separately loaded intended policy snapshot. The executable basename requires a full path before simulation.",
+    steps: [
+      "Compare the observed log with current OCE intended policy; simulation does not establish historical replay.",
+      "Enter the full executable path and simulate without sending the entered action. Optionally inspect the Sandbox provider separately.",
+      "Close with Escape and confirm focus returns to Inspect / test action.",
+    ],
+  },
+  networkPolicyDeny: {
+    ...networkPolicyPreview,
+    name: "Network policy: denied action",
+    actions: testNetworkAction,
+    description:
+      "The OCE simulation fixture names the nonmatching authored rule and the matched built-in default denial.",
+  },
+  networkPolicyAllow: {
+    ...networkPolicyPreview,
+    name: "Network policy: allowed action",
+    policyDecision: "allow",
+    actions: [
+      click("Inspect / test action"),
+      { selector: "#policy-host", value: "api.github.com" },
+      { selector: "#policy-binary", value: "/usr/bin/curl" },
+      click("Simulate policy"),
+    ],
+    description:
+      "Allowed OCE simulation still lists unevaluated checks. No network request is made.",
+  },
+  networkPolicyAudit: {
+    ...networkPolicyPreview,
+    name: "Network policy: audit decision",
+    policyDecision: "audit",
+    actions: testNetworkAction,
+    description:
+      "The UI displays the simulation fixture's audit outcome without converting it into enforcement denial.",
+  },
+  networkPolicyUnknown: {
+    ...networkPolicyPreview,
+    name: "Network policy: unknown simulation",
+    policyDecision: "unknown",
+    policyAdmission: "unknown",
+    actions: testNetworkAction,
+    description:
+      "An unknown simulation does not claim an applied Sandbox policy or a known runtime outcome.",
+  },
+  networkPolicyEmpty: {
+    ...networkPolicyPreview,
+    name: "Network policy: no log action",
+    policyEmptyLogs: true,
+    actions: [click("Open policy tester")],
+    description: "An empty Sandbox log view can open the tester and enter an action manually.",
+  },
+  networkPolicyDenied: {
+    ...networkPolicyPreview,
+    name: "Network policy: access denied",
+    actions: [click("Inspect / test action")],
+    rules: [{ suffix: "/runtime/policy-simulation", status: 403, code: "FORBIDDEN" }],
+    description:
+      "Log readers retain the observed decision while independently authorized policy inspection is denied. Evaluation is disabled.",
+  },
+  networkPolicyUnavailable: {
+    ...networkPolicyPreview,
+    name: "Network policy: unavailable evaluator",
+    actions: testNetworkAction,
+    rules: [
+      {
+        suffix: "/runtime/policy-simulation",
+        method: "POST",
+        status: 501,
+        code: "SANDBOX_POLICY_EVALUATION_UNAVAILABLE",
+      },
+    ],
+    description: "Unavailable simulation reports its failure without fabricating a verdict.",
+  },
+  networkPolicyLoading: {
+    ...networkPolicyPreview,
+    name: "Network policy: loading",
+    actions: [click("Inspect / test action")],
+    rules: [{ suffix: "/runtime/policy-simulation", hold: true }],
+    description:
+      "Loading leaves manual inputs available and simulation disabled until the intended snapshot arrives.",
+  },
+  policyTesterPlugin: {
+    ...networkPolicyPreview,
+    name: "Policy tester: plugin tool without Sandbox",
+    path: `${candidateVersion}&tab=policy`,
+    policyPluginOnly: true,
+    networkPolicy: false,
+    actions: [
+      click("Open policy tester"),
+      { selector: "#policy-plugin", value: "occ-plugin:diffs" },
+      { selector: "#policy-tool", value: "diffs" },
+      click("Simulate policy"),
+    ],
+    description:
+      "The version-level tester simulates a disabled plugin tool with no Sandbox or log read dependency.",
+    steps: [
+      "Inspect intended plugin selections and tool overrides.",
+      "Simulate Diffs and inspect the explicit tool denial.",
+      "Switch to Network request: the unsupported action stays explicit and sends no evaluation.",
+    ],
+  },
+  policyTesterNative: {
+    ...networkPolicyPreview,
+    name: "Policy tester: separate native evidence",
+    actions: [
+      ...testNetworkAction,
+      { selector: ".policy-native > summary", click: true },
+      click("Inspect Sandbox provider"),
+      click("Evaluate with Sandbox provider"),
+    ],
+    description:
+      "OCE simulation and native provider evaluation keep separate snapshots and result labels. Native access is optional.",
   },
   runtimeLogsStartupWarnings: {
     group: "Pages/Agent detail",

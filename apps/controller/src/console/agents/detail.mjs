@@ -14,6 +14,7 @@ import { createRepositoryFields } from "./repositories.mjs";
 import { renderChannels } from "../channels.mjs";
 import { renderWorkspaceFiles } from "./workspace.mjs";
 import { renderAgentLogs } from "./logs.mjs";
+import { renderAgentPolicyTester } from "./network-policy.mjs";
 import {
   displayDate,
   shortId,
@@ -834,7 +835,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     "channels",
     ...(selected === "draft" ? ["repositories", "credentials"] : []),
     "workspace",
-    ...(selected === "draft" ? [] : ["logs"]),
+    ...(selected === "draft" ? [] : ["policy", "logs"]),
   ];
   let selectedTab = tabsForSelection.includes(tab) ? tab : "configuration";
   let deployInFlight = false;
@@ -991,7 +992,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         ]
       : []),
     ["workspace", "Workspace files"],
-    ...(selected === "draft" ? [] : [["logs", "Logs"]]),
+    ...(selected === "draft"
+      ? []
+      : [
+          ["policy", "Policy tester"],
+          ["logs", "Logs"],
+        ]),
   ]) {
     const control = button(
       label,
@@ -1892,7 +1898,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       mountedTab = null;
     }
     renderDetailHeading();
-    versionEvidence.hidden = selectedTab === "workspace" || selectedTab === "logs";
+    versionEvidence.hidden = ["workspace", "policy", "logs"].includes(selectedTab);
     const tab = selectedTab;
     for (const [index, id] of tabsForSelection.entries()) {
       const control = tabs.children[index];
@@ -1940,6 +1946,14 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     content.replaceChildren();
     if (tab === "workspace") {
       content.append(renderWorkspaceFiles(tabContext, agent, path));
+      state.loading = false;
+      content.style.minHeight = "";
+      return;
+    }
+    if (tab === "policy") {
+      details ??= loadDetails();
+      state.reusable = false;
+      content.append(renderAgentPolicyTester(tabContext, { agent, revisionId: selected }));
       state.loading = false;
       content.style.minHeight = "";
       return;
