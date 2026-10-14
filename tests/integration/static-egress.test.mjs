@@ -370,6 +370,24 @@ test("protected admission requires the actual counterpart and exact loaded polic
   const middleware = f.attachment.configuration.network_middlewares["oce-egress"];
   assert.equal(middleware.on_error, "fail_closed");
   assert.equal(middleware.credential_authority, true);
+  assert.equal(Object.hasOwn(middleware, "config"), false);
+  assert.equal(Object.hasOwn(middleware, "order"), false);
+  assert.equal(Object.hasOwn(middleware.endpoints, "exclude"), false);
+  // Strict Sandbox adoption compares the outgoing policy with its decoded form.
+  // Use the production schema and decoder options without normalizing either side.
+  const require = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
+  const definition = require("@grpc/proto-loader").loadSync(
+    new URL(
+      "../../apps/controller/src/drivers/sandbox/proto/openshell-gateway.proto",
+      import.meta.url,
+    ).pathname,
+    { keepCase: true, longs: String, enums: String, defaults: false, oneofs: true },
+  );
+  const policy = definition["openshell.v1.SandboxPolicy"];
+  assert.deepStrictEqual(
+    policy.deserialize(policy.serialize(f.attachment.configuration)),
+    f.attachment.configuration,
+  );
   const contract = "openshell.supervisor-middleware.contract";
   const capability = "openshell.supervisor-middleware.http-credential-access.v1";
   // The supervisor performs its own Describe with locally compiled capabilities. An

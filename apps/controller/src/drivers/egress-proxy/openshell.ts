@@ -146,10 +146,8 @@ export function openShellEgressConfiguration(
       "oce-egress": {
         name: "oce-egress",
         middleware: options.middlewareName,
-        config: { fields: {} },
         on_error: "fail_closed",
-        endpoints: { include: hosts, exclude: [] },
-        order: 0,
+        endpoints: { include: hosts },
         credential_authority: true,
       },
     },
