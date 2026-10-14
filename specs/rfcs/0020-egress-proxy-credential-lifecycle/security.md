@@ -4,12 +4,15 @@ rfc: index.md
 
 # Egress Proxy security model
 
-This companion describes the proposed security contract for
-[RFC-0020](index.md). It is for reviewers assessing authorization, credential
-custody and failure boundaries. It does not establish an implemented or
-qualified system. [Lifecycle](lifecycle.md) owns preparation, rotation, startup
-and recovery. [Management](control-contracts.md) and [runtime contracts](runtime-contracts.md)
-define proposed transport-neutral fields and method results, not implemented APIs.
+[RFC-0020](index.md) must let a potentially compromised Agent use a provider without giving it the
+provider credential or a way around enforcement. A trusted sender checks authority before it obtains
+material and again before it sends. Even then, withdrawal can race dispatch, and blocking a response
+cannot undo the provider’s action.
+
+Review this as a proposed security contract, not evidence of a qualified system.
+[Lifecycle](lifecycle.md) covers preparation, rotation, startup and recovery.
+[Management](control-contracts.md) and [runtime contracts](runtime-contracts.md) define the proposed
+fields, checks and results.
 
 ## Assets and threat model
 
@@ -58,77 +61,60 @@ management preparation. Its clone and cleanup duties are in
 
 ### Management preparation
 
-Control-plane configuration and discovery use a separate authenticated caller.
-Its authority is limited to the exact Installation and Namespace, source,
-purpose, operation, scope and destination, plus applicable initiating-user and
-saved-binding rights. When explicitly authorized, it may ask the designated
-lifecycle owner to prepare or refresh material. The MVP Forwarder is a trusted
-library inside OCC; OpenShell retains token storage and refresh. The trusted OCC sender may hold access tokens transiently
-for injection. The management caller receives a sanitized response and no roots.
-Generic contracts allow later service/worker placements. Management captures the
-business operation before preparation authorization. Material-consuming callbacks
-are internal to the designated trusted sender or custody implementation, never
-arbitrary caller functions or a bypass of these checks. OCC checks current
-authority before material access and again after preparation, before each
-provider send. The lifecycle owner retains authority checks for issuer operations.
+Configuration or discovery authenticates a control-plane caller separately. Authorize the exact
+Installation, Namespace, source, purpose, operation, scope and destination, including applicable
+initiating-user and saved-binding rights. No Agent flag or request field can confer this authority.
+
+Management captures the business operation *before* seeking preparation authority. Only if
+authorized may it ask the designated owner to prepare or refresh material. In MVP, that owner is
+OpenShell; the business Forwarder is a trusted library inside OCC. OCC may hold an access token
+briefly for injection. It checks authority before obtaining that material and again, after
+preparation, before *each* provider send. The lifecycle owner separately authorizes issuer calls.
+Later service or worker placements must preserve these boundaries.
 
 ### Retrieval and recovery
 
-Retrieval supplies usable runtime material only to authorized trusted code. It
-exports no signing or refresh roots and starts no second refresher. Provisioning
-roots to the lifecycle owner is a separate authorized operation. Provider tokens
-and handles do not go to the Agent or UI; results are sanitized.
+Only designated trusted sender or custody code may consume usable material. There is no arbitrary
+caller callback, exported signing or refresh root, second refresher or token returned to an Agent or
+UI. Provisioning roots to the lifecycle owner requires its own authorization. Return a sanitized
+business response and audit caller, initiating principal, source, grant, destination, purpose and
+outcome without secrets.
 
-Management authority comes from the authenticated control-plane boundary and
-admitted purpose, never an Agent-selected flag or request field. It does not
-relax the warm-only request-path Resolver. Record a secret-free audit of caller,
-initiating principal, source and grant, destination, purpose and outcome. Denial,
-withdrawal, unavailable authority, failed preparation or material still unusable
-within the original deadline refuses use. A failed or cancelled retrieval does
-not prove that refresh had no effect; retain uncertain attempts without blind
-replay. [Management retrieval](lifecycle.md#management-preparation-and-retrieval)
-describes the source integration and its limits.
+Deny use on withdrawal, unavailable authority, failed preparation or material still unusable by the
+original deadline. Failed or cancelled retrieval may nonetheless have caused a refresh. Preserve
+that attempt; never replay it blindly.
+[Management retrieval](lifecycle.md#management-preparation-and-retrieval) does not weaken warm-only
+Agent and bootstrap resolution.
 
 ## Authorize each operation
 
-For every supported operation, including credential-free egress, the trusted
-sender authenticates the caller and captures an immutable description of the
-operation, including its destination, protocol authority and policy-relevant
-content. Sealed streams expose policy-relevant semantics to OCC and enforce a
-registered grammar and finite bounds; a digest alone cannot support inspection.
-The sender need not buffer an unbounded body. It selects an admitted route and
-grant; a credentialed operation also needs a binding. Before material access,
-OCC checks current authority online over the authenticated caller, versioned
-route, grant and captured operation. It refuses requests when authority is
-unavailable, routes are ambiguous, operations are unsupported or scope is insufficient. Provider adapters
-classify operations against normalized grants, including repository ID and
-action for GitHub. Requests cannot select another source or backend, load a
-driver or widen scope.
+Consider a Git read of repository `123`. The sender needs to know who is calling, which repository
+and action policy covers, and which exact material it would send. A valid token alone answers none
+of those questions.
 
-After resolution, or when no material is needed, OCC freshly checks the actual
-immutable operation, authenticated caller, versioned route and grant, and the
-selected material's nonsecret identity and version, or explicit absence of
-material. Static evidence includes the admitted adoption mode and material
-reference, selected store/scope and exact version; snapshot reads do not depend
-on the provenance Secret's current value. Per-operation consumer permission
-does not approve replacement material. Policy receives no credential bytes; a
-send cannot substitute another operation or material after the check. Changed routes or grants require
-re-admission and repeated checks. Cached allows cannot substitute for either
-check, even with cached material.
+1. **Capture.** Authenticate the caller and seal the actual operation: destination, protocol
+   authority and policy-relevant content. For a stream, expose those semantics to OCC and enforce a
+   registered grammar and finite bounds. A digest alone is not inspectable; unbounded buffering is
+   not required.
+2. **Before access.** Check current authority online for this caller, versioned route, normalized
+   grant and operation. Require an admitted binding for credentialed use. The provider classifies
+   GitHub repository ID and action; a request cannot select another source or backend, load a driver
+   or widen the grant. Refuse on unavailable authority, ambiguous route, unsupported operation or
+   insufficient scope.
+3. **Before send.** Check online again over the same immutable operation, caller, versioned route
+   and grant, now with nonsecret identity and version of the material selected, or explicit `none`.
+   For static material bind admitted mode and reference, selected store, scope and exact version. A
+   snapshot does not depend on the provenance Secret’s current value. Consumer permission cannot
+   approve replacement. Policy never receives credential bytes, and the sender cannot substitute
+   material or operation.
+4. **Dispatch.** Recheck usability and send once within the short finite send-start limit and
+   original absolute deadline. A changed route or grant needs readmission and repeated checks.
 
-Both checks remain fresh online evaluations. Transport encoding may vary, but
-cannot remove a check or reuse a cached allow. This grants no atomic-revocation
-exception.
-
-For each HTTP subrequest, redirect, retry or new operation on a reused
-connection:
-
-1. Repeat both checks and any required resolution.
-2. Recheck material usability and send once.
-3. Enforce a finite, short send-start deadline and the original absolute
-   operation deadline. Retries cannot extend the latter.
-
-Deadline values, time protocol and transport enforcement remain open.
+Apply the sequence to credential-free operations and cache hits too. Every HTTP subrequest,
+redirect, retry or new operation on a reused connection needs both fresh checks and any resolution.
+No transport encoding, cached allow or retry can remove a check or extend the original deadline.
+Concrete deadlines, time protocol and enforcement remain to be selected. The final-check race is
+described [below](#withdrawal-and-owner-loss).
 
 ## Resolution and custody
 
@@ -202,29 +188,25 @@ to the authorized operation.
 
 ## Withdrawal and owner loss
 
-A check observing a committed reduction or hold denies removed access. The
-Egress Proxy MVP accepts a race: a send may start after a reduction is
-acknowledged if its final check raced that change. Finite in-flight work may
-continue until the original deadline. Cancellation is best effort; a timeout
-neither proves remote cancellation nor undoes an effect. Ordered admission and
-renewable stream leases are follow-up work, not guarantees of this proposal.
-Logical OCE denial, Egress detachment and provider revocation are distinct.
-Issuer retirement revokes only where the provider supports it. OCE cannot
-recall an exported bearer or undo sent effects; status must not imply otherwise.
-Scope expansion waits for required warm material and a fresh check; narrower
-access may continue.
+A check that observes a committed reduction or hold denies the removed access. But in MVP a send can
+*start after withdrawal was acknowledged* if its final check raced the change. Work already in
+flight may continue to its original deadline. Cancellation is best effort and timeout proves neither
+remote cancellation nor absence of an effect. Ordered admission and renewable stream leases remain
+follow-ups.
 
-When an operator disables or removes an owner in OCE, confirmed loss of the last
-authorized owner installs a hold and fence for new admissions, subject to the
-race above. A team Agent with remaining owners does not park solely because one
-leaves. Unknown owner or directory state is not confirmed loss. Report incomplete
-containment and `parking` until stop and preservation evidence supports `parked`.
+Report logical OCE denial, Egress detachment and provider-supported revocation separately. None can
+recall an exported bearer or undo a sent operation. Expanding scope requires any newly required warm
+material and a fresh check; authorized narrower access can continue.
 
-Deployment, restart, repair, deletion and garbage collection cannot bypass the
-hold or remove protected data. Platform-owned cleanup continues for the exact
-accepted work even if its requester loses access. Release requires current
-authorization and fresh execution admission. External identity-provider
-offboarding synchronization is later work.
+When an OCE operator disables or removes the *last* authorized owner, install a hold and fence new
+admissions, subject to the dispatch race above. A team Agent with another owner continues. Unknown
+owner or directory state is not confirmed loss. Report incomplete containment and `parking` until
+stop and preservation evidence justify `parked`.
+
+Deployment, restart, repair, deletion and garbage collection cannot bypass the hold or remove
+protected data. Platform cleanup of exact accepted work survives loss of requester access. Releasing
+the hold needs current authority and fresh execution admission. Synchronizing external
+identity-provider offboarding is later work.
 
 ## Authorized forks
 

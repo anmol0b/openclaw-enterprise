@@ -4,13 +4,15 @@ rfc: index.md
 
 # Proposed capture, resolution and forwarding contracts
 
-These proposed internal contracts use [management identities](control-contracts.md#identities-and-admission)
-and closed records. They add no registered Driver or Agent token API. Runtime
-authentication must enforce handle associations; TypeScript brands are insufficient.
-The MVP management Forwarder is a trusted library inside OCC. OpenShell retains
-token storage and refresh; the OCC sender may hold access tokens transiently for
-injection. Generic contracts allow later service/worker placements. Physical
-OpenShell transport remains to be qualified.
+[RFC-0020](index.md) requires two decisions over one operation: permission to resolve material, then
+permission to send with the actual selection. These proposed internal contracts use
+[management identities](control-contracts.md#identities-and-admission) and closed records. They add
+no registered Driver or Agent token API. Enforce handle associations at runtime; TypeScript brands
+are insufficient.
+
+For management, MVP places the trusted Forwarder inside OCC; OpenShell owns storage and refresh.
+Qualify the physical transport and OCC’s transient custody of access tokens. Later service or worker
+placements may use the same contracts.
 
 ## Capture and trusted handles
 
@@ -30,44 +32,32 @@ Caller from current OCC execution/delegation records, not workload JSON.
 | `Classification`  | Initial closed schemas: inference `generate{model: string}` or `list_models{}`; GitHub `repository{repositoryId: Id, action: clone\|read\|write}` or `list_repositories{installationId: Id}`; OAuth/API `{operationPolicy: Ref, action: string}` validated against that versioned policy's closed action list. Extensions use the registered provider schema, never arbitrary context. |
 | `OperationHandle` | Opaque runtime reference to sealed Use and response sink, bound to peer/sender and deadline; single-use dispatch.                                                                                                                                                                                                                                                                      |
 
-Capture requires authenticated Caller/Context agreement: Agent and bootstrap use
-their Execution; management uses its Management identity, purpose and source-scoped
-route/binding. The management variant carries through Use, both permits and the
-selected MaterialEvidence binding reference; it invents no Execution. Discovery
-uses admitted management policy, not invented model/repository IDs or Agent authority.
+Match authenticated Caller to Context. Agent and bootstrap use their Execution. Management uses its
+admitted identity, purpose, route and binding throughout Use, both permits and selected
+MaterialEvidence; it borrows no execution, Agent authority or fictitious model/repository ID.
 
 ### Binding selection
 
-`Selection` is `automatic` or `explicit{binding: Ref}`. The trusted transport
-maps a configured placeholder or integration selector to a binding Ref in the
-authenticated context. Missing selection means automatic. Malformed, conflicting
-or unknown explicit selectors are refused. Selection is untrusted intent, not
-identity or permission; its adapter-specific encoding must be qualified.
+`Selection` is `automatic` (the default) or `explicit{binding: Ref}`. Trusted transport maps a
+configured placeholder or selector to a binding in the authenticated context. Treat it as untrusted
+intent; qualify its encoding. Match context, destination, method and classified operation, including
+relevant body, repository or model. Selection neither reads nor issues credentials.
 
-Capture matches admitted routes using caller context, destination, method and
-provider-classified operation, including repository/model and relevant body. It
-uses configuration and request semantics; selection reads no credential or issues
-material.
+| Selection | Required result |
+| --- | --- |
+| Automatic, one matching route | Capture its binding or explicit credential-free use. |
+| Automatic, zero or several matches | Refuse; several yield `ambiguous_route`. No priority or first-match rule. |
+| Explicit binding identifies exactly one matching route | Validate context, current generations and operation; capture that route. |
+| Malformed, conflicting, unknown, foreign or ambiguous selection | Refuse without disclosing foreign bindings or trying another identity or credential-free route. |
 
-| Selection                                                                    | Result                                                                              |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Automatic; exactly one route matches                                         | Capture that route and its binding, or its explicit credential-free use.            |
-| Automatic; zero or multiple routes match                                     | Refuse; multiple matches return `ambiguous_route`. No priority or first-match rule. |
-| Explicit binding; exactly one matching route uses it                         | Capture that route; validate context, current generations and operation.            |
-| Explicit binding is invalid, foreign or mismatched, or several routes remain | Refuse without trying another binding or a credential-free route.                   |
+Neither path grants authority, chooses a Driver or widens scope. No identity fallback on denial,
+unavailable material or cold tokens. Strip control selectors before dispatch; conflicting
+authentication fields cannot smuggle them through.
 
-Selectors grant no authority, Driver choice or wider scope; errors disclose no
-foreign bindings. Both paths share checks and forwarding. Denial, unavailable
-material or cold tokens never cause identity fallback. Remove control selectors
-before dispatch; conflicting authentication fields cannot smuggle them through.
-
-Capture freezes the verified context, selection, request and operation after
-permitted noncredential transformations. Streams pin policy-relevant semantics
-and enforce the admitted grammar without buffering an unbounded body. A later
-frame needing another decision is another operation; refuse unsupported or opaque
-streams. Injection cannot change the authorized operation: changed content needs
-new capture and checks. The handle binds no token or cached authorization;
-rotation is resolved at use.
+After permitted noncredential transformations, seal context, selection, request and operation. For
+streams, pin policy semantics and enforce the admitted grammar. A frame requiring another decision
+is another operation; refuse opaque or unsupported streams. Changed content needs fresh capture and
+checks. The operation handle binds no token or cached allow; resolve rotation at use.
 
 ## Two policy checks and common resolution
 
@@ -78,22 +68,23 @@ rotation is resolved at use.
 | `CredentialResolver.reportRejection` | `RejectionFeedback`, plus Bounds                                                                                                                          | Trusted response classifier only; `recorded`, `obsolete` or Refusal. Durably deduplicates authenticated receipt/version and fences only that version; dynamic recovery coalesces at its owner.         |
 | `EgressForwarder.forward`            | OperationHandle                                                                                                                                           | `ForwardOutcome` below; owns the complete sequence, not an injection callback. Uses capture's original Bounds.                                                                                         |
 
-OCC dereferences the runtime-verified handle to inspect the exact Use. Each check
-verifies the route/binding Context against the authenticated Caller and evaluates
-current IAM and applicable initiating-user rights, execution or delegation
-currency, hold/withdrawal state, source/binding/backend/provider/route
-generations, normalized grant and actual classified operation. Static checks bind
-the adoption mode and admitted material reference; consumer authorization cannot
-replace an approved version. For selected dynamic material, verify its current
-family generation and owner epoch as well. This extends OCC policy evaluation;
-generic IAM principal/action/resource input alone is insufficient. Checks include
-credential-free operations and cache hits. No cached allow substitutes for either
-fresh online evaluation.
+At both checks, OCC opens the runtime-verified handle and evaluates the actual Use. It must match
+the authenticated caller to the route and binding context, then check current IAM and applicable
+initiating-user rights, execution or delegation, holds and withdrawals,
+source/binding/backend/provider/route generations, the normalized grant and the classified
+operation. For static material, bind adoption mode and admitted material reference; a consumer
+cannot approve a new version. For selected dynamic material, verify the current input-family
+generation and owner epoch. A generic IAM principal, action and resource tuple does not contain all
+this information.
 
-`AccessPermit` is a Permit restricted to this Use, source and resolver, expiring
-within its deadline; it authorizes one resolution, never a send. `SendPermit`
-additionally binds selected material identity/version or explicit `none`, sender,
-and a short finite `sendStartBy` timestamp. Neither is renewable authority.
+For example, the first check allows access to a prepared repository-read token. If the second sees
+that the repository grant was withdrawn, refuse the send even if the token remains valid at GitHub.
+Evaluate both checks online for credential-free operations and cache hits too. Never substitute a
+cached allow.
+
+An `AccessPermit` allows one resolution for this Use, source, Resolver and deadline; it cannot
+permit dispatch. A `SendPermit` additionally identifies the sender, selected material identity and
+version (or explicit `none`), and a short, finite `sendStartBy`. Neither permit is renewable.
 
 `MaterialEvidence` contains SourceKey, binding Ref, grantHash, isolationId,
 materialId, materialVersion, usableUntil, and exactly one variant:
@@ -115,22 +106,19 @@ credentialed operation resolves again; a narrower grant cannot borrow a broader
 token. Valid committed material may survive issuer outage; Resolver failure has
 no proxy fallback. Credential-free use skips resolution and passes `none` to check 2.
 
-Static evidence's SecretRef equals Input's `secret` (snapshot provenance).
-`materialId` identifies the selected Secret or snapshot; `materialVersion` equals
-the returned version and, for approved targets, `valueVersion`. Both checks bind
-the admitted mode, reference and selected Driver/scope; evidence cannot
-substitute provenance for the target. Cache keys include SourceKey, mode,
-target/store, material reference, version, grant and isolation. Known revocation
-fences that material across caches.
+For static evidence, match the SecretRef to Input’s `secret`. In snapshot mode that is provenance,
+not the store to read. `materialId` identifies the selected Secret or snapshot; `materialVersion` is
+the returned version and must equal `valueVersion` for an approved target. Bind mode, admitted
+reference, selected Driver and scope across the checks. Key reusable reads by SourceKey, mode,
+target and store, material reference and version, grant and isolation. Fence known revocation across
+caches.
 
-Source cache `none` or request `maxStaticAgeMs=0` forces an authoritative read
-of the admitted target without retention/fallback at any serving layer. Zero
-requires a fresh read, not zero elapsed age at send. Confine material to the
-request deadline, positive age bounds and selected-material expiry; discard it
-after completion/cancellation. `authoritativeObservedAt` is the successful
-selected-store read time, not snapshot creation/approval time; lower-cache hits
-cannot renew it. An owned snapshot is authoritative storage: zero disables reuse
-of read results, not the snapshot, and never selects the latest Secret.
+If source cache is `none` or request `maxStaticAgeMs=0`, read the admitted target authoritatively
+and retain no reusable result at any layer. Zero requires a new read, not zero elapsed time at send.
+Confine use to the request deadline, applicable positive age bounds and material expiry; discard
+after completion or cancellation. Set `authoritativeObservedAt` from the successful selected-store
+read. Neither an older snapshot approval nor a lower-cache hit sets a new observation time. With an
+approved snapshot and zero retention, read *that snapshot again*, never the latest Secret.
 
 ### Forwarding sequence and results
 
@@ -141,7 +129,8 @@ of read results, not the snapshot, and never selects the latest Secret.
 4. Consume handles, strip execution authentication, inject material, send once
    and protect the response.
 
-Resolution cannot dispatch. Separate management preparation grants no lasting authority.
+Distinguish refusal before send from blocked response or possible dispatch. Preserve the exact
+receipt for recovery. Resolution or separate preparation cannot authorize dispatch.
 
 `Refusal` is one of these closed safe variants:
 

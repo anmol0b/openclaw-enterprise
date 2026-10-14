@@ -4,9 +4,13 @@ rfc: index.md
 
 # Proposed credential lifecycle
 
-This [RFC companion](index.md) uses proposed [management](control-contracts.md)
-and [runtime](runtime-contracts.md) contracts. Token Service means the retained
-`CredentialRefreshDriver` capability, not a required separate service.
+[RFC-0020](index.md) separates preparing a usable credential from permission to use it. OpenShell
+can renew a GitHub installation token while an Agent is idle. A later Agent or bootstrap request can
+use only material already prepared for its exact grant; a cold read starts no work. Here, “Token
+Service” means the retained `CredentialRefreshDriver` capability, not a required separate service.
+
+[Management contracts](control-contracts.md) govern admission and durable attempts.
+[Runtime contracts](runtime-contracts.md) bind the selected version to an actual operation.
 
 ## 1. Configure and warm
 
@@ -77,30 +81,28 @@ issuance, signing, refresh, scheduling or refresh-capable retrieval.
 
 ### One owner and durable attempts
 
-Retire a shared family only after all admitted source/grant dependencies are
-released. Otherwise `removeRefresh` returns `references_remaining`; removing one
-source must not destroy another source's canonical input or usable material.
+Two grants can consume one rotating input. Isolating their WarmKeys prevents cross-grant reuse; it
+does *not* serialize consumption of the shared refresh token. Retire the input family only after all
+admitted source and grant dependencies are released. Otherwise return `references_remaining` and
+preserve the other consumers’ input and material.
 
-Warm-key isolation does not lock a rotating family: two grants can share one
-input. The owner:
+The owner must, in order:
 
-1. Serializes **family-wide** consumption and fences the exact epoch/attempt.
-2. Durably records the attempt and uncertainty marker before effects, then calls
-   `CredentialIssuer.issue`.
-3. Validates returned scope and expiry, and durably commits the replacement input
-   and runtime candidate before readiness.
-4. Publishes only under the current fence; retains late results for cleanup.
+1. Serialize consumption across the whole family and fence this owner epoch and attempt.
+2. Persist the attempt and uncertainty marker *before* calling `CredentialIssuer.issue`.
+3. Validate the returned authority and expiry. Commit both replacement input and runtime candidate
+   durably *before* publishing readiness.
+4. Publish only under the current fence. Retain even a late candidate for owned cleanup.
 
-An interrupted exchange remains uncertain until provider-supported inspection
-settles it or explicit reauthorization establishes new input. Timeout, process
-replacement and lease/lock loss do not authorize blind replay. Once replacement
-input is canonical, rereading a bootstrap Secret cannot overwrite it. Custody
-transfer from native Harness refresh state must stop the previous consumer first.
+If the provider rotates a refresh token and the owner crashes before saving its replacement, a lock
+cannot recover that token. Inspect where the provider supports it; otherwise explicit
+reauthorization may be necessary. A timeout, new process or lost lease never licenses replay. A
+bootstrap Secret cannot overwrite canonical replacement input. When taking custody from a Harness,
+stop its refresh consumer before starting this owner.
 
-Eligible old committed material remains ready during ordinary refresh; activity
-is separate. Renewal must not restart the proxy/Agent or periodically interrupt
-use. Exceptional reauthorization may interrupt only the affected credential,
-fail closed and expose recovery status. Hot cutover remains later work.
+During ordinary renewal, continue serving eligible committed material without restarting or
+periodically interrupting the proxy or Agent. Exceptional reauthorization may interrupt only the
+affected credential; fail closed and expose recovery status. Hot cutover remains later work.
 
 ### Management preparation and retrieval
 
@@ -110,55 +112,48 @@ _All interactions are proposed; arrows distinguish calls/returns. Management can
 prepare through the one owner, then uses the common Forwarder.
 [Editable source](assets/management-preparation.mmd)._
 
-The MVP configuration/discovery service uses a trusted Forwarder library inside
-OCC; OpenShell owns storage and refresh. The trusted OCC sender may hold an
-access token transiently for injection. Management callers receive no roots.
-Later service/worker placements use the same contracts.
+For MVP configuration or discovery, the trusted Forwarder runs inside OCC. OpenShell stores and
+refreshes the token; OCC may hold an access token briefly to inject it. Later placements must
+preserve this sequence:
 
-1. Authenticate caller and initiating user, capture the business operation, and
-   authorize its exact source, purpose, grant and destination before any access.
-   Only then may management call the same owner's `prepare`.
-2. Call `forward` after preparation. It performs fresh check 1 before resolution,
-   then check 2 over the captured operation and selected material before each
-   business send. Preparation grants no lasting authority or fake Agent identity.
-3. Return sanitized metadata, never roots or tokens. Material-consuming callbacks
-   are internal to trusted sender/custody code, never caller-provided functions.
+1. Authenticate the caller and initiating user, capture the business operation, then authorize
+   preparation for its exact source, purpose, grant and destination *before* access.
+2. If authorized, ask the designated owner to `prepare`. Keep any uncertain effect owned even if
+   retrieval fails or is cancelled. A readiness check cannot turn refresh-capable retrieval into
+   `readWarm`.
+3. Call `forward`. It checks current authority before resolution, then checks the actual operation
+   and selected material before each business send. Return sanitized metadata; no caller receives
+   roots, tokens or a material-consuming callback.
 
-Issuer calls are independently owner-authorized. Agent and bootstrap callers
-cannot obtain preparation through an `allowRefresh` flag.
-
-A refresh-capable retrieval is not `readWarm`, even after a readiness check.
-Its uncertain effects remain owned if retrieval fails or is cancelled.
+The owner separately authorizes issuer calls. Agent and bootstrap callers have no preparation flag,
+and management does not impersonate an Agent.
 
 ### Live Secret cutover
 
-New static sources default to live adoption. Existing sources retain their
-approved immutable version or owned snapshot in `explicit_update` mode until an
-operator authorized for the exact source update opts in. Consumer permission is
-not replacement approval; a mutable ref or longer TTL cannot preserve this
-boundary. Failed opt-in preserves approved state; known revocation still denies.
+New static sources default to live adoption: a Secret writer can change the value consumed without
+changing source generation. Existing sources keep their approved immutable version or snapshot in
+`explicit_update` mode until an operator authorized for that exact source opts in. Admission governs
+mode, policy and approved material. Neither consumer permission, a mutable reference nor a longer
+TTL can approve replacement. Failed opt-in preserves approval; known revocation still denies.
 
-A live source's Secret writer may change consumed material without readmission.
-Value changes preserve source generation; changing mode, approved material or
-policy requires admission. These bounds apply to reusable reads; explicit update
-never substitutes the latest value for its approved version or snapshot.
+Apply these bounds to reads of the *admitted target*:
 
-| Policy                 | Default and behavior                                                                                                                                                                               |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Freshness              | Ten minutes, configurable per source. Then read the admitted material selection.                                                                                                                   |
-| Eligible stale age     | **Four hours total**, configurable per source, and only for positively classified transport, timeout or throttling errors. A 09:00 observation is fresh until 09:10 and eligible only until 13:00. |
-| Fail closed            | Cold, denied, revoked, missing, unknown-error and unavailable-authority paths do not use fallback. Failed reads and lower-cache hits never reset authoritative age.                                |
-| Zero retention         | Disables caching and fallback at every serving layer. The normalized cache is `none` or positive bounded durations; either public zero duration selects `none`.                                    |
-| Zero request-age limit | Forces an authoritative read. Fresh material remains usable for that request within its original deadline and provider/Secret expiry; zero does not make it immediately expired.                   |
+- **Fresh.** Default ten minutes, configurable per source. A successful authoritative read at 09:00
+  is fresh until 09:10.
+- **Eligible stale.** Default four hours *total*, configurable per source. That 09:00 read is
+  eligible only until 13:00, and only on positively classified transport, timeout or throttling
+  errors. Failed reads and lower-cache hits never reset age.
+- **Fail closed.** No fallback on cold, denied, revoked, missing, unknown error or unavailable authority.
+- **Zero.** Either public cache duration of zero selects `none`; otherwise both are positive bounded
+  durations. Zero retention or zero request-age limit requires an authoritative read, no retention
+  or fallback anywhere. Use fresh material within the original deadline and provider or Secret
+  expiry; zero does not mean immediate expiry.
 
-Recheck usability at dispatch. Snapshot reads use the admitted owner/version
-without a current provenance Secret read. Authoritative reads establish cache age,
-not snapshot approval time. Zero preserves the snapshot but disables reusable reads.
-
-[Secret read results](runtime-contracts.md#versioned-secret-access) define version
-and age evidence. [Migration](migration.md#preserve-approved-static-material)
-preserves adoption mode and material references through admission, attachments,
-resolution, evidence and caches without expanding Secret-writer authority.
+Recheck usability at dispatch. Reading an approved snapshot starts read age, regardless of approval
+date; no current provenance Secret is needed. Zero disables read reuse, not the snapshot.
+[Secret results](runtime-contracts.md#versioned-secret-access) define age and version evidence;
+[migration](migration.md#preserve-approved-static-material) carries mode and target through
+admission, attachments, resolution, evidence and caches.
 
 ## 2. Prepare the optional repository
 
@@ -241,10 +236,10 @@ _Continuation of the same proposed request, including material absence.
 _All edges are proposed. Dynamic reuse remains behind Resolver; no proxy fallback
 or stale grace. [Editable source](assets/credential-selection.mmd)._
 
-The [runtime contract](runtime-contracts.md#two-policy-checks-and-common-resolution)
-owns capture, checks, resolution, evidence and responses. Cold lookup starts no
-work. Eligible material may survive issuer outage; unavailable Resolver or
-authority refuses use. Readiness cannot replace either check.
+Read the diagrams in order: check before access, check again with the actual material, then send at
+most once. The [runtime contract](runtime-contracts.md#two-policy-checks-and-common-resolution)
+defines the evidence and outcome. An issuer outage may leave eligible committed material usable; an
+unavailable Resolver or authority refuses use. Cold lookup starts no work.
 
 ## 4. Withdraw and recover
 
@@ -309,18 +304,17 @@ composition and persistence coupling.
 | Providers          | Real scoped GitHub, safe responses, bootstrap completion/cleanup and Codex account integration; qualify the actual selected protocol.                                                                                                                                                                                                                                   |
 | Composition        | Qualify each protected capability against the actual versions, configuration, provider/protocol slice and custody; self-declared flags are insufficient. Preserve initial Kubernetes/same-Backend/Repo guards until replacements work. Additional loading, independent backends, strong local development, DNS, packaging and scale/HA require follow-up qualification. |
 
-Package loading and protocols need composed qualification. Dedicated Codex
-needs a qualified WebSocket or HTTP/SSE path; management retrieval cannot replace
-warm-only resolution. Generalized bootstrap, including cloud-init, remains
-follow-up work beyond the optional repository clone gate.
+Qualify package loading and protocols in composition. For Codex, demonstrate that a placeholder-only
+client obtains required account metadata, starts, executes and handles renewal or reconnect while
+provider credentials stay outside the Harness. Qualify its actual WebSocket or HTTP/SSE path;
+management retrieval cannot stand in for warm resolution. Generalized bootstrap, including
+cloud-init, is later work.
 
-The Egress Proxy MVP requires qualification of static inference and GitHub,
-including the issuer bridge. OCE 1.0 also requires GitHub preclone, Codex OAuth
-and custom dynamic paths.
-Rotating OAuth may follow MVP, but any slice using rotating inputs must meet its
-concurrency/restart/recovery requirements. Source, fixture, installed-runtime and
-live-provider evidence support distinct claims; no-op CI and deployment acceptance
-prove neither enforcement nor readiness.
+MVP requires static inference and GitHub, including the issuer bridge. OCE 1.0 also requires GitHub
+preclone, Codex OAuth and custom dynamic paths. Any slice that rotates inputs, even in MVP, must
+meet the concurrency, restart and uncertain-effect requirements. Distinguish source, fixture,
+installed-runtime and live-provider evidence; no-op CI and accepted deployment prove neither
+enforcement nor readiness.
 
 Related: [security validation](security.md#required-validation),
 [Credential Gateway RFC](../0016-sandbox-credential-injection/index.md) and

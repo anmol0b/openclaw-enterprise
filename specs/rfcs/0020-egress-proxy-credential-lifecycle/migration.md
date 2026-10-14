@@ -4,60 +4,51 @@ rfc: index.md
 
 # Proposed source migration and legacy disposition
 
-This companion to [RFC-0020](index.md) preserves approved material and maps
-`CredentialGatewayDriver` consumers to the proposed contracts. It specifies
-required cutover behavior, not an implemented migration procedure.
+[RFC-0020](index.md) changes the default for *new* static sources. It must not silently give an
+existing source’s Secret writer authority to replace the credential an Agent uses. This is the
+required cutover and retirement contract, not a migration that has already run.
 
 ## Preserve approved static material
 
-Migration retains each existing source's `explicit_update` mode and approved
-immutable value/version or owned snapshot. It must preserve the material actually
-approved, not read the latest value from the recorded SecretRef. If that material
-cannot be recovered or its ownership verified, fail closed and require an
-authorized source update. Preserve running attachments' approved material until
-replacement installation is verified; migration cannot silently expand a Secret
-writer's authority.
+Suppose an operator approved `v1` and a Secret writer later stored `v2`. Migrate that source in
+`explicit_update` mode, pinned to approved `v1` or an owned immutable snapshot of it. Reading the
+latest Secret would select the wrong credential. If the approved material cannot be recovered or its
+ownership verified, fail closed and require an authorized source update. Keep running attachments on
+their approved material until replacement installation is verified.
 
-An operator with exact `credential_source:update` and `secret:operate` on the
-selected live Secret may explicitly opt in. Validate a separate candidate's
-material access and replacement attachments before activating its mode,
-reference and source generation together. Carry them through projections,
-attachments, Resolver evidence and cache keys; do not overwrite the approved
-snapshot or stop a working Agent before replacement validation. Keep the prior
-approved admission active until durable cutover; refused or failed opt-in
-preserves it. An uncertain activation requires inspection of that durable record,
-not an assumption of rollback. Reconcile partial effects under the recorded
-attempt; late completion cannot activate a superseded candidate.
+To opt an existing source into live adoption:
 
-Existing operations still need both current checks. Operation denial or known
-revocation cannot fall back to old material; consumer permission never approves
-replacement.
+1. Require `credential_source:update` on the exact source and `secret:operate` on the selected live
+   Secret. Consumer permission cannot approve replacement.
+2. Stage a separate candidate; validate material access and replacement attachments. Do not
+   overwrite the approved snapshot or stop a working Agent to test the candidate.
+3. Activate mode, material reference and source generation together. Carry all three through
+   projections, attachments, Resolver evidence and cache keys. Refusal or failure before cutover
+   leaves the prior approved admission active.
+4. If activation is uncertain, inspect the durable cutover record and reconcile partial effects
+   under that attempt. Do not assume rollback or let a late completion activate a superseded
+   candidate.
 
-New sources default to live adoption. Existing explicit updates still select
-approved immutable material; a mutable SecretRef with a longer TTL is not an
-implementation. This preserves the existing source-update boundary without a
-general promotion framework. Optional explicit promotion remains
+“Keep the prior admission” does not override an operation denial or known revocation. Every use
+still needs both current checks. New sources default to live adoption; a mutable reference with a
+longer TTL cannot implement explicit update. A general promotion framework is unnecessary for this
+cutover. Optional explicit promotion remains
 [#1965](https://github.com/openclaw/openclaw-enterprise/issues/1965).
 
-A snapshot's admitted owner stores and serves its immutable value/version. The
-recorded SecretRef preserves origin; its latest value, availability or current
-existence is not needed to read that snapshot. Version targets instead read the
-exact approved version from their matching Secret Driver. Preserve origin/version
-associations so known revocation of the approved material still denies use,
-including after reread or cache eviction; a provenance-only change does not
-approve replacement. All references remain in the source's Installation/Namespace.
-An inaccessible selected store fails or uses only eligible retained material;
-never substitute the provenance store or mutable latest value.
+For a *version* target, the matching Secret Driver serves that exact approved version. For a
+*snapshot*, its admitted owner serves the immutable value and version; the SecretRef records origin
+and need not still exist or be readable. Keep references within the source’s Installation and
+Namespace. Preserve the origin/version revocation association across eviction and reread. If the
+selected store is unavailable, fail or use only eligible retained material; never substitute the
+provenance store or its latest value.
 
-Snapshot creation/approval time is not serving-cache age. A successful
-authoritative read of that snapshot establishes `authoritativeObservedAt`;
-retained results keep it. Zero retention requires another authoritative read,
-not deletion of the approved snapshot. [Read bounds](lifecycle.md#live-secret-cutover)
-still constrain retained reads in either mode.
+[Read bounds](lifecycle.md#live-secret-cutover) begin at an authoritative read, not snapshot
+approval. Set `authoritativeObservedAt` on success; retained results keep that timestamp. Zero
+retention means read the approved snapshot again, not delete it.
 
-A storage update alone does not prove universal adoption or permit retirement
-of an old provider key. Confirm serving adoption and outstanding use separately;
-accepted cleanup survives loss of source-use rights.
+Before retiring an old provider key, verify adoption where requests are served and account
+separately for outstanding use. A storage write proves neither. Accepted cleanup survives loss of
+source-use rights.
 
 ## Legacy methods and consumers
 
@@ -111,14 +102,25 @@ preserves its rationale.
 
 ### Successor caller flows
 
-These sequences show how migrated callers use the proposed contracts.
+Use these paths to check that the migration preserved what each caller can do.
 
-| Caller               | Named API sequence and observable result                                                                                                                                                                                                                                                                                                                   |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Static inference     | OCC `applySource` admits adoption mode and live or approved immutable material; Compute `configureRevision` → Sandbox `installEgress`. `capture` classifies inference; `forward` uses check 1 → `resolve` → `readCredentialInput`/eligible retention → check 2 → injection and safe response.                                                              |
-| Scoped GitHub        | OCC admits repository IDs/permissions and `configureRefresh`. In the background, OpenShell calls the OCE issuer; OCE exchanges and validates the token; OpenShell commits it. Each captured operation uses fresh check 1 → `resolve`/`readWarm` → fresh check 2 → send. Cold returns `not_ready` without preparation.                                      |
-| Optional clone       | Compute observes exact attachment, `refreshStatus` and bounded required readiness; issues repository/execution delegation to bootstrap. Bootstrap uses `capture`/`forward` for every clone operation and returns [completion evidence](lifecycle.md#2-prepare-the-optional-repository). Compute owns the startup gate and cleanup.                         |
-| Management discovery | OCC authenticates caller/user, captures the business operation and obtains its preparation Permit before access; `prepare` → inspect/reconcile if needed → in-process `forward` → fresh check 1 → warm resolve → check 2 after preparation → business provider send. Return sanitized metadata. Issuer's provider calls have separate owner authorization. |
+- **Static inference.** OCC `applySource` admits live or approved immutable material. Compute
+  `configureRevision` and Sandbox `installEgress` install the binding. `capture` classifies
+  inference; `forward` checks access, resolves through `readCredentialInput` or eligible retention,
+  checks the selected version, sends and protects the response.
+- **GitHub.** OCC admits repository IDs and permissions, then `configureRefresh`. In the background
+  OpenShell calls the OCE issuer; OCE exchanges and validates the token; OpenShell commits it. On
+  each operation, check access, resolve through `readWarm`, check again, send. Cold returns
+  `not_ready` without preparation.
+- **Optional clone.** Compute observes the exact attachment, `refreshStatus` and bounded required
+  readiness, then delegates the repository and execution to bootstrap. Bootstrap uses `capture` and
+  `forward` for each clone operation and returns
+  [completion evidence](lifecycle.md#2-prepare-the-optional-repository). Compute owns the gate and
+  cleanup.
+- **Management discovery.** OCC authenticates caller and user, captures the business operation and
+  obtains its preparation Permit before access. `prepare`, inspect or reconcile if necessary, then
+  `forward` inside OCC. Check before the warm read and again with the selected material after
+  preparation. Return sanitized metadata. The owner separately authorizes issuer calls.
 
 Cutover must reconcile owned providers, catalog changes, running attachments and
 uncertain cleanup, then disable legacy reattachment/refresh paths. Retire exports,

@@ -4,12 +4,20 @@ rfc: index.md
 
 # Proposed source and egress management contracts
 
-This companion defines the replacement for `CredentialGatewayDriver`. Names and
-shapes are proposed transport-neutral IDL, not implemented exports or a public
-configuration format. Tables are closed records: all fields are required unless
-marked optional; unknown fields are rejected. Wire encoding may change without
-dropping these semantics. [Runtime contracts](runtime-contracts.md) and
-[lifecycle contracts](lifecycle.md#lifecycle-interface) share these definitions.
+[RFC-0020](index.md) gives OCC source admission and durable intent, Egress the execution’s binding
+set, and Sandbox its installation and enforcement. Installation proves neither credential readiness
+nor permission for an operation.
+
+![Credential sources and proposed background preparation](assets/credential-architecture.svg)
+
+[Editable diagram](assets/credential-architecture.mmd) ·
+[Configuration and warmup](lifecycle.md#1-configure-and-warm). “Token Service” denotes the retained
+`CredentialRefreshDriver` responsibility.
+
+These transport-neutral proposals are not exports or public configuration syntax. Require all fields
+unless marked optional; reject unknown fields. Wire encodings must preserve these semantics.
+[Runtime](runtime-contracts.md) and [lifecycle](lifecycle.md#lifecycle-interface) use the same
+definitions.
 
 ## Identities and admission
 
@@ -29,22 +37,22 @@ dropping these semantics. [Runtime contracts](runtime-contracts.md) and
 | `Route`              | `{route: Ref, context: Context, origin: HTTPS origin, methods: HTTP method[], pathPrefix: string, operationPolicy: Ref, responsePolicy: Ref, use: Binding\|none, grant: Grant, deadlineMs: positive integer}`. Prefix matching is segment-aware; provider classification supplies finer constraints. Credential-free routes still have grants.                     |
 | `Custody`            | `{sender: Ref, resolver: Ref, owner: Ref\|none, issuer: Ref\|none}` identifies trusted permitted consumers. Source policy must admit each material transfer.                                                                                                                                                                                                       |
 
-OCC's existing source service owns schema validation, IAM authorization, durable
-intent, generations and audit. Trusted Backend composition supplies provider
-definitions; requests never choose implementations. Source configuration changes
-advance its generation, including input-reference, route-policy or custody changes.
-Bindings/routes get new generations when their grant or selection changes. A
-live Secret value change preserves configuration generations. Adoption-mode or
-approved-material changes require exact source-update authorization and a new
-source generation; consumer permission does not approve replacement material.
+OCC’s source service validates the schema, authorizes the change, and records intent, generations
+and audit. The trusted Backend supplies provider definitions. A caller cannot choose implementation
+code.
 
-OCC admits management routes and bindings from registered configuration/discovery
-operations and current service and initiating-user rights. They have scoped,
-versioned refs, an explicit grant and isolation, and a bounded deadline; management
-bindings set `requiredForStartup: false`. They need no Agent, execution or Sandbox
-attachment. `authorizationId` identifies the operation context, not a cached allow.
-Agent/bootstrap cannot select this variant; management cannot borrow an Agent
-binding. Shared material reuse still requires explicit isolation admission.
+Keep configuration generations separate from credential versions. Changing an input reference, route
+policy, custody, adoption mode or approved static material advances the source generation. A live
+Secret value changing from `v1` to `v2` does not. Changing a grant or its selection advances the
+affected binding and route generations. Only exact source-update authority can change adoption mode
+or approve replacement material; permission to consume the source cannot do either.
+
+For management, OCC admits a route and binding for a registered configuration or discovery operation
+using current service and initiating-user rights. Give it scoped, versioned references, an explicit
+grant, isolation, a bounded deadline and `requiredForStartup: false`. It needs no Agent, execution
+or Sandbox attachment. `authorizationId` identifies the operation; OCC still checks current
+authority. Agent and bootstrap callers cannot select management context, and management cannot
+borrow an Agent binding. Sharing material always requires admitted isolation.
 
 `Source` is `{key: SourceKey, schemaVersion: registered positive integer, custody: Custody, input: Input}`.
 `Input` selects one registered closed schema; initial forms are:
@@ -241,12 +249,13 @@ The proposed Sandbox networking facet adds
 inspect/reconcile contract. Every Plan route and binding must use the execution
 variant matching its exact Execution; management contexts cannot enter
 attachments or installation.
-During provisioning, Compute invokes installation. The Sandbox input
-`egressAttachment: Attachment` replaces
-`credentialAttachments`. Sandbox verifies version, audience, execution and the
-entire plan before reporting enforcement. Egress owns binding apply/withdraw;
-Sandbox only installs/enforces the resulting configuration and reports evidence.
-Withdrawal follows this handoff:
+Compute calls `installEgress` with `egressAttachment: Attachment` in place of
+`credentialAttachments`. Sandbox verifies the version, audience, execution and entire plan before it
+reports enforcement. Egress owns the binding set; Sandbox enforces that set and reports what it
+installed.
+
+For example, withdraw a repository binding while an inference binding remains. OCC can already deny
+repository use. Egress must still prove that Sandbox installed the *remaining* binding set:
 
 1. Egress advances policyGeneration, tombstones withdrawn binding Refs and
    records a successor attachment with the remaining bindings and effective
@@ -269,14 +278,14 @@ before new use. Existing narrower operations may continue only where their
 current bindings remain authorized. Policy generations and withdrawal tombstones
 prevent an older installation from restoring access.
 
-Compute waits separately for source configuration, required dynamic grant
-material, exact applied attachment and authenticated Harness `serving` status.
-Static usability is checked by authorized resolution, not an invented warm-status
-API. None implies another. Protected capability flags also require evidence for
-the selected implementation versions, configuration, custody, enforcement and
-provider/protocol slice; self-report is not installed proof. Existing
-same-Backend/Kubernetes pairing guards stay until replacement adapters prove
-this join; they are initial implementation limits.
+Compute needs four distinct observations: applied source configuration, usable material for each
+required dynamic grant, Sandbox’s receipt for the exact attachment, and authenticated Harness
+`serving` status. None implies another. Check a static source through authorized resolution, not an
+invented warm-status API.
+
+At startup and admission, qualify capabilities against the actual implementation versions,
+configuration, custody, enforcement, provider and protocol. Keep the existing same-Backend and
+Kubernetes pairing guards until replacement adapters prove this join.
 
 ## Complete legacy disposition
 
