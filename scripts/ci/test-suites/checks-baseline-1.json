@@ -360,6 +360,9 @@
     },
     {
       "path": "tests/integration/static-egress.test.mjs"
+    },
+    {
+      "path": "tests/integration/egress-enrollment.test.mjs"
     }
   ]
 }
