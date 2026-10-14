@@ -30,12 +30,14 @@ The script prints only status codes and flags. It checks that:
 
 - the model placeholder, read from an ancestor process because Codex withholds
   `OPENAI_API_KEY` from its commands, is refused at a tool source's host with
-  `403`;
+  `403 credential_endpoint_mismatch`. Any other failure fails the check;
 - a command Codex starts still gets the model key inserted on the model
-  source's endpoint, `api.openai.com/v1/**` by default. OpenShell matches binaries against ancestors; the test
-  expects this until Agent tools run in their own Sandbox;
+  source's endpoint, `api.openai.com/v1/**` by default. OpenShell matches
+  binaries against ancestors; the test expects this until Agent tools run in
+  their own Sandbox;
 - skipping the proxy settings reaches neither a denied host nor a bare public
-  address, and the Harness Pod itself reaches no public address;
+  address while an allowed host still answers, and the Harness Pod itself
+  reaches no public address;
 - a `bearer-token` source whose upstream presents a certificate from an
   untrusted CA fails: the Harness sees the Sandbox proxy's certificate, and the
   upstream logs a failed handshake and no request.

@@ -2756,9 +2756,9 @@ const untrustedCaName = "OCE untrusted upstream CA";
 /**
  * Starts an HTTPS service whose certificate chains only to a fresh private CA that nothing in
  * the cluster trusts. The certificate also names the model host and the service listens on the
- * model port, so the model route can be pointed at it through cluster DNS. The service logs one JSON line per TLS failure, completed
- * handshake, or request, with no header values, so a route that refuses the upstream shows a
- * failed handshake and no request.
+ * model port, so the model route can be pointed at it through cluster DNS. The service logs one
+ * JSON line per TLS failure, completed handshake, or request, with the TLS server name and no
+ * header values, so a route that refuses the upstream shows a failed handshake and no request.
  */
 async function startUntrustedTlsObserver(context) {
   const namespace = `oce-untrusted-tls-${hash(randomUUID())}`;
@@ -4382,6 +4382,9 @@ async function assertCredentialRouteEnforcement(topology) {
     `printf 'FOREIGN_PLACEHOLDER=%s\\n' "$(grep -o '"placeholder":[a-z]*' "$body" ` +
       `2>/dev/null | cut -d: -f2)"`,
     `printf 'FOREIGN_LENGTH=%s\\n' "$(grep -o '"length":[0-9]*' "$body" 2>/dev/null | cut -d: -f2)"`,
+    // OpenShell names the reason when it refuses a credential for the wrong endpoint.
+    `printf 'FOREIGN_REFUSAL=%s\\n' "$(grep -o 'credential_endpoint_mismatch' "$body" ` +
+      `2>/dev/null | head -1)"`,
     // A minimal Responses request, the one API every model endpoint must serve, from a command
     // Codex started rather than from Codex itself.
     `probe MODEL curl -sS -o /dev/null -w '%{http_code},%{http_connect}' --max-time 60 ` +
@@ -4476,11 +4479,17 @@ async function assertCredentialRouteEnforcement(topology) {
   const issuer = value("TLS_ISSUER");
   const [modelStatus, modelConnectStatus] = (value("MODEL_OUT") ?? "").split(",");
   // Classify what the foreign host received by the echo's placeholder flag and header length,
-  // so a substituted model key is recognized without hashing or printing it.
+  // so a substituted model key is recognized without hashing or printing it. Only OpenShell's
+  // own endpoint-mismatch refusal counts as refused: a transport failure or another error could
+  // follow a forwarded credential, so it proves nothing and fails the check.
   const foreignReceived = (() => {
     const length = Number(value("FOREIGN_LENGTH"));
-    if (value("FOREIGN_OUT") !== "200") {
+    const status = value("FOREIGN_OUT");
+    if (status === "403" && value("FOREIGN_REFUSAL") === "credential_endpoint_mismatch") {
       return "refused";
+    }
+    if (status !== "200") {
+      return `unverified-${status}`;
     }
     if (value("FOREIGN_PLACEHOLDER") === "true") {
       return "placeholder";
@@ -4517,7 +4526,10 @@ async function assertCredentialRouteEnforcement(topology) {
       httpStatus: value("TLS_HTTP") || null,
       exitCode: exitCode("TLS"),
       harnessSawProxyIssuer: Boolean(issuer) && !issuer.includes(untrustedCaName),
-      tlsFailures: tlsEvents.filter(({ event }) => event === "tls-error").length,
+      // Counted only for the tool source's host, so the failures belong to this request.
+      tlsFailures: tlsEvents.filter(
+        ({ event, servername }) => event === "tls-error" && servername === untrustedTls.host,
+      ).length,
       handshakes: tlsEvents.filter(({ event }) => event === "tls-established").length,
       requests: tlsEvents.filter(({ event }) => event === "request").length,
     },
@@ -4547,6 +4559,13 @@ async function assertCredentialRouteEnforcement(topology) {
     "a command Codex runs is expected to reach the model endpoint with the inserted key.",
   );
   // Skipping the proxy settings gains nothing: a denied host and a bare address stay unreachable.
+  // The allowed host still answers, so the run has an outbound path and these failures are the
+  // policy's, not a missing network.
+  assert.equal(
+    observed.proxyBypass.allowedHostExitCode,
+    0,
+    "a host the policy allows must stay reachable for the denied checks to mean anything.",
+  );
   assert.notEqual(
     observed.proxyBypass.deniedHostExitCode,
     0,
@@ -4733,7 +4752,10 @@ async function assertModelRouteRefusesUntrustedUpstream(topology) {
   const events = (await untrustedTls.events()).slice(eventsBefore);
   const observed = {
     turnRejected: rejected,
-    tlsFailures: events.filter(({ event }) => event === "tls-error").length,
+    // Counted only for the model host, so the failures belong to the model route.
+    tlsFailures: events.filter(
+      ({ event, servername }) => event === "tls-error" && servername === modelEndpoint.hostname,
+    ).length,
     handshakes: events.filter(({ event }) => event === "tls-established").length,
     requests: events.filter(({ event }) => event === "request").length,
   };
