@@ -429,7 +429,7 @@ async function refreshSource(context, name = "oauth-client") {
 test("a refresh source is ready only after its first mint, and its material is not a gateway value", async () => {
   const context = await fixture();
   await context.makeReady();
-  const { secret, source } = await refreshSource(context);
+  const { source } = await refreshSource(context);
   assert.equal(source.state, "ready");
   assert.deepEqual(source.status, {
     state: "ready",
