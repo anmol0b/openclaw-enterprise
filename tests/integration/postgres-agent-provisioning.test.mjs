@@ -3896,7 +3896,10 @@ test(
     });
     // The fixture validator admits the legacy plan, as an older Compute installation could.
     // Revalidation below uses the actual current Kubernetes validator without changing stored rows.
-    body.configuration.values.plugins.entries[" CODEX "] = { enabled: false };
+    body.configuration.values.plugins.entries = {
+      " CODEX ": { enabled: false },
+      ...body.configuration.values.plugins.entries,
+    };
     const path = `/namespaces/${namespace.id}/agents/provision`;
     const admitted = await fixture.request("POST", path, { body });
     assert.equal(admitted.status, 202, JSON.stringify(admitted.body));
