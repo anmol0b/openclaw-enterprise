@@ -1,5 +1,7 @@
 /// <reference lib="es2024.string" />
 
+import type { CredentialInputRead, VersionedSecretValue } from "@openclaw-enterprise/contracts";
+
 import {
   asRecord,
   isNonEmptyString,
@@ -432,6 +434,28 @@ export class KubernetesSecretDriver implements SecretDriver {
   async resolve(secret: Secret): Promise<SecretBackendRef> {
     const { reference } = await this.readOwnedSecret(secret);
     return reference;
+  }
+
+  async readCredentialInput(input: CredentialInputRead): Promise<VersionedSecretValue> {
+    input.signal.throwIfAborted();
+    if (
+      !Number.isFinite(Date.parse(input.deadlineAt)) ||
+      Date.parse(input.deadlineAt) <= Date.now() ||
+      input.retention !== "none"
+    ) {
+      throw new SecretOwnershipError("Credential read bounds are invalid.");
+    }
+    const { observed } = await this.readOwnedSecret(input.secret);
+    input.signal.throwIfAborted();
+    const version = observed.metadata?.resourceVersion;
+    if (!isNonEmptyString(version) || Date.parse(input.deadlineAt) <= Date.now()) {
+      throw new SecretOwnershipError("Versioned credential material is unavailable.");
+    }
+    return {
+      value: decodedValue(observed),
+      version,
+      authoritativeObservedAt: new Date().toISOString(),
+    };
   }
 
   async withValue<T>(secret: Secret, use: (value: string) => Promise<T>): Promise<T> {

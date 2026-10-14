@@ -1,3 +1,5 @@
+import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
+import { isDeepStrictEqual } from "node:util";
 import { isSecretHarnessAuth, isServiceAccountHarnessAuth } from "@openclaw-enterprise/contracts";
 import { isPositiveSafeInteger } from "@openclaw-enterprise/utils";
 import { randomUUID } from "node:crypto";
@@ -132,6 +134,7 @@ export interface ControllerWorkerOptions {
   readonly computeDriver?: ComputeDriver;
   readonly sandboxDriver?: SandboxDriver;
   readonly credentialGatewayDriver?: CredentialGatewayDriver;
+  readonly egressProxyDriver?: EgressProxyDriver;
   readonly pollIntervalMs?: number;
   readonly leaseDurationMs?: number;
   readonly maxAttempts?: number;
@@ -913,6 +916,7 @@ export class ControllerWorker {
   private provisioningController: OpenClawController | undefined;
   private readonly sandbox: SandboxDriver | undefined;
   private readonly credentialGateway: CredentialGatewayDriver | undefined;
+  private readonly egressProxy: EgressProxyDriver | undefined;
   private readonly backends: readonly BackendDefinition[];
   private readonly backendMap: ReadonlyMap<string, BackendDefinition>;
   private readonly requireComputePreflight: boolean;
@@ -1038,6 +1042,7 @@ export class ControllerWorker {
     }
     this.sandbox = drivers?.sandboxDriver ?? options.sandboxDriver;
     this.credentialGateway = drivers?.credentialGatewayDriver ?? options.credentialGatewayDriver;
+    this.egressProxy = drivers?.egressProxyDriver ?? options.egressProxyDriver;
     if (
       (drivers?.installation.drivers.credential_gateway === undefined) !==
       (drivers?.credentialGatewayDriver === undefined)
@@ -1127,6 +1132,7 @@ export class ControllerWorker {
       this.configuration,
       this.sandbox,
       this.credentialGateway,
+      this.egressProxy,
       this.iam,
       this.secretDriver,
       this.repoDriver,
@@ -4238,6 +4244,18 @@ export class ControllerWorker {
     }
     return {
       context: {
+        ...(revision.egressPlan === undefined
+          ? {}
+          : {
+              recordEgressInstallation: async (installation) => {
+                if (!isDeepStrictEqual(installation.plan, revision.egressPlan)) {
+                  throw new Error("Egress receipt does not match the admitted revision.");
+                }
+                await this.state.transact((state) =>
+                  state.credentialSources.recordEgressInstallation(installation),
+                );
+              },
+            }),
         secretEnvironment: Object.freeze(resolved),
         harnessAuth,
         ...(credentialSources.length === 0

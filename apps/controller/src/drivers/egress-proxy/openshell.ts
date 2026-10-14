@@ -1,0 +1,332 @@
+import { isDeepStrictEqual } from "node:util";
+import type {
+  Backend,
+  CredentialSourceControl,
+  EgressAttachment,
+  EgressInstallation,
+  EgressPlan,
+  EgressProxyDriver,
+  EgressRef,
+  EgressRevisionContext,
+  SandboxDriver,
+} from "@openclaw-enterprise/contracts";
+import { DependencyUnavailableError } from "@openclaw-enterprise/occ";
+import { asRecord, immutableCopy } from "@openclaw-enterprise/utils";
+import { type OpenShellGateway, openShellWorkspaceName } from "../../backends/openshell.ts";
+import { openAiStaticProvider } from "./openai-provider.ts";
+
+export interface OpenShellEgressOptions {
+  readonly middlewareName: string;
+  readonly binaries: readonly string[];
+}
+
+// Proto3 omits default fields; compare their semantics while retaining every nondefault.
+function wirePolicy(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(wirePolicy);
+  }
+  const record = asRecord(value);
+  return record
+    ? Object.fromEntries(
+        Object.entries(record)
+          .map(([key, item]) => [key, wirePolicy(item)])
+          .filter(
+            ([, item]) =>
+              item !== false &&
+              item !== 0 &&
+              item !== "" &&
+              item !== undefined &&
+              !(Array.isArray(item) && item.length === 0) &&
+              !(asRecord(item) && Object.keys(item as object).length === 0),
+          ),
+      )
+    : value;
+}
+
+const capability = "openshell.supervisor-middleware.http-credential-access.v1";
+
+/** Nonsecret, exact routing consumed and independently checked by the paired Sandbox. */
+export function openShellEgressConfiguration(
+  plan: EgressPlan,
+  options: OpenShellEgressOptions,
+): Readonly<Record<string, unknown>> {
+  if (
+    new Set(plan.routes.map((route) => route.binding.binding.id)).size !== 1 ||
+    plan.routes.length === 0
+  ) {
+    throw new Error("The protected inference slice requires exactly one binding.");
+  }
+  const hosts = [...new Set(plan.routes.map((route) => new URL(route.origin).hostname))];
+  return immutableCopy({
+    network_policies: Object.fromEntries(
+      plan.routes.map((route, index) => {
+        const origin = new URL(route.origin);
+        return [
+          `oce-egress-${index}`,
+          {
+            name: `oce-egress-${index}`,
+            binaries: options.binaries.map((path) => ({ path })),
+            endpoints: [
+              {
+                host: origin.hostname,
+                ports: [Number(origin.port || 443)],
+                protocol: "rest",
+                tls: "NETWORK_TLS_MODE_TERMINATE",
+                enforcement: "NETWORK_ENFORCEMENT_MODE_ENFORCE",
+                access: "NETWORK_ACCESS_PRESET_FULL",
+                path: route.path,
+              },
+            ],
+          },
+        ];
+      }),
+    ),
+    network_middlewares: {
+      "oce-egress": {
+        name: "oce-egress",
+        middleware: options.middlewareName,
+        config: { fields: {} },
+        on_error: "fail_closed",
+        endpoints: { include: hosts, exclude: [] },
+        order: 0,
+        credential_authority: true,
+      },
+    },
+  });
+}
+
+export class OpenShellEgressProxyDriver implements EgressProxyDriver {
+  readonly capability = "egress_proxy" as const;
+  readonly implementation = "openshell";
+  readonly id: string;
+  readonly sourceControl: CredentialSourceControl;
+  private readonly backend: Backend<OpenShellGateway>;
+  private readonly sandbox: SandboxDriver;
+  private readonly options: OpenShellEgressOptions;
+
+  static readonly configurationSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["middlewareName", "binaries"],
+    properties: {
+      middlewareName: { type: "string", minLength: 1 },
+      binaries: { type: "array", minItems: 1, items: { type: "string", pattern: "^/" } },
+    },
+  };
+
+  static validateConfiguration(configuration: unknown): void {
+    const value = asRecord(configuration);
+    if (
+      !value ||
+      Object.keys(value).some((key) => !["middlewareName", "binaries"].includes(key)) ||
+      typeof value.middlewareName !== "string" ||
+      !value.middlewareName.trim() ||
+      !Array.isArray(value.binaries) ||
+      value.binaries.length === 0 ||
+      value.binaries.some(
+        (path) => typeof path !== "string" || !path.startsWith("/") || path.includes(".."),
+      )
+    ) {
+      throw new Error("Invalid protected OpenShell egress configuration.");
+    }
+  }
+
+  constructor(
+    options: OpenShellEgressOptions,
+    selection: {
+      readonly id: string;
+      readonly backend: Backend<OpenShellGateway>;
+      readonly sandbox: SandboxDriver;
+    },
+  ) {
+    OpenShellEgressProxyDriver.validateConfiguration(options);
+    if (
+      !options.middlewareName ||
+      options.binaries.length === 0 ||
+      options.binaries.some((binary) => !binary.startsWith("/") || binary.includes("..")) ||
+      selection.sandbox.harnessResource === undefined
+    ) {
+      throw new Error("Invalid protected OpenShell egress configuration.");
+    }
+    this.id = selection.id;
+    this.backend = selection.backend;
+    this.sandbox = selection.sandbox;
+    this.options = immutableCopy(options);
+    this.sourceControl = Object.freeze({
+      backend: { id: selection.backend.id, generation: 1 },
+      sender: { id: `${selection.backend.id}/supervisor`, generation: 1 },
+      resolver: { id: `${selection.id}/resolver`, generation: 1 },
+      providers: [openAiStaticProvider],
+      assertAvailable: async (signal: AbortSignal) => {
+        const client = this.backend.client.clientForNamespace("");
+        if (!client.getGatewayInfo) {
+          throw new DependencyUnavailableError(
+            "The selected OpenShell counterpart does not support protected egress.",
+          );
+        }
+        const info = await client.getGatewayInfo(signal);
+        const extensions = info.extensions;
+        if (
+          !Array.isArray(extensions) ||
+          !extensions.some((value) => {
+            const item = asRecord(value);
+            return (
+              item?.configured_name === options.middlewareName &&
+              (item.kind === "EXTENSION_KIND_SUPERVISOR_MIDDLEWARE" || item.kind === 4) &&
+              item.protocol_major === 1 &&
+              Array.isArray(item.required_capabilities) &&
+              item.required_capabilities.includes(capability) &&
+              Array.isArray(item.supported_capabilities) &&
+              item.supported_capabilities.includes(capability)
+            );
+          })
+        ) {
+          throw new DependencyUnavailableError(
+            "The selected OpenShell counterpart has no negotiated protected egress authority.",
+          );
+        }
+      },
+    });
+  }
+
+  async configureRevision(context: EgressRevisionContext): Promise<EgressAttachment> {
+    this.assertPlan(context);
+    await this.sourceControl.assertAvailable(context.signal);
+    return immutableCopy({
+      plan: context.plan,
+      configuration: openShellEgressConfiguration(context.plan, this.options),
+    });
+  }
+
+  async attachmentStatus(
+    context: EgressRevisionContext,
+    prepared: EgressAttachment,
+  ): Promise<EgressInstallation | undefined> {
+    this.assertPlan(context);
+    if (!isDeepStrictEqual(prepared.plan, context.plan)) {
+      throw new Error("The prepared Sandbox policy has a different admitted plan.");
+    }
+    await this.sourceControl.assertAvailable(context.signal);
+    const ref = this.sandbox.harnessResource!(context);
+    const client = this.backend.client.clientForNamespace(ref.namespaceName);
+    const existing = await client.getSandbox(
+      { workspace: openShellWorkspaceName(context.namespace), name: ref.resourceName },
+      context.signal,
+    );
+    if (!existing) {
+      return undefined;
+    }
+    this.assertOwned(existing.annotations, context);
+    if (!existing.id || !client.getSandboxPolicyStatus) {
+      return undefined;
+    }
+    const status = await client.getSandboxPolicyStatus(
+      openShellWorkspaceName(context.namespace),
+      ref.resourceName,
+      context.signal,
+    );
+    const revision = asRecord(status.revision);
+    const policy = asRecord(revision?.policy);
+    const protectedConfiguration = openShellEgressConfiguration(context.plan, this.options);
+    const expected = prepared.configuration;
+    const expectedPolicies = asRecord(expected.network_policies);
+    if (
+      !expectedPolicies ||
+      !isDeepStrictEqual(
+        wirePolicy(expected.network_middlewares),
+        wirePolicy(protectedConfiguration.network_middlewares),
+      ) ||
+      !isDeepStrictEqual(
+        wirePolicy(
+          Object.fromEntries(
+            Object.entries(expectedPolicies).filter(([name]) => name.startsWith("oce-egress-")),
+          ),
+        ),
+        wirePolicy(protectedConfiguration.network_policies),
+      )
+    ) {
+      throw new Error("The prepared Sandbox policy changed protected egress routes.");
+    }
+    const policies = asRecord(policy?.network_policies);
+    // The authenticated supervisor must report loading the exact policy. A desired spec,
+    // provider name or running Pod alone is not installation evidence.
+    if (
+      !revision ||
+      !policy ||
+      !policies ||
+      Number(status.active_version) !== context.plan.generation ||
+      Number(revision.version) !== context.plan.generation ||
+      ![2, "POLICY_STATUS_LOADED"].includes(revision.status as string | number) ||
+      !isDeepStrictEqual(
+        wirePolicy(policy.network_middlewares),
+        wirePolicy(expected.network_middlewares),
+      )
+    ) {
+      return undefined;
+    }
+    // Compare auxiliary rules too: an enrollment rule's reserved name alone is not
+    // proof of its host, port, binary or TLS policy. The paired Sandbox supplies all of it.
+    if (!isDeepStrictEqual(wirePolicy(policies), wirePolicy(expected.network_policies))) {
+      throw new DependencyUnavailableError(
+        "The installed egress policy differs from its admitted routes.",
+      );
+    }
+    return immutableCopy({
+      plan: context.plan,
+      sandboxId: existing.id,
+      sender: this.sourceControl.sender,
+      installedAt: new Date().toISOString(),
+    });
+  }
+
+  async withdrawBinding(context: EgressRevisionContext, binding: EgressRef): Promise<boolean> {
+    if (!context.plan.routes.some((route) => isDeepStrictEqual(route.binding.binding, binding))) {
+      throw new Error("Unknown egress withdrawal binding.");
+    }
+    // TODO(egress multi-binding): install a reducing successor policy without stopping the
+    // Harness. The first single-binding slice confirms Sandbox destruction instead.
+    return this.removeRevision(context);
+  }
+
+  async removeRevision(context: EgressRevisionContext): Promise<boolean> {
+    this.assertPlan(context);
+    const ref = this.sandbox.harnessResource!(context);
+    const client = this.backend.client.clientForNamespace(ref.namespaceName);
+    const selector = {
+      workspace: openShellWorkspaceName(context.namespace),
+      name: ref.resourceName,
+    };
+    const existing = await client.getSandbox(selector, context.signal);
+    if (!existing) {
+      return true;
+    }
+    this.assertOwned(existing.annotations, context);
+    await client.deleteSandbox(selector, context.signal);
+    return (await client.getSandbox(selector, context.signal)) === undefined;
+  }
+
+  private assertPlan(context: EgressRevisionContext): void {
+    if (
+      !isDeepStrictEqual(context.plan, context.revision.egressPlan) ||
+      context.plan.egressDriverId !== this.id ||
+      context.plan.sandboxDriverId !== this.sandbox.id ||
+      context.plan.execution.namespaceId !== context.namespace.id ||
+      context.plan.execution.revisionId !== context.revision.id
+    ) {
+      throw new Error("Protected egress plan does not match its admitted owner.");
+    }
+  }
+
+  private assertOwned(
+    annotations: Readonly<Record<string, string>>,
+    context: EgressRevisionContext,
+  ): void {
+    if (
+      annotations["openclaw.dev/namespace-id"] !== context.namespace.id ||
+      annotations["openclaw.dev/agent-id"] !== context.revision.agentId ||
+      annotations["openclaw.dev/revision-id"] !== context.revision.id
+    ) {
+      throw new Error("Protected Sandbox ownership differs from admission.");
+    }
+  }
+}

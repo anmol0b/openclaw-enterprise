@@ -1,4 +1,8 @@
-import { asRecord, isNonEmptyString, sha256Hex } from "@openclaw-enterprise/utils";
+import {
+  openShellEgressConfiguration,
+  type OpenShellEgressOptions,
+} from "../egress-proxy/openshell.ts";
+import { asRecord, immutableCopy, isNonEmptyString, sha256Hex } from "@openclaw-enterprise/utils";
 import { KubernetesObjectApi, type KubernetesObject, PatchStrategy } from "@kubernetes/client-node";
 import {
   RuntimeLogsForbiddenByClusterError,
@@ -79,6 +83,7 @@ export interface OpenShellNetworkBinary {
 }
 
 export interface OpenShellSandboxDriverOptions {
+  readonly egress?: OpenShellEgressOptions;
   /** Workspace and readiness policy; the `openshell` Backend owns the gateway connection. */
   readonly gateway: {
     readonly workspaceMode: "managed" | "operator";
@@ -1495,8 +1500,15 @@ function sandboxSpec(
         run_as_user: options.policy.process.runAsUser,
         run_as_group: options.policy.process.runAsGroup,
       },
+      ...(requirements.egressAttachment === undefined
+        ? {}
+        : {
+            network_middlewares: protectedEgressPolicy(options, requirements).network_middlewares,
+          }),
       network_policies: {
-        ...networkPolicies(options),
+        ...(requirements.egressAttachment === undefined
+          ? networkPolicies(options)
+          : asRecord(protectedEgressPolicy(options, requirements).network_policies)),
         ...(runtimeProvider === undefined || workspaceNodeBinding === undefined
           ? {}
           : workspaceNodeNetworkPolicy(workspaceNodeBinding)),
@@ -1656,6 +1668,7 @@ export const configurationSchema = Object.freeze({
     startupDelayMs: { type: "integer", minimum: 1, maximum: MAX_SANDBOX_STARTUP_DELAY_MS },
     logLevel: { type: "string" },
     providers: { type: "array", items: { type: "string" } },
+    egress: { type: "object" },
   },
 });
 
@@ -1663,6 +1676,28 @@ export const configurationSchema = Object.freeze({
  * Static operator providers plus every Credential Gateway attachment. An attachment this
  * Backend did not issue, or one that shadows a static provider, fails provisioning.
  */
+function protectedEgressPolicy(
+  options: OpenShellSandboxDriverOptions,
+  requirements: HarnessWorkloadRequirements,
+): Readonly<Record<string, unknown>> {
+  const attachment = requirements.egressAttachment;
+  if (
+    !attachment ||
+    !options.egress ||
+    requirements.credentialAttachments.length !== 0 ||
+    (options.providers?.length ?? 0) !== 0
+  ) {
+    throw new OpenShellSandboxConfigurationFailure(
+      "Protected egress requires its exact paired policy and no legacy credential attachments.",
+    );
+  }
+  const expected = openShellEgressConfiguration(attachment.plan, options.egress);
+  if (!isDeepStrictEqual(attachment.configuration, expected)) {
+    throw new OpenShellSandboxConfigurationFailure("Protected egress attachment was altered.");
+  }
+  return expected;
+}
+
 function sandboxProviders(
   options: OpenShellSandboxDriverOptions,
   requirements: HarnessWorkloadRequirements,
@@ -2061,6 +2096,13 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   async provisionHarness(context: SandboxHarnessContext): Promise<SandboxResourceRef> {
     this.requireOperatorWorkspaceMode("provision a Harness");
     if (
+      !isDeepStrictEqual(context.requirements.egressAttachment?.plan, context.revision.egressPlan)
+    ) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "Protected egress attachment must match the admitted revision.",
+      );
+    }
+    if (
       context.revision.harness.mode !== "dedicated" ||
       (context.revision.harness.id !== "codex" && context.revision.harness.id !== "openclaw")
     ) {
@@ -2143,6 +2185,21 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       ),
       serviceExposures,
     };
+    const prepared = context.requirements.egressAttachment;
+    const result = immutableCopy({
+      ...sandbox,
+      ...(prepared === undefined
+        ? {}
+        : {
+            egressAttachment: {
+              plan: prepared.plan,
+              configuration: {
+                network_policies: create.spec.policy.network_policies,
+                network_middlewares: create.spec.policy.network_middlewares,
+              },
+            },
+          }),
+    });
     // Every reconcile pass reaches here. Re-sending CreateSandbox for a Sandbox that
     // exists would hit the gateway's request_id replay, which refuses a changed spec
     // (REQUEST_ID_PAYLOAD_MISMATCH) and forgets the create after 24 h (ALREADY_EXISTS).
@@ -2197,7 +2254,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
           // delay when OpenShell reports that an exposed Sandbox service is ready.
           await delay(this.options.startupDelayMs, undefined, { signal: context.signal });
         }
-        return Object.freeze(sandbox);
+        return result;
       }
       existing = await client.getSandbox(selector, context.signal);
       if (existing === undefined && alreadyExists) {
@@ -2231,7 +2288,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       }
       validateHarnessServiceUrl(service.url);
     }
-    return Object.freeze(sandbox);
+    return result;
   }
 
   async harnessEndpoint(context: SandboxHarnessContext): Promise<SandboxHarnessEndpoint> {

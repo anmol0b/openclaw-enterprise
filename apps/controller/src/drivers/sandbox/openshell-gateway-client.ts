@@ -286,6 +286,12 @@ export function openShellSandboxObserver(
 export interface OpenShellGatewayClient
   extends OpenShellSandboxLogReader, OpenShellSandboxObserver {
   health(signal: AbortSignal): Promise<void>;
+  getGatewayInfo?(signal: AbortSignal): Promise<RecordValue>;
+  getSandboxPolicyStatus?(
+    workspace: string,
+    sandbox: string,
+    signal: AbortSignal,
+  ): Promise<RecordValue>;
   getWorkspace(name: string, signal: AbortSignal): Promise<OpenShellWorkspaceResponse | undefined>;
   createWorkspace(
     name: string,
@@ -415,6 +421,8 @@ export interface OpenShellGatewayClient
 
 type OpenShellMethod =
   | "Health"
+  | "GetGatewayInfo"
+  | "GetSandboxPolicyStatus"
   | "GetWorkspace"
   | "CreateWorkspace"
   | "DeleteWorkspace"
@@ -1041,6 +1049,22 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     if (status !== "SERVICE_STATUS_HEALTHY" && status !== 1) {
       throw new OpenShellGatewayFailure("OpenShell gateway is not healthy.");
     }
+  }
+
+  async getGatewayInfo(signal: AbortSignal): Promise<RecordValue> {
+    return this.unary("GetGatewayInfo", {}, signal);
+  }
+
+  async getSandboxPolicyStatus(
+    workspace: string,
+    sandbox: string,
+    signal: AbortSignal,
+  ): Promise<RecordValue> {
+    return this.unary(
+      "GetSandboxPolicyStatus",
+      { sandbox, workspace_scope: { workspace }, version: 0 },
+      signal,
+    );
   }
 
   async getWorkspace(

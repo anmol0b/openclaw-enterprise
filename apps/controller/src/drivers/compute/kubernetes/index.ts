@@ -1,3 +1,4 @@
+import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
 import {
   normalizeOpenAiBaseUrl,
   openAiBaseUrlRewritesIpv4,
@@ -1026,6 +1027,14 @@ function prepareHarnessAuth(
     harness.mode === "dedicated" &&
     (harness.id === "codex" || harness.id === "openclaw")
   ) {
+    // Protected egress supplies material only to the supervisor. A nonsecret marker lets
+    // ordinary model clients construct their request; the authority replaces its header.
+    if (resolvedAuth.source.egress !== undefined) {
+      environment.push({
+        name: harnessModelAuthentication(configuration).environmentName,
+        value: "oce-protected-egress",
+      });
+    }
     // The paired Sandbox supplies the credential environment; no Secret is projected here.
     if (harness.id === "codex") {
       environment.push({ name: "CODEX_LOGIN_MODE", value: resolvedAuth.loginMode });
@@ -2934,6 +2943,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private readonly options: KubernetesComputeDriverOptions;
   private readonly sandboxDriver: SandboxDriver | undefined;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
+  private readonly egressProxyDriver: EgressProxyDriver | undefined;
   private readonly nodeEnrollment: GatewayNodeEnrollment | undefined;
   // How long, in total across passes, preparation may wait for one setup's node to pair.
   private workspaceNodePairingWaitMs = WORKSPACE_NODE_PAIRING_WAIT_MS;
@@ -3298,6 +3308,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       readonly lifecycleDrivers?: readonly Driver[];
       readonly sandboxDriver?: SandboxDriver;
       readonly credentialGatewayDriver?: CredentialGatewayDriver;
+      readonly egressProxyDriver?: EgressProxyDriver;
       readonly nodeEnrollment?: GatewayNodeEnrollment;
       readonly readNodeCa?: () => Promise<string | undefined>;
     } = {},
@@ -3319,6 +3330,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
     }
     this.credentialGatewayDriver = selection.credentialGatewayDriver;
+    this.egressProxyDriver = selection.egressProxyDriver;
     this.nodeEnrollment = selection.nodeEnrollment;
     this.readNodeCa = selection.readNodeCa;
     const lifecycleDrivers = selection.lifecycleDrivers ?? [];
@@ -5801,7 +5813,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         const sources = [
           ...(harnessAuth.credentialSource === undefined ? [] : [harnessAuth.credentialSource]),
           ...credentialSources,
-        ];
+        ].filter((source) => source.egress === undefined);
         const credentialContext =
           sources.length === 0
             ? undefined
@@ -5815,12 +5827,37 @@ export class KubernetesComputeDriver implements ComputeDriver {
           credentialContext === undefined
             ? []
             : await this.requireCredentialGateway().attachForRevision(credentialContext);
-        const requirements = this.harnessRequirementsFromDeployment(
-          agentDeployment,
-          harnessAuth.loginMode,
-          attachments,
-          this.sandboxWorkloadFiles(pluginRuntime),
-        );
+        const egressContext =
+          revision.egressPlan === undefined
+            ? undefined
+            : {
+                namespace: sandboxContext.namespace,
+                revision,
+                plan: revision.egressPlan,
+                signal: sandboxContext.signal,
+              };
+        if (
+          egressContext !== undefined &&
+          (this.egressProxyDriver?.id !== revision.egressPlan!.egressDriverId ||
+            context?.recordEgressInstallation === undefined)
+        ) {
+          throw new DependencyUnavailableError(
+            "The admitted protected egress composition is unavailable.",
+          );
+        }
+        const egressAttachment =
+          egressContext === undefined
+            ? undefined
+            : await this.egressProxyDriver!.configureRevision(egressContext);
+        const requirements = {
+          ...this.harnessRequirementsFromDeployment(
+            agentDeployment,
+            harnessAuth.loginMode,
+            attachments,
+            this.sandboxWorkloadFiles(pluginRuntime),
+          ),
+          ...(egressAttachment === undefined ? {} : { egressAttachment }),
+        };
         const sandbox = await this.prepareRevisionStage("sandbox_provision", () =>
           sandboxDriver.provisionHarness!({
             ...sandboxContext,
@@ -5829,6 +5866,21 @@ export class KubernetesComputeDriver implements ComputeDriver {
           }),
         );
         this.verifySandboxResourceRef(sandbox, revision, namespace);
+        if (egressContext !== undefined) {
+          if (sandbox.egressAttachment === undefined) {
+            throw new DependencyUnavailableError(
+              "The paired Sandbox returned no exact protected egress configuration.",
+            );
+          }
+          const installed = await this.egressProxyDriver!.attachmentStatus(
+            egressContext,
+            sandbox.egressAttachment,
+          );
+          if (installed === undefined) {
+            return incomplete();
+          }
+          await context!.recordEgressInstallation!(installed);
+        }
         if (this.options.runtime !== undefined) {
           // The Sandbox, and with it the supervisor's exact peer labels, exists only
           // now: admit that supervisor before waiting for its workspace node.
@@ -6692,6 +6744,28 @@ export class KubernetesComputeDriver implements ComputeDriver {
       external,
     );
     const sandboxNamespace = this.sandboxNamespaceForRevision(revision, namespace);
+    if (revision.egressPlan !== undefined && source.egress !== undefined) {
+      const egress = this.egressProxyDriver;
+      if (egress?.id !== revision.egressPlan.egressDriverId) {
+        throw new DependencyUnavailableError("The protected egress cleanup owner is unavailable.");
+      }
+      const binding = revision.egressPlan.routes.find(
+        (route) => route.binding.source.source.id === source.id,
+      )?.binding.binding;
+      if (!binding) {
+        throw new OwnershipFailure("The protected source has no admitted binding.");
+      }
+      const removed = await egress.withdrawBinding(
+        {
+          namespace: sandboxNamespace,
+          revision,
+          plan: revision.egressPlan,
+          signal: AbortSignal.timeout(30_000),
+        },
+        binding,
+      );
+      return { sourceId: source.id, state: removed ? "revoked" : "pending" };
+    }
     const sandbox = sandboxDriver.harnessResource({ namespace: sandboxNamespace, revision });
     this.verifySandboxResourceRef(sandbox, revision, namespace);
     const status = await this.requireCredentialGateway().withdraw({
