@@ -465,7 +465,13 @@ test(
         sandboxId: ownedSandboxId,
       });
       const harness = await f.waitForProviderHarnessPod(placement, revision);
-      await f.assertProviderOwnedHarness(placement, revision, sandbox, harness);
+      await f.assertProviderOwnedHarness(
+        placement,
+        revision,
+        sandbox,
+        harness,
+        "maintainedLauncher",
+      );
       f.assertWorkspaceMounts(harness);
       f.assertApprovedOpenShellPrivileges(harness);
       await f.assertGatewayBootstrapPolicies(placement);

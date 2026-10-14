@@ -71,6 +71,66 @@ export function openShellRevisionName(revision) {
   return `${openShellAgentName(revision.agentId)}-rev-${openshellHash(revision.id)}`;
 }
 
+export function assertOpenShellHarnessBinding(
+  namespace,
+  revision,
+  sandbox,
+  pod,
+  profile = "perAgent",
+) {
+  assert.equal(sandbox.metadata.namespace, namespace);
+  assert.equal(pod.metadata.namespace, namespace);
+  assert.ok(sandbox.metadata.name, "Sandbox must have a stable resource name.");
+  assert.ok(["perAgent", "maintainedLauncher"].includes(profile), "unknown identity profile");
+  // internal/occdev/openshell.go selects this literal for the maintained launcher.
+  // Keep the per-Agent oracle as the default for callers qualifying that contract.
+  assert.equal(
+    pod.spec.serviceAccountName,
+    profile === "maintainedLauncher" ? "openshell-sandbox" : openShellAgentName(revision.agentId),
+  );
+  assert.equal(pod.metadata.labels?.["openclaw.dev/namespace"], revision.namespaceId);
+  assert.equal(pod.metadata.labels?.["openclaw.dev/agent"], revision.agentId);
+  assert.equal(pod.metadata.labels?.["openclaw.dev/revision"], revision.id);
+  assert.equal(
+    pod.metadata.labels?.["app.kubernetes.io/name"],
+    openShellRevisionName(revision),
+    "the provider-owned Pod must carry Compute's immutable revision selector.",
+  );
+  assert.ok(sandbox.metadata.uid, "Sandbox must have an immutable UID.");
+  assert.equal(
+    pod.metadata.ownerReferences?.some(
+      (owner) =>
+        owner.kind === "Sandbox" &&
+        owner.name === sandbox.metadata.name &&
+        owner.uid === sandbox.metadata.uid &&
+        owner.apiVersion === sandbox.apiVersion &&
+        owner.controller === true,
+    ),
+    true,
+    "the Agent Sandbox controller, not Compute, must own the Harness Pod.",
+  );
+  if (profile === "maintainedLauncher") {
+    // Supplier 0f6786167e8c1e37b6804243cf3ebdb5c1daf6b2 driver.rs:
+    // apply_supervisor_sandbox_runtime_boundary keeps SA tokens in the separate
+    // supervisor Pod. The workload bootstrap consumes a Secret, not an SA token.
+    assert.equal(pod.spec.automountServiceAccountToken, false);
+    assert.equal(
+      (pod.spec.volumes ?? []).some(({ projected }) =>
+        projected?.sources?.some(({ serviceAccountToken }) => serviceAccountToken !== undefined),
+      ),
+      false,
+      "the workload Pod must not project a ServiceAccount token, even for init containers.",
+    );
+    const sandboxId = sandbox.metadata.labels?.["openshell.ai/sandbox-id"];
+    assert.ok(typeof sandboxId === "string" && sandboxId.length > 0);
+    assert.equal(pod.metadata.annotations?.["openshell.ai/sandbox-id"], sandboxId);
+    assert.equal(pod.metadata.labels?.["openshell.ai/boundary-pair"], sandboxId.toLowerCase());
+    assert.equal(pod.metadata.labels?.["openshell.ai/boundary-role"], "workload");
+    assert.equal(pod.metadata.labels?.["openclaw.dev/workload-role"], "agent");
+    assert.equal(pod.metadata.labels?.["openclaw.dev/network-profile"], "provider-fenced-v1");
+  }
+}
+
 export function createOpenShellServiceLoopbackLookup(serviceHostname) {
   const expectedHostname = serviceHostname.toLowerCase();
 
@@ -847,26 +907,14 @@ export function createOpenShellKubernetesFixture({
     return pod;
   }
 
-  async function assertProviderOwnedHarness(namespace, revision, sandbox, pod) {
-    assert.equal(sandbox.metadata.namespace, namespace);
-    assert.equal(pod.metadata.namespace, namespace);
-    assert.ok(sandbox.metadata.name, "Sandbox must have a stable resource name.");
-    assert.equal(pod.spec.serviceAccountName, openShellAgentName(revision.agentId));
-    assert.equal(pod.metadata.labels?.["openclaw.dev/namespace"], revision.namespaceId);
-    assert.equal(pod.metadata.labels?.["openclaw.dev/agent"], revision.agentId);
-    assert.equal(pod.metadata.labels?.["openclaw.dev/revision"], revision.id);
-    assert.equal(
-      pod.metadata.labels?.["app.kubernetes.io/name"],
-      openShellRevisionName(revision),
-      "the provider-owned Pod must carry Compute's immutable revision selector.",
-    );
-    assert.equal(
-      pod.metadata.ownerReferences?.some(
-        (owner) => owner.kind === "Sandbox" && owner.name === sandbox.metadata.name,
-      ),
-      true,
-      "the Agent Sandbox controller, not Compute, must own the Harness Pod.",
-    );
+  async function assertProviderOwnedHarness(
+    namespace,
+    revision,
+    sandbox,
+    pod,
+    profile = "perAgent",
+  ) {
+    assertOpenShellHarnessBinding(namespace, revision, sandbox, pod, profile);
     assert.equal(
       await maybeResource("deployment", openShellRevisionName(revision), namespace),
       undefined,

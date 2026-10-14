@@ -31,6 +31,146 @@ import {
   validateConnectedInputs,
 } from "../helpers/egress-connected-inputs.mjs";
 
+import {
+  assertOpenShellHarnessBinding,
+  openShellAgentName,
+  openShellRevisionName,
+} from "../helpers/openshell-kubernetes-real.mjs";
+
+// These are oracle inputs, not simulated evidence of a running supplier. The
+// selected account comes from the maintained launcher, independently of the Pod.
+test("connected workload binding accepts only the maintained launcher identity and isolation", async (t) => {
+  const revision = { namespaceId: "ns_fixture", agentId: "agent_fixture", id: "revision_fixture" };
+  const sandbox = {
+    apiVersion: "agents.x-k8s.io/v1alpha1",
+    metadata: {
+      namespace: "workspace",
+      name: "sandbox-fixture",
+      uid: "sandbox-uid",
+      labels: { "openshell.ai/sandbox-id": "sandbox-id" },
+    },
+  };
+  const valid = {
+    metadata: {
+      namespace: "workspace",
+      labels: {
+        "openclaw.dev/namespace": revision.namespaceId,
+        "openclaw.dev/agent": revision.agentId,
+        "openclaw.dev/revision": revision.id,
+        "openclaw.dev/workload-role": "agent",
+        "openclaw.dev/network-profile": "provider-fenced-v1",
+        "app.kubernetes.io/name": openShellRevisionName(revision),
+        "openshell.ai/boundary-pair": "sandbox-id",
+        "openshell.ai/boundary-role": "workload",
+      },
+      annotations: { "openshell.ai/sandbox-id": "sandbox-id" },
+      ownerReferences: [
+        {
+          apiVersion: sandbox.apiVersion,
+          kind: "Sandbox",
+          name: sandbox.metadata.name,
+          uid: "sandbox-uid",
+          controller: true,
+        },
+      ],
+    },
+    spec: {
+      serviceAccountName: "openshell-sandbox",
+      automountServiceAccountToken: false,
+      volumes: [
+        {
+          name: "openshell-pod-identity",
+          downwardAPI: {
+            items: [{ path: "uid", fieldRef: { fieldPath: "metadata.uid" } }],
+          },
+        },
+      ],
+    },
+  };
+  const check = (pod, profile = "maintainedLauncher") =>
+    assertOpenShellHarnessBinding("workspace", revision, sandbox, pod, profile);
+  check(valid);
+  // The shared helper must still reject the launcher account for per-Agent callers.
+  assert.throws(() => assertOpenShellHarnessBinding("workspace", revision, sandbox, valid), {
+    code: "ERR_ASSERTION",
+  });
+  const perAgent = structuredClone(valid);
+  perAgent.spec.serviceAccountName = openShellAgentName(revision.agentId);
+  assertOpenShellHarnessBinding("workspace", revision, sandbox, perAgent);
+  assert.throws(() => check(valid, "unknown"), { code: "ERR_ASSERTION" });
+
+  const mutations = {
+    "wrong account": (pod) => {
+      pod.spec.serviceAccountName = "default";
+    },
+    "per-Agent account in launcher profile": (pod) => {
+      pod.spec.serviceAccountName = perAgent.spec.serviceAccountName;
+    },
+    "automount enabled": (pod) => {
+      pod.spec.automountServiceAccountToken = true;
+    },
+    "automount unspecified": (pod) => {
+      delete pod.spec.automountServiceAccountToken;
+    },
+    "token projection even without a workload mount": (pod) => {
+      pod.spec.volumes.push({
+        name: "bootstrap-token",
+        projected: {
+          sources: [
+            {
+              serviceAccountToken: {
+                audience: "openshell-gateway",
+                path: "token",
+                expirationSeconds: 600,
+              },
+            },
+          ],
+        },
+      });
+    },
+    "recreated Sandbox UID": (pod) => {
+      pod.metadata.ownerReferences[0].uid = "stale-uid";
+    },
+    "wrong Sandbox name": (pod) => {
+      pod.metadata.ownerReferences[0].name = "other";
+    },
+    "wrong owner API": (pod) => {
+      pod.metadata.ownerReferences[0].apiVersion = "other/v1";
+    },
+    "noncontrolling owner": (pod) => {
+      pod.metadata.ownerReferences[0].controller = false;
+    },
+    "wrong annotation": (pod) => {
+      pod.metadata.annotations["openshell.ai/sandbox-id"] = "other";
+    },
+    "wrong pair": (pod) => {
+      pod.metadata.labels["openshell.ai/boundary-pair"] = "other";
+    },
+    "supervisor instead of workload": (pod) => {
+      pod.metadata.labels["openshell.ai/boundary-role"] = "supervisor";
+    },
+  };
+  for (const label of [
+    "openclaw.dev/namespace",
+    "openclaw.dev/agent",
+    "openclaw.dev/revision",
+    "openclaw.dev/workload-role",
+    "openclaw.dev/network-profile",
+    "app.kubernetes.io/name",
+  ]) {
+    mutations[`wrong ${label}`] = (pod) => {
+      pod.metadata.labels[label] = "other";
+    };
+  }
+  for (const [name, mutate] of Object.entries(mutations)) {
+    await t.test(name, () => {
+      const pod = structuredClone(valid);
+      mutate(pod);
+      assert.throws(() => check(pod), { code: "ERR_ASSERTION" });
+    });
+  }
+});
+
 test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS fixtures", () => {
   const inputs = () => ({
     version: 1,
