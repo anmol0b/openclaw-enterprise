@@ -65,14 +65,14 @@ modes fail closed.
 Compute's `apps/controller/src/drivers/compute/native-gateway-transport.ts:validatePlaintextNativeGateway`
 rejects `gateway.tls.enabled: true` before revision creation and preparation:
 Docker, SSH and Kubernetes require native HTTP.
-The revision freezes Configuration, approved Harness identity/version, mode,
-Compute, and Agent ServicePrincipal. Production supports embedded OpenClaw and
-dedicated Codex; dedicated OpenClaw requires a SandboxDriver providing network,
-filesystem, and process containment. Access tokens require dedicated Codex;
-account snapshots retain OCC identity, credential kind, and opaque Secret reference.
+Revisions freeze Configuration, approved Harness identity/version, mode, Compute,
+and Agent ServicePrincipal. Production supports embedded OpenClaw and dedicated
+Codex. Dedicated OpenClaw requires SandboxDriver network, filesystem, and process
+containment. Access tokens require dedicated Codex; account snapshots retain OCC
+identity, credential kind, and opaque Secret reference.
 `apps/controller/src/drivers/compute/kubernetes/configuration-rules.ts:requireCodexPluginPolicy`
-rejects effective Codex plugin disables before save, provisioning, or deployment,
-comparing trimmed, case-folded entry IDs in source order without rewriting policy.
+rejects effective Codex disables before save, provisioning, or deployment.
+Trimmed, case-folded entry IDs merge in order; authored policy stays unchanged.
 
 ### 2. Claim work and realize the approved topology
 
