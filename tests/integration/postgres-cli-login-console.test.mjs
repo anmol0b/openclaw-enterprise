@@ -136,6 +136,64 @@ test(
       },
     );
 
+    await t.test("editing the code during lookup cannot approve another device", async () => {
+      const reviewed = await start();
+      const other = await start();
+      let lookupReached;
+      let releaseLookup;
+      const reached = new Promise((resolve) => {
+        lookupReached = resolve;
+      });
+      const release = new Promise((resolve) => {
+        releaseLookup = resolve;
+      });
+      const lookupUrl = "**/api/auth/cli/device-authorizations/lookup";
+      await page.route(lookupUrl, async (route) => {
+        // Keep the real lookup response in flight while the person edits the input.
+        const response = await route.fetch();
+        lookupReached();
+        await release;
+        await route.fulfill({ response });
+      });
+      try {
+        await page.goto(`${origin}/console/cli-login`);
+        await code.fill(reviewed.userCode);
+        const submitted = page.getByRole("button", { name: "Continue" }).click();
+        let timer;
+        try {
+          await Promise.race([
+            reached,
+            new Promise((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("lookup did not reach the controller")),
+                5000,
+              );
+            }),
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+        await code.fill(other.userCode);
+        releaseLookup();
+        await submitted;
+        await page.getByRole("heading", { name: "Approve this sign-in?" }).waitFor();
+        await page.getByRole("button", { name: "Approve" }).click();
+        await page.getByRole("heading", { name: "occ is signed in" }).waitFor();
+        const issued = await poll(reviewed.deviceCode);
+        assert.equal(issued.status, 200, JSON.stringify(issued.body));
+        const stillPending = await poll(other.deviceCode);
+        assert.equal(stillPending.body.error.code, "AUTHORIZATION_PENDING");
+        const logout = await fetch(`${origin}/api/auth/cli-sessions/current`, {
+          method: "DELETE",
+          headers: { "x-occ-cli-session": issued.body.data.token },
+        });
+        assert.equal(logout.status, 200);
+      } finally {
+        releaseLookup();
+        await page.unroute(lookupUrl);
+      }
+    });
+
     await t.test("a used or expired code is refused", async () => {
       await enter(approvedCode);
       await page.getByText(/No pending sign-in request has this code/).waitFor();

@@ -69,18 +69,22 @@ export function renderCliLogin(view, { request, isCurrent, onSessions }) {
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (submit.disabled) {
+      return;
+    }
+    const userCode = input.value;
     feedback.hidden = true;
     submit.disabled = true;
     try {
       const found = await request("/api/auth/cli/device-authorizations/lookup", {
         method: "POST",
-        body: { userCode: input.value },
+        body: { userCode },
         readOnly: true,
       });
       if (!isCurrent()) {
         return;
       }
-      review(input.value, found);
+      review(userCode, found);
     } catch (error) {
       if (isCurrent()) {
         fail(error, "The code could not be checked.");

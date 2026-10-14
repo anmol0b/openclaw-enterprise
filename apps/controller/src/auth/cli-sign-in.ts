@@ -157,7 +157,7 @@ const browserOnly = () =>
  * current entries refuses instead of evicting someone else's budget.
  */
 class WrongCodeBudget {
-  readonly #entries = new Map<string, { windowStart: number; failures: number }>();
+  readonly #entries = new Map<string, { windowStart: number; failures: number; pending: number }>();
   readonly #perMinute: number;
   readonly #capacity: number;
 
@@ -166,43 +166,68 @@ class WrongCodeBudget {
     this.#capacity = capacity;
   }
 
-  /** Seconds until the most exhausted key resets, or undefined while every key has budget. */
-  refused(keys: readonly string[], now: number): number | undefined {
+  /** Reserve both keys before persistence. Only a wrong code spends the reservation. */
+  reserve(keys: readonly string[], now: number): number | ((wrong: boolean) => void) {
+    const unique = [...new Set(keys)];
     let resetAt: number | undefined;
-    for (const key of keys) {
+    for (const key of unique) {
       const entry = this.#entries.get(key);
-      if (
-        entry !== undefined &&
-        now - entry.windowStart < 60_000 &&
-        entry.failures >= this.#perMinute
-      ) {
+      if (entry === undefined) {
+        continue;
+      }
+      if (now - entry.windowStart >= 60_000) {
+        entry.windowStart = now;
+        entry.failures = 0;
+      }
+      if (entry.failures + entry.pending >= this.#perMinute) {
         resetAt = Math.max(resetAt ?? 0, entry.windowStart + 60_000);
       }
     }
-    return resetAt === undefined ? undefined : Math.max(1, Math.ceil((resetAt - now) / 1000));
-  }
-
-  spend(keys: readonly string[], now: number): boolean {
-    for (const key of keys) {
+    if (resetAt !== undefined) {
+      return Math.max(1, Math.ceil((resetAt - now) / 1000));
+    }
+    const missing = unique.filter((key) => !this.#entries.has(key)).length;
+    for (const [key, entry] of this.#entries) {
+      if (this.#entries.size + missing <= this.#capacity) {
+        break;
+      }
+      if (entry.pending === 0 && now - entry.windowStart >= 60_000) {
+        this.#entries.delete(key);
+      }
+    }
+    if (this.#entries.size + missing > this.#capacity) {
+      return 60;
+    }
+    const reserved = unique.map((key) => {
       let entry = this.#entries.get(key);
-      if (entry === undefined || now - entry.windowStart >= 60_000) {
-        if (entry === undefined && this.#entries.size >= this.#capacity) {
-          for (const [candidate, value] of this.#entries) {
-            if (now - value.windowStart >= 60_000) {
-              this.#entries.delete(candidate);
-              break;
-            }
-          }
-          if (this.#entries.size >= this.#capacity) {
-            return false;
-          }
-        }
-        entry = { windowStart: now, failures: 0 };
+      if (entry === undefined) {
+        entry = { windowStart: now, failures: 0, pending: 0 };
         this.#entries.set(key, entry);
       }
-      entry.failures += 1;
-    }
-    return true;
+      entry.pending += 1;
+      return { key, entry };
+    });
+    let finished = false;
+    return (wrong) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      const settledAt = performance.now();
+      for (const { key, entry } of reserved) {
+        entry.pending -= 1;
+        if (wrong) {
+          if (settledAt - entry.windowStart >= 60_000) {
+            entry.windowStart = settledAt;
+            entry.failures = 0;
+          }
+          entry.failures += 1;
+        }
+        if (entry.pending === 0 && entry.failures === 0) {
+          this.#entries.delete(key);
+        }
+      }
+    };
   }
 }
 
@@ -342,24 +367,21 @@ export function createCliSignIn(dependencies: CliSignInDependencies): CliSignIn 
   }
 
   /** Normalizes the typed code under the shared wrong-code budget. */
-  function typedCode(request: FastifyRequest, userId: string): string | undefined {
+  function typedCode(request: FastifyRequest, userId: string) {
     const keys = codeKeys(request, userId);
-    const retryAfter = wrongCodes.refused(keys, performance.now());
-    if (retryAfter !== undefined) {
+    const reservation = wrongCodes.reserve(keys, performance.now());
+    if (typeof reservation === "number") {
       throw new CliRefusal(
         429,
         "RATE_LIMITED",
         "Too many wrong codes. Try again later.",
-        retryAfter,
+        reservation,
       );
     }
-    return normalizeUserCode(body(request).userCode);
+    return { code: normalizeUserCode(body(request).userCode), finish: reservation };
   }
 
-  function wrongCode(request: FastifyRequest, userId: string): CliRefusal {
-    if (!wrongCodes.spend(codeKeys(request, userId), performance.now())) {
-      return new CliRefusal(429, "RATE_LIMITED", "Too many wrong codes. Try again later.", 60);
-    }
+  function wrongCode(): CliRefusal {
     return new CliRefusal(
       404,
       "NOT_FOUND",
@@ -525,12 +547,21 @@ export function createCliSignIn(dependencies: CliSignInDependencies): CliSignIn 
       await send(request, reply, async () => {
         refuseCliCredentials(request);
         const browser = await dependencies.browserSession(request, true);
-        const code = typedCode(request, browser.userId);
-        const found = code === undefined ? undefined : await store.lookup(hashCliCredential(code));
-        if (found === undefined) {
-          throw wrongCode(request, browser.userId);
+        const attempt = typedCode(request, browser.userId);
+        let wrong = false;
+        try {
+          const found =
+            attempt.code === undefined
+              ? undefined
+              : await store.lookup(hashCliCredential(attempt.code));
+          if (found === undefined) {
+            wrong = true;
+            throw wrongCode();
+          }
+          return { data: pendingView(request, found, browser) };
+        } finally {
+          attempt.finish(wrong);
         }
-        return { data: pendingView(request, found, browser) };
       });
     },
     async decide(request, reply) {
@@ -541,25 +572,31 @@ export function createCliSignIn(dependencies: CliSignInDependencies): CliSignIn 
         if (decision !== "approve" && decision !== "deny") {
           throw new CliRefusal(400, "INVALID_REQUEST", "decision must be approve or deny.");
         }
-        const code = typedCode(request, browser.userId);
-        const decided =
-          code === undefined
-            ? undefined
-            : await store.decide(
-                hashCliCredential(code),
-                decision,
-                { userId: browser.userId, sessionId: browser.id },
-                request.id,
-              );
-        if (decided === undefined) {
-          throw wrongCode(request, browser.userId);
+        const attempt = typedCode(request, browser.userId);
+        let wrong = false;
+        try {
+          const decided =
+            attempt.code === undefined
+              ? undefined
+              : await store.decide(
+                  hashCliCredential(attempt.code),
+                  decision,
+                  { userId: browser.userId, sessionId: browser.id },
+                  request.id,
+                );
+          if (decided === undefined) {
+            wrong = true;
+            throw wrongCode();
+          }
+          return {
+            data: {
+              decision,
+              ...(decision === "approve" ? { sessionExpiresAt: sessionExpiry(browser) } : {}),
+            },
+          };
+        } finally {
+          attempt.finish(wrong);
         }
-        return {
-          data: {
-            decision,
-            ...(decision === "approve" ? { sessionExpiresAt: sessionExpiry(browser) } : {}),
-          },
-        };
       });
     },
     async list(request, reply) {

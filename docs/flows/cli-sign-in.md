@@ -1,7 +1,7 @@
 ---
 created: 2026-10-07
-updated: 2026-10-07
-last_updated_session: d39-cli-access
+updated: 2026-10-14
+last_updated_session: authoring-run/7d9929a6-35c9-4495-a8d8-01167d130209
 ---
 
 # CLI Sign-in Flow
@@ -68,9 +68,13 @@ graph TD
 pending authorizations beyond 1,000 and inserts the new one with SHA-256 hashes
 of the device code and user code
 ([packages/occ/src/state/cli-sessions.ts:PostgresCliSessions.start](../../packages/occ/src/state/cli-sessions.ts)).
-The route limits starts per client address. `lookup` and `decide` resolve the
-browser session, normalize the typed code and share a wrong-code budget keyed
-on the account and the address. `decide` moves a pending row to `approved`
+The route limits starts per client address. The console keeps the submitted
+code with its lookup result, so a later input edit cannot change the code being
+approved. `lookup` and `decide` resolve the browser session and reserve the
+shared wrong-code budget for both account and address before reading or changing
+the authorization. A wrong or malformed code spends that reservation; a
+successful request or dependency error releases it. Pending requests occupy
+capacity until they settle. `decide` moves a pending row to `approved`
 (naming the user and the approving session) or `denied`, and writes the
 `approve` or `deny` audit event in the same transaction.
 
@@ -140,4 +144,5 @@ cascades. A bounded sweep deletes expired rows every 5 minutes.
 
 ## Changelog
 
+- 2026-10-14 18:40: Bind approval to the submitted code and reserve wrong-code capacity before persistence. (authoring-run/7d9929a6-35c9-4495-a8d8-01167d130209 - 305d51efe3b85f6ec461616a3876610d3250f1c7)
 - 2026-10-07: First version: device authorization, exchange, admission and logout for `occ login` (RFC-0019).
