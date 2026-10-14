@@ -1672,6 +1672,8 @@ export const occApiRoutes = [
       response: {
         200: AgentPolicySimulationResultResponse,
         409: ErrorResponseRef,
+        413: ErrorResponseRef,
+        415: ErrorResponseRef,
         ...runtimeReadErrors,
       },
     },
@@ -1693,6 +1695,8 @@ export const occApiRoutes = [
       response: {
         200: AgentNetworkPolicyEvaluationResponse,
         409: ErrorResponseRef,
+        413: ErrorResponseRef,
+        415: ErrorResponseRef,
         ...runtimeReadErrors,
       },
     },

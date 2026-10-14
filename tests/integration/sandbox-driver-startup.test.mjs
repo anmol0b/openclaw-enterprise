@@ -957,46 +957,43 @@ test("OpenShell authored simulation conforms to the real provisioning translatio
     });
   }
   const source = process.env.OCC_TEST_OPENSHELL_NATIVE_SOURCE;
-  await t.test(
-    "compiled OpenShell evaluator parity",
-    {
-      skip:
-        source === undefined
-          ? "set OCC_TEST_OPENSHELL_NATIVE_SOURCE to the native evaluator checkout"
-          : false,
-    },
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), "openshell-native-policy-conformance-"));
-      t.after(() => rm(directory, { recursive: true, force: true }));
-      const fixturePath = join(directory, "cases.json");
-      await writeFile(fixturePath, JSON.stringify(nativeCases));
-      const result = spawnSync(
-        "cargo",
-        [
-          "test",
-          "-p",
-          "openshell-supervisor-network",
-          "--lib",
-          "--no-default-features",
-          "evaluation::tests::driver_translated_policy_conformance",
-          "--",
-          "--ignored",
-          "--exact",
-          "--nocapture",
-        ],
-        {
-          cwd: source,
-          env: { ...process.env, OPENSHELL_NETWORK_POLICY_CONFORMANCE_FILE: fixturePath },
-          encoding: "utf8",
-          timeout: 180_000,
-          maxBuffer: 8 * 1024 * 1024,
-        },
-      );
-      assert.equal(result.error, undefined, result.error?.message);
-      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-      assert.match(result.stdout, /1 passed; 0 failed/);
-    },
-  );
+  if (source === undefined) {
+    t.diagnostic(
+      "Compiled OpenShell evaluator parity was not run; set OCC_TEST_OPENSHELL_NATIVE_SOURCE to the native evaluator checkout.",
+    );
+    return;
+  }
+  await t.test("compiled OpenShell evaluator parity", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "openshell-native-policy-conformance-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const fixturePath = join(directory, "cases.json");
+    await writeFile(fixturePath, JSON.stringify(nativeCases));
+    const result = spawnSync(
+      "cargo",
+      [
+        "test",
+        "-p",
+        "openshell-supervisor-network",
+        "--lib",
+        "--no-default-features",
+        "evaluation::tests::driver_translated_policy_conformance",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture",
+      ],
+      {
+        cwd: source,
+        env: { ...process.env, OPENSHELL_NETWORK_POLICY_CONFORMANCE_FILE: fixturePath },
+        encoding: "utf8",
+        timeout: 180_000,
+        maxBuffer: 8 * 1024 * 1024,
+      },
+    );
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /1 passed; 0 failed/);
+  });
 });
 
 test("OpenShell adopts its revision's existing Sandbox instead of re-sending CreateSandbox", async () => {

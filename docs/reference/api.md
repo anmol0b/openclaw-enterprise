@@ -4164,6 +4164,8 @@ Evaluate a synthetic network request against a sandbox policy without sending it
 | `403` | Forbidden |
 | `404` | Not Found |
 | `409` | Conflict |
+| `413` | Payload Too Large |
+| `415` | Unsupported Media Type |
 | `429` | Too Many Requests |
 | `500` | Internal Server Error |
 | `501` | Not Implemented |
@@ -4324,6 +4326,8 @@ Schema: `object or object`.
 | `403` | Forbidden |
 | `404` | Not Found |
 | `409` | Conflict |
+| `413` | Payload Too Large |
+| `415` | Unsupported Media Type |
 | `429` | Too Many Requests |
 | `500` | Internal Server Error |
 | `501` | Not Implemented |
