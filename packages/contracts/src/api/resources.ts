@@ -551,6 +551,12 @@ export const CredentialSourceSchema = Type.Object(
     name: Name,
     type: CredentialSourceType,
     config: CredentialSourceConfig,
+    egress: Type.Optional(
+      Type.Object(
+        { adoption: Type.Literal("live"), retention: Type.Literal("none") },
+        { additionalProperties: false },
+      ),
+    ),
     secrets: CredentialSourceSecrets,
     state: Type.Union([
       Type.Literal("registering"),

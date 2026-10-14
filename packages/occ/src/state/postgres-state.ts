@@ -1,3 +1,4 @@
+import type { StaticEgressSource, EgressInstallation } from "@openclaw-enterprise/contracts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { DatabaseError } from "pg";
@@ -534,7 +535,7 @@ function secretFromRow(row: PostgresRow): Readonly<Secret> {
 }
 
 const CREDENTIAL_SOURCE_COLUMNS = `cs.id, cs.namespace_id, cs.name, cs.type, cs.config,
-  cs.driver_id, cs.state, cs.created_at,
+  cs.driver_id, cs.state, cs.created_at, cs.egress,
   COALESCE((
     SELECT jsonb_object_agg(css.field, css.secret_id)
     FROM occ.credential_source_secrets AS css
@@ -587,6 +588,9 @@ function credentialSourceFromRow(row: PostgresRow): Readonly<CredentialSource> {
     name: text(row, "name"),
     type: text(row, "type"),
     config: config as Record<string, string>,
+    ...(row.egress == null
+      ? {}
+      : { egress: jsonObject(row.egress) as unknown as StaticEgressSource }),
     secrets: Object.fromEntries(
       Object.entries(secretIds as Record<string, string>).map(([field, id]) => [
         field,
@@ -629,6 +633,7 @@ function revisionFromRow(
     sandbox_driver_id?: AgentRevision["sandboxDriverId"];
     harness_auth: AgentRevision["harnessAuth"];
     credential_sources?: AgentRevision["credentialSources"];
+    egress_plan?: AgentRevision["egressPlan"];
     secret_driver_id?: AgentRevision["secretDriverId"];
     secret_bindings?: AgentRevision["secretBindings"];
     plugins?: AgentRevision["plugins"];
@@ -700,6 +705,7 @@ function revisionFromRow(
       ? {}
       : { repositoryCredentials: admitted.repository_credentials }),
     harnessAuth: admitted.harness_auth,
+    ...(admitted.egress_plan === undefined ? {} : { egressPlan: admitted.egress_plan }),
     ...(admitted.credential_sources === undefined
       ? {}
       : { credentialSources: admitted.credential_sources }),
@@ -2570,6 +2576,73 @@ export class PostgresPlatformState implements PlatformStateStore {
     };
 
     const credentialSources: CredentialSourceRepository = {
+      isEgressMaterialRejected: async (evidence) => {
+        const found = await client.query(
+          "SELECT 1 FROM occ.egress_rejected_material WHERE namespace_id = $1 AND secret_driver_id = $2 AND material_id = $3 AND material_version = $4",
+          [
+            evidence.source.namespaceId,
+            evidence.secretDriver.id,
+            evidence.materialId,
+            evidence.materialVersion,
+          ],
+        );
+        return found.rows.length > 0;
+      },
+      rejectEgressMaterial: async (evidence) => {
+        await client.query(
+          "INSERT INTO occ.egress_rejected_material (namespace_id, secret_driver_id, material_id, material_version) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+          [
+            evidence.source.namespaceId,
+            evidence.secretDriver.id,
+            evidence.materialId,
+            evidence.materialVersion,
+          ],
+        );
+      },
+      findEgressInstallation: async (senderId, sandboxId) => {
+        const result = await client.query(
+          "SELECT installation FROM occ.egress_installations WHERE sender_id = $1 AND sandbox_id = $2",
+          [senderId, sandboxId],
+        );
+        const row = rows(result.rows)[0];
+        return row === undefined
+          ? undefined
+          : immutableCopy(jsonObject(row.installation) as unknown as EgressInstallation);
+      },
+      recordEgressInstallation: async (installation) => {
+        const execution = installation.plan.execution;
+        const inserted = await client.query(
+          `INSERT INTO occ.egress_installations (sender_id, sandbox_id, namespace_id, revision_id, installation, agent_id)
+          SELECT $1, $2, $3, $4, $5::jsonb, $7 FROM occ.agent_revisions
+          WHERE namespace_id = $3 AND id = $4 AND admitted_spec->'egress_plan' = $6::jsonb
+          ON CONFLICT (sender_id, sandbox_id) DO UPDATE SET installation = occ.egress_installations.installation
+          WHERE occ.egress_installations.installation->'plan' = EXCLUDED.installation->'plan'`,
+          [
+            installation.sender.id,
+            installation.sandboxId,
+            execution.namespaceId,
+            execution.revisionId,
+            JSON.stringify(installation),
+            JSON.stringify(installation.plan),
+            execution.agentId,
+          ],
+        );
+        if (inserted.rowCount !== 1) {
+          throw new ResourceStateConflictError(
+            "Egress installation does not match its admitted execution.",
+          );
+        }
+      },
+      admitEgressSource: async (namespaceId, sourceId, expectedGeneration, egress) => {
+        const updated = await client.query(
+          `UPDATE occ.credential_sources SET egress = $4::jsonb
+          WHERE namespace_id = $1 AND id = $2 AND state = 'ready'
+          AND COALESCE((egress->'key'->'source'->>'generation')::bigint, 0) = $3
+          AND ($4::jsonb->'key'->'source'->>'generation')::bigint = $3 + 1`,
+          [namespaceId, sourceId, expectedGeneration, JSON.stringify(egress)],
+        );
+        return updated.rowCount === 1 ? findCredentialSource(namespaceId, sourceId) : undefined;
+      },
       findCredentialSource,
       findCredentialWithdrawal,
       listCredentialWithdrawals: async (namespaceId, revisionId) =>
@@ -2708,8 +2781,8 @@ export class PostgresPlatformState implements PlatformStateStore {
         }
         await client.query(
           `INSERT INTO occ.credential_sources
-           (id, namespace_id, name, type, config, driver_id, state, created_at)
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
+           (id, namespace_id, name, type, config, driver_id, state, created_at, egress)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb)`,
           [
             source.id,
             source.namespaceId,
@@ -2719,6 +2792,7 @@ export class PostgresPlatformState implements PlatformStateStore {
             source.driverId,
             source.state,
             source.createdAt,
+            source.egress === undefined ? null : JSON.stringify(source.egress),
           ],
         );
         if (secretInputs.length > 0) {
@@ -3565,6 +3639,7 @@ export class PostgresPlatformState implements PlatformStateStore {
                 ? {}
                 : { repository_credentials: revision.repositoryCredentials }),
               harness_auth: revision.harnessAuth,
+              ...(revision.egressPlan === undefined ? {} : { egress_plan: revision.egressPlan }),
               ...(revision.credentialSources === undefined
                 ? {}
                 : { credential_sources: revision.credentialSources }),

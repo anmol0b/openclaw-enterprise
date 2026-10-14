@@ -461,6 +461,15 @@
                 "maxProperties": 32,
                 "type": "object"
               },
+              "egress": {
+                "additionalProperties": false,
+                "properties": {
+                  "adoption": { "const": "live", "type": "string" },
+                  "retention": { "const": "none", "type": "string" }
+                },
+                "required": ["adoption", "retention"],
+                "type": "object"
+              },
               "id": {
                 "pattern": "^cs_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
                 "type": "string"
@@ -23817,6 +23826,15 @@
                             "maxProperties": 32,
                             "type": "object"
                           },
+                          "egress": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "adoption": { "const": "live", "type": "string" },
+                              "retention": { "const": "none", "type": "string" }
+                            },
+                            "required": ["adoption", "retention"],
+                            "type": "object"
+                          },
                           "id": {
                             "pattern": "^cs_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
                             "type": "string"
@@ -24328,6 +24346,7 @@
                 "additionalProperties": false,
                 "description": "Re-reads the source's Secret values, or those of replacement Secret references, and updates the Credential Gateway copy. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
                 "properties": {
+                  "adoption": { "const": "live", "type": "string" },
                   "secrets": {
                     "additionalProperties": {
                       "additionalProperties": false,

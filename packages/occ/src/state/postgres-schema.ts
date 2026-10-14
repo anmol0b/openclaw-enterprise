@@ -1,5 +1,7 @@
 import type {
   InitialWorkspaceFiles,
+  StaticEgressSource,
+  EgressInstallation,
   AgentDesiredRuntimeState,
   AgentStatus,
   CredentialSourceState,
@@ -473,11 +475,16 @@ export const credentialSources = occSchema.table(
     name: collatedText("name").notNull(),
     type: text("type").notNull(),
     config: jsonb("config").$type<Readonly<Record<string, string>>>().notNull(),
+    egress: jsonb("egress").$type<StaticEgressSource>(),
     driverId: text("driver_id").notNull(),
     state: text("state").$type<CredentialSourceState>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
+    check(
+      "credential_sources_egress_valid",
+      sql`${table.egress} IS NULL OR occ.static_egress_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id})`,
+    ),
     unique("credential_sources_namespace_id_id_unique").on(table.namespaceId, table.id),
     unique("credential_sources_namespace_id_name_unique").on(table.namespaceId, table.name),
     check(
@@ -655,6 +662,17 @@ export const agentRevisions = occSchema.table(
     ),
     check("agent_revisions_spec_object", sql`jsonb_typeof(${table.admittedSpec}) = 'object'`),
     check(
+      "agent_revisions_egress_scope",
+      sql`NOT (${table.admittedSpec} ? 'egress_plan') OR COALESCE(
+        jsonb_typeof(${table.admittedSpec}->'egress_plan') = 'object'
+        AND ${table.admittedSpec}->'egress_plan'->'execution'->>'namespaceId' = ${table.namespaceId}
+        AND ${table.admittedSpec}->'egress_plan'->'execution'->>'agentId' = ${table.agentId}
+        AND ${table.admittedSpec}->'egress_plan'->'execution'->>'revisionId' = ${table.id}
+        AND jsonb_typeof(${table.admittedSpec}->'egress_plan'->'routes') = 'array'
+        AND jsonb_array_length(${table.admittedSpec}->'egress_plan'->'routes') > 0,
+        false)`,
+    ),
+    check(
       "agent_revisions_admitted_snapshot",
       sql`(${table.admittedSpec} ?& ARRAY[
           'configuration_id', 'configuration_kind', 'configuration_generation',
@@ -664,7 +682,7 @@ export const agentRevisions = occSchema.table(
           - 'configuration_id' - 'configuration_kind' - 'configuration_generation'
           - 'draft_spec' - 'harness' - 'compute' - 'sandbox_driver_id'
           - 'secret_driver_id' - 'secret_bindings' - 'harness_auth' - 'credential_sources' - 'plugins'
-          - 'repository_credentials') = '{}'::jsonb
+          - 'repository_credentials' - 'egress_plan') = '{}'::jsonb
         AND jsonb_typeof(${table.admittedSpec}->'configuration_id') = 'string'
         AND (${table.admittedSpec}->>'configuration_id') ~ ${identifierPatterns.configuration}
         AND jsonb_typeof(${table.admittedSpec}->'configuration_kind') = 'string'
@@ -1579,5 +1597,59 @@ export const apikey = occSchema.table(
   (table) => [
     index("apikey_config_id_idx").on(table.configId),
     index("apikey_reference_id_idx").on(table.referenceId),
+  ],
+);
+
+/** Exact authenticated runtime installation; admission remains owned by the revision. */
+export const egressInstallations = occSchema.table(
+  "egress_installations",
+  {
+    senderId: text("sender_id").notNull(),
+    sandboxId: text("sandbox_id").notNull(),
+    namespaceId: text("namespace_id").notNull(),
+    revisionId: text("revision_id").notNull(),
+    agentId: text("agent_id").notNull(),
+    installation: jsonb("installation").$type<EgressInstallation>().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.senderId, table.sandboxId] }),
+    check(
+      "egress_installations_check",
+      sql`length(${table.senderId}) BETWEEN 1 AND 200 AND length(${table.sandboxId}) BETWEEN 1 AND 200`,
+    ),
+    check(
+      "egress_installations_check1",
+      sql`COALESCE(${table.installation}->'sender'->>'id' = ${table.senderId}
+        AND ${table.installation}->>'sandboxId' = ${table.sandboxId}
+        AND ${table.installation}->'plan'->'execution'->>'namespaceId' = ${table.namespaceId}
+        AND ${table.installation}->'plan'->'execution'->>'revisionId' = ${table.revisionId}
+        AND ${table.installation}->'plan'->'execution'->>'agentId' = ${table.agentId}, false)`,
+    ),
+    unique().on(table.namespaceId, table.revisionId),
+    foreignKey({
+      columns: [table.namespaceId, table.agentId, table.revisionId],
+      foreignColumns: [agentRevisions.namespaceId, agentRevisions.agentId, agentRevisions.id],
+    }).onDelete("cascade"),
+  ],
+);
+
+export const egressRejectedMaterial = occSchema.table(
+  "egress_rejected_material",
+  {
+    namespaceId: text("namespace_id")
+      .notNull()
+      .references(() => namespaces.id, { onDelete: "cascade" }),
+    secretDriverId: text("secret_driver_id").notNull(),
+    materialId: text("material_id").notNull(),
+    materialVersion: text("material_version").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.namespaceId, table.secretDriverId, table.materialId, table.materialVersion],
+    }),
+    check(
+      "egress_rejected_material_check",
+      sql`length(${table.secretDriverId}) > 0 AND length(${table.materialId}) > 0 AND length(${table.materialVersion}) > 0`,
+    ),
   ],
 );

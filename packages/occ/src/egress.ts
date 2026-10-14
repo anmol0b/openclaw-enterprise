@@ -1,0 +1,370 @@
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import type {
+  CredentialProviderDefinition,
+  EgressInstallation,
+  EgressRef,
+  EgressRefusal,
+  EgressRequest,
+  EgressResponse,
+  EgressRoute,
+  InferenceOperation,
+  StaticEgressSource,
+  StaticMaterialEvidence,
+  VersionedSecretValue,
+} from "@openclaw-enterprise/contracts";
+import { immutableCopy } from "@openclaw-enterprise/utils";
+
+export interface EgressPeer {
+  readonly sender: EgressRef;
+  readonly sandboxId: string;
+  readonly expiresAt: string;
+}
+
+/** Only installed transport verifiers implement this interface, never workload input. */
+export interface EgressPeerVerifier {
+  verify(authorization: string): Promise<EgressPeer | undefined>;
+}
+
+export interface CapturedEgressUse {
+  readonly id: string;
+  readonly peer: EgressPeer;
+  readonly installation: EgressInstallation;
+  readonly route: EgressRoute;
+  readonly request: EgressRequest;
+  readonly operation: InferenceOperation;
+}
+
+export interface EgressAuthorityPorts {
+  readonly verifier: EgressPeerVerifier;
+  readonly now: () => number;
+  installation(peer: EgressPeer): Promise<EgressInstallation | undefined>;
+  provider(route: EgressRoute): CredentialProviderDefinition | undefined;
+  /** Each call must open a new policy unit, independent of the capture and Secret read. */
+  check(
+    use: CapturedEgressUse,
+    material?: StaticMaterialEvidence,
+  ): Promise<StaticEgressSource | EgressRefusal>;
+  read(
+    source: StaticEgressSource,
+    signal: AbortSignal,
+    deadlineAt: string,
+  ): Promise<VersionedSecretValue & { readonly materialId: string }>;
+  reject(evidence: StaticMaterialEvidence): Promise<void>;
+}
+
+export type EgressResolution =
+  | { readonly kind: "refused"; readonly error: EgressRefusal }
+  | {
+      readonly kind: "ready";
+      readonly handle: string;
+      readonly evidence: StaticMaterialEvidence;
+      readonly headers: readonly (readonly [string, string])[];
+      readonly injectionDigest: string;
+    };
+
+export type EgressSendDecision =
+  | { readonly kind: "refused"; readonly error: EgressRefusal }
+  | { readonly kind: "allow"; readonly sendStartBy: string; readonly injectionDigest: string };
+
+interface OperationRecord {
+  readonly use: CapturedEgressUse;
+  readonly provider: CredentialProviderDefinition;
+  readonly source: StaticEgressSource;
+  readonly evidence: StaticMaterialEvidence;
+  readonly digest: string;
+  value: string;
+  phase: "resolved" | "checking" | "sent";
+}
+
+function refuse(
+  code: Extract<EgressRefusal, { kind: "denied" }>["code"],
+): EgressResolution & { kind: "refused" } {
+  return { kind: "refused", error: { kind: "denied", code } };
+}
+
+function sameSecret(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** Matches the wire contract: ordered UTF-8 names and values with u64 big-endian lengths. */
+export function egressInjectionDigest(headers: readonly (readonly [string, string])[]): string {
+  const hash = createHash("sha256");
+  for (const pair of headers) {
+    for (const item of pair) {
+      const bytes = Buffer.from(item, "utf8");
+      const size = Buffer.alloc(8);
+      size.writeBigUInt64BE(BigInt(bytes.length));
+      hash.update(size).update(bytes);
+    }
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * Trusted request registry shared by the transport's resolve, send and response phases.
+ * Restart loses outstanding handles and fails closed. No permit or material is reusable.
+ */
+export class EgressForwarder {
+  private readonly records = new Map<string, OperationRecord>();
+  private readonly requests = new Map<string, number>();
+  private readonly ports: EgressAuthorityPorts;
+
+  constructor(ports: EgressAuthorityPorts) {
+    this.ports = ports;
+  }
+
+  private prune(): void {
+    const now = this.ports.now();
+    for (const [handle, record] of this.records) {
+      if (Date.parse(record.use.request.deadlineAt) <= now) {
+        record.value = "";
+        this.records.delete(handle);
+      }
+    }
+    for (const [key, expiresAt] of this.requests) {
+      if (expiresAt <= now) {
+        this.requests.delete(key);
+      }
+    }
+  }
+
+  async resolve(
+    authorization: string,
+    sandboxId: string,
+    input: EgressRequest,
+    signal: AbortSignal,
+  ): Promise<EgressResolution> {
+    this.prune();
+    if (signal.aborted) {
+      return { kind: "refused", error: { kind: "cancelled" } };
+    }
+    const peer = await this.ports.verifier.verify(authorization);
+    const now = this.ports.now();
+    if (!peer || peer.sandboxId !== sandboxId || Date.parse(peer.expiresAt) <= now) {
+      return refuse("identity");
+    }
+    const deadline = Date.parse(input.deadlineAt);
+    if (
+      !Number.isFinite(deadline) ||
+      deadline <= now ||
+      deadline > now + 30_000 ||
+      deadline > Date.parse(peer.expiresAt)
+    ) {
+      return { kind: "refused", error: { kind: "deadline_exceeded" } };
+    }
+    if (
+      input.body.byteLength > 1024 * 1024 ||
+      !/^[0-9a-f-]{36}$/i.test(input.id) ||
+      this.records.size >= 1024 ||
+      this.requests.size >= 4096
+    ) {
+      return refuse("unsupported_operation");
+    }
+    const replayKey = JSON.stringify([peer.sender, sandboxId, input.id]);
+    if (this.requests.has(replayKey)) {
+      return refuse("invalid_handle");
+    }
+    // Reserve before the first await. Failed attempts cannot reuse their transport request ID.
+    this.requests.set(replayKey, Date.parse(peer.expiresAt));
+    const request = {
+      ...immutableCopy({ ...input, body: undefined }),
+      body: new Uint8Array(input.body),
+    } as EgressRequest;
+    const installation = await this.ports.installation(peer);
+    if (!installation || !isDeepStrictEqual(installation.sender, peer.sender)) {
+      return { kind: "refused", error: { kind: "not_ready", code: "attachment_pending" } };
+    }
+    const matches = installation.plan.routes.flatMap((route) => {
+      if (request.bindingId !== undefined && route.binding.binding.id !== request.bindingId) {
+        return [];
+      }
+      const provider = this.ports.provider(route);
+      const operation = provider?.classify(route, request);
+      return provider && operation ? [{ route, provider, operation }] : [];
+    });
+    if (matches.length !== 1) {
+      return refuse(matches.length > 1 ? "ambiguous_route" : "unsupported_operation");
+    }
+    const { route, provider, operation } = matches[0]!;
+    if (deadline > now + route.deadlineMs) {
+      return { kind: "refused", error: { kind: "deadline_exceeded" } };
+    }
+    const use = immutableCopy({
+      id: randomUUID(),
+      peer,
+      installation,
+      route,
+      request: { ...request, body: undefined },
+      operation,
+    }) as unknown as CapturedEgressUse;
+    // Keep captured bytes private and detached from the transport's mutable buffer.
+    const captured = { ...use, request };
+    let source: StaticEgressSource | EgressRefusal;
+    try {
+      source = await this.ports.check(captured);
+    } catch {
+      return { kind: "refused", error: { kind: "unavailable", code: "authority" } };
+    }
+    if (!("key" in source)) {
+      return { kind: "refused", error: source };
+    }
+    try {
+      const material = await this.ports.read(source, signal, request.deadlineAt);
+      const observed = Date.parse(material.authoritativeObservedAt);
+      const usableUntil = Math.min(
+        deadline,
+        material.expiresAt === undefined ? deadline : Date.parse(material.expiresAt),
+      );
+      if (
+        !material.version ||
+        !material.materialId ||
+        !Number.isFinite(observed) ||
+        observed > this.ports.now() ||
+        !Number.isFinite(usableUntil) ||
+        usableUntil <= this.ports.now()
+      ) {
+        return { kind: "refused", error: { kind: "not_ready", code: "expired" } };
+      }
+      if (signal.aborted) {
+        return { kind: "refused", error: { kind: "cancelled" } };
+      }
+      const evidence: StaticMaterialEvidence = immutableCopy({
+        kind: "static",
+        source: source.key,
+        binding: route.binding.binding,
+        grantHash: route.binding.grantHash,
+        isolationId: route.binding.isolationId,
+        adoption: source.adoption,
+        materialRefId: source.materialRefId,
+        secret: source.secret,
+        secretDriver: source.secretDriver,
+        materialId: material.materialId,
+        materialVersion: material.version,
+        authoritativeObservedAt: material.authoritativeObservedAt,
+        usableUntil: new Date(usableUntil).toISOString(),
+        retention: "none",
+      });
+      const headers = provider.inject(material.value);
+      const digest = egressInjectionDigest(headers);
+      const handle = randomUUID();
+      const record: OperationRecord = {
+        use: captured,
+        provider,
+        source,
+        evidence,
+        digest,
+        value: material.value,
+        phase: "resolved",
+      };
+      this.records.set(handle, record);
+      setTimeout(
+        () => {
+          record.value = "";
+          this.records.delete(handle);
+        },
+        Math.max(1, deadline - this.ports.now()),
+      ).unref();
+      return { kind: "ready", handle, evidence, headers, injectionDigest: digest };
+    } catch {
+      return { kind: "refused", error: { kind: "unavailable", code: "secret_store" } };
+    }
+  }
+
+  async authorizeSend(
+    authorization: string,
+    sandboxId: string,
+    requestId: string,
+    handle: string,
+    evidence: StaticMaterialEvidence,
+    injectionDigest: string,
+    deadlineAt: string,
+  ): Promise<EgressSendDecision> {
+    this.prune();
+    const record = this.records.get(handle);
+    const peer = await this.ports.verifier.verify(authorization);
+    if (
+      !record ||
+      record.phase !== "resolved" ||
+      !peer ||
+      peer.sandboxId !== sandboxId ||
+      !isDeepStrictEqual(peer.sender, record.use.peer.sender) ||
+      sandboxId !== record.use.peer.sandboxId ||
+      requestId !== record.use.request.id ||
+      deadlineAt !== record.use.request.deadlineAt ||
+      !isDeepStrictEqual(record.evidence, evidence) ||
+      !sameSecret(record.digest, injectionDigest)
+    ) {
+      return refuse("invalid_handle");
+    }
+    // Consume before policy I/O: concurrent AuthorizeSend calls cannot both succeed.
+    record.phase = "checking";
+    let decision: StaticEgressSource | EgressRefusal;
+    try {
+      decision = await this.ports.check(record.use, record.evidence);
+    } catch {
+      record.value = "";
+      this.records.delete(handle);
+      return { kind: "refused", error: { kind: "unavailable", code: "authority" } };
+    }
+    if (!("key" in decision) || !isDeepStrictEqual(decision, record.source)) {
+      record.value = "";
+      this.records.delete(handle);
+      return "key" in decision
+        ? refuse("stale_configuration")
+        : { kind: "refused", error: decision };
+    }
+    const now = this.ports.now();
+    const sendStartBy = Math.min(
+      now + 1000,
+      Date.parse(record.evidence.usableUntil),
+      Date.parse(peer.expiresAt),
+    );
+    if (sendStartBy <= now) {
+      record.value = "";
+      this.records.delete(handle);
+      return { kind: "refused", error: { kind: "deadline_exceeded" } };
+    }
+    record.phase = "sent";
+    return {
+      kind: "allow",
+      sendStartBy: new Date(sendStartBy).toISOString(),
+      injectionDigest: record.digest,
+    };
+  }
+
+  async protectResponse(
+    authorization: string,
+    sandboxId: string,
+    requestId: string,
+    response: EgressResponse,
+  ): Promise<EgressResponse | undefined> {
+    this.prune();
+    const peer = await this.ports.verifier.verify(authorization);
+    if (!peer || peer.sandboxId !== sandboxId) {
+      return undefined;
+    }
+    const entry = [...this.records].find(
+      ([, record]) =>
+        record.phase === "sent" &&
+        record.use.request.id === requestId &&
+        record.use.peer.sandboxId === sandboxId &&
+        isDeepStrictEqual(record.use.peer.sender, peer.sender),
+    );
+    if (!entry) {
+      return undefined;
+    }
+    const [handle, record] = entry;
+    this.records.delete(handle);
+    try {
+      if (response.status === 401) {
+        await this.ports.reject(record.evidence);
+      }
+      return record.provider.protectResponse(response, record.value);
+    } finally {
+      record.value = "";
+    }
+  }
+}

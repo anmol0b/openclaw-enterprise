@@ -4394,6 +4394,9 @@ List readable credential sources without revealing credential values
 | --- | --- | --- | --- |
 | `data` | `array<object>` | Yes | — |
 | `data[].config` | `object<string, string>` | Yes | Non-secret source configuration keyed by catalog field name. |
+| `data[].egress` | `object` | No | — |
+| `data[].egress.adoption` | `"live"` | Yes | — |
+| `data[].egress.retention` | `"none"` | Yes | — |
 | `data[].id` | `string` | Yes | pattern: `^cs_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data[].name` | `string` | Yes | min length: 1; max length: 200; pattern: `^(?!\s)(?!.*\s$)[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$` |
 | `data[].namespaceId` | `string` | Yes | pattern: `^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
@@ -4472,6 +4475,9 @@ Register a credential source with the selected Credential Gateway
 | --- | --- | --- | --- |
 | `data` | `object` | Yes | — |
 | `data.config` | `object<string, string>` | Yes | Non-secret source configuration keyed by catalog field name. |
+| `data.egress` | `object` | No | — |
+| `data.egress.adoption` | `"live"` | Yes | — |
+| `data.egress.retention` | `"none"` | Yes | — |
 | `data.id` | `string` | Yes | pattern: `^cs_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.name` | `string` | Yes | min length: 1; max length: 200; pattern: `^(?!\s)(?!.*\s$)[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$` |
 | `data.namespaceId` | `string` | Yes | pattern: `^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
@@ -4568,6 +4574,9 @@ Get one credential source and its live Credential Gateway status
 | --- | --- | --- | --- |
 | `data` | `object` | Yes | — |
 | `data.config` | `object<string, string>` | Yes | Non-secret source configuration keyed by catalog field name. |
+| `data.egress` | `object` | No | — |
+| `data.egress.adoption` | `"live"` | Yes | — |
+| `data.egress.retention` | `"none"` | Yes | — |
 | `data.id` | `string` | Yes | pattern: `^cs_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.name` | `string` | Yes | min length: 1; max length: 200; pattern: `^(?!\s)(?!.*\s$)[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$` |
 | `data.namespaceId` | `string` | Yes | pattern: `^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
@@ -4621,6 +4630,7 @@ Push current or replacement Secret values to the Credential Gateway copy
 
 | Field | Type | Required | Constraints |
 | --- | --- | --- | --- |
+| `adoption` | `"live"` | No | — |
 | `secrets` | `object<string, object>` | No | Secret inputs keyed by catalog field name. Each value references an OCC Secret in the same Namespace; OCC never returns its value. |
 
 ##### Responses
@@ -4644,6 +4654,9 @@ Push current or replacement Secret values to the Credential Gateway copy
 | --- | --- | --- | --- |
 | `data` | `object` | Yes | — |
 | `data.config` | `object<string, string>` | Yes | Non-secret source configuration keyed by catalog field name. |
+| `data.egress` | `object` | No | — |
+| `data.egress.adoption` | `"live"` | Yes | — |
+| `data.egress.retention` | `"none"` | Yes | — |
 | `data.id` | `string` | Yes | pattern: `^cs_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.name` | `string` | Yes | min length: 1; max length: 200; pattern: `^(?!\s)(?!.*\s$)[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$` |
 | `data.namespaceId` | `string` | Yes | pattern: `^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
@@ -4707,6 +4720,9 @@ Force the Credential Refresh Driver to mint a new token for a refresh-type sourc
 | --- | --- | --- | --- |
 | `data` | `object` | Yes | — |
 | `data.config` | `object<string, string>` | Yes | Non-secret source configuration keyed by catalog field name. |
+| `data.egress` | `object` | No | — |
+| `data.egress.adoption` | `"live"` | Yes | — |
+| `data.egress.retention` | `"none"` | Yes | — |
 | `data.id` | `string` | Yes | pattern: `^cs_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.name` | `string` | Yes | min length: 1; max length: 200; pattern: `^(?!\s)(?!.*\s$)[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$` |
 | `data.namespaceId` | `string` | Yes | pattern: `^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |

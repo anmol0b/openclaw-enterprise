@@ -344,7 +344,12 @@ function validateOpenShellBackend(
     );
   }
   for (const key of Object.keys(drivers)) {
-    if (key !== "sandbox" && key !== "credential_gateway" && key !== "credential_refresh") {
+    if (
+      key !== "sandbox" &&
+      key !== "credential_gateway" &&
+      key !== "credential_refresh" &&
+      key !== "egress_proxy"
+    ) {
       throw new ScopeViolationError(path(id, `drivers.${key}`) + " is unsupported.");
     }
   }
@@ -374,6 +379,9 @@ function validateOpenShellBackend(
     drivers: {
       sandbox: drivers.sandbox,
       credential_gateway: drivers.credential_gateway,
+      ...(drivers.egress_proxy === undefined
+        ? {}
+        : { egress_proxy: backendId(drivers.egress_proxy, "Egress Driver ID") }),
       ...(drivers.credential_refresh === undefined
         ? {}
         : { credential_refresh: drivers.credential_refresh as string }),

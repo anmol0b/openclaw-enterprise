@@ -362,6 +362,7 @@ export const CreateCredentialSourceBody = Type.Object(
 
 export const UpdateCredentialSourceBody = Type.Object(
   {
+    adoption: Type.Optional(Type.Literal("live")),
     secrets: Type.Optional(CredentialSourceSecrets),
   },
   {
