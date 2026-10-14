@@ -277,9 +277,8 @@ exercise source, instance, debug, fields, Follow, and filters. At 390px, check
 readable rows and visible selected tabs through direct routes and Back/Forward.
 These fixtures prove presentation, not live reads.
 
-For the version-level **Policy tester**, follow the
-[network and plugin simulation walkthrough](../../scripts/console-storybook/policy-tester-workflow.md).
-Its fixtures keep OCE intent, historical log decisions, and native evidence separate.
+For **Policy tester** fixtures, see the
+[walkthrough](../../scripts/console-storybook/policy-tester-workflow.md).
 
 Version metadata stays visible when saved settings are unreadable. Follow the
 [walkthrough](../../scripts/console-storybook/unreadable-configuration-workflow.md)
