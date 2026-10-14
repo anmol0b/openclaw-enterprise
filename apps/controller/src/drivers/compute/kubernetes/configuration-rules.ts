@@ -53,20 +53,17 @@ export function requireCodexPluginPolicy(
   if (allow.length > 0 && !allow.includes("codex")) {
     throw createError("plugins.allow", `must include codex ${requirement}`);
   }
-  let enabled: boolean | undefined;
-  // OpenClaw folds normalized entry IDs in order; only an explicit boolean replaces enablement.
-  for (const [id, value] of Object.entries(asRecord(plugins?.entries) ?? {})) {
-    if (id.trim().toLowerCase() !== "codex") {
-      continue;
-    }
-    const entry = asRecord(value);
-    if (entry === undefined) {
-      enabled = undefined;
-    } else if (typeof entry.enabled === "boolean") {
-      enabled = entry.enabled;
-    }
+  const entries = Object.entries(asRecord(plugins?.entries) ?? {}).filter(
+    ([id]) => id.trim().toLowerCase() === "codex",
+  );
+  // JSON object order is not preserved by provisioning fingerprints or PostgreSQL jsonb.
+  if (entries.length > 1) {
+    throw createError(
+      "plugins.entries",
+      "must contain at most one entry for codex after trimming whitespace and ignoring case; remove duplicate entries",
+    );
   }
-  if (enabled === false) {
+  if (asRecord(entries[0]?.[1])?.enabled === false) {
     throw createError("plugins.entries.codex.enabled", `must not be false ${requirement}`);
   }
 }

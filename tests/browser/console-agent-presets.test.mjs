@@ -1527,26 +1527,43 @@ test("Default Codex Preset refuses a blocked OpenClaw provider before writes", a
 
     // Normalized duplicate entries must refuse before any Secret, Configuration or Agent write.
     values.plugins.allow.push(provider);
-    for (const entries of [
-      { [provider]: { enabled: true }, [` ${provider.toUpperCase()} `]: { enabled: false } },
-      { [` ${provider.toUpperCase()} `]: { enabled: true }, [provider]: { enabled: false } },
-      { [provider.toUpperCase()]: { enabled: false } },
-      { [provider]: { enabled: false }, [` ${provider} `]: {} },
-    ]) {
-      values.plugins.entries = entries;
-      await configuration.fill(JSON.stringify(values));
-      await page.getByRole("button", { name: "Create Agent", exact: true }).click();
-      await page
-        .getByRole("alert")
-        .filter({ hasText: `plugins.entries.${provider}.enabled` })
-        .waitFor();
-      assert.deepEqual(nonAuthWriteRequests(requests), []);
-      assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins, values.plugins);
+    for (const alias of [provider.toUpperCase(), ` ${provider} `]) {
+      for (const enabled of [true, false, undefined]) {
+        for (const reverse of [false, true]) {
+          const entries = [
+            [provider, { enabled: true }],
+            [alias, enabled === undefined ? {} : { enabled }],
+          ];
+          values.plugins.entries = Object.fromEntries(reverse ? entries.reverse() : entries);
+          await configuration.fill(JSON.stringify(values));
+          await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+          await page
+            .getByRole("alert")
+            .filter({
+              hasText: `plugins.entries must contain at most one entry for ${provider}`,
+            })
+            .waitFor();
+          assert.deepEqual(nonAuthWriteRequests(requests), []);
+          assert.deepEqual(
+            JSON.parse(await configuration.inputValue()).plugins,
+            JSON.parse(JSON.stringify(values.plugins)),
+          );
+        }
+      }
     }
-    // A later explicit enable wins without rewriting either key or the restrictive allowlist.
+    values.plugins.entries = { [` ${provider.toUpperCase()} `]: { enabled: false } };
+    await configuration.fill(JSON.stringify(values));
+    await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: `plugins.entries.${provider}.enabled` })
+      .waitFor();
+    assert.deepEqual(nonAuthWriteRequests(requests), []);
+    // Explicit repair leaves one enabled alias and preserves unrelated entries.
     values.plugins.entries = {
-      [provider]: { enabled: false },
       [` ${provider.toUpperCase()} `]: { enabled: true },
+      knowledge: { enabled: false },
+      " KNOWLEDGE ": { enabled: true },
     };
     // Explicit permission repair preserves the original restriction and allows ordinary creation.
     await configuration.fill(JSON.stringify(values));
@@ -3264,4 +3281,62 @@ test("Preset with a managed PAT account creates a draft without a Secret grant",
     false,
   );
   assert.equal(secretPostRequests(requests, namespace.id).length, 0);
+});
+
+test("Console rejects duplicate Codex entries in either order before writes", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Codex alias admission", { ready: true });
+  const { page } = await newPage(t, fixture);
+  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+  const presets = await fixture.request("GET", `/namespaces/${namespace.id}/presets`);
+  const starter = presets.data.find((preset) => preset.name === "default-codex");
+  await page.getByLabel("Preset template", { exact: true }).selectOption(starter.id);
+  await page.getByRole("button", { name: "Use Preset", exact: true }).click();
+  await openAdvancedSettings(page);
+  await page.getByLabel("Agent name", { exact: true }).fill("Codex alias Agent");
+  await enterManualModel(page, "synthetic-provider-key", "gpt-5.1");
+  const configuration = page.getByLabel("Configuration JSON", { exact: true });
+  const values = JSON.parse(await configuration.inputValue());
+  const canonical = structuredClone(values.plugins.entries.codex);
+  const requests = apiRequests(page, fixture.origin);
+  for (const alias of [" CODEX ", "CoDeX"]) {
+    for (const enabled of [true, false, undefined]) {
+      for (const reverse of [false, true]) {
+        const entries = [
+          ["codex", canonical],
+          [alias, enabled === undefined ? {} : { enabled }],
+        ];
+        values.plugins.entries = Object.fromEntries(reverse ? entries.reverse() : entries);
+        await configuration.fill(JSON.stringify(values));
+        await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+        await page
+          .getByRole("alert")
+          .filter({ hasText: "plugins.entries must contain at most one entry for codex" })
+          .waitFor();
+        assert.deepEqual(nonAuthWriteRequests(requests), []);
+        assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins, values.plugins);
+      }
+    }
+  }
+  values.plugins.entries = {
+    " CODEX ": canonical,
+    knowledge: { enabled: false },
+    " KNOWLEDGE ": { enabled: true },
+  };
+  await configuration.fill(JSON.stringify(values));
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/namespaces/${namespace.id}/agents`) &&
+      response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+  const response = await responsePromise;
+  assert.equal(response.status(), 201, await response.text());
+  const created = (await response.json()).data;
+  const saved = await fixture.request(
+    "GET",
+    `/namespaces/${namespace.id}/configurations/${created.configurationId}`,
+  );
+  assert.deepEqual(saved.data.values.plugins, values.plugins);
 });

@@ -2150,7 +2150,7 @@ export const scenarios = {
       "Inspect plugins.allow, switch to OpenClaw, then back to Codex. The list stays [codex] throughout.",
       "Switch to OpenClaw and try Create Agent. Explicitly add the selected provider to plugins.allow to resolve the conflict; repeat for OpenAI and Anthropic.",
       'For the selected provider, set entries.openai.enabled to true and add entries[" OPENAI "] with enabled false (use anthropic and " ANTHROPIC " for Anthropic). Create Agent must refuse before writes and preserve both entries.',
-      "Explicitly enable the later alias and retry. Reverse the entries to confirm that the last explicit enabled value controls admission.",
+      "Reverse the entries and give both the same enabled value: duplicates must still be refused. Remove the duplicate explicitly, keep one enabled entry, and retry. Repeat for Codex.",
     ],
     gap: "Simulated UI proof; no plugin is loaded or model turn executed.",
   },

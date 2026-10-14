@@ -41,19 +41,20 @@ function nativePluginPolicyConflict(values, harnessId) {
   if (allow.length > 0 && !allow.includes(pluginId)) {
     return `Configuration setting plugins.allow must include ${pluginId} for ${requirement}.`;
   }
-  let enabled;
-  // Match OpenClaw's ordered fold without rewriting authored entry IDs or permissions.
-  for (const [id, entry] of Object.entries(plugins.entries ?? {})) {
-    if (id.trim().toLowerCase() !== pluginId) {
-      continue;
-    }
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
-      enabled = undefined;
-    } else if (typeof entry.enabled === "boolean") {
-      enabled = entry.enabled;
-    }
+  const entries = Object.entries(plugins.entries ?? {}).filter(
+    ([id]) => id.trim().toLowerCase() === pluginId,
+  );
+  // Persisted JSON and replay fingerprints cannot preserve ordered alias overrides.
+  if (entries.length > 1) {
+    return `Configuration setting plugins.entries must contain at most one entry for ${pluginId} after trimming whitespace and ignoring case; remove duplicate entries.`;
   }
-  if (enabled === false) {
+  const entry = entries[0]?.[1];
+  if (
+    entry !== null &&
+    typeof entry === "object" &&
+    !Array.isArray(entry) &&
+    entry.enabled === false
+  ) {
     return `Configuration setting plugins.entries.${pluginId}.enabled must not be false for ${requirement}.`;
   }
   return "";

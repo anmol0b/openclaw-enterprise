@@ -1,7 +1,7 @@
 # Harness execution
 
-A Harness calls models and runs tools. Choose the Agent's execution mode and a
-compatible model and Harness in its Configuration.
+A Harness calls models and runs tools. Choose compatible execution mode, model
+and Harness.
 
 ## Supported topology
 
@@ -12,8 +12,8 @@ compatible model and Harness in its Configuration.
 | OpenClaw | `dedicated`          | Experimental native worker; requires full-facet Sandbox provisioning. Stock OpenShell has [upstream blockers](#optional-sandbox-provisioning), so this is not a supported production path. |
 
 Agent creation defaults to `embedded`; updates omitting the mode preserve it.
-Deployment rejects incompatible Harness/execution modes with `400 INVALID_REQUEST`
-before admitting work. A Harness is not a separate resource or Driver.
+Incompatible Harness/execution modes receive `400 INVALID_REQUEST` before work.
+A Harness is not a separate resource or Driver.
 Availability and isolation depend on the Installation's Compute and optional Sandbox. In a single Kubernetes cluster, a
 dedicated gateway and its Harness run as separate Pods in the Agent's
 [tenant namespace](drivers/kubernetes-compute.md), each with its own
@@ -65,9 +65,11 @@ Dedicated Codex accepts only the native `codex` provider, or `openai` when the
 Codex plugin is explicitly enabled with `websocket` app-server transport.
 Kubernetes Compute rejects Agent create/update, provisioning, and deployment when
 native policy blocks its required Codex plugin: `plugins.enabled` or
-effective `plugins.entries.codex.enabled` is false, `plugins.deny` lists `codex`, or a
+`plugins.entries.codex.enabled` is false, `plugins.deny` lists `codex`, or a
 nonempty `plugins.allow` excludes it. Missing/empty allowlists are unrestricted.
-Configuration can be staged separately; admission never rewrites these permissions.
+Duplicate trimmed, case-insensitive Codex entries are refused even with equal
+enablement; remove duplicates explicitly. Configuration staging remains separate;
+admission never rewrites permissions.
 
 Selectable model catalogs and fallbacks under Agent defaults or entries
 must retain the selected provider. Additional catalog models need an

@@ -477,13 +477,22 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
     [{ deny: [" CODEX "] }, "plugins.deny"],
     [{ enabled: false }, "plugins.enabled"],
     [{ entries: { codex: { enabled: false } } }, "plugins.entries.codex.enabled"],
-    // Normalized IDs fold in source order; later explicit booleans control activation.
-    ...[
-      { codex: { enabled: true }, " CODEX ": { enabled: false } },
-      { " CODEX ": { enabled: true }, codex: { enabled: false } },
-      { CoDeX: { enabled: false } },
-      { codex: { enabled: false }, " codex ": {} },
-    ].map((entries) => [{ entries }, "plugins.entries.codex.enabled"]),
+    [{ entries: { CoDeX: { enabled: false } } }, "plugins.entries.codex.enabled"],
+    // Required-plugin aliases are ambiguous regardless of key order or equal enablement.
+    ...[" CODEX ", "CoDeX", " codex "].flatMap((alias) =>
+      [true, false, undefined].flatMap((enabled) =>
+        [false, true].map((reverse) => {
+          const entries = [
+            ["codex", { enabled: true }],
+            [alias, enabled === undefined ? {} : { enabled }],
+          ];
+          return [
+            { entries: Object.fromEntries(reverse ? entries.reverse() : entries) },
+            "plugins.entries must contain at most one entry for codex",
+          ];
+        }),
+      ),
+    ),
     [{ allow: "codex" }, "plugins.allow"],
     [{ deny: [42] }, "plugins.deny"],
   ];
@@ -535,22 +544,24 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
     assert.deepEqual(saved.data.values.plugins, values.plugins);
   }
 
-  for (const aliasFirst of [false, true]) {
+  // A single required entry retains its spelling; unrelated normalized duplicates are ignored.
+  for (const [index, key] of ["codex", " CODEX ", "CoDeX"].entries()) {
     const values = createHarnessConfiguration("codex", "gpt-5.1");
-    const transport = values.plugins.entries.codex.config;
-    values.plugins.entries = aliasFirst
-      ? { " CODEX ": { enabled: false }, codex: { enabled: true, config: transport } }
-      : { codex: { enabled: false, config: transport }, " CODEX ": { enabled: true } };
+    values.plugins.entries = {
+      [key]: values.plugins.entries.codex,
+      knowledge: { enabled: false },
+      " KNOWLEDGE ": { enabled: true },
+    };
     const configuration = await fixture.createConfiguration(namespace.id, values);
-    const response = await fixture.request("POST", `/namespaces/${namespace.id}/agents`, {
+    const agent = await fixture.request("POST", `/namespaces/${namespace.id}/agents`, {
       body: {
-        name: `Ordered Codex ${aliasFirst}`,
+        name: `Single plugin entry ${index}`,
         executionMode: "dedicated",
         configurationId: configuration.id,
         harnessAuth: { method: "api_key", source: secret.ref },
       },
     });
-    assert.equal(response.status, 201, JSON.stringify(response.body));
+    assert.equal(agent.status, 201, JSON.stringify(agent.body));
     const saved = await fixture.request(
       "GET",
       `/namespaces/${namespace.id}/configurations/${configuration.id}`,
@@ -583,7 +594,9 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
     assert.equal(response.status, 400, `${method} ${path}: ${JSON.stringify(response.body)}`);
     assert.equal(response.body.error.code, "INVALID_REQUEST");
     assert.ok(
-      response.body.error.message.includes("plugins.entries.codex.enabled"),
+      response.body.error.message.includes(
+        "plugins.entries must contain at most one entry for codex",
+      ),
       response.body.error.message,
     );
   }
@@ -623,7 +636,9 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
   assert.equal(provisioned.status, 409, JSON.stringify(provisioned.body));
   assert.equal(provisioned.body.error.code, "RESOURCE_CONFLICT");
   assert.ok(
-    provisioned.body.error.message.includes("plugins.entries.codex.enabled"),
+    provisioned.body.error.message.includes(
+      "plugins.entries must contain at most one entry for codex",
+    ),
     provisioned.body.error.message,
   );
 });

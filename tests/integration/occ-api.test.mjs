@@ -5783,7 +5783,10 @@ test("Agent provisioning API validates inline configuration with existing Secret
     );
     assert.equal(refused.status, 409, JSON.stringify(refused.body));
     assert.equal(refused.body.error.code, "RESOURCE_CONFLICT");
-    assert.match(refused.body.error.message, /plugins.entries.codex.enabled/);
+    assert.match(
+      refused.body.error.message,
+      /plugins.entries must contain at most one entry for codex/,
+    );
     assert.deepEqual(configurationWrites, []);
     assert.deepEqual(
       await fixture.controller.listAgents(fixture.principal.id, namespace.data.id),

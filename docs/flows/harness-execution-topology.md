@@ -1,7 +1,7 @@
 ---
 created: 2026-08-21
-updated: 2026-10-14 09:44
-last_updated_session: authoring-run/1bb49df0-7a5c-40a9-b668-f5ff3123d24b
+updated: 2026-10-14 10:10
+last_updated_session: authoring-run/efd9df0c-50ba-40c9-a281-10996f9292cf
 ---
 
 # Harness Execution Topology Flow
@@ -14,13 +14,13 @@ activation audit.
 
 ## Entry Points
 
-- Trigger: exact-Agent `POST /namespaces/:namespaceId/agents/:agentId/deploy` and durable revision
+- Trigger: exact-Agent `POST /namespaces/:namespaceId/agents/:agentId/deploy` and revision
   reconciliation.
 - Source: `packages/occ/src/index.ts:OpenClawController.deployAgent` and
   `apps/controller/src/worker.ts:ControllerWorker`.
-- Assumptions: authorized actor; ready Namespace; same-Namespace native agent Configuration;
-  explicit Agent execution mode; and a supported `harnessAuth` binding. Managed methods reference an authorized OCC
-  Secret API key or a Driver-issued account-owned access-token credential.
+- Assumptions: authorized actor, ready Namespace, same-Namespace native Configuration,
+  explicit execution mode, and supported `harnessAuth`. Managed methods require an authorized
+  OCC Secret API key or Driver-issued account-owned access token.
 
 ## Flow
 
@@ -58,7 +58,7 @@ graph TD
 `packages/occ/src/index.ts:OpenClawController.deployAgent`
 
 OCC locks authorized Agent/Configuration, resolves `agentRuntime.id`, and validates
-model routes and Harness modes. Fallbacks retain order, primary provider and Harness.
+routes/modes. Fallbacks retain order, primary provider and Harness.
 Only unambiguous built-in configuration defaults to embedded OpenClaw;
 missing/ambiguous policies, unsupported IDs and incompatible modes fail closed.
 Compute's `apps/controller/src/drivers/compute/native-gateway-transport.ts:validatePlaintextNativeGateway`
@@ -71,7 +71,8 @@ and processes. Access tokens require dedicated Codex; snapshots retain OCC ident
 credential kind, and opaque Secret reference.
 `apps/controller/src/drivers/compute/kubernetes/configuration-rules.ts:requireCodexPluginPolicy`
 validates Codex policy before save/provisioning/deployment.
-It folds trimmed, case-folded IDs in order without rewriting permissions.
+Duplicate normalized Codex entries are refused: storage cannot preserve order.
+Permissions remain unchanged.
 
 ### 2. Claim work and realize the approved topology
 
@@ -316,6 +317,8 @@ owns claim sizes, mount paths, StorageClass requirements, and final teardown.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 10:10: Refuse duplicates. (authoring-run/efd9df0c-50ba-40c9-a281-10996f9292cf - bf3ad81987031ca135b06d7f2055b497e61f00dc)
 
 - 2026-10-14 09:44: Check normalized entries. (authoring-run/1bb49df0-7a5c-40a9-b668-f5ff3123d24b - a765fb077f910730403ce5c03439907a5cf9ba4b)
 
