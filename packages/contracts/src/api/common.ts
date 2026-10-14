@@ -373,7 +373,7 @@ export const UpdateCredentialSourceBody = Type.Object(
   {
     additionalProperties: false,
     description:
-      "Without adoption, re-reads Secret inputs and updates the legacy Credential Gateway copy. adoption: live explicitly selects protected per-operation reads through the configured egress Driver for an unbound static source. Existing sources never opt in merely because their Secret changes. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
+      "For a legacy source, omitting adoption re-reads Secret inputs and updates the Credential Gateway copy. adoption: live explicitly admits an unbound static source for protected per-operation reads. Already-protected sources remain live; PATCH changes require an unbound source. Updating the referenced Secret value needs no source PATCH. Existing legacy sources never opt in merely because their Secret changes. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
   },
 );
 
