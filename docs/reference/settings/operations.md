@@ -94,9 +94,8 @@ through `0049_codex_pat_sources`; `preCredentialWithdrawalRequester` has 50
 through `0050_agent_credential_sources`; `preProvisioningDeploymentOutcome` has 51
 through `0051_credential_withdrawal_requester`; `preComputePreparationFailureEvidence`
 has 52 through `0052_agent_provisioning_deployment_outcome`; `preCliSessions` has 53
-through `0053_compute_preparation_failure_evidence`. `completed` is the current
-canonical history with all receipts, including `0054_cli_sessions`.
-The source manifest is
+through `0053_compute_preparation_failure_evidence`. `completed` is the current canonical history through `0054_cli_sessions`.
+Source manifest:
 [`migrations/meta/canonical-history.json`](../../../migrations/meta/canonical-history.json).
 Empty schemas may be absent or have only their owner's ordinary `CREATE` and
 `USAGE` privileges, with no objects or unexpected default privileges. An empty
