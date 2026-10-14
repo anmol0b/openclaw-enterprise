@@ -2616,7 +2616,9 @@ export class PostgresPlatformState implements PlatformStateStore {
           SELECT $1, $2, $3, $4, $5::jsonb, $7 FROM occ.agent_revisions
           WHERE namespace_id = $3 AND id = $4 AND admitted_spec->'egress_plan' = $6::jsonb
           ON CONFLICT (sender_id, sandbox_id) DO UPDATE SET installation = occ.egress_installations.installation
-          WHERE occ.egress_installations.installation->'plan' = EXCLUDED.installation->'plan'`,
+          WHERE occ.egress_installations.installation->'plan' = EXCLUDED.installation->'plan'
+            AND occ.egress_installations.installation->'sender' = EXCLUDED.installation->'sender'
+            AND occ.egress_installations.installation->'enforcement' = EXCLUDED.installation->'enforcement'`,
           [
             installation.sender.id,
             installation.sandboxId,

@@ -2,38 +2,14 @@ import type {
   CredentialProviderDefinition,
   EgressRequest,
   EgressResponse,
+  InferenceOperation,
 } from "@openclaw-enterprise/contracts";
 import { asRecord, immutableCopy } from "@openclaw-enterprise/utils";
 import { normalizeOpenAiBaseUrl } from "../openai-endpoint.ts";
+import { validResponsesRequest, validResponsesEvent } from "./openai-responses.ts";
+import { parseUnambiguousJson } from "./openai-json.ts";
 
 const maximumResponseBytes = 4 * 1024 * 1024;
-
-/** JSON.parse discards duplicate members. Refuse them before selecting a model or
- * releasing original response bytes, since peers may disagree about the winning value. */
-function parseUnambiguousJson(text: string): unknown {
-  const parsed: unknown = JSON.parse(text);
-  const stack: { keys: Set<string> | undefined; expectingKey: boolean }[] = [];
-  for (const [token] of text.matchAll(/"(?:\\.|[^"\\])*"|[{}[\],:]/gs)) {
-    if (token === "{" || token === "[") {
-      stack.push({ keys: token === "{" ? new Set() : undefined, expectingKey: token === "{" });
-    } else if (token === "}" || token === "]") {
-      stack.pop();
-    } else {
-      const frame = stack.at(-1);
-      if (frame?.keys && token === ",") {
-        frame.expectingKey = true;
-      } else if (frame?.keys && frame.expectingKey && token.startsWith('"')) {
-        const key: string = JSON.parse(token);
-        if (frame.keys.has(key)) {
-          throw new Error("Ambiguous JSON members are unsupported.");
-        }
-        frame.keys.add(key);
-        frame.expectingKey = false;
-      }
-    }
-  }
-  return parsed;
-}
 
 function jsonRequest(request: EgressRequest): Record<string, unknown> | undefined {
   const headers = request.headers;
@@ -66,7 +42,12 @@ function jsonRequest(request: EgressRequest): Record<string, unknown> | undefine
   }
 }
 
-function protectedJson(response: EgressResponse, credential: string): EgressResponse | undefined {
+function protectedResponse(
+  response: EgressResponse,
+  credential: string,
+  request: EgressRequest,
+  operation: InferenceOperation,
+): EgressResponse | undefined {
   if (
     response.status < 200 ||
     response.status >= 600 ||
@@ -76,9 +57,18 @@ function protectedJson(response: EgressResponse, credential: string): EgressResp
     return undefined;
   }
   const types = response.headers.filter(([name]) => name.toLowerCase() === "content-type");
+  const mediaType = types[0]?.[1];
+  const streaming = jsonRequest(request)?.stream === true;
+  const sse = streaming && /^text\/event-stream(?:;\s*charset=utf-8)?$/i.test(mediaType ?? "");
   if (
     types.length !== 1 ||
-    !/^application\/json(?:;\s*charset=utf-8)?$/i.test(types[0]![1]) ||
+    !(
+      sse ||
+      (/^application\/json(?:;\s*charset=utf-8)?$/i.test(mediaType ?? "") &&
+        (!streaming || response.status >= 400))
+    ) ||
+    response.headers.length > 64 ||
+    response.headers.some(([name, value]) => /[\r\n\0]/.test(name + value)) ||
     response.headers.some(([name]) =>
       ["content-encoding", "trailer", "upgrade"].includes(name.toLowerCase()),
     )
@@ -87,36 +77,59 @@ function protectedJson(response: EgressResponse, credential: string): EgressResp
   }
   try {
     const body = new TextDecoder("utf-8", { fatal: true }).decode(response.body);
-    const parsed: unknown = parseUnambiguousJson(body);
-    if (asRecord(parsed) === undefined) {
-      return undefined;
-    }
     const encodings = [
       credential,
       encodeURIComponent(credential),
       Buffer.from(credential).toString("base64"),
       Buffer.from(credential).toString("base64url"),
     ];
-    const leaked = (value: unknown): boolean => {
-      if (typeof value === "string") {
-        return encodings.some((candidate) => value.includes(candidate));
+    const leaked = (value: unknown): boolean =>
+      typeof value === "string" && encodings.some((candidate) => value.includes(candidate));
+    // Keep parsed-string scans bounded, including decoded data split across SSE deltas.
+    const scan = (root: unknown): boolean => {
+      const pending = [{ value: root, depth: 0 }];
+      let nodes = 0;
+      while (pending.length) {
+        const { value, depth } = pending.pop()!;
+        if (++nodes > 100_000 || depth > 64 || leaked(value)) {
+          return false;
+        }
+        if (value !== null && typeof value === "object") {
+          for (const [key, item] of Object.entries(value)) {
+            if (leaked(key)) {
+              return false;
+            }
+            pending.push({ value: item, depth: depth + 1 });
+          }
+        }
       }
-      if (Array.isArray(value)) {
-        return value.some(leaked);
-      }
-      const record = asRecord(value);
-      return (
-        record !== undefined &&
-        Object.entries(record).some(([key, item]) => leaked(key) || leaked(item))
-      );
+      return true;
     };
     // Parse first so JSON escapes cannot hide credential bytes from the response policy.
-    if (leaked(parsed) || response.headers.some(([name, value]) => leaked(name) || leaked(value))) {
+    if (leaked(body) || response.headers.some(([name, value]) => leaked(name) || leaked(value))) {
       return undefined;
+    }
+    if (sse) {
+      if (
+        !protectedEvents(
+          body,
+          operation.model,
+          scan,
+          leaked,
+          Math.max(...encodings.map((value) => value.length)),
+        )
+      ) {
+        return undefined;
+      }
+    } else {
+      const parsed: unknown = parseUnambiguousJson(body);
+      if (!asRecord(parsed) || !scan(parsed)) {
+        return undefined;
+      }
     }
     return {
       status: response.status,
-      headers: [["content-type", "application/json"]],
+      headers: [["content-type", sse ? "text/event-stream" : "application/json"]],
       body: new Uint8Array(response.body),
     };
   } catch {
@@ -124,7 +137,95 @@ function protectedJson(response: EgressResponse, credential: string): EgressResp
   }
 }
 
-/** Bounded HTTP inference only; streaming, tool execution and model discovery need separate policies. */
+function protectedEvents(
+  body: string,
+  model: string,
+  scan: (value: unknown) => boolean,
+  leaked: (value: unknown) => boolean,
+  maximumEncodingLength: number,
+): boolean {
+  const normalized = body.replaceAll("\r\n", "\n");
+  if (normalized.includes("\r") || !normalized.endsWith("\n\n")) {
+    return false;
+  }
+  let terminal = false;
+  let responseId: string | undefined;
+  let sequence = -1;
+  let count = 0;
+  const fragments = new Map<string, string>();
+  for (const block of normalized.split("\n\n")) {
+    if (!block) {
+      continue;
+    }
+    let eventName: string | undefined;
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith(":")) {
+        continue;
+      }
+      if (line.startsWith("event:") && eventName === undefined) {
+        eventName = line.slice(6).replace(/^ /, "");
+      } else if (line.startsWith("data:")) {
+        data.push(line.slice(5).replace(/^ /, ""));
+      } else {
+        return false;
+      }
+    }
+    if (data.length === 0) {
+      if (eventName !== undefined) {
+        return false;
+      }
+      continue;
+    }
+    // Responses completion is explicit JSON. An opaque terminator is never evidence.
+    if (terminal || ++count > 16_384) {
+      return false;
+    }
+    const event = asRecord(parseUnambiguousJson(data.join("\n")));
+    if (
+      !event ||
+      !validResponsesEvent(event, model) ||
+      !scan(event) ||
+      (eventName !== undefined && eventName !== event.type)
+    ) {
+      return false;
+    }
+    if (event.sequence_number !== undefined) {
+      if (Number(event.sequence_number) <= sequence) {
+        return false;
+      }
+      sequence = Number(event.sequence_number);
+    }
+    const response = asRecord(event.response);
+    if (response) {
+      if (responseId !== undefined && response.id !== responseId) {
+        return false;
+      }
+      responseId = String(response.id);
+    }
+    if (typeof event.delta === "string") {
+      const key = JSON.stringify([
+        event.type,
+        event.item_id,
+        event.output_index,
+        event.content_index,
+        event.summary_index,
+      ]);
+      const joined = (fragments.get(key) ?? "") + event.delta;
+      if (leaked(joined)) {
+        return false;
+      }
+      // Retain only a possible cross-event prefix, avoiding quadratic growth on long streams.
+      fragments.set(key, joined.slice(-Math.max(1, maximumEncodingLength - 1)));
+    }
+    terminal = ["response.completed", "response.failed", "response.incomplete"].includes(
+      String(event.type),
+    );
+  }
+  return terminal;
+}
+
+/** Bounded inference with Harness-local tools and complete finite Responses SSE custody. */
 export const openAiStaticProvider: CredentialProviderDefinition =
   Object.freeze<CredentialProviderDefinition>({
     ref: { id: "openai-static-https", generation: 1 },
@@ -146,6 +247,12 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       }
       return { base_url: baseUrl };
     },
+    normalizeGrant(models) {
+      if (models.length !== 1 || !models[0] || models[0].length > 256) {
+        throw new Error("Protected inference requires one explicit model.");
+      }
+      return immutableCopy({ kind: "inference", models, providerTools: "none" });
+    },
     routes(source, binding) {
       const base = new URL(this.normalizeConfig(source.config).base_url!);
       return ["responses", "chat/completions"].map((operation) =>
@@ -159,7 +266,7 @@ export const openAiStaticProvider: CredentialProviderDefinition =
           path: `${base.pathname}/${operation}`,
           method: "POST" as const,
           operationPolicy: { id: "openai-bounded-inference", generation: 1 },
-          responsePolicy: { id: "openai-bounded-json", generation: 1 },
+          responsePolicy: { id: "openai-bounded-response", generation: 1 },
           deadlineMs: 30_000,
         }),
       );
@@ -188,25 +295,34 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       if (
         !body ||
         typeof body.model !== "string" ||
+        route.binding.grant.providerTools !== "none" ||
         !route.binding.grant.models.includes(body.model) ||
-        (body.stream !== undefined && body.stream !== false) ||
         (body.store !== undefined && body.store !== false)
       ) {
         return undefined;
       }
       const responseApi = route.path.endsWith("/responses");
+      if (responseApi) {
+        return validResponsesRequest(body)
+          ? { kind: "inference", action: "generate", model: body.model }
+          : undefined;
+      }
+      if (body.stream !== undefined && body.stream !== false) {
+        return undefined;
+      }
       const allowed = new Set([
         "model",
         "stream",
         "store",
         "temperature",
         "top_p",
-        ...(responseApi ? ["input", "max_output_tokens"] : ["messages", "max_completion_tokens"]),
+        "messages",
+        "max_completion_tokens",
       ]);
       if (Object.keys(body).some((key) => !allowed.has(key))) {
         return undefined;
       }
-      for (const key of ["temperature", "top_p", "max_output_tokens", "max_completion_tokens"]) {
+      for (const key of ["temperature", "top_p", "max_completion_tokens"]) {
         if (
           body[key] !== undefined &&
           (typeof body[key] !== "number" || !Number.isFinite(body[key]) || body[key] < 0)
@@ -214,13 +330,7 @@ export const openAiStaticProvider: CredentialProviderDefinition =
           return undefined;
         }
       }
-      if (responseApi) {
-        // Responses defaults may retain provider-side state. Require explicit no-store
-        // for this bounded inference policy rather than silently authorizing that operation.
-        if (typeof body.input !== "string" || body.store !== false) {
-          return undefined;
-        }
-      } else if (
+      if (
         !Array.isArray(body.messages) ||
         body.messages.length === 0 ||
         body.messages.length > 128 ||
@@ -244,5 +354,5 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       }
       return [["authorization", `Bearer ${value}`]];
     },
-    protectResponse: protectedJson,
+    protectResponse: protectedResponse,
   });

@@ -463,6 +463,7 @@
               },
               "egress": {
                 "additionalProperties": false,
+                "description": "Protected live static reads with no retained material. The first inference grant permits the configured model and local Harness tools; provider-executed tools are unsupported. Runtime readiness requires current authenticated supervisor evidence.",
                 "properties": {
                   "adoption": { "const": "live", "type": "string" },
                   "retention": { "const": "none", "type": "string" }
@@ -532,7 +533,7 @@
               },
               "status": {
                 "additionalProperties": false,
-                "description": "Live status reported by the selected Credential Gateway. It never contains credential values.",
+                "description": "Source admission or selected Credential Gateway status. For protected sources, ready does not attest an installed enforcing Sandbox; current supervisor evidence is checked separately. Never contains credential values.",
                 "properties": {
                   "reason": { "maxLength": 512, "type": "string" },
                   "refresh": {
@@ -23828,6 +23829,7 @@
                           },
                           "egress": {
                             "additionalProperties": false,
+                            "description": "Protected live static reads with no retained material. The first inference grant permits the configured model and local Harness tools; provider-executed tools are unsupported. Runtime readiness requires current authenticated supervisor evidence.",
                             "properties": {
                               "adoption": { "const": "live", "type": "string" },
                               "retention": { "const": "none", "type": "string" }
@@ -23897,7 +23899,7 @@
                           },
                           "status": {
                             "additionalProperties": false,
-                            "description": "Live status reported by the selected Credential Gateway. It never contains credential values.",
+                            "description": "Source admission or selected Credential Gateway status. For protected sources, ready does not attest an installed enforcing Sandbox; current supervisor evidence is checked separately. Never contains credential values.",
                             "properties": {
                               "reason": { "maxLength": 512, "type": "string" },
                               "refresh": {
@@ -24344,9 +24346,13 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "Re-reads the source's Secret values, or those of replacement Secret references, and updates the Credential Gateway copy. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
+                "description": "Without adoption, re-reads Secret inputs and updates the legacy Credential Gateway copy. adoption: live explicitly selects protected per-operation reads through the configured egress Driver for an unbound static source. Existing sources never opt in merely because their Secret changes. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
                 "properties": {
-                  "adoption": { "const": "live", "type": "string" },
+                  "adoption": {
+                    "const": "live",
+                    "description": "Explicitly opt an unbound static source into protected live Secret reads. Requires source update and Secret operate permission; failure preserves the existing source.",
+                    "type": "string"
+                  },
                   "secrets": {
                     "additionalProperties": {
                       "additionalProperties": false,
@@ -24374,7 +24380,7 @@
               }
             }
           },
-          "description": "Re-reads the source's Secret values, or those of replacement Secret references, and updates the Credential Gateway copy. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
+          "description": "Without adoption, re-reads Secret inputs and updates the legacy Credential Gateway copy. adoption: live explicitly selects protected per-operation reads through the configured egress Driver for an unbound static source. Existing sources never opt in merely because their Secret changes. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
           "required": true
         },
         "responses": {

@@ -63,6 +63,7 @@ export interface EgressExecution {
 export interface InferenceGrant {
   readonly kind: "inference";
   readonly models: readonly string[];
+  readonly providerTools: "none";
 }
 
 export interface EgressBinding {
@@ -100,6 +101,11 @@ export interface EgressInstallation {
   readonly sandboxId: string;
   readonly sender: EgressRef;
   readonly installedAt: string;
+  /** Adapter-verified installation fence. Historical evidence must be revalidated for each use. */
+  readonly enforcement: {
+    readonly instanceId: string;
+    readonly configurationId: string;
+  };
 }
 
 export interface EgressRequest {
@@ -167,10 +173,16 @@ export interface CredentialProviderDefinition {
   readonly schemaVersion: 1;
   readonly sourceType: CredentialSourceType;
   normalizeConfig(config: Readonly<Record<string, string>>): Readonly<Record<string, string>>;
+  normalizeGrant(models: readonly string[]): InferenceGrant;
   routes(source: Readonly<CredentialSource>, binding: EgressBinding): readonly EgressRoute[];
   classify(route: EgressRoute, request: EgressRequest): InferenceOperation | undefined;
   inject(value: string): readonly (readonly [string, string])[];
-  protectResponse(response: EgressResponse, value: string): EgressResponse | undefined;
+  protectResponse(
+    response: EgressResponse,
+    value: string,
+    request: EgressRequest,
+    operation: InferenceOperation,
+  ): EgressResponse | undefined;
 }
 
 export interface CredentialSourceControl {
@@ -203,6 +215,11 @@ export interface EgressProxyDriver extends Driver {
     context: EgressRevisionContext,
     prepared: EgressAttachment,
   ): Promise<EgressInstallation | undefined>;
+  /** Query the counterpart again; persisted installation records are not readiness leases. */
+  verifyInstallation(
+    context: EgressRevisionContext,
+    installation: EgressInstallation,
+  ): Promise<boolean>;
   withdrawBinding(context: EgressRevisionContext, binding: EgressRef): Promise<boolean>;
   removeRevision(context: EgressRevisionContext): Promise<boolean>;
 }

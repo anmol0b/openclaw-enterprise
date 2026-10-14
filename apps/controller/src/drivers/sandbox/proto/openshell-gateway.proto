@@ -768,6 +768,17 @@ message GetSandboxPolicyStatusRequest {
 message GetSandboxPolicyStatusResponse {
   SandboxPolicyRevision revision = 1;
   uint32 active_version = 2;
+  LoadedEnforcementEvidence loaded_enforcement = 3;
+}
+// Additive supplier contract: current accepted registration after runtime installation.
+message LoadedEnforcementEvidence {
+  string sandbox_id = 1;
+  string instance_id = 2;
+  uint32 policy_version = 3;
+  string policy_hash = 4;
+  uint64 config_revision = 5;
+  uint64 provider_env_revision = 6;
+  repeated string enforced_capabilities = 7;
 }
 message SandboxPolicyRevision {
   uint32 version = 1;

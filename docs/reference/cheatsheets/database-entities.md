@@ -135,7 +135,8 @@ Stores credential sources registered with the selected Credential Gateway; the g
 
 ### `egress_installations`
 
-Binds authenticated supervisor/Sandbox identity to the exact admitted revision plan.
+Binds authenticated supervisor/Sandbox identity and an immutable loaded-enforcement
+instance/configuration fingerprint to the exact admitted revision plan.
 See [protected inference](../credential-sources/protected-inference.md).
 
 - `sender_id`, `sandbox_id`

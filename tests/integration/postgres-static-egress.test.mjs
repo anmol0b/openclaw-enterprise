@@ -79,6 +79,19 @@ test(
       ),
       installed,
     );
+    // Re-observation cannot turn a replacement supervisor into the previously admitted execution.
+    await assert.rejects(
+      f.controller.transact((unit) =>
+        unit.credentialSources.recordEgressInstallation({
+          ...installed,
+          enforcement: {
+            ...installed.enforcement,
+            instanceId: "10000000-0000-4000-8000-000000000001",
+          },
+        }),
+      ),
+      (error) => error.name === "ResourceStateConflictError",
+    );
     await assert.rejects(
       f.pool.query(
         "UPDATE occ.credential_sources SET egress = jsonb_set(egress, '{secret,namespaceId}', '\"other-namespace\"') WHERE id = $1",

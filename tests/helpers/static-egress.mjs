@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID, randomBytes, sign } from "node:crypto";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
@@ -27,12 +27,20 @@ export const wireTime = (millis) => ({
   seconds: Math.floor(millis / 1000),
   nanos: (millis % 1000) * 1e6,
 });
-export const unary = (client, method, request, metadata) =>
+export function requestId(createdAt = Date.now()) {
+  const bytes = randomBytes(16);
+  bytes.writeUIntBE(createdAt, 0, 6);
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+export const unary = (client, method, request, metadata, timeoutMs = 5000) =>
   new Promise((resolve, reject) =>
     client[method](
       request,
       metadata ?? new grpc.Metadata(),
-      { deadline: Date.now() + 5000 },
+      { deadline: Date.now() + timeoutMs },
       (error, result) => (error ? reject(error) : resolve(result)),
     ),
   );
@@ -43,7 +51,7 @@ const listen = (server) =>
  * not a Kubernetes API server or an OpenShell supervisor. No authorization/provider logic is mocked. */
 export async function staticEgressFixture(
   t,
-  { appFactory = createConsoleAppFixture, includeLegacy = false } = {},
+  { appFactory = createConsoleAppFixture, includeLegacy = false, now = () => new Date() } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "oce-egress-wire-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -76,6 +84,7 @@ export async function staticEgressFixture(
   const objects = new Map();
   let namespace;
   let secretReads = 0;
+  let secretReadBarrier;
   const kubeRequests = [];
   const kube = createHttpsServer({ key, cert }, async (request, response) => {
     response.setHeader("content-type", "application/json");
@@ -142,6 +151,7 @@ export async function staticEgressFixture(
       response.writeHead(request.method === "POST" ? 201 : 200).end(JSON.stringify(stored));
     } else if (request.method === "GET" && previous) {
       secretReads += 1;
+      await secretReadBarrier;
       response.end(JSON.stringify(previous));
     } else {
       response.writeHead(404).end(JSON.stringify({ code: 404 }));
@@ -244,7 +254,13 @@ export async function staticEgressFixture(
     GetSandboxPolicyStatus(call, callback) {
       assert.equal(call.request.workspace_scope.workspace, namespace.name);
       callback(null, {
-        revision: { version: 1, status: 2, policy: observed.policy },
+        revision: {
+          version: 1,
+          status: 2,
+          policy: observed.policy,
+          policy_hash: observed.policyHash,
+        },
+        loaded_enforcement: observed.evidence,
         active_version: 1,
       });
     },
@@ -311,6 +327,7 @@ export async function staticEgressFixture(
     { id: "openshell-credentials", backend },
   );
   const app = await appFactory(t, {
+    now,
     provisionedPeople: [],
     secretDriver,
     computeDriver: {
@@ -350,7 +367,9 @@ export async function staticEgressFixture(
       body: JSON.parse(Buffer.concat(body)),
     });
     response
-      .writeHead(providerResponse.status, { "content-type": "application/json" })
+      .writeHead(providerResponse.status, {
+        "content-type": providerResponse.contentType ?? "application/json",
+      })
       .end(providerResponse.rawBody ?? JSON.stringify(providerResponse.body));
   });
   const providerPort = await listen(provider);
@@ -447,14 +466,20 @@ export async function staticEgressFixture(
     undefined,
     "a loaded gateway policy without an applied-capability receipt must not become ready",
   );
-  // This synthetic record exercises the authority independently of runtime
-  // installation. It is not evidence of an enforcing supervisor or readiness.
-  const installation = {
-    plan: context.plan,
-    sandboxId,
-    sender: egress.sourceControl.sender,
-    installedAt: new Date().toISOString(),
+  // Supplier observations are fixtures; the production adapter must consume their
+  // exact protobuf shape. No hand-written installation bypasses its readiness checks.
+  observed.policyHash = "1a".repeat(32);
+  observed.evidence = {
+    sandbox_id: sandboxId,
+    instance_id: randomUUID(),
+    policy_version: 1,
+    policy_hash: observed.policyHash,
+    config_revision: "17395563786422799999",
+    provider_env_revision: "9019556378642279999",
+    enforced_capabilities: [capability],
   };
+  const installation = await egress.attachmentStatus(context, attachment);
+  assert.ok(installation, "the adapter must validate the complete supplier observation");
   await app.controller.transact((unit) =>
     unit.credentialSources.recordEgressInstallation(installation),
   );
@@ -508,6 +533,7 @@ export async function staticEgressFixture(
         jti: randomUUID(),
         caller_kind: "supervisor",
         sandbox_id: sandboxId,
+        instance_id: installation.enforcement.instanceId,
         ...overrides,
       }),
     ).toString("base64url");
@@ -518,9 +544,9 @@ export async function staticEgressFixture(
   };
   const capture = (body = { model: "fixture-model", input: "hello", store: false }) => ({
     audience: "oce-egress",
-    deadline: wireTime(Date.now() + 20_000),
+    deadline: wireTime(now().getTime() + 20_000),
     request: {
-      context: { request_id: randomUUID(), sandbox_id: sandboxId },
+      context: { request_id: requestId(now().getTime()), sandbox_id: sandboxId },
       target: {
         scheme: "https",
         host: "provider.example.test",
@@ -632,6 +658,14 @@ export async function staticEgressFixture(
     },
     get secretReads() {
       return secretReads;
+    },
+    pauseSecretReads() {
+      const paused = Promise.withResolvers();
+      secretReadBarrier = paused.promise;
+      return () => {
+        secretReadBarrier = undefined;
+        paused.resolve();
+      };
     },
     async revoke() {
       const result = await app.request(
