@@ -66,7 +66,7 @@ Codex plugin is explicitly enabled with `websocket` app-server transport.
 Kubernetes Compute rejects Agent create/update, provisioning, and deployment when
 native policy blocks its required Codex plugin: `plugins.enabled` or
 effective `plugins.entries.codex.enabled` is false, `plugins.deny` lists `codex`, or a
-nonempty `plugins.allow` excludes it. Missing or empty allowlists are unrestricted.
+nonempty `plugins.allow` excludes it. Missing/empty allowlists are unrestricted.
 Configuration can be staged separately; admission never rewrites these permissions.
 
 Selectable model catalogs and fallbacks under Agent defaults or entries

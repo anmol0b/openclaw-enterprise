@@ -57,22 +57,21 @@ graph TD
 
 `packages/occ/src/index.ts:OpenClawController.deployAgent`
 
-OCC locks the authorized Agent and Configuration, resolves `agentRuntime.id`,
-and validates primary/fallback routes and Harness modes. Fallbacks preserve native order,
-primary provider and Harness. Only unambiguous built-in configuration defaults
-to embedded OpenClaw. Missing/ambiguous policies, unsupported IDs and incompatible
-modes fail closed.
+OCC locks authorized Agent/Configuration, resolves `agentRuntime.id`, and validates
+model routes and Harness modes. Fallbacks retain order, primary provider and Harness.
+Only unambiguous built-in configuration defaults to embedded OpenClaw;
+missing/ambiguous policies, unsupported IDs and incompatible modes fail closed.
 Compute's `apps/controller/src/drivers/compute/native-gateway-transport.ts:validatePlaintextNativeGateway`
 rejects `gateway.tls.enabled: true` before revision creation and preparation:
 Docker, SSH and Kubernetes require native HTTP.
 Revisions freeze Configuration, approved Harness identity/version, mode, Compute,
 and Agent ServicePrincipal. Production supports embedded OpenClaw and dedicated
-Codex. Dedicated OpenClaw requires SandboxDriver network, filesystem, and process
-containment. Access tokens require dedicated Codex; account snapshots retain OCC
-identity, credential kind, and opaque Secret reference.
+Codex; dedicated OpenClaw needs SandboxDriver containment of networks, filesystems,
+and processes. Access tokens require dedicated Codex; snapshots retain OCC identity,
+credential kind, and opaque Secret reference.
 `apps/controller/src/drivers/compute/kubernetes/configuration-rules.ts:requireCodexPluginPolicy`
-rejects effective Codex disables before save, provisioning, or deployment.
-Trimmed, case-folded entry IDs merge in order; authored policy stays unchanged.
+validates Codex policy before save/provisioning/deployment.
+It folds trimmed, case-folded IDs in order without rewriting permissions.
 
 ### 2. Claim work and realize the approved topology
 
