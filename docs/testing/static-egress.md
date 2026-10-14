@@ -1,8 +1,7 @@
 # Verify protected static inference
 
-Use these checks to distinguish the OCE source and fixture paths from an installed
-OpenShell deployment and a real provider. Run them with the installed workspace
-dependencies; an individual suite's coverage does not establish a deployment result.
+Run these checks with installed workspace dependencies. OCE source and fixture
+coverage does not establish installed OpenShell or real-provider behavior.
 
 ## Authority and provider fixtures
 
@@ -99,33 +98,29 @@ OCC_TEST_ISSUER_GATEWAY_BINARY=/absolute/path/to/openshell-gateway \
   node --test tests/integration/openshell-issuer-compatibility.test.mjs
 ```
 
-The manual `issuer-compatibility` lane owns this test; it is outside `ci` and
-`full`. An absent selector skips discovery; an invalid selected binary fails.
-The test owns temporary SQLite, generated authentication keys, loopback issuer
-and OIDC listeners, and a Unix-socket compute fixture that implements no workload
-operations. It uses the OCE gRPC client and actual Rust refresh implementation,
-with no host compute, provider account, or installed controller.
+The manual `issuer-compatibility` lane is outside `ci` and `full`. An absent
+selector skips discovery; an invalid binary fails. The test uses the OCE gRPC
+client and Rust refresh implementation with temporary SQLite, generated keys,
+loopback issuer/OIDC listeners and a Unix-socket compute fixture without workload
+operations. It uses no host compute, provider account or installed controller.
 
-The issuer sees the same authenticated form on two distinct attempts. It
-contains only `grant_type`, `client_id`, `client_secret`, and `scope`. In the
-first attempt the issuer refuses, and the refusal survives restart. In the
-second, the gateway's background worker receives only a synthetic `access_token`.
-OpenShell reports `refreshed`, substitutes a one-hour expiry, and publishes a new
-provider version. Both the reported expiry and provider version survive restart.
-A provider resource version identifies that publication, not the admitted grant
-or an authoritative expiry. Reading refresh status is not a warm credential lookup.
+Two attempts send the same authenticated form: only `grant_type`, `client_id`,
+`client_secret`, and `scope`. The first refusal survives restart. On the second,
+the gateway background worker receives only a synthetic `access_token`.
+OpenShell reports `refreshed`, substitutes a one-hour expiry and publishes a new
+provider version; both survive restart. That version identifies publication, not
+the admitted grant or authoritative expiry. Refresh status is not a warm lookup.
 
 The GitHub fixture in `tests/conformance/repository-credentials-github.test.mjs`
 separately exercises App signing with a generated key, rejects a widened repository
 list, missing rights, or absent provider expiry, and retires the refused candidate.
 
-To join these paths, the lifecycle owner must durably admit each attempt before
-dispatch. Give the issuer an authenticated attempt reference bound to the exact
-grant, input family and owner epoch. Commit the validated returned rights, actual
-provider expiry and material version together before a read-only lookup can report
-the grant warm. The [issuer contract](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/runtime-contracts.md#provider-semantics-and-issuer-boundary)
-defines that boundary. This pinned gateway does not establish it; keep dynamic
-GitHub credentials disabled until the complete path is qualified.
+The lifecycle owner must durably admit each attempt before dispatch, giving the
+issuer an authenticated reference bound to the exact grant, input family and owner
+epoch. Commit validated returned rights, actual provider expiry and material
+version together before read-only lookup reports the grant warm. This gateway
+does not establish the [issuer contract](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/runtime-contracts.md#provider-semantics-and-issuer-boundary);
+keep dynamic GitHub credentials disabled until the complete path is qualified.
 
 ## PostgreSQL state
 
