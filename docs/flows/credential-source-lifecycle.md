@@ -202,16 +202,16 @@ audit failure leaves `deleting` for retry. Namespace deletion returns
 `packages/occ/src/index.ts:updateCredentialSource`,
 `apps/controller/src/drivers/credential-gateway/openshell.ts:updateSource`
 
-For static updates, OCC authorizes `credential_source:update`, reads the Namespace,
+For static updates, OCC authorizes `credential_source:update`, reads the Namespace
 and locks only the source. It requires `ready` and an offered type (`409` otherwise),
-validates catalog reference fields, authorizes `secret:operate`, and reads through
-`withValue`. `updateSource` uses Compute placement; OpenShell
-verifies provider ownership and calls `UpdateProvider`. References and success audit
-commit together. A definite rollback retains references and attempts a failure audit.
-Unknown commits leave references and success audit uncertain and skip rollback callbacks.
-Only static updates can converge by repeating material. `absent` or
-`failed` returns `503`. OpenShell rejects empty values because `UpdateProvider`
-merges them; only new processes receive updates. Refresh types use the
+validates catalog fields, authorizes `secret:operate`, and reads with `withValue`.
+`updateSource` uses Compute placement; OpenShell checks provider ownership and calls
+`UpdateProvider`. References and success audit commit together. After a gateway write
+begins, definite rollback attempts any configured failure audit. Unknown commits skip
+rollback callbacks; reconcile references and success audit before acting. Repeating
+unchanged static material converges. `absent` or `failed` returns `503`. Empty values
+are refused because `UpdateProvider` merges them; only new processes receive updates.
+Refresh types use the
 [explicit handoff and preserved ID guard](credential-source-refresh.md#4-update-and-rotation).
 
 ### 9. Withdraw a source from an Agent

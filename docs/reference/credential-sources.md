@@ -156,8 +156,9 @@ Secret the update reads:
 
 A successful update returns `200` with the source and its live gateway `status`.
 Only a `ready` source can be updated. A gateway failure returns `503` and leaves
-the Secret references unchanged; once the gateway may have changed, the failure
-is audited. The gateway is updated before OCC commits, so
+the Secret references unchanged. Once a gateway write begins, a definite rollback
+attempts any configured failure audit; that separate write can fail. Unknown commits
+require reconciliation of references and success audit before acting. The gateway is updated before OCC commits, so
 a failed response does not prove no external change. Static updates can converge
 on repeated values; refresh configure or mint outcomes must be resolved before
 another submission. If the

@@ -4658,8 +4658,8 @@ export class OpenClawController {
    * token issuer. Static updates can converge by repeating the same material after a failed
    * commit. Refresh effects may consume or rotate issuer material despite an uncertain outcome;
    * reconcile the source and Driver state instead of implicitly repeating configure or mint.
-   * Running Harness processes keep the previous value. `failureAudit` builds the event committed
-   * on its own after a definite rollback when a gateway write had begun.
+   * Running Harness processes keep the previous value. If supplied, `failureAudit` builds a
+   * separate event attempted after a definite rollback when a gateway write had begun.
    */
   async updateCredentialSource(
     principalId: string,
@@ -4852,8 +4852,8 @@ export class OpenClawController {
   }
 
   /**
-   * A gateway write cannot roll back with OCC's transaction, so a request that fails after one
-   * began still records a failure event, in its own transaction once the request's has ended.
+   * A gateway write cannot roll back with OCC's transaction. Once one begins, a definite
+   * rollback attempts any supplied failure audit in a separate transaction; that write can fail.
    * An unknown commit outcome runs no rollback-triggered failure event; whether the success
    * event committed remains unknown and requires reconciliation.
    */

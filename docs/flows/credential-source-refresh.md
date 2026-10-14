@@ -121,7 +121,7 @@ same-Namespace Secrets and checks the gateway status (including `pending`). For 
 `configureRefresh` with a new request ID, then `rotate`, instead of the
 gateway's `updateSource`. A non-`ready` mint returns `503` before OCC replaces
 the committed handoff IDs or releasing references, but OpenShell keeps the new material, the next `GET`
-reports the failed mint, and OCC records a `failure` audit event. OpenShell
+reports the failed mint, and OCC attempts the configured failure audit after rollback. OpenShell
 starts a new authorization epoch on each reconfiguration, even one whose mint
 fails, which revokes the stable placeholders of running Sandboxes, so Agents
 need a redeploy. On success, the new last-committed IDs, live-reference release
@@ -135,7 +135,8 @@ a record of every externally submitted attempt.
 `POST …/rotate` requires `credential_source:update`, a `ready` source, and a
 `refresh` type; a static type returns `409`. It calls `rotate` under the source
 lock and returns the new status. The HTTP handler commits the audit event in
-the same transaction; a failed mint commits a `failure` event instead. An unknown
+the same transaction; after a failed mint and definite rollback, OCC attempts the
+configured failure audit separately. An unknown
 commit does not run the rollback-triggered failure audit; whether the success
 event committed remains unknown and requires reconciliation.
 
