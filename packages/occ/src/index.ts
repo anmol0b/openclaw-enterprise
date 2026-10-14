@@ -4540,7 +4540,8 @@ export class OpenClawController {
       await this.abandonCredentialRegistration(placed, gateway, source, terminal, refresh);
       throw error;
     }
-    // A commit failure leaves the record `registering`; deleting it removes any stored copy.
+    // A definite rollback leaves `registering`, recoverable by deletion. An unknown commit
+    // may have succeeded and requires reconciliation.
     const ready = await this.mutate(async (state) => {
       await this.lockNamespace(state, namespace.id);
       let marked = await state.credentialSources.markCredentialSourceReady(namespace.id, source.id);

@@ -108,8 +108,9 @@ removes the provider and record, retaining a `deleting` record if removal fails.
 Thrown calls always retain `deleting` after cleanup: a timed-out create may still
 land, requiring another DELETE. Success commits `ready` and the mutation audit
 together; refresh types also [commit handoff IDs and release references](credential-source-refresh.md).
-A failed commit or process exit leaves `registering`, ineligible for
-binding or admission but deletable. If concurrent DELETE already removed the
+A definite rollback leaves `registering`, ineligible for
+binding or admission but deletable. Reconcile an unknown commit before acting.
+If concurrent DELETE already removed the
 record, OCC repeats remote removal and returns `409`.
 
 ### 4. Bind the source to an Agent
