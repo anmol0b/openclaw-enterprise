@@ -75,6 +75,52 @@ function writesSchemeSlashes(literals: readonly string[]): boolean {
   return scheme === null || /^[/\\]{2}(?![/\\])/.test(first.slice(scheme[0].length));
 }
 
+// Whether a baseUrl's text, as written up to its first variable, starts with an http(s) scheme
+// followed by one or no slash (`https:/v1`, `https:v1`, `https:${HOST}`, `https:{{ vars.host }}`),
+// so its refusal can say the `//` is missing (finding 1285). An empty authority (`https:///v1`)
+// keeps the general message.
+const missesSchemeSlashes = (first: string): boolean =>
+  /^[\0- ]*https?:(?![/\\]{2})/i.test(first.replaceAll(/[\t\n\r]/g, ""));
+
+// A host label that is a decimal or 0x number. When the last label (before one trailing dot) is one,
+// the URL parser reads the whole host as an IPv4 address.
+const NUMERIC_LABEL = /^(?:0x[0-9a-f]*|[0-9]+)$/i;
+
+/**
+ * Whether a refused baseUrl fails only because its host ends in a numeric or 0x label, which the
+ * URL parser reads as an IPv4 address and refuses unless the host is one (`https://api.123/v1`,
+ * `https://999.1.2.3/v1`), so its refusal can say so (finding 1346): with that label a name, the
+ * same text is accepted. `literals` is the text around a Preset's unfilled variables, each filled
+ * as `fillsAsRuntimeUrl` fills it with a name. Other refusals keep the general message.
+ */
+function refusedForNumericLastLabel(literals: readonly string[]): boolean {
+  const [first = "", ...rest] = literals.map((literal) => literal.replaceAll(/[\t\n\r]/g, ""));
+  const start = first.slice(first.search(/[^\0- ]|$/));
+  const scheme = /^https?:/i.exec(start)?.[0];
+  if (scheme === undefined) {
+    return false;
+  }
+  // The URL parser also trims trailing C0 controls and spaces.
+  let text = scheme + fillUrl([start.slice(scheme.length), ...rest], "x");
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) <= 0x20) {
+    end -= 1;
+  }
+  text = text.slice(0, end);
+  // An http(s) authority ends at a slash, backslash, query or fragment; its host follows the last
+  // `@` and ends at the port's colon.
+  const [, before = "", host = ""] =
+    /^(https?:[/\\]{2}(?:[^/\\?#]*@)?)([^/\\?#:]*)/i.exec(text) ?? [];
+  const name = host.endsWith(".") ? host.slice(0, -1) : host;
+  const label = name.slice(name.lastIndexOf(".") + 1);
+  return (
+    NUMERIC_LABEL.test(label) &&
+    isRuntimeUrl(
+      `${before}${name.slice(0, name.length - label.length)}x${host.slice(name.length)}${text.slice(before.length + host.length)}`,
+    )
+  );
+}
+
 // Where a variable sits in a baseUrl with a literal http(s) scheme, and the one token it stands
 // for there: a host name or number, an empty port (or `:port` after an IPv6 address), an IPv6
 // address (the whole bracketed address, whatever literal text surrounds the variable in it), or
@@ -217,13 +263,20 @@ export function urlHoldsUserinfo(value: string, literals: readonly string[] = [v
 }
 
 // `literals` as the runtime may render its environment references: every reference set, every
-// fallback rendered, and each fallback alone with the rest set.
-function environmentRenderings(literals: readonly string[]): string[][] {
+// fallback rendered, and each of the first `alone` fallbacks alone with the rest set. Each
+// rendering reads the whole text, so all of them cost time quadratic in its length (finding 1265).
+// `writesSchemeSlashes` reads only the text before the first variable, which rendering a later
+// fallback alone leaves as when every reference is set (fallbacks are numbered in order), so it
+// needs only the first fallback alone (`alone` 1).
+function environmentRenderings(literals: readonly string[], alone = Infinity): string[][] {
   const { fallbacks } = splitEnvironmentReferences(literals, () => false);
   return [
     () => false,
     () => true,
-    ...Array.from({ length: fallbacks }, (_, only) => (index: number) => index === only),
+    ...Array.from(
+      { length: Math.min(fallbacks, alone) },
+      (_, only) => (index: number) => index === only,
+    ),
   ].map((fallback) => splitEnvironmentReferences(literals, fallback));
 }
 
@@ -310,12 +363,23 @@ function validateSettings(
     const literals = unresolved([...path, "baseUrl"]);
     if (
       environment(baseUrl)
-        ? !environmentRenderings(literals ?? [String(baseUrl)]).every(writesSchemeSlashes)
+        ? !environmentRenderings(literals ?? [String(baseUrl)], 1).every(writesSchemeSlashes)
         : literals === undefined
           ? !isRuntimeUrl(baseUrl)
           : !fillsAsRuntimeUrl(literals)
     ) {
-      throw new ModelProviderSettingError(pointer(...path, "baseUrl"), "baseUrl");
+      // A value that is not a string is refused for its type, whatever text it would make.
+      const [first = typeof baseUrl === "string" ? baseUrl : ""] = literals ?? [];
+      throw new ModelProviderSettingError(
+        pointer(...path, "baseUrl"),
+        missesSchemeSlashes(first)
+          ? "baseUrlSlashes"
+          : typeof baseUrl === "string" &&
+              !environment(baseUrl) &&
+              refusedForNumericLastLabel(literals ?? [baseUrl])
+            ? "baseUrlNumericHost"
+            : "baseUrl",
+      );
     }
   }
   // An api that waits on a variable names no adapter until it is filled.

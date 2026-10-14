@@ -897,12 +897,13 @@ function imageCache(role) {
 }
 
 // Only main's warm job (ci-image-cache.yml) writes the cache. It runs for every
-// image input change, in order and never cancelled, so the newest commit's export
-// lands last. CI lanes only restore: a lane export on main could land after a
-// newer commit's warm export and replace it, and on a pull request it cost about
-// 40 s and filled only the merge ref's scope. The warm job exports in a second
-// build after the image is built and loaded: the same arguments without --load or
-// the tag, so BuildKit reuses the steps it just ran and only uploads the cache.
+// image input change and on a schedule from main's newest commit, in order and
+// never cancelled, so the newest commit's export lands last. CI lanes only
+// restore: a lane export on main could land after a newer commit's warm export
+// and replace it, and on a pull request it cost about 40 s and filled only the
+// merge ref's scope. The warm job exports in a second build after the image is
+// built and loaded: the same arguments without --load or the tag, so BuildKit
+// reuses the steps it just ran and only uploads the cache.
 function imageCacheExportArgs(role, buildArgs) {
   if (buildArgs.slice(0, 3).join(" ") !== "buildx build --load") {
     throw new Error("Only a hosted cache build can export the image cache.");
@@ -926,13 +927,17 @@ function imageCacheExportArgs(role, buildArgs) {
   ];
 }
 
-// The warm job's limit for one image's cache export. Healthy exports took 25-65 s;
-// one stalled on a single layer upload for 17 minutes, past BuildKit's own
-// timeout=10m (finding 1219). Tests shorten it.
+// The warm job's limit for one image's cache export. Exports that reuse the
+// OpenClaw layers took 25-65 s. A change to those layers (an OpenClaw pin, patch
+// or install step) uploads them all again, one at a time: 513-817 s on the warm
+// runner. Those layers are not byte-reproducible, so a cut-off export's uploads
+// never help the next run, and a 5 min limit left the image lanes rebuilding
+// them on every run (finding 1275). One upload once stalled for 17 min (finding
+// 1219); this still bounds that. Tests shorten it.
 const imageCacheExportTimeoutMs =
   Number(process.env.OPENCLAW_CI_IMAGE_CACHE_EXPORT_TIMEOUT_MS) > 0
     ? Number(process.env.OPENCLAW_CI_IMAGE_CACHE_EXPORT_TIMEOUT_MS)
-    : 5 * 60_000;
+    : 20 * 60_000;
 
 function imageBuildArgs(state, role, localStore) {
   if (process.env.OCC_CI_IMAGE_CACHE === "1") {
@@ -3059,8 +3064,8 @@ async function prepareK3dModelLane(statePath, state, env, options) {
 
 // `template` (optional) is an OCC_TEST_DATABASE_URL that an earlier prepareFile call
 // returned for this state. The file's database is then a copy of that database
-// (CREATE DATABASE ... TEMPLATE) instead of a freshly migrated one. A suite that
-// prepares a database per test uses it to migrate once per file.
+// (CREATE DATABASE ... TEMPLATE) instead of a freshly migrated one. The worker revision
+// suite copies the database the runner prepared for its file, one copy per test.
 async function prepareFile({ lane, file, statePath, template }) {
   const name = assertLane(lane);
   if (!file) {
@@ -3218,9 +3223,9 @@ const warmRuntimeImageRepository = "localhost/openclaw-ci-main/runtime";
 async function warmImageCache({ statePath }) {
   if (
     process.env.GITHUB_REF !== "refs/heads/main" ||
-    !["push", "workflow_dispatch"].includes(process.env.GITHUB_EVENT_NAME)
+    !["push", "schedule", "workflow_dispatch"].includes(process.env.GITHUB_EVENT_NAME)
   ) {
-    throw new Error("Only a push or dispatch on main may warm the image cache.");
+    throw new Error("Only a push, schedule or dispatch on main may warm the image cache.");
   }
   const lane = "images-packaging";
   await validateLaneInputsBeforeSideEffects(lane);

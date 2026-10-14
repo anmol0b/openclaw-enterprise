@@ -41,9 +41,11 @@ graph TD
 `apps/controller/src/composition/installation-config.ts:loadInstallationConfiguration`
 accepts an optional closed `observability` block in trusted Installation YAML.
 It rejects malformed URLs, unsupported schemes, credentials, fragments, an IPv4
-host that is not four decimal octets from 0 to 255 with no leading zeros, and
-unknown fields. Shorthand and integer hosts stop API and worker startup with
-log code `OBSERVABILITY_URL_INVALID`; correct the URL and restart. The
+host that is not four decimal octets from 0 to 255 with no leading zeros, a
+tab or newline, a backslash before the query, and unknown fields. Shorthand
+and integer hosts, and any `@` before the host, stop
+API and worker startup with log code `OBSERVABILITY_URL_INVALID`; correct the
+URL and restart. The
 [breaking-change notice](../../guides/deploy/breaking-changes.md) has the
 wording. Production and configured PostgreSQL development pass the
 validated URL to `createFastifyApp`. Compose development also accepts an
@@ -76,6 +78,8 @@ The console settles the read once per session owner: an allowed response or a `4
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 12:20: Startup refuses a tab, newline, or a backslash before the query, and logs `OBSERVABILITY_URL_INVALID`. A backslash in the query stays. (2383)
 
 - 2026-10-13 22:10: Startup refuses an observability IPv4 host that is not four decimal octets. (2329)
 

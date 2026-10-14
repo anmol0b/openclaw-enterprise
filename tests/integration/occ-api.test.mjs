@@ -1265,6 +1265,7 @@ test("Agent reads return the bound credentialSources; revision reads return only
     id: "credential-gateway-api",
     capability: "credential_gateway",
     implementation: "test-recording-gateway",
+    validateSourceConfig() {},
     async listSourceTypes() {
       return [
         {
@@ -1407,6 +1408,7 @@ test("refresh source PATCH and rotate refuse a stale refresh token and audit a f
     id: "credential-gateway-refresh-api",
     capability: "credential_gateway",
     implementation: "test-recording-gateway",
+    validateSourceConfig() {},
     async listSourceTypes() {
       return [
         {
@@ -5817,6 +5819,16 @@ test("Agent provisioning API validates inline configuration with existing Secret
       },
       'Configuration setting models.providers.openai.request.headers must not set the credential header "Authorization" (its name marks a credential): model credentials come from the Agent\'s Harness authentication binding.',
     ],
+    // Finding 1311: provisioning runs the agents roster rules Configuration save runs, with the
+    // same text, so a roster every deployment refuses is refused before anything is stored.
+    [
+      { agents: { ...model.agents, entries: { "main!": {} } } },
+      'The OpenClaw Gateway rejects the Agent ID in agents.entries["main!"]: use up to 64 letters, digits, _ or -, not starting with -.',
+    ],
+    [
+      { agents: { ...model.agents, entries: { main: {}, helper: {} } } },
+      'The OpenClaw Gateway needs agents.ownership "explicit" for more than one agents.entries entry: set it, or keep one entry.',
+    ],
   ]) {
     const refused = await injectedRequest(
       fixture.app,
@@ -6653,7 +6665,23 @@ test("two Namespaces become independently ready and deletion tombstones only its
     "GET",
     `/namespaces/${namespaceA.data.id}/agents/${agentA.data.id}/revisions`,
   );
-  assert.deepEqual(admittedRevisions.data, [readyDeployment.data, nextDeployment.data]);
+  // The list returns summaries, newest first, on one page.
+  const summary = (revision) => ({
+    id: revision.id,
+    namespaceId: revision.namespaceId,
+    agentId: revision.agentId,
+    revision: revision.revision,
+    backendId: revision.backendId,
+    configurationId: revision.configurationId,
+    configurationGeneration: revision.configurationGeneration,
+    harness: revision.harness,
+    createdAt: revision.createdAt,
+  });
+  assert.deepEqual(admittedRevisions.data, [
+    summary(nextDeployment.data),
+    summary(readyDeployment.data),
+  ]);
+  assert.equal(admittedRevisions.body.meta.nextCursor, null);
   assert.deepEqual(fixture.computeCalls.ensureNamespace, [namespaceA.data.id, namespaceB.data.id]);
 
   const deleting = await injectedRequest(
