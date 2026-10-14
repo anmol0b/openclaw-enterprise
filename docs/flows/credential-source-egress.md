@@ -156,7 +156,7 @@ evidence to the authenticated supervisor.
 
 The second RPC must echo the original deadline, evidence and injection digest.
 The registry reserves the handle, then uses
-`packages/occ/src/state/egress-send-receipts.ts:EgressSendReceipts.begin` to commit
+`packages/occ/src/egress-send-receipts.ts:EgressSendReceipts.begin` to commit
 possible dispatch before permission. The key includes authenticated sender Ref,
 instance, stable request/use ID and attempt ID; the binding includes exact
 store-qualified material and original deadline. An existing attempt, failed write

@@ -5,7 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import pg from "pg";
-import { EgressSendReceipts } from "../../packages/occ/src/state/egress-send-receipts.ts";
+import { EgressSendReceipts } from "../../packages/occ/src/egress-send-receipts.ts";
 import { PostgresPlatformState } from "../../packages/occ/src/state/postgres-state.ts";
 import { commitAckProxy } from "../fixtures/postgres-commit-ack-proxy.mjs";
 import { databaseUrl, requiresPostgres } from "../helpers/postgres-database.mjs";

@@ -1,8 +1,4 @@
-import type {
-  EgressSendReceipts,
-  SendAttempt,
-  SendObservation,
-} from "./state/egress-send-receipts.ts";
+import type { EgressSendReceipts, SendAttempt, SendObservation } from "./egress-send-receipts.ts";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {

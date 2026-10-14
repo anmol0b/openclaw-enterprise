@@ -1,4 +1,4 @@
-import { EgressSendReceipts } from "./state/egress-send-receipts.ts";
+import { EgressSendReceipts } from "./egress-send-receipts.ts";
 import type {
   StaticEgressSource,
   EgressPlan,

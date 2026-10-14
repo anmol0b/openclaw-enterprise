@@ -1,8 +1,5 @@
-import {
-  memoryEgressSendReceipts,
-  type EgressSendReceiptRepository,
-  type StoredSendReceipt,
-} from "./egress-send-receipts.ts";
+import { memoryEgressSendReceipts } from "./egress-send-receipts.ts";
+import type { EgressSendReceiptRepository, StoredSendReceipt } from "../egress-send-receipts.ts";
 import { isDeepStrictEqual } from "node:util";
 import type {
   StaticEgressSource,

@@ -2,7 +2,7 @@
 // then recovers the exact attempt only after this process and its pool have exited.
 import assert from "node:assert/strict";
 import pg from "pg";
-import { EgressSendReceipts } from "../../packages/occ/src/state/egress-send-receipts.ts";
+import { EgressSendReceipts } from "../../packages/occ/src/egress-send-receipts.ts";
 import {
   PostgresCommitOutcomeUnknownError,
   PostgresPlatformState,

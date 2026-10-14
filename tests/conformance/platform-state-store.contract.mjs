@@ -1,4 +1,4 @@
-import { EgressSendReceipts } from "../../packages/occ/src/state/egress-send-receipts.ts";
+import { EgressSendReceipts } from "../../packages/occ/src/egress-send-receipts.ts";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
