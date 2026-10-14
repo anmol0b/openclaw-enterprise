@@ -151,6 +151,17 @@ func (app *application) logoutCommand() *cobra.Command {
 			}
 			session, err := loadSession(origin)
 			if err != nil {
+				var invalid *invalidSessionError
+				if errors.As(err, &invalid) {
+					removed, removeErr := removeInvalidSession(invalid)
+					if removeErr != nil {
+						return removeErr
+					}
+					if removed {
+						return fmt.Errorf("removed the invalid local session for %s, but OCC could not confirm sign-out; revoke it in the console if needed, then run occ login", origin)
+					}
+					return fmt.Errorf("the invalid local session for %s is no longer present, but OCC could not confirm sign-out; revoke it in the console if needed, then run occ login", origin)
+				}
 				return err
 			}
 			if session == nil {

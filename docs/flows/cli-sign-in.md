@@ -1,7 +1,7 @@
 ---
 created: 2026-10-07
 updated: 2026-10-14
-last_updated_session: authoring-run/7d9929a6-35c9-4495-a8d8-01167d130209
+last_updated_session: authoring-run/4e82c9fe-31ac-4bc4-9eaa-09d9991ed45c
 ---
 
 # CLI Sign-in Flow
@@ -51,6 +51,7 @@ graph TD
   H -->|10 active already| I2["409 CLI_SESSION_LIMIT"]
   H -->|Audit fails| J["Roll back; 503, occ polls again"]
   H --> K["occ saves token per origin, 0600"]
+  K -->|"Invalid file on logout"| S["Remove local record; remote sign-out unconfirmed"]
   K --> L["Request with x-occ-cli-session"]
   L --> M["verify joins parent session and account; method cli_session"]
   M -->|Invalid, expired, revoked, both headers| N["401, no cookie fallback"]
@@ -80,7 +81,8 @@ capacity until they settle. `decide` moves a pending row to `approved`
 
 ### 2. Exchange the device code
 
-`exchange` locks the authorization and its parent session, returns
+`exchange` ([packages/occ/src/state/cli-sessions.ts:PostgresCliSessions.exchange](../../packages/occ/src/state/cli-sessions.ts))
+locks the authorization and its parent session, returns
 `expired_token` when the parent is gone or expired and `409` when it already
 has 10 active CLI sessions, then marks the authorization `consumed` and inserts
 the `cli_sessions` row with `expires_at` at the earlier of the parent session's
@@ -105,7 +107,7 @@ hashes the token and loads the session with its parent and account. In the
 guarded profile it also checks the account, the method and both versions. It
 admits method `cli_session` with the account's external identity and the
 Namespace pin as admitted scope
-([apps/controller/src/admission/admission-verifier.ts](../../apps/controller/src/admission/admission-verifier.ts)).
+([apps/controller/src/auth/index.ts:ControllerAdmissionVerifier.verify](../../apps/controller/src/auth/index.ts)).
 The controller treats it like `api_key` for workspace-file CSRF and refuses it
 on account, service-key, approval, native admin and session routes
 ([apps/controller/src/index.ts](../../apps/controller/src/index.ts)).
@@ -116,6 +118,14 @@ on account, service-key, approval, native admin and session routes
 ([PostgresCliSessions.revoke](../../packages/occ/src/state/cli-sessions.ts)).
 Deleting the parent `occ.session` row (sign-out, account disable or revoke)
 cascades. A bounded sweep deletes expired rows every 5 minutes.
+
+If the local session file has invalid contents, `occ logout` checks the file
+and directory again and removes the local record without sending its contents.
+It reports that OCC could not confirm sign-out; the person can revoke the
+session in the console before signing in again. Unsafe file types, permissions,
+or detected replacements are refused instead
+([internal/occcli/session_store.go:removeInvalidSession](../../internal/occcli/session_store.go)).
+The pathname checks and removal are not atomic against concurrent file changes.
 
 ## Debugging and Verification
 
@@ -144,5 +154,6 @@ cascades. A bounded sweep deletes expired rows every 5 minutes.
 
 ## Changelog
 
+- 2026-10-14 19:53: Recover invalid local session records without claiming server revocation. (authoring-run/4e82c9fe-31ac-4bc4-9eaa-09d9991ed45c - 29738caa3c2f849d5652eef4222daf28bd56a309)
 - 2026-10-14 18:40: Bind approval to the submitted code and reserve wrong-code capacity before persistence. (authoring-run/7d9929a6-35c9-4495-a8d8-01167d130209 - 305d51efe3b85f6ec461616a3876610d3250f1c7)
 - 2026-10-07: First version: device authorization, exchange, admission and logout for `occ login` (RFC-0019).

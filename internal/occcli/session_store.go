@@ -32,6 +32,18 @@ type storedSession struct {
 	CABundle    string `json:"caBundle,omitempty"`
 }
 
+// invalidSessionError identifies a record whose contents could not be used. It
+// does not classify filesystem inspection or access failures as corruption.
+type invalidSessionError struct {
+	path          string
+	fileInfo      fs.FileInfo
+	directoryInfo fs.FileInfo
+}
+
+func (err *invalidSessionError) Error() string {
+	return fmt.Sprintf("invalid session file %s; run occ logout and occ login", err.path)
+}
+
 // sessionDirectoryOverride is a test seam; empty uses the user configuration directory.
 var sessionDirectoryOverride string
 
@@ -129,14 +141,49 @@ func loadSession(origin string) (*storedSession, error) {
 	}
 	var session storedSession
 	if err := json.Unmarshal(contents, &session); err != nil {
-		return nil, fmt.Errorf("invalid session file %s; run occ logout and occ login", path)
+		return nil, &invalidSessionError{path: path, fileInfo: info, directoryInfo: directoryInfo}
 	}
 	// Origin pinning: a token is only ever sent to the origin that issued it.
 	if session.Origin != origin || !strings.HasPrefix(session.Token, "occcli_") ||
 		strings.ContainsAny(session.Token, "\r\n") {
-		return nil, fmt.Errorf("invalid session file %s; run occ logout and occ login", path)
+		return nil, &invalidSessionError{path: path, fileInfo: info, directoryInfo: directoryInfo}
 	}
 	return &session, nil
+}
+
+// removeInvalidSession refuses an observed replacement or an unsafe path. Like
+// the existing session store, these pathname checks are not atomic with removal.
+func removeInvalidSession(invalid *invalidSessionError) (bool, error) {
+	directory := filepath.Dir(invalid.path)
+	directoryInfo, err := os.Lstat(directory)
+	if err != nil {
+		return false, fmt.Errorf("cannot inspect %s: %w", directory, err)
+	}
+	if err := privateMode(directory, directoryInfo, true); err != nil {
+		return false, err
+	}
+	if !os.SameFile(invalid.directoryInfo, directoryInfo) {
+		return false, fmt.Errorf("session directory changed during logout; try again")
+	}
+	info, err := os.Lstat(invalid.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("cannot inspect %s: %w", invalid.path, err)
+	}
+	if err := privateMode(invalid.path, info, false); err != nil {
+		return false, err
+	}
+	if !os.SameFile(invalid.fileInfo, info) || invalid.fileInfo.Size() != info.Size() || !invalid.fileInfo.ModTime().Equal(info.ModTime()) {
+		return false, fmt.Errorf("session file changed during logout; try again")
+	}
+	if err := os.Remove(invalid.path); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("cannot remove %s: %w", invalid.path, err)
+	}
+	return true, nil
 }
 
 // saveSession writes the session atomically: a private temporary file renamed into place.
