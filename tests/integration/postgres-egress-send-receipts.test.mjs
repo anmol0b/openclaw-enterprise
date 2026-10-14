@@ -26,8 +26,7 @@ async function loseCommitReplyWithCallerProcess(method, ...args) {
   }
 }
 
-// Persistence-boundary proof only. The integration owner applies the adjacent
-// SQL fragment as migrator before this test; the test uses the application role.
+// Persistence-boundary proof after normal canonical migrations; uses the application role.
 // Real caller composition and provider response protection are separate proofs.
 test(
   "PostgreSQL send receipts survive owner loss and fence exact static versions",
@@ -83,6 +82,7 @@ test(
     };
     const attempt = (material = evidence) => ({
       sender,
+      instanceId: randomUUID(),
       useId: randomUUID(),
       attemptId: randomUUID(),
       material,
@@ -100,7 +100,13 @@ test(
         const recoveryPool = new pg.Pool({ connectionString: databaseUrl, max: 2 });
         try {
           const recovered = new EgressSendReceipts(new PostgresPlatformState(recoveryPool));
-          const expected = { ...input, outcome: blocked, settled: true, feedback: "fenced" };
+          const expected = {
+            ...input,
+            observation: null,
+            outcome: blocked,
+            settled: true,
+            feedback: "fenced",
+          };
           assert.deepEqual(await recovered.recover(sender, input), expected);
           assert.deepEqual(await recovered.record(sender, input, blocked, feedback), expected);
           assert.deepEqual(await recovered.begin(sender, input), {
@@ -158,6 +164,7 @@ test(
           const recovered = new EgressSendReceipts(new PostgresPlatformState(freshPool));
           assert.deepEqual(await recovered.recover(sender, input), {
             ...input,
+            observation: null,
             outcome: { kind: "uncertain", dispatch: "possible" },
             settled: false,
             feedback: null,

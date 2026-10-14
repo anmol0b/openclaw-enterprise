@@ -99,10 +99,20 @@ including completed accumulated deltas, with a 1 MiB argument bound and bounded
 object depth and size. Strings inside that object are not decoded recursively.
 This supported-format policy does not prove protection against arbitrary provider
 transformations. The counterpart must
-withhold incomplete responses and strip protected headers and trailers. A 401
-fences that store-qualified material version in PostgreSQL; a new version can
-be selected. Provider effects may already exist when delivery is blocked. There
-is no durable send receipt or inferred outcome recovery in this slice.
+withhold incomplete responses and strip protected headers and trailers. A structured
+401 error with `code: invalid_api_key` and `type: invalid_request_error` fences
+that store-qualified material version atomically with response observation;
+status alone does not identify credential rejection. A later operation may select
+a new version. Provider effects may already exist when delivery is blocked.
+
+The sender commits a possible-dispatch receipt before its final authorization
+check. Its key binds authenticated sender, instance, use and attempt; its binding
+includes exact selected material and original deadline. Duplicate attempts,
+persistence failures and unknown commits never grant permission or trigger retry.
+Receipts store only safe metadata. Response observations do not establish that
+the supplier applied the returned policy decision: the current wire's best-effort
+terminal notification supplies no such proof. Post-send receipts therefore remain
+uncertain and unsettled. Recovery does not resend.
 
 ## Installation configuration
 
@@ -244,7 +254,7 @@ supervisor candidates. Mixed-version hot upgrades are not supported in this slic
 | Startup enrollment expires                                                       | The Harness holds `egress-enrollment` / `UNAVAILABLE`; check the installation and authenticated service, then deploy a new revision. |
 | Unsupported operation, stale authorization, invalid handle or exhausted capacity | The attempt is refused before its business send. A new request ID does not authorize retry after possible effects.                   |
 | Response is incomplete, unsupported or reflects protected material               | Delivery is blocked with `egress_response_policy`; the provider may already have acted.                                              |
-| Provider returns 401                                                             | The material version is fenced; a new Secret version can be selected for a later operation.                                          |
+| Provider positively identifies an invalid API key                                | The material version is fenced; a new Secret version can be selected for a later operation.                                          |
 
 ## Extension ownership
 

@@ -238,7 +238,7 @@ export async function createConsoleAppFixture(t, options = {}) {
       return super.transact((unit) => policyUnit.run(unit, () => work(unit)));
     }
   }
-  const platformState =
+  const basePlatformState =
     options.state ??
     new ConsolePlatformState({
       auditSink,
@@ -246,6 +246,7 @@ export async function createConsoleAppFixture(t, options = {}) {
       resolveIAMIdentity: (identityId) =>
         policy.identities.find((identity) => identity.id === identityId),
     });
+  const platformState = options.wrapState?.(basePlatformState) ?? basePlatformState;
   const iamDriver = new NativeIAMDriver(
     {
       async loadNativeIAMState() {

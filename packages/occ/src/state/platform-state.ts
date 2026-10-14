@@ -1,3 +1,8 @@
+import {
+  memoryEgressSendReceipts,
+  type EgressSendReceiptRepository,
+  type StoredSendReceipt,
+} from "./egress-send-receipts.ts";
 import { isDeepStrictEqual } from "node:util";
 import type {
   StaticEgressSource,
@@ -903,6 +908,7 @@ export interface PlatformReadView {
 }
 
 export interface PlatformUnitOfWork extends PlatformReadView {
+  readonly egressSendReceipts: EgressSendReceiptRepository;
   readonly installations: InstallationRepository;
   readonly namespaces: NamespaceRepository;
   readonly configurations: ConfigurationRepository;
@@ -955,6 +961,7 @@ interface IAMSubjectSource {
 }
 
 interface PlatformSnapshot {
+  readonly egressSendReceipts: Map<string, StoredSendReceipt>;
   installation: Readonly<Installation> | undefined;
   readonly namespaces: Map<string, Readonly<PersistedNamespace>>;
   readonly configurations: Map<string, Readonly<ConfigurationOwnership>>;
@@ -1027,6 +1034,7 @@ function cloneSnapshot(snapshot: PlatformSnapshot): PlatformSnapshot {
     presets: new Map(Array.from(snapshot.presets, ([key, preset]) => [key, immutableCopy(preset)])),
     secrets: new Map(Array.from(snapshot.secrets, ([key, secret]) => [key, immutableCopy(secret)])),
     egressRejected: new Set(snapshot.egressRejected),
+    egressSendReceipts: new Map(snapshot.egressSendReceipts),
     egressInstallations: new Map(
       Array.from(snapshot.egressInstallations, ([key, value]) => [key, immutableCopy(value)]),
     ),
@@ -2989,6 +2997,7 @@ function repositories(
     revisions,
     iamPolicy,
     repositorySessions,
+    egressSendReceipts: memoryEgressSendReceipts(snapshot.egressSendReceipts),
     provisioning: {
       findByWorkId: provisioningAbsent,
       findWithWork: provisioningAbsent,
@@ -3262,6 +3271,7 @@ export class InMemoryPlatformState implements PlatformStateStore {
     credentialWithdrawals: new Map(),
     egressInstallations: new Map(),
     egressRejected: new Set(),
+    egressSendReceipts: new Map(),
     serviceAccounts: new Map(),
     agents: new Map(),
     workspaceSetups: new Map(),

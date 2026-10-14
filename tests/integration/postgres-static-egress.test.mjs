@@ -122,7 +122,16 @@ test(
         )
       ).allowed,
     );
-    f.setResponse({ status: 401, body: { error: "invalid credential" } });
+    f.setResponse({
+      status: 401,
+      body: {
+        error: {
+          code: "invalid_api_key",
+          type: "invalid_request_error",
+          message: "Invalid credential",
+        },
+      },
+    });
     await f.protect(capture, await f.send(capture, ready));
     const evidence = JSON.parse(ready.evidence.authority_evidence);
     assert.equal(

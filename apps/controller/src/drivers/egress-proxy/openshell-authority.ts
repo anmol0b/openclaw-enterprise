@@ -210,6 +210,8 @@ export function createOpenShellEgressAuthority(
       ) {
         return refused("denied");
       }
+      const signal = new AbortController();
+      call.once("cancelled", () => signal.abort());
       const result = await forwarder.authorizeSend(
         authorization(call.metadata),
         string(context.sandbox_id),
@@ -218,6 +220,7 @@ export function createOpenShellEgressAuthority(
         evidence,
         bytes(call.request.credential_headers_sha256).toString("hex"),
         timestamp(call.request.deadline),
+        signal.signal,
       );
       return result.kind === "refused"
         ? refused(result.error.kind)
@@ -233,9 +236,11 @@ export function createOpenShellEgressAuthority(
   });
   server.addService(service.HttpResponsePreReturn!.service, {
     Evaluate(call: ServerDuplexStream<Wire, Wire>) {
-      let head: { context: Wire; response: Omit<EgressResponse, "body"> } | undefined;
+      let head: { handle: string; response: Omit<EgressResponse, "body"> } | undefined;
       let phase: "head" | "body" | "trailers" | "done" = "head";
       let work = Promise.resolve();
+      const signal = new AbortController();
+      call.once("cancelled", () => signal.abort());
       const block = (body: boolean, sequence?: unknown) =>
         call.write(
           body
@@ -254,11 +259,23 @@ export function createOpenShellEgressAuthority(
             if (event.preflight !== undefined && phase === "head") {
               const preflight = record(event.preflight);
               const context = record(preflight.context);
-              const peer = await identity.verify(authorization(call.metadata));
+              if (
+                !Number.isInteger(preflight.status_code) ||
+                Number(preflight.status_code) < 200 ||
+                Number(preflight.status_code) > 599
+              ) {
+                phase = "done";
+                block(false);
+                return;
+              }
+              const handle = await forwarder.beginResponse(
+                authorization(call.metadata),
+                string(context.sandbox_id),
+                string(context.request_id),
+              );
               const responseHeaders = headers(preflight.headers);
               if (
-                !peer ||
-                peer.sandboxId !== context.sandbox_id ||
+                handle === undefined ||
                 !Array.isArray(preflight.permitted_body_modes) ||
                 !preflight.permitted_body_modes.includes(2) ||
                 responseHeaders.some(([name]) =>
@@ -266,11 +283,23 @@ export function createOpenShellEgressAuthority(
                 )
               ) {
                 phase = "done";
+                if (handle !== undefined) {
+                  await forwarder.protectResponse(
+                    handle,
+                    {
+                      status: Number(preflight.status_code),
+                      headers: responseHeaders,
+                      body: Buffer.alloc(0),
+                    },
+                    signal.signal,
+                    false,
+                  );
+                }
                 block(false);
                 return;
               }
               head = {
-                context,
+                handle,
                 response: { status: Number(preflight.status_code), headers: responseHeaders },
               };
               phase = "body";
@@ -292,15 +321,12 @@ export function createOpenShellEgressAuthority(
             } else if (event.body !== undefined && phase === "body" && head !== undefined) {
               const body = record(event.body);
               phase = "trailers";
-              const safe =
-                body.end_of_stream === true && Number(body.sequence) === 1
-                  ? await forwarder.protectResponse(
-                      authorization(call.metadata),
-                      string(head.context.sandbox_id),
-                      string(head.context.request_id),
-                      { ...head.response, body: bytes(body.data) },
-                    )
-                  : undefined;
+              const safe = await forwarder.protectResponse(
+                head.handle,
+                { ...head.response, body: bytes(body.data) },
+                signal.signal,
+                body.end_of_stream === true && Number(body.sequence) === 1,
+              );
               if (!safe) {
                 phase = "done";
                 block(true, body.sequence);
@@ -319,18 +345,32 @@ export function createOpenShellEgressAuthority(
             ) {
               phase = "done";
               call.write({ trailers_result: {} });
-            } else if (event.session_end === undefined) {
-              call.destroy(new Error("Egress response policy refused."));
+            } else if (
+              event.session_end !== undefined &&
+              (phase === "trailers" || phase === "done")
+            ) {
+              // TODO: settle only when a qualified supplier protocol proves this decision
+              // was applied. Its best-effort NORMAL/DENIAL notification is not that proof.
+              phase = "done";
+            } else {
+              call.emit("error", {
+                code: status.UNAVAILABLE,
+                message: "Egress response policy refused.",
+              });
             }
           })
           .catch(() => {
-            call.destroy(new Error("Egress response policy unavailable."));
+            call.emit("error", {
+              code: status.UNAVAILABLE,
+              message: "Egress response policy unavailable.",
+            });
           });
       });
       call.on("end", () => {
         void work.finally(() => call.end());
       });
       call.on("error", () => {
+        signal.abort();
         phase = "done";
       });
     },

@@ -469,5 +469,29 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       }
       return [["authorization", `Bearer ${value}`]];
     },
+    credentialRejected(response) {
+      if (
+        response.status !== 401 ||
+        response.body.byteLength > maximumResponseBytes ||
+        response.headers.filter(([name]) => name.toLowerCase() === "content-type").length !== 1 ||
+        !response.headers.some(
+          ([name, value]) =>
+            name.toLowerCase() === "content-type" &&
+            /^application\/json(?:;\s*charset=utf-8)?$/i.test(value),
+        ) ||
+        response.headers.some(([name]) => name.toLowerCase() === "content-encoding")
+      ) {
+        return false;
+      }
+      try {
+        const body = asRecord(
+          parseUnambiguousJson(new TextDecoder("utf-8", { fatal: true }).decode(response.body)),
+        );
+        const error = asRecord(body?.error);
+        return error?.code === "invalid_api_key" && error.type === "invalid_request_error";
+      } catch {
+        return false;
+      }
+    },
     protectResponse: protectedResponse,
   });

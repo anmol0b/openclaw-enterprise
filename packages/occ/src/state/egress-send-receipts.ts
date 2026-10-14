@@ -1,10 +1,12 @@
 import { isDeepStrictEqual } from "node:util";
 import type { EgressRef, StaticMaterialEvidence } from "@openclaw-enterprise/contracts";
 import { ResourceStateConflictError } from "../errors.ts";
-import type { PostgresPlatformState } from "./postgres-state.ts";
+import { immutableCopy } from "@openclaw-enterprise/utils";
+import type { PlatformStateStore } from "./platform-state.ts";
 
 export interface SendAttempt {
   readonly sender: EgressRef;
+  readonly instanceId: string;
   readonly useId: string;
   readonly attemptId: string;
   readonly material: StaticMaterialEvidence | null;
@@ -30,13 +32,131 @@ type Refusal =
   | { readonly kind: "denied" | "not_ready" | "unavailable"; readonly code: string }
   | { readonly kind: "cancelled" | "deadline_exceeded" };
 
+export type SendObservation = Extract<SendOutcome, { dispatch: "confirmed" }>;
+
 export interface StoredSendReceipt extends SendAttempt {
+  /** Observed response/policy decision, never proof the sender applied that decision. */
+  readonly observation: SendObservation | null;
   readonly outcome: SendOutcome;
   readonly settled: boolean;
   readonly feedback: "fenced" | null;
 }
 
-type TransactionOwner = Pick<PostgresPlatformState, "transact" | "queryInTransaction">;
+type TransactionOwner = Pick<PlatformStateStore, "transact">;
+
+export interface EgressSendReceiptRepository {
+  find(input: SendAttempt): Promise<StoredSendReceipt | undefined>;
+  insert(input: SendAttempt): Promise<boolean>;
+  save(receipt: StoredSendReceipt): Promise<void>;
+}
+
+function key(input: SendAttempt): readonly unknown[] {
+  return [input.sender.id, input.sender.generation, input.instanceId, input.useId, input.attemptId];
+}
+
+function initial(input: SendAttempt): StoredSendReceipt {
+  return {
+    ...input,
+    observation: null,
+    outcome: { kind: "uncertain", dispatch: "possible" },
+    settled: false,
+    feedback: null,
+  };
+}
+
+export function memoryEgressSendReceipts(
+  rows: Map<string, StoredSendReceipt>,
+): EgressSendReceiptRepository {
+  const id = (input: SendAttempt) => JSON.stringify(key(input));
+  return {
+    find: async (input) => rows.get(id(input)),
+    insert: async (input) => {
+      if (rows.has(id(input))) {
+        return false;
+      }
+      rows.set(id(input), immutableCopy(initial(attempt(input, input.sender))));
+      return true;
+    },
+    save: async (value) => {
+      const previous = rows.get(id(value));
+      if (previous === undefined) {
+        return;
+      }
+      const saved = {
+        ...previous,
+        outcome: outcome(value.outcome),
+        observation: value.observation === null ? null : observation(value.observation),
+        settled: value.settled,
+        feedback: value.feedback,
+      };
+      // Mirror the SQL receipt constraints in the database substitute.
+      if (
+        (!saved.settled && saved.outcome.kind !== "uncertain") ||
+        ((saved.outcome.kind === "provider_rejected" ||
+          saved.observation?.kind === "provider_rejected") &&
+          saved.feedback !== "fenced") ||
+        (saved.observation !== null &&
+          saved.settled &&
+          saved.outcome.kind !== "uncertain" &&
+          !isDeepStrictEqual(saved.observation, saved.outcome)) ||
+        (saved.feedback !== null &&
+          (saved.feedback !== "fenced" ||
+            saved.material === null ||
+            (saved.observation === null &&
+              (!saved.settled ||
+                saved.outcome.kind === "refused" ||
+                saved.outcome.kind === "uncertain"))))
+      ) {
+        return invalid();
+      }
+      rows.set(id(value), immutableCopy(saved));
+    },
+  };
+}
+
+export function postgresEgressSendReceipts(client: {
+  query(sql: string, values: unknown[]): Promise<{ rows: unknown[] }>;
+}): EgressSendReceiptRepository {
+  const where =
+    "sender_id=$1 AND sender_generation=$2 AND instance_id=$3 AND use_id=$4 AND attempt_id=$5";
+  return {
+    find: async (input) => {
+      const result = await client.query(
+        "SELECT * FROM occ.egress_send_receipts WHERE " + where + " FOR UPDATE",
+        [...key(input)],
+      );
+      const found = result.rows[0];
+      if (found === undefined) {
+        return undefined;
+      }
+      const row = object(found);
+      return receipt(
+        {
+          ...object(row.binding),
+          outcome: row.outcome,
+          observation: row.observation,
+          settled: row.settled,
+          feedback: row.feedback,
+        },
+        input,
+      );
+    },
+    insert: async (input) => {
+      const result = await client.query(
+        "INSERT INTO occ.egress_send_receipts (sender_id,sender_generation,instance_id,use_id,attempt_id,binding,outcome) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING sender_id",
+        [...key(input), input, initial(input).outcome],
+      );
+      return result.rows.length === 1;
+    },
+    save: async (value) => {
+      await client.query(
+        "UPDATE occ.egress_send_receipts SET outcome=$6, observation=$7, settled=$8, feedback=$9 WHERE " +
+          where,
+        [...key(value), value.outcome, value.observation, value.settled, value.feedback],
+      );
+    },
+  };
+}
 
 function invalid(): never {
   throw new ResourceStateConflictError("The send receipt input or recorded state conflicts.");
@@ -143,13 +263,21 @@ function material(value: unknown): StaticMaterialEvidence {
 }
 
 function attempt(value: unknown, authenticatedSender: EgressRef): SendAttempt {
-  const item = exact(value, ["sender", "useId", "attemptId", "material", "deadlineAt"]);
+  const item = exact(value, [
+    "sender",
+    "instanceId",
+    "useId",
+    "attemptId",
+    "material",
+    "deadlineAt",
+  ]);
   const sender = ref(item.sender);
   if (!isDeepStrictEqual(sender, ref(authenticatedSender))) {
     return invalid();
   }
   return {
     sender,
+    instanceId: text(item.instanceId),
     useId: text(item.useId),
     attemptId: text(item.attemptId),
     material: item.material === null ? null : material(item.material),
@@ -236,7 +364,14 @@ function outcome(value: unknown): SendOutcome {
 
 function receipt(row: unknown, input: SendAttempt): StoredSendReceipt {
   const value = object(row);
-  const recorded = attempt(value.binding, input.sender);
+  const {
+    outcome: _outcome,
+    observation: _observation,
+    settled: _settled,
+    feedback: _feedback,
+    ...binding
+  } = value;
+  const recorded = attempt(binding, input.sender);
   if (
     !isDeepStrictEqual(recorded, input) ||
     typeof value.settled !== "boolean" ||
@@ -246,18 +381,19 @@ function receipt(row: unknown, input: SendAttempt): StoredSendReceipt {
   }
   return {
     ...recorded,
+    observation: value.observation === null ? null : observation(value.observation),
     outcome: outcome(value.outcome),
     settled: value.settled,
     feedback: value.feedback,
   };
 }
 
-/**
- * Private trusted-sender persistence, never an Agent-facing authority API.
- * Authentication and classification belong to the caller. Nothing here sends,
- * authorizes, retries, or decides whether an operation may be dispatched.
- * TODO: compose at the static rejection caller with the canonical schema migration.
- */
+function observation(value: unknown): SendObservation {
+  const result = outcome(value);
+  return result.kind === "refused" || result.kind === "uncertain" ? invalid() : result;
+}
+
+/** Trusted sender persistence. Receipts never authorize sending or retries. */
 export class EgressSendReceipts {
   private readonly state: TransactionOwner;
 
@@ -265,63 +401,57 @@ export class EgressSendReceipts {
     this.state = state;
   }
 
-  /**
-   * Persist possible dispatch before sending. Even created=true grants no authority;
-   * the caller still needs its live checks. An existing attempt never permits resend.
-   */
   async begin(
     authenticatedSender: EgressRef,
     value: unknown,
   ): Promise<{ created: boolean; receipt: StoredSendReceipt }> {
     const input = attempt(value, authenticatedSender);
     return this.state.transact(async (unit) => {
-      const inserted = await this.state.queryInTransaction(
-        unit,
-        `INSERT INTO occ.egress_send_receipts (sender_id, sender_generation, use_id, attempt_id, binding, outcome)
-         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING *`,
-        [...this.key(input), input, { kind: "uncertain", dispatch: "possible" }],
-      );
-      const found =
-        inserted.rows[0] ??
-        (
-          await this.state.queryInTransaction(
-            unit,
-            `SELECT * FROM occ.egress_send_receipts WHERE sender_id=$1 AND sender_generation=$2 AND use_id=$3 AND attempt_id=$4`,
-            this.key(input),
-          )
-        ).rows[0];
-      return { created: inserted.rows.length === 1, receipt: receipt(found, input) };
+      const created = await unit.egressSendReceipts.insert(input);
+      return { created, receipt: receipt(await unit.egressSendReceipts.find(input), input) };
     });
   }
 
-  /** Missing and possible records are recovery evidence only, never permission to retry. */
   async recover(
     authenticatedSender: EgressRef,
     value: unknown,
   ): Promise<StoredSendReceipt | undefined> {
     const input = attempt(value, authenticatedSender);
     return this.state.transact(async (unit) => {
-      const found = await this.state.queryInTransaction(
-        unit,
-        `SELECT * FROM occ.egress_send_receipts WHERE sender_id=$1 AND sender_generation=$2 AND use_id=$3 AND attempt_id=$4`,
-        this.key(input),
-      );
-      return found.rows[0] === undefined ? undefined : receipt(found.rows[0], input);
+      const found = await unit.egressSendReceipts.find(input);
+      return found === undefined ? undefined : receipt(found, input);
     });
   }
 
-  /** Settle once. Unknown COMMIT propagates; reconcile using the unchanged attempt. */
+  /** Commit the observation and exact rejection fence before replying to the sender.
+   * It does not establish that the supplier accepted/applied the policy decision. */
+  async observe(
+    authenticatedSender: EgressRef,
+    value: unknown,
+    result: unknown,
+    rejection?: { readonly classification: "credential_rejected"; readonly evidence: unknown },
+  ): Promise<StoredSendReceipt> {
+    return this.write(authenticatedSender, value, observation(result), false, rejection);
+  }
+
+  /** Final settlement requires independent trusted evidence; unknown COMMIT propagates. */
   async record(
     authenticatedSender: EgressRef,
     value: unknown,
     result: unknown,
     rejection?: { readonly classification: "credential_rejected"; readonly evidence: unknown },
   ): Promise<StoredSendReceipt> {
+    return this.write(authenticatedSender, value, outcome(result), true, rejection);
+  }
+
+  private async write(
+    authenticatedSender: EgressRef,
+    value: unknown,
+    final: SendOutcome,
+    settle: boolean,
+    rejection?: { readonly classification: "credential_rejected"; readonly evidence: unknown },
+  ): Promise<StoredSendReceipt> {
     const input = attempt(value, authenticatedSender);
-    const final = outcome(result);
-    if (final.kind === "provider_rejected" && input.material === null) {
-      return invalid();
-    }
     const feedback =
       rejection === undefined ? undefined : exact(rejection, ["classification", "evidence"]);
     const evidence = feedback === undefined ? undefined : material(feedback.evidence);
@@ -338,33 +468,35 @@ export class EgressSendReceipts {
       return invalid();
     }
     return this.state.transact(async (unit) => {
-      const found = await this.state.queryInTransaction(
-        unit,
-        `SELECT * FROM occ.egress_send_receipts WHERE sender_id=$1 AND sender_generation=$2 AND use_id=$3 AND attempt_id=$4 FOR UPDATE`,
-        this.key(input),
-      );
-      const previous = receipt(found.rows[0], input);
-      if (previous.settled) {
-        if (!isDeepStrictEqual(previous.outcome, final)) {
-          return invalid();
-        }
-        if (evidence === undefined || previous.feedback === "fenced") {
-          return previous;
-        }
+      const previous = receipt(await unit.egressSendReceipts.find(input), input);
+      if (previous.settled && (!settle || !isDeepStrictEqual(previous.outcome, final))) {
+        return invalid();
       }
-      if (evidence !== undefined) {
+      if (
+        previous.observation !== null &&
+        (final.kind === "refused" ||
+          (final.kind !== "uncertain" && !isDeepStrictEqual(previous.observation, final)))
+      ) {
+        return invalid();
+      }
+      if (evidence !== undefined && previous.feedback !== "fenced") {
         await unit.credentialSources.rejectEgressMaterial(evidence);
       }
-      const saved = await this.state.queryInTransaction(
-        unit,
-        `UPDATE occ.egress_send_receipts SET outcome=$5, settled=true, feedback=COALESCE(feedback, $6) WHERE sender_id=$1 AND sender_generation=$2 AND use_id=$3 AND attempt_id=$4 RETURNING *`,
-        [...this.key(input), final, evidence === undefined ? null : "fenced"],
-      );
-      return receipt(saved.rows[0], input);
+      const saved: StoredSendReceipt = {
+        ...previous,
+        outcome: settle ? final : previous.outcome,
+        observation: settle ? previous.observation : observation(final),
+        settled: settle,
+        feedback: evidence === undefined ? previous.feedback : "fenced",
+      };
+      if (!isDeepStrictEqual(saved, previous)) {
+        await unit.egressSendReceipts.save(saved);
+      }
+      return saved;
     });
   }
 
-  /** Independent trusted credential classification, including blocked responses. */
+  /** Independently classified rejection of an observed response, never generic failure. */
   async reject(
     authenticatedSender: EgressRef,
     value: unknown,
@@ -376,35 +508,20 @@ export class EgressSendReceipts {
       return invalid();
     }
     return this.state.transact(async (unit) => {
-      const found = await this.state.queryInTransaction(
-        unit,
-        `SELECT * FROM occ.egress_send_receipts WHERE sender_id=$1 AND sender_generation=$2 AND use_id=$3 AND attempt_id=$4 FOR UPDATE`,
-        this.key(input),
-      );
-      const recorded = receipt(found.rows[0], input);
+      const previous = receipt(await unit.egressSendReceipts.find(input), input);
       if (
-        !recorded.settled ||
-        recorded.outcome.kind === "refused" ||
-        recorded.outcome.kind === "uncertain"
+        previous.observation === null &&
+        (!previous.settled ||
+          previous.outcome.kind === "refused" ||
+          previous.outcome.kind === "uncertain")
       ) {
         return invalid();
       }
-      if (recorded.feedback === "fenced") {
-        return recorded.feedback;
+      if (previous.feedback !== "fenced") {
+        await unit.credentialSources.rejectEgressMaterial(evidence);
+        await unit.egressSendReceipts.save({ ...previous, feedback: "fenced" });
       }
-      // The existing store-qualified static fence IS the durable obligation.
-      // It neither rotates material nor follows a pointer to a newer version.
-      await unit.credentialSources.rejectEgressMaterial(evidence);
-      await this.state.queryInTransaction(
-        unit,
-        `UPDATE occ.egress_send_receipts SET feedback='fenced' WHERE sender_id=$1 AND sender_generation=$2 AND use_id=$3 AND attempt_id=$4`,
-        this.key(input),
-      );
-      return "fenced";
+      return "fenced" as const;
     });
-  }
-
-  private key(input: SendAttempt): readonly unknown[] {
-    return [input.sender.id, input.sender.generation, input.useId, input.attemptId];
   }
 }

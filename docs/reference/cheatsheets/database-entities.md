@@ -143,6 +143,15 @@ See [protected inference](../credential-sources/protected-inference.md).
 - `namespace_id`, `agent_id`, `revision_id`
 - `installation`
 
+### `egress_send_receipts`
+
+Retains exact sender attempts and safe observations independently of final delivery proof.
+See [protected inference](../credential-sources/protected-inference.md).
+
+- `sender_id`, `sender_generation`, `instance_id`, `use_id`, `attempt_id`
+- `binding` (selected material evidence and original deadline)
+- `outcome`, `observation`, `settled`, `feedback`
+
 ### `egress_rejected_material`
 
 Fences a provider-rejected version independently of later authoritative rereads.
