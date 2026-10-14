@@ -1525,8 +1525,30 @@ test("Default Codex Preset refuses a blocked OpenClaw provider before writes", a
     assert.deepEqual(nonAuthWriteRequests(requests), []);
     assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins, values.plugins);
 
-    // Explicit permission repair preserves the original restriction and allows ordinary creation.
+    // Normalized duplicate entries must refuse before any Secret, Configuration or Agent write.
     values.plugins.allow.push(provider);
+    for (const entries of [
+      { [provider]: { enabled: true }, [` ${provider.toUpperCase()} `]: { enabled: false } },
+      { [` ${provider.toUpperCase()} `]: { enabled: true }, [provider]: { enabled: false } },
+      { [provider.toUpperCase()]: { enabled: false } },
+      { [provider]: { enabled: false }, [` ${provider} `]: {} },
+    ]) {
+      values.plugins.entries = entries;
+      await configuration.fill(JSON.stringify(values));
+      await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+      await page
+        .getByRole("alert")
+        .filter({ hasText: `plugins.entries.${provider}.enabled` })
+        .waitFor();
+      assert.deepEqual(nonAuthWriteRequests(requests), []);
+      assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins, values.plugins);
+    }
+    // A later explicit enable wins without rewriting either key or the restrictive allowlist.
+    values.plugins.entries = {
+      [provider]: { enabled: false },
+      [` ${provider.toUpperCase()} `]: { enabled: true },
+    };
+    // Explicit permission repair preserves the original restriction and allows ordinary creation.
     await configuration.fill(JSON.stringify(values));
     const createdResponse = page.waitForResponse(
       (response) =>

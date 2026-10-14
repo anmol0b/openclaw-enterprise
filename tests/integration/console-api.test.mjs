@@ -477,6 +477,13 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
     [{ deny: [" CODEX "] }, "plugins.deny"],
     [{ enabled: false }, "plugins.enabled"],
     [{ entries: { codex: { enabled: false } } }, "plugins.entries.codex.enabled"],
+    // Normalized IDs fold in source order; later explicit booleans control activation.
+    ...[
+      { codex: { enabled: true }, " CODEX ": { enabled: false } },
+      { " CODEX ": { enabled: true }, codex: { enabled: false } },
+      { CoDeX: { enabled: false } },
+      { codex: { enabled: false }, " codex ": {} },
+    ].map((entries) => [{ entries }, "plugins.entries.codex.enabled"]),
     [{ allow: "codex" }, "plugins.allow"],
     [{ deny: [42] }, "plugins.deny"],
   ];
@@ -528,6 +535,29 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
     assert.deepEqual(saved.data.values.plugins, values.plugins);
   }
 
+  for (const aliasFirst of [false, true]) {
+    const values = createHarnessConfiguration("codex", "gpt-5.1");
+    const transport = values.plugins.entries.codex.config;
+    values.plugins.entries = aliasFirst
+      ? { " CODEX ": { enabled: false }, codex: { enabled: true, config: transport } }
+      : { codex: { enabled: false, config: transport }, " CODEX ": { enabled: true } };
+    const configuration = await fixture.createConfiguration(namespace.id, values);
+    const response = await fixture.request("POST", `/namespaces/${namespace.id}/agents`, {
+      body: {
+        name: `Ordered Codex ${aliasFirst}`,
+        executionMode: "dedicated",
+        configurationId: configuration.id,
+        harnessAuth: { method: "api_key", source: secret.ref },
+      },
+    });
+    assert.equal(response.status, 201, JSON.stringify(response.body));
+    const saved = await fixture.request(
+      "GET",
+      `/namespaces/${namespace.id}/configurations/${configuration.id}`,
+    );
+    assert.deepEqual(saved.data.values.plugins, values.plugins);
+  }
+
   const existing = await fixture.createAgent(
     namespace.id,
     "Policy update Agent",
@@ -538,7 +568,7 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
     },
   );
   const blocked = createHarnessConfiguration("codex", "gpt-5.1");
-  blocked.plugins.allow = ["knowledge"];
+  blocked.plugins.entries[" CODEX "] = { enabled: false };
   // Staged Configuration edits cannot bypass validation through an existing Agent or deployment.
   await fixture.updateConfiguration(namespace.id, existing.configurationId, blocked);
   for (const [method, path, body] of [
@@ -552,7 +582,10 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
     const response = await fixture.request(method, path, { body });
     assert.equal(response.status, 400, `${method} ${path}: ${JSON.stringify(response.body)}`);
     assert.equal(response.body.error.code, "INVALID_REQUEST");
-    assert.ok(response.body.error.message.includes("plugins.allow"), response.body.error.message);
+    assert.ok(
+      response.body.error.message.includes("plugins.entries.codex.enabled"),
+      response.body.error.message,
+    );
   }
   const saved = await fixture.request(
     "GET",
@@ -590,7 +623,7 @@ test("REST Codex Agent admission rejects blocked native plugin policy without ch
   assert.equal(provisioned.status, 409, JSON.stringify(provisioned.body));
   assert.equal(provisioned.body.error.code, "RESOURCE_CONFLICT");
   assert.ok(
-    provisioned.body.error.message.includes("plugins.allow"),
+    provisioned.body.error.message.includes("plugins.entries.codex.enabled"),
     provisioned.body.error.message,
   );
 });

@@ -53,7 +53,20 @@ export function requireCodexPluginPolicy(
   if (allow.length > 0 && !allow.includes("codex")) {
     throw createError("plugins.allow", `must include codex ${requirement}`);
   }
-  if (asRecord(asRecord(plugins?.entries)?.codex)?.enabled === false) {
+  let enabled: boolean | undefined;
+  // OpenClaw folds normalized entry IDs in order; only an explicit boolean replaces enablement.
+  for (const [id, value] of Object.entries(asRecord(plugins?.entries) ?? {})) {
+    if (id.trim().toLowerCase() !== "codex") {
+      continue;
+    }
+    const entry = asRecord(value);
+    if (entry === undefined) {
+      enabled = undefined;
+    } else if (typeof entry.enabled === "boolean") {
+      enabled = entry.enabled;
+    }
+  }
+  if (enabled === false) {
     throw createError("plugins.entries.codex.enabled", `must not be false ${requirement}`);
   }
 }
