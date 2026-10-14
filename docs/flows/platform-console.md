@@ -8,14 +8,12 @@ last_updated_session: authoring-run/b6795ba9-f6ca-4258-9c2e-e964cd0860de
 
 ## Overview
 
-`/console/` renders session-authorized resources.
-The [console reference](../reference/console.md) owns user-visible behavior;
-API and IAM authorize access.
+`/console/` renders authorized resources; API and IAM authorize access.
+The [console reference](../reference/console.md) owns user-visible behavior.
 
 ## Entry Points
 
-- Browser entry: `apps/controller/src/console/console.mjs` composes the session,
-  request client, view lifetime, navigation, and shell.
+- Browser entry: `apps/controller/src/console/console.mjs` composes the Console.
 - `api-client.mjs` owns cancellation and session expiry; `view-lifetime.mjs`
   owns generation and abort state; `navigation.mjs` owns return paths and history;
   `shell.mjs` owns navigation and collections.
@@ -189,9 +187,9 @@ missing wiring or failed dependencies return errors.
 
 `apps/controller/src/console/agents/create.mjs:renderCreateAgent` composes the form.
 Provider/Harness changes reset incompatible credentials and models.
-`updateModelConfiguration` preserves allow/deny policy, changing only
-Codex's runtime entry. The form rejects conflicts before writes;
-Kubernetes Compute's `validateHarnessAuth` enforces this for API callers.
+`updateModelConfiguration` preserves allow/deny policy and updates Codex's runtime entry.
+The form refuses blocked Codex/OpenClaw provider plugins before writes.
+Kubernetes `validateHarnessAuth` enforces Codex policy for API callers.
 See [creation](../reference/console/create-and-deploy.md) for supported combinations.
 
 `agents/plugin-fields.mjs:createPluginFields` edits Agent `plugins` separately

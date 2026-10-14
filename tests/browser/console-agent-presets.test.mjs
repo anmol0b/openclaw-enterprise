@@ -1314,7 +1314,14 @@ test("API-key Presets keep their credential provider fixed while allowing model 
 });
 
 test("Harness switches preserve unrestricted and explicit native plugin allowlists through Agent creation", async (t) => {
-  for (const allow of [undefined, [], ["knowledge"], ["knowledge", "codex"], ["codex"]]) {
+  for (const allow of [
+    undefined,
+    [],
+    ["knowledge"],
+    ["knowledge", "codex"],
+    ["codex"],
+    ["knowledge", "codex", "openai"],
+  ]) {
     const fixture = await createConsoleAppFixture(t);
     await fixture.bootstrap();
     const namespace = await fixture.createNamespace("Native plugin settings", { ready: true });
@@ -1352,6 +1359,19 @@ test("Harness switches preserve unrestricted and explicit native plugin allowlis
     assert.equal(dedicated.plugins.entries.codex.enabled, true);
     await harness.selectOption("openclaw");
     assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins, values.plugins);
+
+    if (allow?.length && !allow.includes("openai")) {
+      // Retaining a restriction must not create an OpenClaw Agent with its provider disabled.
+      const requests = apiRequests(page, fixture.origin);
+      await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+      await page
+        .getByRole("alert")
+        .filter({ hasText: "plugins.allow must include openai" })
+        .waitFor();
+      assert.deepEqual(nonAuthWriteRequests(requests), []);
+      assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins, values.plugins);
+      continue;
+    }
 
     // Save through the ordinary Agent form and read its owned Configuration back from the API.
     const createdResponse = page.waitForResponse(
@@ -1467,6 +1487,61 @@ test("Codex policy conflicts stop Console creation before writes and allow an ex
       `/namespaces/${namespace.id}/configurations/${created.configurationId}`,
     );
     assert.deepEqual(saved.data.values.plugins, blocked.plugins);
+  }
+});
+
+test("Default Codex Preset refuses a blocked OpenClaw provider before writes", async (t) => {
+  for (const provider of ["openai", "anthropic"]) {
+    const fixture = await createConsoleAppFixture(t);
+    await fixture.bootstrap();
+    const namespace = await fixture.createNamespace(`OpenClaw ${provider} policy`, { ready: true });
+    const { page } = await newPage(t, fixture);
+    await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+    const presets = await fixture.request("GET", `/namespaces/${namespace.id}/presets`);
+    const starter = presets.data.find((preset) => preset.name === "default-codex");
+    await page.getByLabel("Preset template", { exact: true }).selectOption(starter.id);
+    await page.getByRole("button", { name: "Use Preset", exact: true }).click();
+    await openAdvancedSettings(page);
+    if (provider === "openai") {
+      await page.getByLabel("Harness", { exact: true }).selectOption("openclaw");
+    } else {
+      await page.getByLabel("Provider", { exact: true }).selectOption(provider);
+    }
+    await page.getByLabel("Agent name", { exact: true }).fill(`OpenClaw ${provider} Agent`);
+    await enterManualModel(
+      page,
+      "synthetic-provider-key",
+      provider === "openai" ? "gpt-6-astra" : "claude-opus-5-5",
+    );
+    const configuration = page.getByLabel("Configuration JSON", { exact: true });
+    const values = JSON.parse(await configuration.inputValue());
+    assert.deepEqual(values.plugins.allow, ["codex"]);
+    const requests = apiRequests(page, fixture.origin);
+    await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+    await page
+      .getByRole("alert")
+      .filter({ hasText: `plugins.allow must include ${provider}` })
+      .waitFor();
+    assert.deepEqual(nonAuthWriteRequests(requests), []);
+    assert.deepEqual(JSON.parse(await configuration.inputValue()).plugins, values.plugins);
+
+    // Explicit permission repair preserves the original restriction and allows ordinary creation.
+    values.plugins.allow.push(provider);
+    await configuration.fill(JSON.stringify(values));
+    const createdResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/namespaces/${namespace.id}/agents`) &&
+        response.request().method() === "POST",
+    );
+    await page.getByRole("button", { name: "Create Agent", exact: true }).click();
+    const response = await createdResponse;
+    assert.equal(response.status(), 201, await response.text());
+    const created = (await response.json()).data;
+    const saved = await fixture.request(
+      "GET",
+      `/namespaces/${namespace.id}/configurations/${created.configurationId}`,
+    );
+    assert.deepEqual(saved.data.values.plugins, values.plugins);
   }
 });
 

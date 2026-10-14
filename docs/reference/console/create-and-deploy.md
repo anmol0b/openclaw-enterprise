@@ -55,8 +55,9 @@ still block initial workspace files and Secret-backed environment projection.
    open **Advanced settings**. Selection changes preserve unrelated JSON edits;
    **Reset template** replaces them. Harness switches preserve native `plugins.allow`
    and `plugins.deny`; only Codex's runtime entry changes. Missing or empty allowlists
-   remain unrestricted. If the policy blocks Codex, explicitly edit **Configuration JSON**
-   or select OpenClaw. Native Configuration is separate from Agent plugin policies.
+   remain unrestricted. If the policy blocks Codex or the selected OpenClaw provider,
+   explicitly edit **Configuration JSON** or choose a permitted Harness and provider.
+   Native Configuration is separate from Agent plugin policies.
 5. Under **Repository access**, optionally select up to 16 approved repositories
    and set their access levels. Kubernetes supports Codex (Dedicated) or OpenClaw
    (Embedded), without a Sandbox Driver. Dedicated OpenClaw requires a Sandbox

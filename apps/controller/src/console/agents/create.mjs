@@ -12,10 +12,20 @@ import { createSlackApproverField } from "./slack-approvers.mjs";
 import { renderChannels } from "../channels.mjs";
 import { GENERIC_CONFLICT, link, message, namespacePath, rejectionMessage } from "./list.mjs";
 
-function codexPluginPolicyConflict(values) {
+function nativePluginPolicyConflict(values, harnessId) {
+  const selected = values.agents?.defaults?.model;
+  const primary = typeof selected === "string" ? selected : selected?.primary;
+  const provider = typeof primary === "string" ? primary.split("/")[0] : undefined;
+  // These Console providers have matching bundled plugin IDs. Custom Presets retain their own policy.
+  const pluginId = harnessId === "codex" ? "codex" : provider;
+  if (!["codex", "openai", "anthropic"].includes(pluginId)) {
+    return "";
+  }
+  const requirement =
+    harnessId === "codex" ? "the Codex Harness" : "the selected OpenClaw provider";
   const plugins = values.plugins ?? {};
   if (plugins.enabled === false) {
-    return "Configuration setting plugins.enabled must not be false for the Codex Harness.";
+    return `Configuration setting plugins.enabled must not be false for ${requirement}.`;
   }
   for (const key of ["allow", "deny"]) {
     const list = plugins[key];
@@ -24,15 +34,15 @@ function codexPluginPolicyConflict(values) {
     }
   }
   const ids = (list) => (list ?? []).map((id) => id.trim().toLowerCase()).filter(Boolean);
-  if (ids(plugins.deny).includes("codex")) {
-    return "Configuration setting plugins.deny must not list codex for the Codex Harness.";
+  if (ids(plugins.deny).includes(pluginId)) {
+    return `Configuration setting plugins.deny must not list ${pluginId} for ${requirement}.`;
   }
   const allow = ids(plugins.allow);
-  if (allow.length > 0 && !allow.includes("codex")) {
-    return "Configuration setting plugins.allow must include codex for the Codex Harness.";
+  if (allow.length > 0 && !allow.includes(pluginId)) {
+    return `Configuration setting plugins.allow must include ${pluginId} for ${requirement}.`;
   }
-  if (plugins.entries?.codex?.enabled === false) {
-    return "Configuration setting plugins.entries.codex.enabled must not be false for the Codex Harness.";
+  if (plugins.entries?.[pluginId]?.enabled === false) {
+    return `Configuration setting plugins.entries.${pluginId}.enabled must not be false for ${requirement}.`;
   }
   return "";
 }
@@ -769,7 +779,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     }
     configuration.value = JSON.stringify(values, null, 2);
     configuration.setCustomValidity("");
-    feedback.textContent = harness.value === "codex" ? codexPluginPolicyConflict(values) : "";
+    feedback.textContent = nativePluginPolicyConflict(values, harness.value);
     renderChannelEditor();
   }
   function clearModelCredential() {
@@ -1775,9 +1785,9 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         "Channels require Dedicated execution. Select Dedicated under Runtime details or disable configured channels before creating the Agent.";
       return;
     }
-    const pluginConflict = harness.value === "codex" ? codexPluginPolicyConflict(values) : "";
+    const pluginConflict = nativePluginPolicyConflict(values, harness.value);
     if (pluginConflict) {
-      feedback.textContent = `${pluginConflict} Update Configuration JSON or select OpenClaw.`;
+      feedback.textContent = `${pluginConflict} Update Configuration JSON or choose a permitted Harness and provider.`;
       return;
     }
     const repositoryBindings = repositories.bindings();

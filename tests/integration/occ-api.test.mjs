@@ -283,7 +283,7 @@ function provisioningRequestBody(namespaceId, secrets, { configuration, ...overr
     executionMode: "dedicated",
     configuration: {
       kind: "agent",
-      values: { agents: { defaults: { model: "codex/gpt-6-astra" } } },
+      values: createHarnessConfiguration("codex", "gpt-6-astra"),
       secretBindings: {
         TOOL_API_KEY: {
           source: exactSecretRef(namespaceId, secrets.toolApiKey.id),
@@ -1265,6 +1265,7 @@ test("Agent reads return the bound credentialSources; revision reads return only
     id: "credential-gateway-api",
     capability: "credential_gateway",
     implementation: "test-recording-gateway",
+    validateSourceConfig() {},
     async listSourceTypes() {
       return [
         {
@@ -1407,6 +1408,7 @@ test("refresh source PATCH and rotate refuse a stale refresh token and audit a f
     id: "credential-gateway-refresh-api",
     capability: "credential_gateway",
     implementation: "test-recording-gateway",
+    validateSourceConfig() {},
     async listSourceTypes() {
       return [
         {
@@ -5705,7 +5707,14 @@ test("Agent provisioning API validates inline configuration with existing Secret
   // without its value, so the caller can fix it.
   const kubernetes = createTestKubernetesComputeDriver("compute-provisioning-validation");
   computeDriver.validateAgentProvisioning = (input) => kubernetes.validateAgentProvisioning(input);
-  const model = { agents: { defaults: { model: "codex/gpt-6-astra" } } };
+  const model = {
+    agents: {
+      defaults: {
+        model: "codex/gpt-6-astra",
+        models: { "codex/gpt-6-astra": { agentRuntime: { id: "codex" } } },
+      },
+    },
+  };
   for (const [gateway, message] of [
     [
       { auth: { mode: "token" } },
@@ -5732,6 +5741,23 @@ test("Agent provisioning API validates inline configuration with existing Secret
       { code: "RESOURCE_CONFLICT", message },
     );
     assert.doesNotMatch(JSON.stringify(refused.body), /10\.99\./);
+  }
+  // Configuration failures remain actionable 400s even when Compute resolves the Harness first.
+  for (const [values, message] of [
+    [
+      { agents: { defaults: { model: "codex/gpt-6-astra" } } },
+      "The configured Agent model requires an explicit supported Harness runtime.",
+    ],
+    [{ agents: [] }, "Configuration setting agents must be an object."],
+  ]) {
+    const refused = await injectedRequest(
+      fixture.app,
+      "POST",
+      `/namespaces/${namespace.data.id}/agents/provision`,
+      { body: provisioningRequestBody(namespace.data.id, secrets, { configuration: { values } }) },
+    );
+    assert.equal(refused.status, 400, JSON.stringify(refused.body));
+    assert.deepEqual(refused.body.error, { code: "INVALID_REQUEST", message });
   }
   // The retired Codex untrusted approval policy is one of those gateway settings (finding 987).
   const untrustedPolicy = await injectedRequest(
@@ -5816,6 +5842,16 @@ test("Agent provisioning API validates inline configuration with existing Secret
         },
       },
       'Configuration setting models.providers.openai.request.headers must not set the credential header "Authorization" (its name marks a credential): model credentials come from the Agent\'s Harness authentication binding.',
+    ],
+    // Finding 1311: provisioning runs the agents roster rules Configuration save runs, with the
+    // same text, so a roster every deployment refuses is refused before anything is stored.
+    [
+      { agents: { ...model.agents, entries: { "main!": {} } } },
+      'The OpenClaw Gateway rejects the Agent ID in agents.entries["main!"]: use up to 64 letters, digits, _ or -, not starting with -.',
+    ],
+    [
+      { agents: { ...model.agents, entries: { main: {}, helper: {} } } },
+      'The OpenClaw Gateway needs agents.ownership "explicit" for more than one agents.entries entry: set it, or keep one entry.',
     ],
   ]) {
     const refused = await injectedRequest(
