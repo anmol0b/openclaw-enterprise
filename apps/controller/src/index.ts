@@ -6,10 +6,6 @@ import {
   AgentRuntimeCredentialResponse,
   AgentRuntimeLogsResponse,
   AgentRuntimeResponse,
-  AgentNetworkPolicyResponse,
-  AgentPolicySimulationResponse,
-  AgentPolicySimulationResultResponse,
-  AgentNetworkPolicyEvaluationResponse,
   CredentialSourceResponse,
   ErrorDetail as ErrorDetailSchema,
   ErrorResponse,
@@ -3987,10 +3983,6 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     routes.addSchema(ErrorResponse);
     routes.addSchema(AgentDeploymentDiagnosticsResponse);
     routes.addSchema(AgentRuntimeResponse);
-    routes.addSchema(AgentNetworkPolicyResponse);
-    routes.addSchema(AgentPolicySimulationResponse);
-    routes.addSchema(AgentPolicySimulationResultResponse);
-    routes.addSchema(AgentNetworkPolicyEvaluationResponse);
     routes.addSchema(AgentRuntimeLogsResponse);
     routes.addSchema(AgentRuntimeCredentialResponse);
     routes.addSchema(SecretResponse);

@@ -344,6 +344,18 @@
     },
     {
       "path": "tests/conformance/split-layout-adopt.test.mjs"
+    },
+    {
+      "path": "tests/conformance/policy-simulation.test.mjs"
+    },
+    {
+      "path": "tests/conformance/sandbox-network-policy.test.mjs"
+    },
+    {
+      "path": "tests/integration/agent-network-policy.test.mjs"
+    },
+    {
+      "path": "tests/integration/agent-policy-simulation.test.mjs"
     }
   ]
 }

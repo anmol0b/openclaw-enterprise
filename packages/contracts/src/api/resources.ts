@@ -1521,16 +1521,16 @@ export const AgentNetworkPolicyResponse = Type.Object(
     ),
     meta: Meta,
   },
-  { $id: "AgentNetworkPolicyResponse", additionalProperties: false },
+  { additionalProperties: false },
 );
 
 export const AgentPolicySimulationResponse = Type.Object(
   { data: PolicySimulationDescriptionSchema, meta: Meta },
-  { $id: "AgentPolicySimulationResponse", additionalProperties: false },
+  { additionalProperties: false },
 );
 export const AgentPolicySimulationResultResponse = Type.Object(
   { data: AgentPolicySimulationResultSchema, meta: Meta },
-  { $id: "AgentPolicySimulationResultResponse", additionalProperties: false },
+  { additionalProperties: false },
 );
 
 export const AgentNetworkPolicyEvaluationResponse = Type.Object(
@@ -1541,7 +1541,7 @@ export const AgentNetworkPolicyEvaluationResponse = Type.Object(
     ),
     meta: Meta,
   },
-  { $id: "AgentNetworkPolicyEvaluationResponse", additionalProperties: false },
+  { additionalProperties: false },
 );
 
 export const AgentRuntimeLogPageSchema = Type.Object(

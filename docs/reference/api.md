@@ -6560,10 +6560,6 @@ Reusable schema names are referenced by operation request and response tables.
 | --- | --- |
 | `SafeJsonValue` | `string or boolean or number or null or array<SafeJsonValue> or object<string, SafeJsonValue>` |
 | `PluginDriverIdentity` | `object` |
-| `AgentNetworkPolicyResponse` | `object` |
-| `AgentPolicySimulationResponse` | `object` |
-| `AgentPolicySimulationResultResponse` | `object` |
-| `AgentNetworkPolicyEvaluationResponse` | `object` |
 | `AgentRuntimeLogsResponse` | `object` |
 | `AgentRuntimeCredentialResponse` | `object` |
 | `SecretResponse` | `object` |
