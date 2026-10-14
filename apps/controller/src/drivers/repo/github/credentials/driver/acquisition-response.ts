@@ -14,7 +14,6 @@ type AcquisitionObservation = Readonly<{
   packet: Record<string, unknown> | undefined;
   credential: CredentialRef | undefined;
   observedWallMs: number;
-  expiry: number;
 }>;
 
 type ResponseObservationDependencies = Readonly<{
@@ -76,7 +75,7 @@ export function observeAcquisitionResponse({
       bytes.fill(0);
     }
   }
-  return { packet, credential, observedWallMs, expiry };
+  return { packet, credential, observedWallMs };
 }
 
 export function classifyAcquisitionResponse(
@@ -93,7 +92,40 @@ export function classifyAcquisitionResponse(
   if (status !== 201 || !observation?.credential) {
     return { kind: "uncertain" };
   }
-  const { packet, credential, observedWallMs, expiry } = observation;
+  const { packet, credential, observedWallMs } = observation;
+  const decision = validateInstallationTokenResponse(status, packet, observedWallMs, {
+    repositoryId,
+    repository,
+    permissions,
+    minimumValidityMs,
+  });
+  if (decision.kind !== "validated") {
+    return decision;
+  }
+  return {
+    kind: "acquired",
+    credential,
+    observedWallMs,
+    expiresAtWallMs: decision.usableUntil,
+  };
+}
+
+/** Shared by session acquisition and the OCE-prepared background owner. */
+export function validateInstallationTokenResponse(
+  status: number,
+  packet: Record<string, unknown> | undefined,
+  observedWallMs: number,
+  { repositoryId, repository, permissions, minimumValidityMs }: AcquisitionPolicy,
+):
+  | Readonly<{ kind: "validated"; providerExpiresAt: number; usableUntil: number }>
+  | Exclude<AcquisitionDecision, { kind: "acquired" }> {
+  if ([401, 403, 404, 422].includes(status)) {
+    return { kind: "reauthorization-required", code: "authority-unavailable" };
+  }
+  if (status !== 201) {
+    return { kind: "uncertain" };
+  }
+  const expiry = typeof packet?.expires_at === "string" ? Date.parse(packet.expires_at) : NaN;
   const token = packet?.token;
   if (typeof token !== "string" || !/^[\x21-\x7e]{1,16384}$/.test(token)) {
     return { kind: "uncertain" };
@@ -117,6 +149,9 @@ export function classifyAcquisitionResponse(
     return { kind: "rejected", code: "scope-mismatch" };
   }
   if (
+    typeof packet?.expires_at !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(packet.expires_at) ||
+    !Number.isFinite(observedWallMs) ||
     !Number.isFinite(expiry) ||
     expiry <= observedWallMs + providerClockSkewMs ||
     expiry > observedWallMs + tokenLifetimeMs + providerClockSkewMs
@@ -127,9 +162,8 @@ export function classifyAcquisitionResponse(
     return { kind: "rejected", code: "insufficient-validity" };
   }
   return {
-    kind: "acquired",
-    credential,
-    observedWallMs,
-    expiresAtWallMs: expiry - providerClockSkewMs,
+    kind: "validated",
+    providerExpiresAt: expiry,
+    usableUntil: expiry - providerClockSkewMs,
   };
 }
