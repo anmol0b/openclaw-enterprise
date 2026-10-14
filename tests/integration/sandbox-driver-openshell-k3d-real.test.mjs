@@ -4382,9 +4382,12 @@ async function assertCredentialRouteEnforcement(topology) {
     `printf 'FOREIGN_PLACEHOLDER=%s\\n' "$(grep -o '"placeholder":[a-z]*' "$body" ` +
       `2>/dev/null | cut -d: -f2)"`,
     `printf 'FOREIGN_LENGTH=%s\\n' "$(grep -o '"length":[0-9]*' "$body" 2>/dev/null | cut -d: -f2)"`,
-    // The model host from a binary outside the model profile.
-    `probe MODEL curl -sS -o /dev/null -w '%{http_code},%{http_connect}' --max-time 20 ` +
-      `-H "Authorization: Bearer $model" ${modelBaseUrl}/models`,
+    // A minimal Responses request, the one API every model endpoint must serve, from a command
+    // Codex started rather than from Codex itself.
+    `probe MODEL curl -sS -o /dev/null -w '%{http_code},%{http_connect}' --max-time 60 ` +
+      `-H "Authorization: Bearer $model" -H 'Content-Type: application/json' ` +
+      `-d '${JSON.stringify({ model: providerModel, input: "Reply with OK.", max_output_tokens: 16 })}' ` +
+      `${modelBaseUrl}/responses`,
     // Direct connections that skip the proxy, by name and by address.
     // OpenShell may intercept these transparently, so a host the policy allows can still answer;
     // a host it denies must not.
