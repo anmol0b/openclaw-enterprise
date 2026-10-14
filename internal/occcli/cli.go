@@ -575,7 +575,7 @@ func (app *application) credentialSourceCommand() *cobra.Command {
 	var updateFile string
 	update := &cobra.Command{
 		Use:   "update ID",
-		Short: "Push current or replacement Secret values to the gateway copy",
+		Short: "Update static credentials or supply refresh reauthorization material",
 		Args:  idArgs(credentialSourceIDArg),
 		RunE: func(command *cobra.Command, args []string) error {
 			// An explicit empty --file was refused by refuseEmptyFlags.

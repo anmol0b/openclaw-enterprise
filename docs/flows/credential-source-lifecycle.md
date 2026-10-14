@@ -8,9 +8,9 @@ last_updated_session: authoring-run/92488d54-b44d-449b-b76a-5ac69c9965d2
 
 ## Overview
 
-An authorized caller registers, binds, deploys, updates, withdraws and deletes a
-credential source. OCC stores metadata; the gateway holds values. Admission freezes
-identity; Compute receives the live record.
+Authorized callers manage credential sources through registration, deployment,
+updates, withdrawal and deletion. OCC stores metadata; gateways hold values.
+Admission freezes identity; Compute receives the live record.
 [OpenShell provisioning](openshell-sandbox-provisioning.md) owns attachment and readiness.
 
 ## Entry Points
@@ -83,9 +83,9 @@ OpenShell-safe form; status and deletion do not guess ownership from an invalid 
 
 `packages/occ/src/index.ts:createCredentialSource`
 
-OCC first rejects any Secret reference to another Namespace with
+OCC rejects cross-Namespace Secret references with
 `SecretBindingValidationError` (`400 INVALID_REQUEST`, "Credential source
-Secrets cannot cross Namespaces."). For each Secret reference, it then authorizes
+Secrets cannot cross Namespaces."). For each reference, it authorizes
 `secret:operate`, locks the Secret (a Secret the Namespace does not hold is
 `404`), and calls the owning Driver's optional
 `withValue`. The Kubernetes Secret Driver verifies the stored object's ownership
@@ -172,8 +172,8 @@ record to Compute, which rechecks the match in `harnessAuthForRevision`. It
 loads each other listed source the same way, skips the Harness source and any
 source withdrawn from the revision, and returns `CREDENTIAL_SOURCE_UNAVAILABLE`
 for one that is missing or changed.
-Compute checks the list in `credentialSourcesForRevision` and attaches it after
-the model source. The next owner is the [OpenShell Sandbox provisioning flow](openshell-sandbox-provisioning.md#2-derive-the-provider-owned-harness-request).
+Compute checks `credentialSourcesForRevision` and attaches the list after
+the model source. See [OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md#2-derive-the-provider-owned-harness-request).
 
 ### 7. Delete the source
 
@@ -324,6 +324,8 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 
 - 2026-10-09 08:30: Replays take over withdrawal work. (fix-892-894)
 - 2026-10-09 06:00: Exhausted withdrawals retry later without Compute maintenance. (fix-887)
+- 2026-10-09 10:38: Distinguish static Secret references from refresh handoff in the accompanying change. (authoring-run/f7c45a46-6f14-42ea-acd8-7f8990a41d89 - 1c6ac12fb)
+
 - 2026-10-08 20:30: Maintenance leaves denied withdrawals for a replay. (fix-853)
 - 2026-10-08 17:30: Withdrawal covers unretired predecessors. (fix-816-819)
 - 2026-10-08 16:00: Preparation rechecks revoked withdrawals against a late Sandbox create. (fix-790)
