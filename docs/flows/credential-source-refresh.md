@@ -84,8 +84,9 @@ marks the source `ready`, records the last committed Secret IDs in internal
 source-owned provenance, clears live Secret references, and appends the success
 audit in one transaction (`handoffCredentialSourceSecrets`). The response's
 `secrets` is `{}`. The operator may delete bootstrap Secrets once no other
-consumer holds them. A failed commit retains the prior state; an unknown
-external outcome does not authorize another configure or mint.
+consumer holds them. A definite rollback retains the prior state. If the database
+commit outcome is unknown, reconcile the handoff and success audit before acting.
+An unknown external outcome does not authorize another configure or mint.
 
 ### 3. Background refresh
 
@@ -124,16 +125,19 @@ reports the failed mint, and OCC records a `failure` audit event. OpenShell
 starts a new authorization epoch on each reconfiguration, even one whose mint
 fails, which revokes the stable placeholders of running Sandboxes, so Agents
 need a redeploy. On success, the new last-committed IDs, live-reference release
-and success audit commit together. Failed or unknown outcomes retain the prior
-committed evidence; it is not a record of every externally submitted attempt.
+and success audit commit together. A failed or unknown configure/mint response
+before handoff does not replace the prior committed evidence. An unknown database
+commit leaves the handoff and success-audit outcome unknown. The evidence is not
+a record of every externally submitted attempt.
 
 `packages/occ/src/index.ts:rotateCredentialSource`
 
 `POST …/rotate` requires `credential_source:update`, a `ready` source, and a
 `refresh` type; a static type returns `409`. It calls `rotate` under the source
 lock and returns the new status. The HTTP handler commits the audit event in
-the same transaction; a failed mint commits a `failure` event instead. A commit
-whose outcome is unknown records neither event.
+the same transaction; a failed mint commits a `failure` event instead. An unknown
+commit does not run the rollback-triggered failure audit; whether the success
+event committed remains unknown and requires reconciliation.
 
 ### 5. Deletion
 
@@ -150,7 +154,7 @@ which sends `DeleteProviderRefresh` with `allow_missing`, and then the gateway's
 - `oauth_token_endpoint_unavailable` means the OpenShell gateway Pod could not
   reach `token_url`; check its NetworkPolicy and trust of the issuer's CA.
 - `reauthorize` follows a revoked refresh token; supply new material with `PATCH`.
-- `tests/integration/sandbox-driver-openshell-k3d-real.test.mjs` proves minting,
+- When run, `tests/integration/sandbox-driver-openshell-k3d-real.test.mjs` exercises minting,
   background re-minting, forced rotation, reauthorization, a failed update, and deletion against
   a real Keycloak. `tests/conformance/credential-source-occ.test.mjs` covers OCC
   ordering and cleanup.

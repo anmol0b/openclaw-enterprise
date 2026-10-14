@@ -322,9 +322,10 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 
 - 2026-10-09 20:27: Integrate main lifecycle, native workspace and readiness contracts without dropping endpoint safeguards. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - 90268463bbd255c3c13a0e0bdeb437728189eb1a)
 
+- 2026-10-09 10:38: Distinguish static Secret references from refresh handoff in the accompanying change. (authoring-run/f7c45a46-6f14-42ea-acd8-7f8990a41d89 - 1c6ac12fb)
+
 - 2026-10-09 08:30: Replays take over withdrawal work. (fix-892-894)
 - 2026-10-09 06:00: Exhausted withdrawals retry later without Compute maintenance. (fix-887)
-- 2026-10-09 10:38: Distinguish static Secret references from refresh handoff in the accompanying change. (authoring-run/f7c45a46-6f14-42ea-acd8-7f8990a41d89 - 1c6ac12fb)
 
 - 2026-10-08 20:30: Maintenance leaves denied withdrawals for a replay. (fix-853)
 - 2026-10-08 17:30: Withdrawal covers unretired predecessors. (fix-816-819)

@@ -4634,9 +4634,11 @@ export class OpenClawController {
    * Pushes current, or replacement, Secret values to the gateway copy. The gateway calls run
    * under the source lock, which orders them against rotation, deletion, and Agent admission of
    * this source; they do not hold the Namespace lock, because a refresh type's calls wait on the
-   * token issuer. A failed commit leaves the gateway newer, and repeating the same request
-   * converges. Running Harness processes keep the previous value. `failureAudit` builds the event
-   * committed on its own when the request fails after a gateway write began.
+   * token issuer. Static updates can converge by repeating the same material after a failed
+   * commit. Refresh effects may consume or rotate issuer material despite an uncertain outcome;
+   * reconcile the source and Driver state instead of implicitly repeating configure or mint.
+   * Running Harness processes keep the previous value. `failureAudit` builds the event committed
+   * on its own after a definite rollback when a gateway write had begun.
    */
   async updateCredentialSource(
     principalId: string,
@@ -4831,7 +4833,8 @@ export class OpenClawController {
   /**
    * A gateway write cannot roll back with OCC's transaction, so a request that fails after one
    * began still records a failure event, in its own transaction once the request's has ended.
-   * A commit whose outcome is unknown runs no rollback, so it records neither event.
+   * An unknown commit outcome runs no rollback-triggered failure event; whether the success
+   * event committed remains unknown and requires reconciliation.
    */
   private auditUncommittedCredentialEffect(
     failureAudit: ((reasonCode: string) => AuditEvent) | undefined,
