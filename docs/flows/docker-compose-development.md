@@ -1,7 +1,7 @@
 ---
 created: 2026-08-24
 updated: 2026-10-14
-last_updated_session: authoring-run/b0bd473e-3b1d-44cc-a1b1-4a1d411a1829
+last_updated_session: authoring-run/5607c5fd-a268-466b-a5c9-93e0cc984807
 ---
 
 # Compose development flow
@@ -107,7 +107,15 @@ graph TD
 
 ### 1. Start and initialize the local stack
 
-`scripts/dev-up`, `apps/controller/src/server.mjs:start`
+`internal/occcli/dev.go:developmentCommand`,
+`internal/occdev/egress_k3d.go:CheckDevelopmentProfile`, `scripts/dev-up`
+
+Before Compute dispatch, the CLI checks protected-egress, database, and host-gateway
+selectors through the existing development validators. Direct Docker script startup
+calls the same check through `occ dev check-profile` before temporary-state creation
+or engine probes; Kubernetes script startup dispatches to the guarded CLI.
+Invalid or incompatible selections stop startup. Unset or `0` protected egress
+preserves ordinary startup when its related selectors are absent.
 
 [Docker or Podman Compose startup](docker-compose-development/startup.md) owns
 engine selection, database initialization, local API admission and worker startup.
@@ -192,7 +200,8 @@ OCC Namespace becomes ready. See the
 `internal/occdev/openshell_k3d.go:installDevelopmentPlatform`,
 `apps/controller/src/drivers/sandbox/openshell-gateway-client.ts:createClient`
 
-The explicit protected profile requires Kubernetes control plane and reviewed
+The explicit protected profile requires Kubernetes Compute, Kubernetes control
+plane, OpenShell Sandbox, and reviewed
 candidate images/charts. It prepares authority server TLS and its public CA,
 then installs OpenShell with native PKI and a TLS middleware registration.
 OpenShell owns the complete Gateway server/client certificate and extension-JWT
@@ -278,6 +287,8 @@ distinguishes local proof from pending connected runtime qualification.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 17:03: Validate protected development selectors before CLI dispatch and direct Docker script effects. (authoring-run/5607c5fd-a268-466b-a5c9-93e0cc984807 - 3fba9be5bae09aa9c33483a768221f44079edc3b)
 
 - 2026-10-14 16:11: Add the default-off protected OpenShell launch, native mTLS credential ownership, authority-first readiness and disposable database selection. (authoring-run/b0bd473e-3b1d-44cc-a1b1-4a1d411a1829 - 126b6a1b13b48281aee5d3ca4d476ec75da8a24a)
 

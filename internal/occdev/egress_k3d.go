@@ -22,6 +22,28 @@ const (
 
 var developmentDatabaseName = regexp.MustCompile(`^openclaw_k8s_[a-z0-9_]+$`)
 
+// CheckDevelopmentProfile validates protected egress and its related selectors
+// before Compute dispatch, including callers that otherwise bypass Up.
+func CheckDevelopmentProfile() error {
+	r := newRunner(Options{})
+	controlPlane := r.setting("OCC_DEVELOPMENT_CONTROL_PLANE", "compose")
+	sandbox := r.setting("OCC_DEVELOPMENT_SANDBOX_DRIVER", "none")
+	protected, err := r.protectedEgressSelection(controlPlane, sandbox)
+	if err != nil {
+		return err
+	}
+	if protected && r.env["OCC_DEVELOPMENT_COMPUTE_DRIVER"] != "kubernetes" {
+		return fmt.Errorf("protected egress requires OCC_DEVELOPMENT_COMPUTE_DRIVER=kubernetes")
+	}
+	if _, err := r.selectedDevelopmentDatabase(controlPlane); err != nil {
+		return err
+	}
+	if _, selected := r.env["OCC_DEVELOPMENT_DATABASE_NAME"]; selected && r.env["OCC_DEVELOPMENT_COMPUTE_DRIVER"] != "kubernetes" {
+		return fmt.Errorf("OCC_DEVELOPMENT_DATABASE_NAME requires Kubernetes Compute")
+	}
+	return nil
+}
+
 func (r *runner) protectedEgressSelection(controlPlane, sandbox string) (bool, error) {
 	value := r.env["OCC_DEVELOPMENT_PROTECTED_EGRESS"]
 	if value != "" && value != "0" && value != "1" {
