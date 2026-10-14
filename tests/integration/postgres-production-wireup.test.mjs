@@ -17,6 +17,7 @@ import { composePostgresDevelopment } from "../../apps/controller/src/compositio
 import { loadInstallationConfiguration } from "../../apps/controller/src/composition/installation-config.ts";
 import { createOccLogger } from "../../apps/controller/src/logging.ts";
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
+import { createReadyComputeDriver } from "../helpers/development.mjs";
 import { authenticatedHeaders, signInWithEmailPassword } from "../helpers/auth-session.mjs";
 import { createInstallationDriverConfiguration } from "../helpers/installation-driver-configuration.mjs";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
@@ -50,9 +51,7 @@ async function defaultNamespaceRows(pool) {
 }
 
 function createPassiveComputeDriver() {
-  return {
-    id: "compute-production-wireup",
-    capability: "compute",
+  return createReadyComputeDriver("compute-production-wireup", {
     implementation: "production-wireup-memory-compute",
     async preflight() {
       return {
@@ -64,22 +63,7 @@ function createPassiveComputeDriver() {
         ],
       };
     },
-    async ensureNamespace(namespace) {
-      return { namespaceId: namespace.id, namespaceReady: true };
-    },
-    async deleteNamespace(namespace) {
-      return { namespaceId: namespace.id, namespaceDeleted: true };
-    },
-    async prepareRevision(revision) {
-      return {
-        namespaceId: revision.namespaceId,
-        agentId: revision.agentId,
-        revisionId: revision.id,
-        ready: true,
-      };
-    },
-    async retireRevision() {},
-  };
+  });
 }
 
 function memoryLog() {
@@ -516,8 +500,15 @@ test(
         "Standard OpenClaw",
         "default-codex",
       ]);
-      const copied = defaults.data.find((preset) => preset.name === "Standard Codex");
-      const copiedOpenClaw = defaults.data.find((preset) => preset.name === "Standard OpenClaw");
+      // The list returns summaries; the exact read carries each template.
+      const exactPreset = async (summary) =>
+        summary && (await request("GET", `${presetPath}/${summary.id}`)).data;
+      const copied = await exactPreset(
+        defaults.data.find((preset) => preset.name === "Standard Codex"),
+      );
+      const copiedOpenClaw = await exactPreset(
+        defaults.data.find((preset) => preset.name === "Standard OpenClaw"),
+      );
       assert.ok(copied, "missing Standard Codex");
       assert.ok(copiedOpenClaw, "missing Standard OpenClaw");
       const worker = createControllerWorker({
@@ -544,6 +535,36 @@ test(
       } finally {
         await worker.stop();
       }
+      // Production composition must retain the same contract-sized route budget as development.
+      const workspaceContent = (
+        "# Workspace guidance\n" + "Routine fixture instructions.\n".repeat(600)
+      ).slice(0, 16 * 1024);
+      const workspaceTemplate = {
+        agent: {
+          initialWorkspaceFiles: Object.fromEntries(
+            ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md"].map((name) => [
+              name,
+              workspaceContent,
+            ]),
+          ),
+        },
+      };
+      const largePreset = await request("POST", presetPath, {
+        name: "Full workspace",
+        template: workspaceTemplate,
+      });
+      assert.equal(largePreset.status, 201);
+      const replacedPreset = await request("PATCH", `${presetPath}/${largePreset.data.id}`, {
+        name: "Full workspace updated",
+        template: workspaceTemplate,
+      });
+      assert.equal(replacedPreset.status, 200);
+      assert.deepEqual(
+        (await request("GET", `${presetPath}/${largePreset.data.id}`)).data.template,
+        workspaceTemplate,
+      );
+      assert.equal((await request("DELETE", `${presetPath}/${largePreset.data.id}`)).status, 204);
+
       const customized = await request("PATCH", `${presetPath}/${copied.id}`, {
         template: { agent: { name: "Kept across restart" } },
       });
@@ -594,12 +615,12 @@ test(
         "default-codex",
       ]);
       assert.deepEqual(
-        afterRestart.data.find((preset) => preset.name === "Standard Codex"),
+        await exactPreset(afterRestart.data.find((preset) => preset.name === "Standard Codex")),
         customized.data,
       );
       // Refreshed from the stored JSONB: same ID, current template. The edit above stays.
       assert.deepEqual(
-        afterRestart.data.find((preset) => preset.name === "Standard OpenClaw"),
+        await exactPreset(afterRestart.data.find((preset) => preset.name === "Standard OpenClaw")),
         copiedOpenClaw,
       );
       // A Restriction freezing the Namespace's Presets keeps an earlier copy, and startup
@@ -668,7 +689,9 @@ test(
         JSON.stringify({ name: "default-codex", template: operatorCodexTemplate }),
       );
       const bundledCodexCopy = async () =>
-        (await request("GET", presetPath)).data.find((preset) => preset.name === "default-codex");
+        exactPreset(
+          (await request("GET", presetPath)).data.find((preset) => preset.name === "default-codex"),
+        );
       const seededCodex = await bundledCodexCopy();
       const shadowLog = memoryLog();
       await restart({ includeDefaults: true, files: [operatorCodexPath] }, shadowLog.logger);
@@ -690,11 +713,14 @@ test(
         "Standard OpenClaw",
         "default-codex",
       ]);
-      // A new Namespace receives the operator's template, not the bundled one.
-      assert.equal(
-        newPresets.data.find((preset) => preset.name === "default-codex").template.agent.name,
-        operatorCodexTemplate.agent.name,
+      // A new Namespace receives the operator's template, not the bundled one. The list
+      // returns summaries, so read the exact Preset for its template.
+      const newCodex = newPresets.data.find((preset) => preset.name === "default-codex");
+      const newCodexPreset = await request(
+        "GET",
+        `/namespaces/${newNamespace.data.id}/presets/${newCodex.id}`,
       );
+      assert.equal(newCodexPreset.data.template.agent.name, operatorCodexTemplate.agent.name);
       assert.notEqual(
         newPresets.data.find((preset) => preset.name === "Standard Codex").id,
         copied.id,

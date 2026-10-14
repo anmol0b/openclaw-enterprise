@@ -97,8 +97,9 @@ Unknown identities fail without signup. Success returns to exactly `/console/`
 and sets a two-minute HttpOnly, `SameSite=Strict` login receipt; failure returns
 to `/console/?authError=github` without automatic retry. An identity attached to a
 disabled account returns with `authReason=account-disabled`, audited as `ACCOUNT_DISABLED`
-with the account's `userId`; only the person the provider just authenticated reaches it,
-and every other refusal stays generic. The starting tab sends its
+with the account's `userId`; only the person the provider just authenticated reaches it.
+Provider outages and allowlist refusals (below) carry their own reasons; a rejected
+identity stays generic. The starting tab sends its
 `attemptId` with the configured Origin to `POST /api/auth/providers/github/result`,
 which returns the callback session's `sessionKey` once, only while that session's
 cookie is current. It never issues or extends a session.
@@ -123,6 +124,11 @@ logs one `authentication.provider-unavailable-warning` at WARN. It carries `prov
 `oversized_response`, `malformed_response`, `provider_error`, or `client_rejected`), and,
 when present, the HTTP `status` or transport `code` such as `ECONNREFUSED`. It never carries URLs,
 authorization codes, tokens, response bodies, or user data. A rejected identity logs nothing.
+After that denial the callback returns to
+`/console/?authError=<provider>&authReason=provider-unavailable`, and the Console says sign-in is
+unavailable right now instead of suggesting an attach; the failure precedes any identity lookup,
+so the reason reveals nothing about accounts. A callback that fails inside OCE (its database or
+audit store) returns with `authReason=unavailable`.
 
 ### Organization and team allowlist
 
@@ -217,7 +223,7 @@ one straight after creation.
 
 ## Session and recovery controls
 
-Password and GitHub sessions share admission rules: an eight-hour lifetime without refresh, current account and
+Password, GitHub, Google and OIDC sessions share admission rules: an eight-hour lifetime without refresh, current account and
 method checks, and required audit before a cookie is released or, on logout,
 cleared. Older sessions without account/method binding are rejected; users sign in again.
 An external session authenticates only while its provider instance is configured: removing

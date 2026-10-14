@@ -87,6 +87,7 @@ export async function composeProduction(config: ProductionConfig) {
     secretDriver,
     sandboxDriver,
     credentialGatewayDriver,
+    credentialRefreshDriver,
     pluginDriver,
     repoDriver,
     createIAMDriver,
@@ -292,6 +293,10 @@ export async function composeProduction(config: ProductionConfig) {
       controller.registerDriver(credentialGatewayDriver);
       controller.selectDriver("credential_gateway", credentialGatewayDriver.id);
     }
+    if (credentialRefreshDriver !== undefined) {
+      controller.registerDriver(credentialRefreshDriver);
+      controller.selectDriver("credential_refresh", credentialRefreshDriver.id);
+    }
     controller.registerDriver(configurationDriver);
     controller.selectDriver("configuration", configurationDriver.id);
     config.serviceAccountDriverFactory?.(controller, state);
@@ -360,7 +365,6 @@ export async function composeProduction(config: ProductionConfig) {
         enabled: false,
         installationId: persistedInstallation.id,
       },
-      maxBodyBytes: 64 * 1024,
       ...(config.clientAddress === undefined ? {} : { trustedProxies: config.clientAddress }),
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });

@@ -74,6 +74,11 @@ required member Drivers. A ChatGPT workspace UUID identifies the upstream worksp
 Inline keys and configurable upstream URLs are unsupported. Credential TTL
 accepts 1–2,592,000 seconds and defaults to 2,592,000 (30 days); changing it does
 not renew issued credentials. Retired `integrations` and `adminKeyPath` keys fail.
+The production chart's `backend.chatgpt.secretName` must be a lowercase
+DNS-subdomain Kubernetes resource name of at most 253 characters. Its
+`backend.chatgpt.key` accepts letters, digits, `-`, `_` and `.`, up to 253
+characters, but cannot be `.` or start with `..`; the unchanged default is
+`admin-key`.
 
 `backend[].drivers` declares required membership. The ChatGPT Backend and its
 selected `service_account` Driver must be configured together with matching IDs.
@@ -137,17 +142,32 @@ backend:
 
 Its closed `configuration` accepts:
 
-- `endpoint`: `host:port`, or an `http` or `https` origin without credentials,
-  path, query, or fragment.
+- `endpoint`: `host:port` (bracket IPv6 literals, such as `[2001:db8::1]:8080`),
+  or an `http` or `https` origin without credentials,
+  path, query, or fragment. HTTP origins use port 80 when omitted; an explicit
+  `:80` also remains 80 in the gRPC target. HTTPS retains its default 443.
+  Either form refuses an IPv6 zone ID (`[fe80::1%eth0]`), which URL parsing
+  cannot carry. An IPv4 host must be four decimal octets from 0 to 255 with no
+  leading zeros; shorthand, a single integer, hex, and leading zeros dial a
+  different address and are refused. The port, explicit or the scheme default, must be 1 to 65535,
+  and a bare value must also parse as `http://<value>`, as both gateway clients
+  read it.
 - `serviceName`, `scheme`, and `port`: used when `endpoint` is omitted. A dotted
   name is used as-is; a bare name resolves in each tenant namespace. `port`
   defaults to `8080`, and `scheme` defaults to `https` only when
-  `rootCertificatePath` is set.
+  `rootCertificatePath` is set. OAuth2 credential sources refuse `token_url`
+  hosts in the gateway's namespace only when OCE knows it: from a bare or
+  `<service>.<namespace>` `serviceName`, or a `serviceName` or `endpoint` host
+  `<service>.<namespace>.svc[.<cluster domain>]`.
 - `auth`: `{ mode: unauthenticated }` or `{ mode: bearerTokenFile, path }` with
   an absolute path.
 - `requestTimeoutMs`: the per-call deadline, from 1000 to 30000 ms. The bound
-  limits how late a timed-out credential registration can land.
-- `rootCertificatePath`: an absolute path to the gateway CA.
+  limits how late a timed-out credential registration can land. Sandbox
+  deletion has its own 120-second bound: OpenShell answers only after the
+  Sandbox Pod terminates, and OCE waits until the Sandbox is gone.
+- `rootCertificatePath`: an absolute path to the gateway CA. An `https`
+  `endpoint` at an IP address sends no TLS server name, so the gateway
+  certificate must carry that IP address.
 - `insecureTransport: network-policy`: required when the connection lacks TLS or
   bearer-token authentication, and rejected otherwise. It declares that
   NetworkPolicy restricts the gateway to the OCE API, worker, and OpenShell
@@ -157,8 +177,11 @@ Its closed `configuration` accepts:
 Either `endpoint` or `serviceName` is required. Both `drivers.sandbox` and
 `drivers.credential_gateway` are required and must match the selected bundled
 [OpenShell SandboxDriver](drivers/openshell-sandbox.md) and
-[OpenShell Credential Gateway](drivers/openshell-credential-gateway.md). One
-OpenShell Backend is supported. Composition builds one gateway client object
+[OpenShell Credential Gateway](drivers/openshell-credential-gateway.md). The
+optional `drivers.credential_refresh` member must match the selected
+[Credential Refresh Driver](drivers/credential-refresh.md); OpenShell keeps
+refresh state on the gateway's provider records, so the two roles share this
+Backend. One OpenShell Backend is supported. Composition builds one gateway client object
 and injects it into both members, which cache one client per resolved endpoint.
 The API and the worker each construct it, so both need the token file and gateway access.
 
@@ -215,7 +238,7 @@ Driver, workspace, and recorded issuance. A mismatch returns
 The worker repeats ownership checks after IAM reauthorization and before
 Compute effects. It reads only binding metadata, never external IDs or admin
 credentials. Mismatches prevent candidate activation; database read failures
-use normal retries. The account-owned token/workspace Secret is delivered only
+use normal retries. The account-owned token Secret is delivered only
 to its compatible dedicated Codex workload.
 
 The ChatGPT client cancels unused HTTP error bodies and responses declared

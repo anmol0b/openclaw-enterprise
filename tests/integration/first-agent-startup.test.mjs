@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -19,7 +19,7 @@ async function fixture(t, sandboxDriver) {
   await Promise.all([
     writeFile(
       join(tools, "docker"),
-      '#!/bin/sh\nprintf "%s\\n" "$*" > "$FIRST_AGENT_TEST_ENGINE_LOG"\nexit 23\n',
+      '#!/bin/sh\nprintf "%s\\n" "$*" "DOCKER_HOST=$DOCKER_HOST" "DOCKER_TLS=${DOCKER_TLS-unset}" "DOCKER_TLS_VERIFY=${DOCKER_TLS_VERIFY-unset}" "DOCKER_CERT_PATH=${DOCKER_CERT_PATH-unset}" > "$FIRST_AGENT_TEST_ENGINE_LOG"\nprintf "controller container is unavailable\\033[31m\\n" >&2\nprintf "%9000s" "" >&2\nexit 23\n',
       { mode: 0o700 },
     ),
     writeFile(join(directory, ".openclaw-development"), "openclaw-enterprise-development-v3\n", {
@@ -74,16 +74,75 @@ function runFirstAgent(env, ...args) {
     maxBuffer: 16_384,
   });
   assert.equal(result.status, 1, result.error?.message);
-  return `${result.stdout}${result.stderr}`;
+  const output = `${result.stdout}${result.stderr}`;
+  assert.notEqual(
+    output,
+    "",
+    `first-Agent exited without diagnostics (signal ${result.signal ?? "none"})`,
+  );
+  return output;
 }
+
+test("first-Agent starts without installed workspace dependencies", async (t) => {
+  const directory = await mkdtemp(join(await realpath(tmpdir()), "oce-first-agent-source-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  // Run real sources outside the checkout so installed workspace packages cannot
+  // hide import failures in the host-run command used by First Agent Smoke.
+  for (const path of [
+    "package.json",
+    "scripts/first-agent.mjs",
+    "scripts/first-agent-database.mjs",
+    "scripts/first-agent-model.mjs",
+    "apps/controller/src",
+  ]) {
+    await cp(join(repository, path), join(directory, path), { recursive: true });
+  }
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(
+    process.execPath,
+    [join(directory, "scripts/first-agent.mjs"), "--help"],
+    {
+      cwd: directory,
+      encoding: "utf8",
+      env,
+      timeout: 10_000,
+    },
+  );
+
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  assert.match(result.stdout, /Usage: node scripts\/first-agent\.mjs/);
+  assert.match(result.stdout, /--control-ui/);
+});
 
 test("first-Agent accepts current Compose-backed Kubernetes development state", async (t) => {
   const { engineLog, env } = await fixture(t, "none");
+  env.DOCKER_HOST = "unix:///tmp/other-first-agent.sock";
+  env.DOCKER_TLS = "1";
+  env.DOCKER_TLS_VERIFY = "1";
+  env.DOCKER_CERT_PATH = "/tmp/other-first-agent-certificates";
 
   // Reaching the engine proves state admission succeeded without replacing the
   // external Compose behavior that this focused test does not exercise.
-  assert.match(runFirstAgent(env), /docker did not complete successfully/);
-  assert.match(await readFile(engineLog, "utf8"), /compose .* port controller 3000/);
+  const output = runFirstAgent(env);
+  assert.match(
+    output,
+    /docker did not complete successfully.*controller container is unavailable/s,
+  );
+  assert.match(output, /\[stderr truncated\]/);
+  assert.ok(output.length < 9_000, "first-Agent should not echo unbounded subprocess stderr");
+  assert.equal(
+    output.includes(String.fromCharCode(27)),
+    false,
+    "stderr must not inject terminal controls",
+  );
+  const invocation = await readFile(engineLog, "utf8");
+  assert.match(invocation, /compose .* port controller 3000/);
+  assert.match(invocation, /^DOCKER_HOST=unix:\/\/\/tmp\/first-agent-startup-test.sock$/m);
+  assert.match(invocation, /^DOCKER_TLS=unset$/m);
+  assert.match(invocation, /^DOCKER_TLS_VERIFY=unset$/m);
+  assert.match(invocation, /^DOCKER_CERT_PATH=unset$/m);
 });
 
 test("first-Agent requires dedicated Codex for OpenShell before external calls", async (t) => {
@@ -97,6 +156,32 @@ test("first-Agent admits dedicated Codex with OpenShell development state", asyn
   const { engineLog, env } = await fixture(t, "openshell");
 
   assert.match(runFirstAgent(env, "--harness", "codex"), /docker did not complete successfully/);
+  assert.match(await readFile(engineLog, "utf8"), /compose .* port controller 3000/);
+});
+
+test("first-Agent control UI requires the launcher-owned native admin endpoint", async (t) => {
+  const { directory, engineLog, env } = await fixture(t, "openshell");
+
+  assert.match(
+    runFirstAgent(env, "--harness", "codex", "--control-ui"),
+    /did not enable its durable native admin endpoint/,
+  );
+  await assert.rejects(readFile(engineLog), { code: "ENOENT" });
+
+  const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
+  await writeFile(
+    join(directory, "state.json"),
+    `${JSON.stringify({
+      ...state,
+      browserOrigin: "https://console.occ-dev-first-agent-test.oce.localhost:8443",
+      nativeAdminDomain: "agents.occ-dev-first-agent-test.oce.localhost",
+    })}\n`,
+    { mode: 0o600 },
+  );
+  assert.match(
+    runFirstAgent(env, "--harness", "codex", "--control-ui"),
+    /docker did not complete successfully/,
+  );
   assert.match(await readFile(engineLog, "utf8"), /compose .* port controller 3000/);
 });
 

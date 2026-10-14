@@ -23,6 +23,15 @@ function event(installation, namespace, agent, action) {
   };
 }
 
+// A database-backed store stamps a revision's admission time on its own clock, the one that
+// stamps controller work (finding 1195), so a created revision equals its input except for
+// createdAt. The input adopts the stored stamp, so later reads compare against the record.
+function assertCreatedRevision(created, input) {
+  assert.ok(Number.isFinite(Date.parse(created.createdAt)), "createdAt is a timestamp");
+  assert.deepEqual({ ...created, createdAt: input.createdAt }, input);
+  input.createdAt = created.createdAt;
+}
+
 // Both stores raise the same error class for these refusals but word them differently. The
 // memory store names the refusing check. PostgreSQL either enforces it with a constraint or
 // trigger whose violation databaseError maps to one generic message without a cause, or refuses
@@ -135,7 +144,7 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     ]);
     await transaction.secrets.createSecret(harnessSecret);
     assert.deepEqual(await transaction.agents.createAgent(agent), agent);
-    assert.deepEqual(await transaction.revisions.createRevision(revision), revision);
+    assertCreatedRevision(await transaction.revisions.createRevision(revision), revision);
     await transaction.audit.append(audit);
     await transaction.operations.append(operation);
   });
@@ -458,7 +467,61 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
   }
 
   await store.read(async (state) => {
-    assert.deepEqual(await state.revisions.listRevisions(namespace.id, agent.id), [revision]);
+    const listed = await state.revisions.listRevisions(namespace.id, agent.id);
+    assert.deepEqual(listed, [revision]);
+    // Revision metadata lists the same revisions, in the same order, without saved settings.
+    assert.deepEqual(
+      await state.revisions.listRevisionMetadata(namespace.id, agent.id),
+      listed.map(({ id, namespaceId, agentId, revision, backendId, createdAt }) => ({
+        id,
+        namespaceId,
+        agentId,
+        revision,
+        backendId,
+        createdAt,
+      })),
+    );
+    assert.deepEqual(await state.revisions.listRevisionMetadata(identifier("ns"), agent.id), []);
+    // A summary page carries metadata plus the fields that tell revisions apart, never the
+    // saved settings; `before` excludes the revision it names and everything newer.
+    assert.deepEqual(
+      await state.revisions.pageRevisionSummaries(namespace.id, agent.id, { limit: 1 }),
+      {
+        revisions: listed.map((item) => ({
+          id: item.id,
+          namespaceId: item.namespaceId,
+          agentId: item.agentId,
+          revision: item.revision,
+          backendId: item.backendId,
+          configurationId: item.configurationId,
+          configurationGeneration: item.configurationGeneration,
+          harness: item.harness,
+          createdAt: item.createdAt,
+        })),
+      },
+    );
+    assert.deepEqual(
+      await state.revisions.pageRevisionSummaries(namespace.id, agent.id, {
+        before: revision.revision,
+        limit: 1,
+      }),
+      { revisions: [] },
+    );
+    assert.deepEqual(
+      await state.revisions.pageRevisionSummaries(identifier("ns"), agent.id, { limit: 1 }),
+      { revisions: [] },
+    );
+    // Agent references carry only the identity of each Agent in a live Namespace.
+    const references = (await state.agents.listAgentReferences()).filter(
+      ({ namespaceId }) => namespaceId === namespace.id,
+    );
+    assert.deepEqual(
+      references.sort((left, right) => left.id.localeCompare(right.id)),
+      (await state.agents.listAgents(namespace.id))
+        .map(({ id, namespaceId }) => ({ id, namespaceId }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+    );
+    assert.ok(references.some(({ id }) => id === agent.id));
   });
 
   await store.transact(async (transaction) => {
@@ -689,6 +752,15 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     await assert.rejects(transaction.agents.createAgent(blockedAgent), {
       name: "ScopeViolationError",
     });
+    // A Namespace being deleted admits no new ServicePrincipal either.
+    await assert.rejects(
+      transaction.iamPolicy.createServicePrincipal({
+        kind: "service_principal",
+        id: identifier("spn"),
+        namespaceId: lifecycleNamespace.id,
+      }),
+      { name: "ScopeViolationError" },
+    );
     const tombstone = await transaction.namespaces.markNamespaceDeleted(
       lifecycleNamespace.id,
       deletedAt,
@@ -810,7 +882,10 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     backendId: null,
     executionMode: "dedicated",
     servicePrincipalId: identifier("service-agent"),
-    harnessAuth: { method: "chatgpt_service_account", serviceAccountId: account.id },
+    harnessAuth: {
+      method: "codex_pat",
+      source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
+    },
     desiredRuntimeState: "stopped",
     status: "active",
     createdAt: new Date().toISOString(),
@@ -831,8 +906,8 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     servicePrincipalId: accountAgent.servicePrincipalId,
     harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
     harnessAuth: {
-      method: "chatgpt_service_account",
-      serviceAccountId: account.id,
+      method: "codex_pat",
+      source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
       credential,
       backendBinding: {
         backendId: "chatgpt-contract",
@@ -863,7 +938,10 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     );
     assert.deepEqual(await transaction.agents.createAgent(accountAgent), accountAgent);
     assert.deepEqual(await transaction.agents.createAgent(sharedAccountAgent), sharedAccountAgent);
-    assert.deepEqual(await transaction.revisions.createRevision(accountRevision), accountRevision);
+    assertCreatedRevision(
+      await transaction.revisions.createRevision(accountRevision),
+      accountRevision,
+    );
   });
 
   const oauthCredential = {
@@ -906,6 +984,43 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
       "Admitted revisions reject unsupported credentials and unsafe Secret keys.",
     );
   }
+  // The admitted ServiceAccount source belongs to the revision's own Namespace, even when
+  // the account ID exists there.
+  await assert.rejects(
+    store.transact((transaction) =>
+      transaction.revisions.createRevision({
+        ...accountRevision,
+        id: identifier("rev"),
+        revision: 2,
+        harnessAuth: {
+          ...accountRevision.harnessAuth,
+          source: { ...accountRevision.harnessAuth.source, namespaceId: namespace.id },
+        },
+      }),
+    ),
+    storeRefusal(
+      "ScopeViolationError",
+      "An AgentRevision requires valid Configuration metadata, a native document, and pinned Harness and Compute descriptors.",
+      "The AgentRevision harness authentication is invalid or legacy.",
+    ),
+    "Admitted revisions reject a ServiceAccount source naming another Namespace.",
+  );
+  // A revision admits exactly the account its Agent is bound to, not a sibling account.
+  await assert.rejects(
+    store.transact((transaction) =>
+      transaction.revisions.createRevision({
+        ...accountRevision,
+        id: identifier("rev"),
+        revision: 2,
+        harnessAuth: {
+          ...accountRevision.harnessAuth,
+          source: { ...accountRevision.harnessAuth.source, id: alternateAccount.id },
+        },
+      }),
+    ),
+    { name: "ScopeViolationError", message: "The AgentRevision belongs to an unavailable Agent." },
+    "Admitted revisions reject an account other than the Agent's binding.",
+  );
 
   await store.read(async (state) => {
     const stored = await state.serviceAccounts.findServiceAccount(accountNamespace.id, account.id);
@@ -980,7 +1095,10 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
         id: identifier("agt"),
         name: "Cross Namespace " + randomUUID(),
         servicePrincipalId: identifier("service-agent"),
-        harnessAuth: { method: "chatgpt_service_account", serviceAccountId: account.id },
+        harnessAuth: {
+          method: "codex_pat",
+          source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
+        },
       }),
     ),
     {
@@ -992,8 +1110,8 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
   await assert.rejects(
     store.transact((transaction) =>
       transaction.agents.updateConfiguration(namespace.id, agent.id, configuration.id, undefined, {
-        method: "chatgpt_service_account",
-        serviceAccountId: account.id,
+        method: "codex_pat",
+        source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
       }),
     ),
     {
@@ -1001,6 +1119,25 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
       message: "The Agent harness authentication references an unavailable ServiceAccount.",
     },
     "An existing Agent cannot associate a ServiceAccount from another Namespace.",
+  );
+  await assert.rejects(
+    store.transact((transaction) =>
+      transaction.agents.updateConfiguration(
+        accountNamespace.id,
+        accountAgent.id,
+        accountConfiguration.id,
+        undefined,
+        {
+          method: "codex_pat",
+          source: { kind: "service_account", namespaceId: namespace.id, id: account.id },
+        },
+      ),
+    ),
+    {
+      name: "ScopeViolationError",
+      message: "The Agent harness authentication references an unavailable ServiceAccount.",
+    },
+    "A source naming another Namespace is refused even when the account ID exists here.",
   );
   await assert.rejects(
     store.transact((transaction) =>
@@ -1034,8 +1171,12 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
       accountRevision.harnessAuth,
     );
     const alternateBinding = {
-      method: "chatgpt_service_account",
-      serviceAccountId: alternateAccount.id,
+      method: "codex_pat",
+      source: {
+        kind: "service_account",
+        namespaceId: alternateAccount.namespaceId,
+        id: alternateAccount.id,
+      },
     };
     for (const [requested, expected] of [
       [alternateBinding, alternateBinding],
@@ -1109,8 +1250,12 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
   );
   await store.transact(async (transaction) => {
     const replacementBinding = {
-      method: "chatgpt_service_account",
-      serviceAccountId: alternateAccount.id,
+      method: "codex_pat",
+      source: {
+        kind: "service_account",
+        namespaceId: alternateAccount.namespaceId,
+        id: alternateAccount.id,
+      },
     };
     await transaction.agents.updateConfiguration(
       accountNamespace.id,
@@ -1121,7 +1266,7 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     );
     const replacement = await transaction.revisions.createRevision({
       ...accountRevision,
-      harnessAuth: { ...accountRevision.harnessAuth, serviceAccountId: alternateAccount.id },
+      harnessAuth: { ...accountRevision.harnessAuth, source: replacementBinding.source },
       id: identifier("rev"),
       revision: 2,
     });
@@ -1136,6 +1281,22 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
       await transaction.serviceAccounts.hasReferences(accountNamespace.id, account.id),
       false,
     );
+  });
+
+  // Revision summary pages run newest first; `nextBefore` continues below the page's last
+  // revision and is absent on the last page.
+  await store.read(async (state) => {
+    const page = (options) =>
+      state.revisions.pageRevisionSummaries(accountNamespace.id, accountAgent.id, options);
+    const numbers = (result) => result.revisions.map(({ revision }) => revision);
+    const first = await page({ limit: 1 });
+    assert.deepEqual([numbers(first), first.nextBefore], [[2], 2]);
+    assert.equal(Object.hasOwn(first.revisions[0], "configuration"), false);
+    assert.deepEqual(first.revisions[0].harness, accountRevision.harness);
+    const second = await page({ before: first.nextBefore, limit: 1 });
+    assert.deepEqual([numbers(second), Object.hasOwn(second, "nextBefore")], [[1], false]);
+    const whole = await page({ limit: 5 });
+    assert.deepEqual([numbers(whole), Object.hasOwn(whole, "nextBefore")], [[2, 1], false]);
   });
 
   const accountOnlyNamespace = {
@@ -1421,6 +1582,22 @@ async function verifyDuplicateNameContract(store) {
     await transaction.serviceAccounts.createServiceAccount(account);
     await transaction.credentialSources.createCredentialSource(source);
   });
+  // Preset summaries list the same Presets in the same order, without their templates.
+  await store.read(async (state) => {
+    assert.deepEqual(
+      await state.presets.listPresetSummaries(namespace.id),
+      (await state.presets.listPresets(namespace.id)).map(
+        ({ id, namespaceId, name, createdAt }) => ({
+          id,
+          namespaceId,
+          name,
+          createdAt,
+        }),
+      ),
+    );
+    assert.equal((await state.presets.listPresetSummaries(namespace.id)).length, 2);
+    assert.deepEqual(await state.presets.listPresetSummaries(identifier("ns")), []);
+  });
 
   const nameConflict = (message) => ({ name: "ResourceStateConflictError", message });
   for (const [write, message] of [
@@ -1597,6 +1774,8 @@ async function verifyDeletedResourceAccessBindingContract(store, revision) {
       SLACK_BOT_TOKEN: { source: { kind: "secret", namespaceId: namespace.id, id: secret.id } },
     },
   };
+  const secondConfiguration = { ...configuration, ...configurationFor() };
+  const configurationIds = [configuration.id, secondConfiguration.id].sort();
   const preset = {
     id: identifier("pre"),
     namespaceId: namespace.id,
@@ -1646,6 +1825,7 @@ async function verifyDeletedResourceAccessBindingContract(store, revision) {
     await transaction.secrets.createSecret(agentSecret);
     await transaction.secrets.createSecret(secret);
     await transaction.configurations.createConfiguration(configuration);
+    await transaction.configurations.createConfiguration(secondConfiguration);
     await transaction.agents.createAgent(agent);
     await transaction.revisions.createRevision({
       ...revision,
@@ -1673,16 +1853,22 @@ async function verifyDeletedResourceAccessBindingContract(store, revision) {
   });
 
   // Each reference comes back once, ordered by kind then ID; a full page says more exist.
+  const references = [
+    ...configurationIds.map((id) => ({ kind: "configuration", id })),
+    { kind: "credential_source", id: source.id },
+  ];
   await store.read(async (state) => {
     assert.deepEqual(await state.secrets.listReferences(namespace.id, secret.id, 50), {
-      references: [
-        { kind: "configuration", id: configuration.id },
-        { kind: "credential_source", id: source.id },
-      ],
+      references,
+      truncated: false,
+    });
+    // A page that holds exactly every reference is not truncated.
+    assert.deepEqual(await state.secrets.listReferences(namespace.id, secret.id, 3), {
+      references,
       truncated: false,
     });
     assert.deepEqual(await state.secrets.listReferences(namespace.id, secret.id, 1), {
-      references: [{ kind: "configuration", id: configuration.id }],
+      references: [references[0]],
       truncated: true,
     });
     assert.deepEqual(await state.secrets.listReferences(namespace.id, agentSecret.id, 50), {
@@ -1697,10 +1883,9 @@ async function verifyDeletedResourceAccessBindingContract(store, revision) {
       await transaction.credentialSources.deleteCredentialSource(namespace.id, source.id),
       true,
     );
-    assert.equal(
-      await transaction.configurations.deleteConfiguration(namespace.id, configuration.id),
-      true,
-    );
+    for (const id of configurationIds) {
+      assert.equal(await transaction.configurations.deleteConfiguration(namespace.id, id), true);
+    }
     assert.equal(await transaction.secrets.deleteSecret(namespace.id, secret.id), true);
     assert.equal(await transaction.presets.deletePreset(namespace.id, preset.id), true);
     assert.equal(
@@ -1720,6 +1905,28 @@ async function verifyDeletedResourceAccessBindingContract(store, revision) {
   await store.transact(async (transaction) => {
     assert.equal(await transaction.iamPolicy.deleteAccessBinding(namespace.id, surviving.id), true);
     assert.equal(await transaction.iamPolicy.deleteRole(namespace.id, role.id), true);
+  });
+
+  // A Namespace ServicePrincipal is listed and read only in its own Namespace. The Agent's
+  // own ServicePrincipal is not a Namespace ServicePrincipal, so it is never listed or read.
+  const principal = { kind: "service_principal", id: identifier("spn"), namespaceId: namespace.id };
+  await store.transact((transaction) => transaction.iamPolicy.createServicePrincipal(principal));
+  const otherNamespaceId = identifier("ns");
+  await store.read(async (state) => {
+    assert.deepEqual(await state.iamPolicy.listServicePrincipals(namespace.id), [principal]);
+    assert.deepEqual(
+      await state.iamPolicy.getServicePrincipal(namespace.id, principal.id),
+      principal,
+    );
+    assert.equal(
+      await state.iamPolicy.getServicePrincipal(namespace.id, agent.servicePrincipalId),
+      undefined,
+    );
+    assert.deepEqual(await state.iamPolicy.listServicePrincipals(otherNamespaceId), []);
+    assert.equal(
+      await state.iamPolicy.getServicePrincipal(otherNamespaceId, principal.id),
+      undefined,
+    );
   });
 }
 
@@ -1774,6 +1981,8 @@ async function verifyCredentialSourceContract(
     configurationId: sourceConfiguration.id,
     backendId: null,
     harnessAuth: sourceBinding,
+    // The list holds every bound source; harnessAuth names the listed Harness source.
+    credentialSources: [{ sourceId: source.id }],
     executionMode: "embedded",
     servicePrincipalId: identifier("service-agent"),
     desiredRuntimeState: "stopped",
@@ -1794,6 +2003,9 @@ async function verifyCredentialSourceContract(
       sourceType: source.type,
       loginMode: "api_key",
     },
+    credentialSources: [
+      { sourceId: source.id, credentialGatewayId: "openshell-contract", sourceType: source.type },
+    ],
   };
   const sourceReferences = (transaction) =>
     transaction.credentialSources.hasReferences(sourceNamespace.id, source.id);
@@ -1945,13 +2157,22 @@ async function verifyCredentialSourceContract(
     await transaction.agents.createAgent(sourceAgent);
     // The Agent draft binding alone retains the source.
     assert.equal(await sourceReferences(transaction), true);
-    assert.deepEqual(await transaction.revisions.createRevision(sourceRevision), sourceRevision);
+    assertCreatedRevision(
+      await transaction.revisions.createRevision(sourceRevision),
+      sourceRevision,
+    );
     await transaction.agents.updateConfiguration(
       sourceNamespace.id,
       sourceAgent.id,
       sourceConfiguration.id,
       undefined,
       null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
     );
     // An inactive historical snapshot does not retain the source.
     assert.equal(await sourceReferences(transaction), false);
@@ -1973,6 +2194,33 @@ async function verifyCredentialSourceContract(
     },
     "An active revision's credential source cannot be deleted.",
   );
+  const blocking = (transaction) =>
+    transaction.credentialSources.findBlockingReference(sourceNamespace.id, source.id);
+  // Queued withdrawal work for a revision that held the source blocks deletion on its own, and
+  // is reported as such so the refusal can say that only waiting helps. Rolled back.
+  const rollback = new Error("roll back the withdrawal-only case");
+  await assert.rejects(
+    store.transact(async (transaction) => {
+      await transaction.agents.compareAndClearActiveRevision(
+        sourceNamespace.id,
+        sourceAgent.id,
+        sourceRevision.id,
+      );
+      await transaction.operations.append({
+        kind: "agent_revision",
+        action: "reconcile",
+        target: "credentials_withdrawn",
+        operationId: "withdrawal-blocking-contract",
+        namespaceId: sourceNamespace.id,
+        resourceId: sourceRevision.id,
+        actorId: "principal-platform-state-contract",
+      });
+      assert.equal(await sourceReferences(transaction), true);
+      assert.equal(await blocking(transaction), "withdrawal_work");
+      throw rollback;
+    }),
+    (error) => error === rollback,
+  );
   await store.transact(async (transaction) => {
     await transaction.agents.compareAndClearActiveRevision(
       sourceNamespace.id,
@@ -1980,6 +2228,7 @@ async function verifyCredentialSourceContract(
       sourceRevision.id,
     );
     assert.equal(await sourceReferences(transaction), false);
+    assert.equal(await blocking(transaction), undefined);
     // A queued deployment will attach the source, so it must survive until that work settles.
     await transaction.operations.append({
       kind: "agent_revision",
@@ -1989,6 +2238,7 @@ async function verifyCredentialSourceContract(
       actorId: "principal-platform-state-contract",
     });
     assert.equal(await sourceReferences(transaction), true);
+    assert.equal(await blocking(transaction), "reference");
     assert.equal(
       await transaction.credentialSources.hasReferences(accountNamespace.id, source.id),
       false,
@@ -2056,6 +2306,47 @@ async function verifyCredentialSourceContract(
     );
     assert.equal(deployment.agentTarget, undefined);
   });
+  // A pending withdrawal can be reassigned to the operator whose replay queues its next attempt;
+  // it keeps the first request's time.
+  await store.transact(async (transaction) => {
+    assert.deepEqual(
+      await transaction.credentialSources.reassignCredentialWithdrawal(
+        sourceNamespace.id,
+        sourceRevision.id,
+        source.id,
+        "principal-platform-state-replay",
+      ),
+      { ...withdrawal, requestedBy: "principal-platform-state-replay" },
+    );
+    // The worker reads the stored requester, so the reassignment must persist.
+    assert.deepEqual(
+      await transaction.credentialSources.listCredentialWithdrawals(
+        sourceNamespace.id,
+        sourceRevision.id,
+      ),
+      [{ ...withdrawal, requestedBy: "principal-platform-state-replay" }],
+    );
+    // A blank requester is refused; the worker would have no principal to authorize. Pinned on
+    // a pending withdrawal, the only kind the controller reassigns.
+    await assert.rejects(
+      transaction.credentialSources.reassignCredentialWithdrawal(
+        sourceNamespace.id,
+        sourceRevision.id,
+        source.id,
+        "",
+      ),
+      { name: "ScopeViolationError", message: "A credential withdrawal requester is missing." },
+    );
+    assert.deepEqual(
+      await transaction.credentialSources.reassignCredentialWithdrawal(
+        sourceNamespace.id,
+        sourceRevision.id,
+        source.id,
+        withdrawal.requestedBy,
+      ),
+      withdrawal,
+    );
+  });
   const completedAt = new Date().toISOString();
   const attempted = {
     ...withdrawal,
@@ -2100,6 +2391,16 @@ async function verifyCredentialSourceContract(
       ),
       undefined,
     );
+    // A revoked withdrawal keeps the requester whose authority revoked it.
+    assert.equal(
+      await transaction.credentialSources.reassignCredentialWithdrawal(
+        sourceNamespace.id,
+        sourceRevision.id,
+        source.id,
+        "principal-platform-state-replay",
+      ),
+      undefined,
+    );
   });
 
   // An update may point the existing field at a replacement Secret, but never change fields.
@@ -2139,6 +2440,319 @@ async function verifyCredentialSourceContract(
     transaction.credentialSources.replaceCredentialSourceSecrets(sourceNamespace.id, source.id, {
       api_key: { kind: "secret", namespaceId: sourceNamespace.id, id: sourceSecret.id },
     }),
+  );
+
+  // A non-model source binds through the Agent's credentialSources list. The draft and the
+  // active revision each retain it, and a revision freezes exactly the draft's list.
+  const tokenSource = {
+    ...source,
+    id: identifier("cs"),
+    name: "Registry token " + randomUUID(),
+    type: "bearer-token",
+    config: { host: "registry.example.com", env_var: "REGISTRY_TOKEN" },
+    secrets: { token: { kind: "secret", namespaceId: sourceNamespace.id, id: sourceSecret.id } },
+  };
+  const toolAgent = {
+    ...sourceAgent,
+    id: identifier("agt"),
+    name: "Credential source tool agent " + randomUUID(),
+    harnessAuth: { method: "runtime" },
+    credentialSources: [{ sourceId: tokenSource.id }],
+    servicePrincipalId: identifier("service-agent"),
+  };
+  const toolRevision = {
+    ...sourceRevision,
+    id: identifier("rev"),
+    agentId: toolAgent.id,
+    servicePrincipalId: toolAgent.servicePrincipalId,
+    harnessAuth: { method: "runtime" },
+    credentialSources: [
+      {
+        sourceId: tokenSource.id,
+        credentialGatewayId: "openshell-contract",
+        sourceType: tokenSource.type,
+      },
+    ],
+  };
+  const tokenReferences = (transaction) =>
+    transaction.credentialSources.hasReferences(sourceNamespace.id, tokenSource.id);
+  await store.transact(async (transaction) => {
+    await transaction.credentialSources.createCredentialSource(tokenSource);
+    await transaction.agents.createAgent(toolAgent);
+    assert.deepEqual(
+      (await transaction.agents.findAgent(sourceNamespace.id, toolAgent.id)).credentialSources,
+      [{ sourceId: tokenSource.id }],
+    );
+    assert.equal(await tokenReferences(transaction), true);
+  });
+  await assert.rejects(
+    store.transact((transaction) =>
+      transaction.revisions.createRevision({ ...toolRevision, credentialSources: undefined }),
+    ),
+    "A revision must freeze the Agent's non-model sources.",
+  );
+  await assert.rejects(
+    store.transact((transaction) =>
+      transaction.credentialSources.deleteCredentialSource(sourceNamespace.id, tokenSource.id),
+    ),
+    "An Agent draft's non-model source cannot be deleted.",
+  );
+  await store.transact(async (transaction) => {
+    assertCreatedRevision(await transaction.revisions.createRevision(toolRevision), toolRevision);
+    await transaction.agents.compareAndSetActiveRevision(
+      sourceNamespace.id,
+      toolAgent.id,
+      undefined,
+      toolRevision.id,
+    );
+    // An empty list removes the draft binding; the active revision still retains the source.
+    const cleared = await transaction.agents.updateConfiguration(
+      sourceNamespace.id,
+      toolAgent.id,
+      sourceConfiguration.id,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
+    );
+    assert.equal(cleared.credentialSources, undefined);
+    assert.equal(await tokenReferences(transaction), true);
+    await transaction.agents.compareAndClearActiveRevision(
+      sourceNamespace.id,
+      toolAgent.id,
+      toolRevision.id,
+    );
+    assert.equal(await tokenReferences(transaction), false);
+    // Queued work for a revision that froze the source will attach it.
+    await transaction.operations.append({
+      kind: "agent_revision",
+      action: "reconcile",
+      namespaceId: sourceNamespace.id,
+      resourceId: toolRevision.id,
+      actorId: "principal-platform-state-contract",
+    });
+    assert.equal(await tokenReferences(transaction), true);
+  });
+
+  // The store keeps a draft's list exact: every entry names a source in the Agent's Namespace,
+  // and a credential-source Harness binding names a listed one.
+  const secondToken = {
+    ...tokenSource,
+    id: identifier("cs"),
+    name: "Second token " + randomUUID(),
+  };
+  const missingSourceId = identifier("cs");
+  const listedAgent = {
+    ...toolAgent,
+    id: identifier("agt"),
+    name: "Credential source listed agent " + randomUUID(),
+    servicePrincipalId: identifier("service-agent"),
+  };
+  await store.transact((transaction) =>
+    transaction.credentialSources.createCredentialSource(secondToken),
+  );
+  for (const [agent, why] of [
+    [
+      { ...listedAgent, credentialSources: [{ sourceId: missingSourceId }] },
+      "A draft cannot list a missing source.",
+    ],
+    [
+      {
+        ...listedAgent,
+        harnessAuth: sourceBinding,
+        credentialSources: [{ sourceId: tokenSource.id }],
+      },
+      "A draft's Harness source must be listed.",
+    ],
+  ]) {
+    await assert.rejects(
+      store.transact((transaction) => transaction.agents.createAgent(agent)),
+      { name: "ScopeViolationError" },
+      why,
+    );
+  }
+  const updateList = (credentialSources, harnessAuth) =>
+    store.transact((transaction) =>
+      transaction.agents.updateConfiguration(
+        sourceNamespace.id,
+        listedAgent.id,
+        sourceConfiguration.id,
+        undefined,
+        harnessAuth,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        credentialSources,
+      ),
+    );
+  await store.transact((transaction) => transaction.agents.createAgent(listedAgent));
+  await assert.rejects(
+    updateList([{ sourceId: missingSourceId }]),
+    { name: "ScopeViolationError" },
+    "An update cannot list a missing source.",
+  );
+  // An update that leaves the list out keeps it.
+  assert.deepEqual((await updateList(undefined, { method: "runtime" })).credentialSources, [
+    { sourceId: tokenSource.id },
+  ]);
+  assert.deepEqual(
+    (await updateList([{ sourceId: secondToken.id }, { sourceId: tokenSource.id }]))
+      .credentialSources,
+    [{ sourceId: secondToken.id }, { sourceId: tokenSource.id }],
+  );
+
+  // A revision freezes exactly the draft's list, in order, as well-formed snapshots.
+  const snapshot = (sourceId) => ({
+    sourceId,
+    credentialGatewayId: "openshell-contract",
+    sourceType: tokenSource.type,
+  });
+  const listedRevision = {
+    ...toolRevision,
+    id: identifier("rev"),
+    agentId: listedAgent.id,
+    servicePrincipalId: listedAgent.servicePrincipalId,
+    credentialSources: [snapshot(secondToken.id), snapshot(tokenSource.id)],
+  };
+  for (const [credentialSources, why] of [
+    [[snapshot(tokenSource.id), snapshot(secondToken.id)], "out of order"],
+    [[...listedRevision.credentialSources, snapshot(missingSourceId)], "with an extra source"],
+    [
+      [{ ...snapshot(secondToken.id), driverId: "elsewhere" }, snapshot(tokenSource.id)],
+      "with an extra field",
+    ],
+    [
+      [{ ...snapshot(secondToken.id), credentialGatewayId: "" }, snapshot(tokenSource.id)],
+      "without a gateway",
+    ],
+  ]) {
+    await assert.rejects(
+      store.transact((transaction) =>
+        transaction.revisions.createRevision({ ...listedRevision, credentialSources }),
+      ),
+      { name: "ScopeViolationError" },
+      `A revision cannot freeze the draft's sources ${why}.`,
+    );
+  }
+  await store.transact(async (transaction) => {
+    assertCreatedRevision(
+      await transaction.revisions.createRevision(listedRevision),
+      listedRevision,
+    );
+  });
+  // A draft without sources freezes none: an empty snapshot list is not a valid form of that.
+  const unlistedAgent = {
+    ...listedAgent,
+    id: identifier("agt"),
+    name: "Credential source unlisted agent " + randomUUID(),
+    credentialSources: undefined,
+    servicePrincipalId: identifier("service-agent"),
+  };
+  await store.transact((transaction) => transaction.agents.createAgent(unlistedAgent));
+  await assert.rejects(
+    store.transact((transaction) =>
+      transaction.revisions.createRevision({
+        ...listedRevision,
+        id: identifier("rev"),
+        agentId: unlistedAgent.id,
+        servicePrincipalId: unlistedAgent.servicePrincipalId,
+        credentialSources: [],
+      }),
+    ),
+    { name: "ScopeViolationError" },
+    "A revision cannot freeze an empty source list.",
+  );
+
+  // An update that leaves harnessAuth out keeps the stored binding without checking it again;
+  // only a supplied binding must be available. Here the bound source is already deleting.
+  const staleSource = {
+    ...source,
+    id: identifier("cs"),
+    name: "Stale Harness source " + randomUUID(),
+  };
+  const staleBinding = { method: "credential_source", sourceId: staleSource.id };
+  const staleAgent = {
+    ...sourceAgent,
+    id: identifier("agt"),
+    name: "Stale Harness source agent " + randomUUID(),
+    harnessAuth: staleBinding,
+    credentialSources: [{ sourceId: staleSource.id }],
+    servicePrincipalId: identifier("service-agent"),
+  };
+  await store.transact(async (transaction) => {
+    await transaction.credentialSources.createCredentialSource(staleSource);
+    await transaction.agents.createAgent(staleAgent);
+    assert.equal(
+      (
+        await transaction.credentialSources.markCredentialSourceDeleting(
+          sourceNamespace.id,
+          staleSource.id,
+        )
+      ).state,
+      "deleting",
+    );
+  });
+  const kept = await store.transact((transaction) =>
+    transaction.agents.updateConfiguration(
+      sourceNamespace.id,
+      staleAgent.id,
+      sourceConfiguration.id,
+      "dedicated",
+    ),
+  );
+  assert.deepEqual(
+    {
+      executionMode: kept.executionMode,
+      harnessAuth: kept.harnessAuth,
+      credentialSources: kept.credentialSources,
+    },
+    {
+      executionMode: "dedicated",
+      harnessAuth: staleBinding,
+      credentialSources: staleAgent.credentialSources,
+    },
+    "Omitting harnessAuth keeps the stored binding without checking it again.",
+  );
+  await assert.rejects(
+    store.transact((transaction) =>
+      transaction.agents.updateConfiguration(
+        sourceNamespace.id,
+        staleAgent.id,
+        sourceConfiguration.id,
+        undefined,
+        staleBinding,
+      ),
+    ),
+    {
+      name: "ScopeViolationError",
+      message: "The Agent harness authentication references an unavailable credential source.",
+    },
+    "Supplying the same binding again checks it.",
+  );
+  const detached = await store.transact((transaction) =>
+    transaction.agents.updateConfiguration(
+      sourceNamespace.id,
+      staleAgent.id,
+      sourceConfiguration.id,
+      undefined,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [],
+    ),
+  );
+  assert.deepEqual(
+    { harnessAuth: detached.harnessAuth, credentialSources: detached.credentialSources },
+    { harnessAuth: null, credentialSources: undefined },
   );
 
   // Deletion is two-phase: a deleting source stays recorded and blocks Namespace

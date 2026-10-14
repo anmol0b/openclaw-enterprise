@@ -51,9 +51,8 @@ const REDACTED = "[REDACTED]";
 const SENSITIVE_KEY =
   /(?:access[_-]?token|api[_-]?key|authorization|bearer|client[_-]?secret|cookie|credential|password|private[_-]?key|provider[_-]?(?:credential|token)|refresh[_-]?token|secret|session[_-]?(?:cookie|token)|cli[_-]?session|token|body|content|message|prompt|text|transcript)/i;
 const SAFE_REFERENCE_KEY = /(?:id|ids|ref|reference|name|names|kind|count)$/i;
-// RFC-0019 CLI session tokens (occcli_) are redacted wherever they appear.
 const SENSITIVE_VALUE =
-  /(?:\bBearer\s+[\w.+/=-]+|\b(?:sk|ghp|gho|xox[baprs])-[\w-]{8,}|\bocccli_[\w-]{8,})/gi;
+  /(?:\bBearer\s+[\w.+/=-]+|\b(?:sk-ant-|sk-|ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|xox[baprs]-|xapp-)[A-Za-z0-9_-]{8,}|\bocccli_[\w-]{8,})/gi;
 const UNSAFE_PROPERTY = /^(?:__proto__|constructor|prototype)$/;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/g;
 

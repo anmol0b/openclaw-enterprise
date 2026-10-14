@@ -145,6 +145,7 @@ export async function composePostgresDevelopment(
     }
     const sandboxDriver = drivers?.sandboxDriver;
     const credentialGatewayDriver = drivers?.credentialGatewayDriver;
+    const credentialRefreshDriver = drivers?.credentialRefreshDriver;
     const configurationDriver =
       options.configurationDriver ??
       ("installation" in options
@@ -262,6 +263,10 @@ export async function composePostgresDevelopment(
       controller.registerDriver(credentialGatewayDriver);
       controller.selectDriver("credential_gateway", credentialGatewayDriver.id);
     }
+    if (credentialRefreshDriver !== undefined) {
+      controller.registerDriver(credentialRefreshDriver);
+      controller.selectDriver("credential_refresh", credentialRefreshDriver.id);
+    }
     if (configurationDriver !== undefined) {
       controller.registerDriver(configurationDriver);
       controller.selectDriver("configuration", configurationDriver.id);
@@ -336,6 +341,7 @@ export async function composePostgresDevelopment(
       development: {
         enabled: true,
         installationId,
+        browserOrigin: config.authBaseURL,
         ...(config.trustedDevelopmentBridgeCidr === undefined
           ? {}
           : {
@@ -347,7 +353,6 @@ export async function composePostgresDevelopment(
               ],
             }),
       },
-      maxBodyBytes: 64 * 1024,
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });
     app.get("/healthz", async () => ({ status: "ok" }));

@@ -21,6 +21,7 @@ const CONSOLE_ASSETS = new Map([
       "cli-login.mjs",
       "agents/list.mjs",
       "agents/logs.mjs",
+      "agents/logs-view.mjs",
       "agents/presets.mjs",
       "agents/create.mjs",
       "agents/plugin-discovery.mjs",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -975,10 +975,12 @@ test(
     const agentId = `agt_${randomUUID()}`;
     const stopWorkId = `agent:${agentId}:reconcile:stopped:${randomUUID()}`;
     const deleteWorkId = `agent:${agentId}:reconcile:deleted`;
+    const provisioningWorkId = `agent-provisioning:${randomBytes(16).toString("hex")}`;
     const withdrawalWorkId = `agent_revision:rev_${randomUUID()}:reconcile:credentials_withdrawn`;
     const cases = [
       { operation: "agent.stop", workId: stopWorkId },
       { operation: "agent.delete", workId: deleteWorkId },
+      { operation: "work.reconcile", workId: provisioningWorkId },
       {
         operation: "agent_revision.credential_withdrawal",
         workId: `${withdrawalWorkId}:${randomUUID()}`,
@@ -1344,6 +1346,17 @@ test(
                 plane: "execution",
                 kubernetesStatus: 403,
               }),
+              // A dependency 503's class, message and causes stay in local logs.
+              line({
+                severity: "WARN",
+                event: "http.dependency_unavailable",
+                requestId,
+                method: "POST",
+                route: `/api/${canary}`,
+                errorClass: "DependencyUnavailableError",
+                message: `The Kubernetes Secret create failed ${canary}.`,
+                causes: [{ errorClass: "ApiException", code: 500 }],
+              }),
               // A failed audit write keeps the Agent's IDs; the error stays local.
               line({
                 severity: "WARN",
@@ -1354,6 +1367,17 @@ test(
                 revisionId,
               }),
               line({ severity: "WARN", event: "native_admin.websocket_denial_audit_failed" }),
+              // A Compute-owner mismatch keeps the Agent's IDs; the Driver names stay local.
+              line({
+                severity: "WARN",
+                event: "native_admin.compute_owner_mismatch",
+                namespaceId,
+                agentId,
+                revisionId,
+                revisionCompute: { id: `compute-${canary}`, implementation: canary },
+                selectedCompute: { id: `selected-${canary}`, implementation: canary },
+                message: `Native admin UI is refused ${canary}`,
+              }),
               // Account IDs and messages that name them stay in local logs.
               line({
                 severity: "WARN",
@@ -1370,6 +1394,11 @@ test(
                 skippedUserIds: [`user_${canary}`],
                 skippedUserCount: 1,
                 skippedUserIdsTruncated: false,
+              }),
+              line({
+                severity: "WARN",
+                event: "authentication.forwarded-refused-warning",
+                code: "TRUSTED_PROXY_NOT_CONFIGURED",
               }),
               line({
                 severity: "WARN",
@@ -1462,6 +1491,7 @@ test(
           "event.name": "agent_runtime_credentials.cluster_denied",
           "request.id": requestId,
         }),
+        api("WARN", { "event.name": "http.dependency_unavailable", "request.id": requestId }),
         api("WARN", {
           "event.name": "native_admin.websocket_audit_failed",
           "occ.namespace.id": namespaceId,
@@ -1469,10 +1499,20 @@ test(
           "occ.revision.id": revisionId,
         }),
         api("WARN", { "event.name": "native_admin.websocket_denial_audit_failed" }),
+        api("WARN", {
+          "event.name": "native_admin.compute_owner_mismatch",
+          "occ.namespace.id": namespaceId,
+          "occ.agent.id": agentId,
+          "occ.revision.id": revisionId,
+        }),
         api("WARN", { "event.name": "authentication.activation-warning" }),
         api("WARN", {
           "event.name": "authentication.password-sign-in-warning",
           "occ.code": "EXTERNAL_IDENTITY_MISSING",
+        }),
+        api("WARN", {
+          "event.name": "authentication.forwarded-refused-warning",
+          "occ.code": "TRUSTED_PROXY_NOT_CONFIGURED",
         }),
         api("WARN", { "event.name": "authentication.recovery-seed-warning" }),
         summary("occ-worker", "WARN", "stderr", {

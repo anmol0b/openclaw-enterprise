@@ -1,7 +1,7 @@
 ---
 created: 2026-08-28
-updated: 2026-10-05
-last_updated_session: authoring-run/583f86ae-e997-4586-8fb5-217bb20a1410
+updated: 2026-10-13
+last_updated_session: authoring-run/503e74ea-e82a-4d1a-8081-fcf4fc4e6868
 ---
 
 # Secret Storage and Gateway Delivery Flow
@@ -95,9 +95,11 @@ persists immutable Namespace, driver, and backend metadata while public metadata
 omits the backend locator and returns `{ kind: "secret", namespaceId, id }`.
 
 Known OCC transaction failure can compensate the exact created object. An
-unknown commit outcome must not trigger destructive compensation. There is no
-value journal or automatic replay; ambiguous creation can require operator
-recovery.
+unknown commit outcome must not trigger destructive compensation. A failed create
+deletes the owned object it may have stored under its name. A create refused because
+its stored object was rewritten deletes it, pinned to the answered UID and
+resourceVersion. There is no value journal or automatic replay; a create still in
+flight can require operator recovery.
 
 ### 3. Bind a source, then admit references
 
@@ -137,6 +139,7 @@ execution topology.
 ### 4. Grant the first local Agent access to its model credential
 
 `scripts/first-agent.mjs:main`;
+`scripts/first-agent.mjs:assertManagedRevision`;
 `scripts/first-agent-database.mjs:grantFirstAgentSecret`
 
 The [tool](../../scripts/first-agent.mjs) targets the persistent installation
@@ -144,6 +147,10 @@ started with `./bin/occ dev up`. Before invoking Kubernetes or the OCC API, it
 requires the current v3 development marker and state from the same checkout.
 The state must select Kubernetes Compute. The default `sandboxDriver: "none"`
 path uses embedded OpenClaw; OpenShell requires explicit `--harness codex`.
+`scripts/first-agent.mjs:loadLocalInstallation` uses the recorded Unix socket
+for container-engine calls and removes inherited Docker TLS settings from their
+environment. Compose-backed setup therefore queries the recorded local controller
+port and PostgreSQL service without loading certificates for another daemon.
 With the [bootstrap service key](../../packages/iam/src/index.ts), it creates a
 Secret, Configuration, and named Agent through the OCC HTTP API. A new Agent uses
 `openai/gpt-6-astra` unless `OPENCLAW_FIRST_AGENT_MODEL` selects another authorized
@@ -164,7 +171,9 @@ a new revision. The private helper record freezes the Harness and Sandbox Driver
 choices so a rerun cannot silently change topology.
 
 The tool provisions initial runtime credentials and requests deployment through
-OCC. Once the revision is active,
+OCC. Its revision check expects OpenShell's frozen Codex policy:
+`sandbox: "danger-full-access"` and `approvalsReviewer: "user"`. Other
+Configuration differences fail the drift check. Once the revision is active,
 [`findGateway`](../../scripts/first-agent-model.mjs) discovers the canonical
 tenant namespace through `openclaw.dev/namespace`. The supported local setup is
 single-cluster, so embedded and dedicated Gateways share that physical namespace
@@ -294,6 +303,10 @@ credential at its issuer.
 
 ## Changelog
 
+- 2026-10-13 15:07: Align the first-Agent revision check with OpenShell's explicit user approval reviewer in the accompanying helper fix. (authoring-run/503e74ea-e82a-4d1a-8081-fcf4fc4e6868 - 05a515c7f57faf3a870b7265b2792c407c0c4305)
+
+- 2026-10-09 13:00: A failed Secret create deletes the exact object it may have stored. (fix-916)
+- 2026-10-05 13:27: Keep first-Agent container-engine calls on the recorded Unix socket without inherited Docker TLS settings. (authoring-run/c743ee6e-95f7-43d3-813d-4496b4b2fb19 - 469d2fef447ecdf2565d3991db1e1ce5c95d880e)
 - 2026-10-05 17:02: Align first-Agent Gateway discovery with the canonical single-cluster tenant namespace. (authoring-run/583f86ae-e997-4586-8fb5-217bb20a1410 - 1d7bd797a941a45c36280b7531ee3051b5cad830)
 
 - 2026-10-02: Canonical sources and role-specific projections share the single-cluster tenant namespace. (01a0fe72-58b2-7cc3-b770-7310f5401deb)
