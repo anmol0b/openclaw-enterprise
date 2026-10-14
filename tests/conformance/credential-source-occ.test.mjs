@@ -3790,3 +3790,25 @@ test("an unknown configure reply preserves the last committed handoff without mi
     {},
   );
 });
+
+test("refresh handoff preserves the Driver's normalized configuration on record and wire", async () => {
+  const context = await fixture();
+  await context.makeReady();
+  const secret = await createSecret(context, "normalized-client", "synthetic-client");
+  context.gateway.validateSourceConfig = () => ({ client_id: "normalized-client" });
+  const source = await context.controller.createCredentialSource(administrator, {
+    namespaceId: context.namespace.id,
+    name: "normalized-handoff",
+    type: "oauth-client",
+    config: { client_id: "written-client" },
+    secrets: { client_secret: secret.ref },
+  });
+  assert.deepEqual(source.config, { client_id: "normalized-client" });
+  assert.deepEqual(source.secrets, {});
+  const calls = context.gateway.calls.filter(({ operation }) =>
+    ["registerSource", "configureRefresh"].includes(operation),
+  );
+  assert.equal(calls.length, 2);
+  for (const call of calls) assert.deepEqual(call.input.config, source.config);
+  assert.deepEqual(await handoffIds(context, source), { client_secret: secret.id });
+});
