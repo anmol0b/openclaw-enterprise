@@ -1636,7 +1636,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       } else if (error.provisioningTerminal && error.canRetryProvisioning) {
         detail = `${error.message} Retry uses the accepted provisioning job.`;
       } else if (error.provisioningRevisionId && error.provisioningCode === "REVISION_STOPPED") {
-        // A stop during the first rollout is not a failure to correct; the Agent stays stopped.
+        // A stopped Agent needs a new deployment, not a repaired failure.
         detail = `${error.message} Open this Agent and deploy a new version when you want it running.`;
       } else if (error.provisioningRevisionId) {
         detail = `${error.message} Open this Agent, correct the cause and deploy a new version.`;

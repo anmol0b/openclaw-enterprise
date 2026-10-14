@@ -1102,7 +1102,7 @@ export const AgentRevisionListResponse = Type.Object(
         ...Meta.properties,
         nextCursor: Type.Union([Type.String({ maxLength: 32 }), Type.Null()], {
           description:
-            "Pass as `cursor` to read older revisions; `null` when no older revision is readable. A full page carries a cursor, so the page after it can be empty.",
+            "Pass as `cursor` to read older revisions. A cursor indicates that an older revision was found readable when checked during this request; a later page may be empty if access changes. `null` means no older revision was found readable when checked.",
         }),
       },
       { additionalProperties: false },
