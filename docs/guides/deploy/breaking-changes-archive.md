@@ -2,11 +2,139 @@
 
 These [breaking-change notices](breaking-changes.md) are older than the ones
 on that page and newer than the
-[notices before 2026-10-11](breaking-changes-before-2026-10-11.md). They still
+[notices before 2026-10-12](breaking-changes-before-2026-10-12.md). They still
 apply when you upgrade from a source commit older than their date. Entries are
 newest first. Steps marked _untested_ have not been run against a real
 Installation. When this page nears the word limit, its oldest notices move to a
 new page named for the date they precede.
+
+## 2026-10-13: remote node CIDRs must be canonical
+
+**What breaks.** `helm upgrade` fails when a saved
+`gatewayRouting.remoteNodeCidrs` entry uses a leading zero, such as
+`010.0.0.1/32` or `::ffff:010.0.0.1/128`. Those values used to render, and the
+apiserver accepted them with a warning. The upgrade now stops before it writes
+that policy.
+
+**Who is affected.** Saved releases that use a leading-zero spelling. Canonical
+values still upgrade, including `10.0.0.1/32`, `0.0.0.0/0`, `::/64`, and
+`::ffff:10.0.0.0/120`. An empty list and `null` still omit the ingress block.
+
+**How to tell.** Helm stops with
+`gatewayRouting.remoteNodeCidrs requires an IPv4 or IPv6 CIDR` for
+`010.0.0.1/32`, and with
+`gatewayRouting.remoteNodeCidrs contains an invalid IPv6 address` for
+`::ffff:010.0.0.1/128`.
+
+**Steps.** Write the canonical value (`10.0.0.1/32` for `010.0.0.1/32`, and
+`::ffff:10.0.0.1/128` for `::ffff:010.0.0.1/128`) and upgrade again.
+
+## 2026-10-13: execution API CIDRs must be explicit and nonzero
+
+**What breaks.** `helm upgrade` fails when a saved `executionCluster.apiCidrs`
+entry is `0.0.0.0/0`, `::/0`, or a leading-zero address such as `010.44.0.2/32`.
+Those values used to render. A `/0` became egress to any address on the
+execution API port, and the apiserver accepted the leading-zero form with a
+warning. The upgrade now stops before it writes that policy.
+
+**Who is affected.** Saved releases that use one of those spellings. A canonical
+IPv4 CIDR with prefix 1 through 32, such as `192.0.2.0/28`, and a canonical
+IPv6 CIDR with a nonzero prefix, such as `2001:db8::/64`, still upgrade. A
+disabled execution cluster is not checked.
+
+**How to tell.** Helm stops with
+`executionCluster.apiCidrs requires an explicit IPv4 or IPv6 CIDR with a nonzero prefix`.
+
+**Steps.** Replace `0.0.0.0/0` or `::/0` with the execution API addresses you
+mean to allow. Rewrite `010.44.0.2/32` as `10.44.0.2/32`. Upgrade again.
+
+## 2026-10-13: OpenShell gateway readiness requires timeoutMs
+
+**What breaks.** Controller startup fails when `gateway.readiness` is set and
+`timeoutMs` is omitted. That configuration starts today. The field must be a
+positive safe integer. Omitted readiness is unchanged.
+
+**Who is affected.** Installations, and the real k3d helper, that set
+`gateway.readiness` with only `serviceName` and `podSelector`.
+
+**How to tell.** Startup logs `startup-error` with code `STARTUP_FAILED`. The
+Installation loader reports `OpenShell gateway readiness timeout must be a
+positive safe integer.` The message does not name `timeoutMs`.
+
+**Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond window.
+The real helper uses 120000. Then start again.
+
+## 2026-10-13: demo cluster CIDRs must be one canonical IPv4 host
+
+**What breaks.** The observability demo `helm upgrade` fails when
+`cluster.cidrs` is not one canonical IPv4 `/32`.
+
+**Who is affected.** Demo releases whose saved `cluster.cidrs` are not that
+form.
+
+**How to tell.** Helm stops in `prometheus.yaml` with `cluster.cidrs requires
+exact IPv4 /32 endpoints`.
+
+**Steps.** Write the canonical spelling (`010.0.0.1/32` becomes `10.0.0.1/32`)
+and upgrade again.
+
+## 2026-10-13: OpenShell network policy names must be unique
+
+**What breaks.** Controller startup refuses an Installation whose
+`policy.networkPolicies` repeat a name, or name a policy
+`workspace-node-enrollment`. Those configurations start today. A duplicate name
+keeps only the last rule. A policy named `workspace-node-enrollment` is replaced
+when a workspace-node binding exists.
+
+**Who is affected.** Installations with duplicate policy names, or with a policy
+named `workspace-node-enrollment`.
+
+**How to tell.** Startup logs `startup-error` with code
+`OPENSHELL_NETWORK_POLICY_NAME_REJECTED` and reason `rename-or-merge`. The log
+does not include the policy name. Loading the Installation configuration names
+the duplicate or reserved policy.
+
+**Steps.** Rename or merge duplicate `policy.networkPolicies` names. Rename a
+policy called `workspace-node-enrollment`. Keep each policy's binaries and
+endpoints. _untested_ against a live Installation.
+
+## 2026-10-13: OpenShell `openai` credential sources need replacing
+
+**What breaks.** Each OpenShell credential source now owns its provider profile.
+An `openai` source registered by an earlier build points its provider at the
+shared `oce-openai` profile, so OCC no longer treats that provider as the
+source's. A deployment that lists the source fails. Deleting the source through
+OCC leaves it `deleting` until its provider is removed by hand.
+
+**Who is affected.** Installations with OpenShell `openai` credential sources.
+`bearer-token` and OAuth2 sources already owned their profiles and are
+unaffected.
+
+**How to tell.** The source's `status` is `failed`, with "The OpenShell
+provider is not owned by this source."
+
+**Steps.** After upgrading, replace each such source, _untested_:
+
+1. Register a replacement `openai` source from the same Secret. It gets its own
+   profile.
+2. For each Agent bound to the old source:
+   - Grant the Agent's service principal `operate` on the replacement.
+   - Update the Agent so that `credentialSources` lists the replacement instead
+     of the old source, and `harnessAuth.sourceId` names the replacement.
+   - Deploy it, and wait until the new revision is active.
+
+   OCC refuses to delete a source with `409` while an Agent, its active
+   revision, or a pending deployment still references it.
+
+3. In the Namespace's OpenShell Workspace, delete each old source's provider:
+   the one labeled `openclaw.dev/credential-source-id` with the source's ID.
+   OpenShell refuses while a Sandbox still lists it, so the old revision's
+   Sandbox must be gone. Then delete the old source through OCC. A `404` while
+   `GET` shows `deleting` means the provider remains; a
+   `409 CREDENTIAL_WITHDRAWAL_IN_PROGRESS` means retry after withdrawal work
+   finishes.
+4. Once no old `openai` provider remains, delete the `oce-openai` profile.
+   OpenShell refuses while a provider still uses it.
 
 ## 2026-10-12: model credentials in provider headers and request auth
 
@@ -144,157 +272,3 @@ topology without repository credential delivery.
 
 **Steps.** Create the Agent without `initialWorkspaceFiles`, or without
 `repositoryBindings`.
-
-## 2026-10-11: named Harness authentication and Docker workspace refusals
-
-**What breaks.**
-
-- On Kubernetes Compute, an Agent whose `harnessAuth.method` its topology
-  cannot use (for example `runtime` or `codex_pat` on embedded OpenClaw, or
-  `oauth` on dedicated OpenClaw) gets `400` naming `harnessAuth.method`, where
-  it got a fixed `409`: at provisioning and deployment, and at Agent create and
-  update for `runtime` and Secret bindings. Nothing new is refused.
-- On Docker Compute, Agent create, and update while initial workspace files
-  are pending, answer `400` for an `agents.entries` roster other than `main`
-  alone, a workspace other than `/home/node/.openclaw/workspace` or
-  `/home/node/workspace`, or a true `skipBootstrap` or
-  `skipOptionalBootstrapFiles`. Before, the first deployment's preparation
-  failed. The messages match Kubernetes Compute's.
-
-**Who is affected.** Clients that branch on the `409`, and Docker Compute
-users who saved such an Agent. Stored Agents still read.
-
-**How to tell.** The `400` names the setting.
-
-**Steps.** Change the named setting, `harnessAuth` or `executionMode`, then save
-again.
-
-## 2026-10-11: Agent and Configuration saves refuse what deployment refuses
-
-**What breaks.** On Kubernetes Compute, Configuration create and update,
-provisioning and Preset saves answer `400` for an enabled unsupported
-`channels.<provider>`, a non-empty `auth`, an `env` or `env.vars` name starting
-`OPENAI_` or `ANTHROPIC_` in any case (or a Codex login variable), and an
-authorization header on a selected model provider. Agent create and update
-answer `503` when the Configuration Driver cannot be read, and refuse what
-deployment refused for the same Agent and Configuration: an Agent that is not
-`dedicated` (including an omitted `executionMode`) when a Sandbox Driver is
-selected (`400`; deployment answered `404`), a Harness the Configuration
-selects for the other execution mode (`400`), a Harness authentication,
-repository or initial workspace file setup the Compute Driver cannot deliver
-(`400` naming the setting, or `409`). Deployment names those Kubernetes
-settings too, instead of answering with fixed Harness authentication text:
-
-- Deployment answers `400` naming the setting, where it answered `409`, for
-  the dedicated OpenClaw model catalog, a provider `apiKey`, channel Secret
-  bindings and `cloudWorkers.requiredProfile`.
-- Deployment refuses a pending initial workspace setup the Configuration
-  cannot deliver with `400`, where the first deployment's preparation failed.
-- Creating a dedicated OpenClaw Agent, or switching an embedded one to
-  `dedicated`, needs the Configuration to carry the dedicated model catalog
-  first: save the Configuration, then the Agent.
-
-**Who is affected.** Clients that saved such values and fixed them before
-deploying. Stored Configurations and Agents still read.
-
-**How to tell.** The `400` names the setting or the execution mode.
-
-**Steps.** Fix the named setting or the Agent's `executionMode`, then save
-again.
-
-## 2026-10-11: the chart refuses malformed Secret, ConfigMap and GatewayClass names
-
-**What breaks.** `helm template`, `install` and `upgrade` fail when a Secret
-name the chart reads, `repositoryCredentials.registryConfigMapName`,
-`gatewayRouting.gatewayClassName` or `gatewayRouting.issuerRef.name` is not a
-Kubernetes resource name: lowercase
-letters, digits, `-` and `.`, starting and ending with a letter or digit, at
-most 253 characters. Examples are `database.caSecretName`,
-`gatewayRouting.apiKeySecretName`, `auth.*.secretName` and
-`executionCluster.*KubeconfigSecretName`. Kubernetes either refused such a Pod
-or left it waiting for a Secret that cannot exist. Profile preflight already
-refused the names it writes.
-
-**Who is affected.** Hand-written values files with such a name. No working
-Installation is affected, since Kubernetes cannot create a Secret, ConfigMap or
-GatewayClass with that name. Settings of disabled features are not checked.
-
-**How to tell.** Rendering fails with
-`<setting> must be a Kubernetes resource name of at most 253 characters`.
-
-**Steps.** Create the Secret or ConfigMap under a valid name, set it in your
-values, and run the upgrade again. _untested_
-
-## 2026-10-11: status proxy sources that cover every address are refused
-
-**What breaks.** Controller startup refuses a
-`network.pluginStatusProxySourceCidrs` entry that covers every address:
-`0.0.0.0/0`, `::/0`, or an IPv6 range containing all of `::ffff:0:0/96`.
-Such a source let every Pod reach each Agent's status port.
-`gatewayTrustedProxyCidrs` already refused these. The two-cluster
-`executionCluster.network` lists refused `/0` and now also such IPv6 ranges.
-
-**Who is affected.** Hand-written `installation.yaml` files with such an
-entry. Profiles already refused a `/0`.
-
-**How to tell.** Startup fails with `... CIDRs cannot cover every address.`
-A narrower status source wider than one address, such as the Pod CIDR, still
-starts; the worker logs `KUBERNETES_STATUS_PROXY_SOURCE_BROAD`, and the profile
-renderer warns.
-
-**Steps.** List the API server's `/32` or `/128` Pod proxy source addresses
-instead, then restart the controller. _untested_
-
-## 2026-10-11: settings that took dedicated Agents down are refused earlier
-
-**What breaks.** Configuration create and update answer `400` for
-a `plugins.entries.codex.config.appServer.approvalPolicy` other than `never`,
-`on-request` or `on-failure`, and for a literal `gateway.auth.password` (one
-that is not a `${NAME}` or `{source, id}` reference). Kubernetes deployment and
-provisioning refuse, before the running revision stops, what preparation or the
-Gateway refused only after it: those policies and a `gateway.auth.password`
-other than the `OPENCLAW_GATEWAY_PASSWORD` reference (`409`); an enabled channel
-on an embedded Agent or on an Installation without `runtime.channels`, and,
-when the Gateway hosts a workspace node, `file-transfer` in `plugins.deny` or
-`plugins.entries.file-transfer.enabled: false` (`400`). Docker and SSH Compute
-refuse the same policies.
-
-**Who is affected.** Configurations with such values. A dedicated redeploy of
-one stopped the working Agent and then failed. Docker Agents that ran a literal
-gateway password can no longer save it. Stored Configurations still read.
-
-**How to tell.** The `400` or `409` names the setting.
-
-**Steps.** Fix the named setting (for the password, use **Enable gateway
-password access**), then deploy again.
-
-## 2026-10-11: Gateway StorageClass names are checked before startup
-
-**What breaks.** Profile preflight and controller startup refuse a
-`runtime.gatewayStorageClassName` that is not a Kubernetes DNS-subdomain resource
-name. Such a value could never create a Gateway PVC.
-
-**Who is affected.** Hand-written `installation.yaml` files with an invalid value;
-profiles now refuse the same value before writing deployable files.
-
-**How to tell.** Preflight names `runtime.gatewayStorageClassName`; controller
-startup logs `GATEWAY_STORAGE_CLASS_INVALID`.
-
-**Steps.** Run `kubectl get storageclass`, copy the intended StorageClass name into
-the Installation input, rerender when using a profile, and restart the controller.
-
-## 2026-10-11: `occ` refuses explicitly empty flag values
-
-**What breaks.** `occ` refuses an empty `--revision=`, `--pod=`, `--level=`,
-`--source=`, `--file=`, `--out=`, `--service-principal=`, `--url=`,
-`--service-key-file=` or `dev up --key-output=` before it does any work.
-Earlier builds treated most of these as omitted and used the default revision,
-Pod, level or key path.
-
-**Who is affected.** Scripts that pass one of these flags a variable that can be
-empty, such as `--revision="$REV"`.
-
-**How to tell.** `occ` reports `--<flag> must name ...`.
-
-**Steps.** Omit the flag when its value is empty. `--ca-bundle=` still clears
-`OCC_CA_BUNDLE`.

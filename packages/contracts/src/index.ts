@@ -1384,8 +1384,14 @@ export interface CredentialAttachmentStatus {
 export interface CredentialGatewayDriver extends Driver {
   readonly capability: "credential_gateway";
   listSourceTypes(context: CredentialGatewayContext): Promise<readonly CredentialSourceType[]>;
-  /** Validate nonsecret configuration without I/O, before OCC reads Secrets or stores a record. */
-  validateSourceConfig(input: Pick<CredentialSourceInput, "type" | "config">): void;
+  /**
+   * Validate nonsecret configuration without I/O, before OCC reads Secrets or stores a record.
+   * A returned configuration, with the same fields, is what OCC stores and registers instead of
+   * the written one, such as a URL in the normalized form the gateway uses.
+   */
+  validateSourceConfig(
+    input: Pick<CredentialSourceInput, "type" | "config">,
+  ): Readonly<Record<string, string>> | void;
   registerSource(
     context: CredentialSourceContext,
     input: CredentialSourceInput,
@@ -1933,6 +1939,12 @@ export interface ConfigurationDriver extends Driver {
     values: OpenClawConfigurationDocument,
     options?: ConfigurationValidationOptions,
   ): Promise<void>;
+  /**
+   * Refuses values too large to store, as `validate` would. OCC calls it before its content
+   * rules on Configuration create and update and Agent provisioning, so no rule walks them.
+   * Throw OCC's `ConfigurationSizeError` so the API names the limit to the caller.
+   */
+  validateSize?(values: OpenClawConfigurationDocument): Promise<void>;
   create(configuration: Configuration): Promise<Configuration>;
   createExact?(configuration: Configuration): Promise<Configuration>;
   inspectExact?(configuration: Configuration): Promise<Configuration | undefined>;

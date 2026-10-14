@@ -5,6 +5,7 @@ main can refuse or break an Installation that an older build created. Each
 change like that gets an entry here: what breaks, who is affected, how to tell,
 and the steps. Before an upgrade, read every entry dated after the source commit
 you run now, here, in the [earlier notices](breaking-changes-archive.md), in the
+[notices before 2026-10-12](breaking-changes-before-2026-10-12.md), in the
 [notices before 2026-10-11](breaking-changes-before-2026-10-11.md) and in the
 [notices before 2026-10-10](breaking-changes-before-2026-10-10.md),
 then follow the [upgrade checklist](upgrade-checklist.md) and
@@ -12,6 +13,126 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
+
+## 2026-10-14: every model selection must use the Harness provider
+
+**What breaks.** On Kubernetes Compute, Configuration, Preset and Agent saves
+and deployment refuse a model selection off the primary model's provider:
+fallbacks, Agent entries, `subagents.model` and the other `*Model` settings,
+`models` policy keys, `modelPolicy.allow`, hook models,
+`channels.modelByChannel`, and an `apiKey` on another `models.providers`
+entry (`openrouter:auto` and `openrouter:free` count as `openrouter`).
+Dedicated Codex refuses every `apiKey`, `mediaModels` and `voiceModel`, and
+unqualified policy entries. Every Compute refuses another-provider fallbacks at
+save. A Preset variable's provider is checked at launch; a number
+or boolean model variable is refused. Preset saves also check `agents` rosters.
+Every Compute also refuses a literal key in `memory.search.remote` (also per
+Agent), `tools.media` requests, speech and Talk provider `apiKey`s, web fetch,
+OpenTelemetry and edge auth credential headers, skill `apiKey`s and
+`cron.webhookToken`, and a header name there or in MCP `headers` that is not an
+HTTP field name. It also refuses a literal secret in the other slots OpenClaw
+marks sensitive: Gateway, hooks, sandbox SSH and storage secrets, and channel
+and plugin settings such as `botToken` or `webSearch.apiKey`
+([list](../../reference/configuration/secrets.md#secret-boundaries)). Preset
+saves also refuse a literal `gateway.auth.password` or invalid `approvalPolicy`;
+provisioning checks `agents` rosters.
+
+**Who is affected.** Configurations and Presets that select a second provider
+or give it an `apiKey`, set an `apiKey`, media or voice model for Dedicated
+Codex, or hold a literal key or secret in one of those slots.
+
+**How to tell.** A `400` names the setting: `... must select
+<provider>/<model>, the provider of the Agent's Harness authentication
+binding`, `... must use the primary model's provider`, `... must be
+provider/model references`, `... must be unset`, or `... holds a credential
+value inline, where a reference is required`.
+
+**Steps.** Move or remove the setting the `400` names, keeping only the
+primary model's provider, or make a literal key a `${NAME}` reference or a
+SecretRef, then save and deploy again.
+
+## 2026-10-14: observability URLs must not hide another host
+
+**What breaks.** Profile preflight and API and worker startup refuse an
+`observability.url` that contains a tab, newline, or a backslash before the
+query. The parser stored a different host. A backslash in the query stays.
+
+**Who is affected.** Profiles with `controlPlane.observabilityUrl`, and
+Installations whose startup `observability.url` uses one of those characters.
+
+**How to tell.** Preflight reports `controlPlane.observabilityUrl must not
+contain a tab or newline, or a backslash before the query`. Startup logs
+`OBSERVABILITY_URL_INVALID`.
+
+**Steps.** Write the host you mean, with no tab, newline, or backslash before the
+query, and upgrade. _untested_ against a live Installation.
+
+## 2026-10-14: proxy and MCP URLs must name a host
+
+**What breaks.** Configuration and Preset saves refuse a proxy, channel proxy,
+MCP server, or plugin URL whose authority is empty (`https:///v1`) or whose
+`//` is missing (`https:/v1`).
+
+**Who is affected.** Configurations and Presets that save one of those
+spellings in a proxy, channel, MCP, or plugin URL.
+
+**How to tell.** The save answers `400` naming the field: `has an empty
+authority or a missing //, which parses as a different host.`
+
+**Steps.** Write an absolute http or https URL with the host you mean, and
+save again.
+
+## 2026-10-14: OpenShell gateway IPv4 hosts must be four decimal octets
+
+**What breaks.** Startup and both gateway clients refuse an OpenShell
+`endpoint` whose IPv4 host is not four decimal octets with no leading zeros.
+
+**Who is affected.** Backends whose `configuration.endpoint` uses one of those
+spellings.
+
+**How to tell.** The report says `IPv4 host must be four decimal octets`.
+
+**Steps.** Write those four octets, then restart.
+
+## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
+
+**What breaks.** Creating an OpenShell `openai` credential source refuses a
+`base_url`, and Kubernetes Compute startup refuses `runtime.codexModelBaseUrl`,
+with a space or control character, without the `//` after `https:`, or with an
+`@` before the host (`https://@host/v1`), which the URL parser silently
+rewrote. An `openai` source host must be an exact DNS name, like a
+`bearer-token` host: an IP address in any spelling (`127.0.0.1`,
+`0x7f000001`, `127.1`) or a label with `_` or an edge `-` is refused. A
+deployment or Secret update of an existing source with such a host or spelling
+fails. A new source stores its
+`base_url` normalized (`https://API.example.com:443/v1/` as
+`https://api.example.com/v1`).
+
+**Who is affected.** Sources or Compute settings that use those spellings, and
+`openai` sources with such a host.
+
+**How to tell.** Creation returns `400` for `/config/base_url`, with `... host
+must be an exact DNS name.` or the spelling's message. Compute startup reports
+`Codex model endpoint must ...` or `... requires HTTPS ...`. A deployment with
+such a source fails with `The OpenShell endpoint requires HTTPS, ...`.
+
+**Steps.** Fix the spelling. Replace such a source with one whose endpoint is a
+DNS name its certificate covers, as the
+[`openai` source replacement notice](breaking-changes-archive.md#2026-10-13-openshell-openai-credential-sources-need-replacing)
+describes. _untested_ against a live Installation.
+
+## 2026-10-14: Codex model IPv4 hosts must be four decimal octets
+
+**What breaks.** `runtime.codexModelBaseUrl` whose IPv4 host is not four decimal
+octets with no leading zeros is refused.
+
+**Who is affected.** Kubernetes Compute settings that set
+`runtime.codexModelBaseUrl` to one of those spellings.
+
+**How to tell.** Compute reports `Codex model endpoint IPv4 host must be four
+decimal octets`.
+
+**Steps.** Write those four octets, then start again.
 
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 
@@ -192,136 +313,3 @@ or the same sentence for `auth.google.egressCidrs`, `auth.oidc.egressCidrs`, and
 
 **Steps.** Write the canonical decimal (`140.82.112.8/20` for
 `140.82.112.08/20`) and upgrade again.
-
-## 2026-10-13: remote node CIDRs must be canonical
-
-**What breaks.** `helm upgrade` fails when a saved
-`gatewayRouting.remoteNodeCidrs` entry uses a leading zero, such as
-`010.0.0.1/32` or `::ffff:010.0.0.1/128`. Those values used to render, and the
-apiserver accepted them with a warning. The upgrade now stops before it writes
-that policy.
-
-**Who is affected.** Saved releases that use a leading-zero spelling. Canonical
-values still upgrade, including `10.0.0.1/32`, `0.0.0.0/0`, `::/64`, and
-`::ffff:10.0.0.0/120`. An empty list and `null` still omit the ingress block.
-
-**How to tell.** Helm stops with
-`gatewayRouting.remoteNodeCidrs requires an IPv4 or IPv6 CIDR` for
-`010.0.0.1/32`, and with
-`gatewayRouting.remoteNodeCidrs contains an invalid IPv6 address` for
-`::ffff:010.0.0.1/128`.
-
-**Steps.** Write the canonical value (`10.0.0.1/32` for `010.0.0.1/32`, and
-`::ffff:10.0.0.1/128` for `::ffff:010.0.0.1/128`) and upgrade again.
-
-## 2026-10-13: execution API CIDRs must be explicit and nonzero
-
-**What breaks.** `helm upgrade` fails when a saved `executionCluster.apiCidrs`
-entry is `0.0.0.0/0`, `::/0`, or a leading-zero address such as `010.44.0.2/32`.
-Those values used to render. A `/0` became egress to any address on the
-execution API port, and the apiserver accepted the leading-zero form with a
-warning. The upgrade now stops before it writes that policy.
-
-**Who is affected.** Saved releases that use one of those spellings. A canonical
-IPv4 CIDR with prefix 1 through 32, such as `192.0.2.0/28`, and a canonical
-IPv6 CIDR with a nonzero prefix, such as `2001:db8::/64`, still upgrade. A
-disabled execution cluster is not checked.
-
-**How to tell.** Helm stops with
-`executionCluster.apiCidrs requires an explicit IPv4 or IPv6 CIDR with a nonzero prefix`.
-
-**Steps.** Replace `0.0.0.0/0` or `::/0` with the execution API addresses you
-mean to allow. Rewrite `010.44.0.2/32` as `10.44.0.2/32`. Upgrade again.
-
-## 2026-10-13: demo cluster CIDRs must be one canonical IPv4 host
-
-**What breaks.** `helm upgrade` of the observability demo fails when a
-`cluster.cidrs` entry is not one IPv4 address in canonical form with prefix
-`/32`. A saved `010.0.0.1/32` used to install. Kubernetes applied it and named
-`10.0.0.1/32` as the spelling a future release will require. The upgrade now
-stops before it writes that policy.
-
-**Who is affected.** Demo releases whose saved `cluster.cidrs` use a leading
-zero, an octet above 255, or a prefix other than `/32`. A canonical endpoint
-such as `10.43.0.1/32` upgrades unchanged.
-
-**How to tell.** Helm stops in `prometheus.yaml` with
-`cluster.cidrs requires exact IPv4 /32 endpoints`.
-
-**Steps.** Replace the saved value with its canonical spelling (`010.0.0.1/32`
-becomes `10.0.0.1/32`) and upgrade again. The scrape policy then uses that
-`/32`.
-
-## 2026-10-13: OpenShell gateway readiness requires timeoutMs
-
-**What breaks.** Controller startup fails when `gateway.readiness` is set and
-`timeoutMs` is omitted. That configuration starts today. The field must be a
-positive safe integer. Omitted readiness is unchanged.
-
-**Who is affected.** Installations, and the real k3d helper, that set
-`gateway.readiness` with only `serviceName` and `podSelector`.
-
-**How to tell.** Startup logs `startup-error` with code `STARTUP_FAILED`. The
-Installation loader reports `OpenShell gateway readiness timeout must be a
-positive safe integer.` The message does not name `timeoutMs`.
-
-**Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond window.
-The real helper uses 120000. Then start again.
-
-## 2026-10-13: OpenShell network policy names must be unique
-
-**What breaks.** Controller startup refuses an Installation whose
-`policy.networkPolicies` repeat a name, or name a policy
-`workspace-node-enrollment`. Those configurations start today. A duplicate name
-keeps only the last rule. A policy named `workspace-node-enrollment` is replaced
-when a workspace-node binding exists.
-
-**Who is affected.** Installations with duplicate policy names, or with a policy
-named `workspace-node-enrollment`.
-
-**How to tell.** Startup logs `startup-error` with code
-`OPENSHELL_NETWORK_POLICY_NAME_REJECTED` and reason `rename-or-merge`. The log
-does not include the policy name. Loading the Installation configuration names
-the duplicate or reserved policy.
-
-**Steps.** Rename or merge duplicate `policy.networkPolicies` names. Rename a
-policy called `workspace-node-enrollment`. Keep each policy's binaries and
-endpoints. _untested_ against a live Installation.
-
-## 2026-10-13: OpenShell `openai` credential sources need replacing
-
-**What breaks.** Each OpenShell credential source now owns its provider profile.
-An `openai` source registered by an earlier build points its provider at the
-shared `oce-openai` profile, so OCC no longer treats that provider as the
-source's. A deployment that lists the source fails. Deleting the source through
-OCC leaves it `deleting` until its provider is removed by hand.
-
-**Who is affected.** Installations with OpenShell `openai` credential sources.
-`bearer-token` and OAuth2 sources already owned their profiles and are
-unaffected.
-
-**How to tell.** The source's `status` is `failed`, with "The OpenShell
-provider is not owned by this source."
-
-**Steps.** After upgrading, replace each such source, _untested_:
-
-1. Register a replacement `openai` source from the same Secret. It gets its own
-   profile.
-2. For each Agent bound to the old source:
-   - Grant the Agent's service principal `operate` on the replacement.
-   - Update the Agent so that `credentialSources` lists the replacement instead
-     of the old source, and `harnessAuth.sourceId` names the replacement.
-   - Deploy it, and wait until the new revision is active.
-
-   OCC refuses to delete a source with `409` while an Agent, its active
-   revision, or a pending deployment still references it.
-
-3. In the Namespace's OpenShell Workspace, delete each old source's provider:
-   the one labeled `openclaw.dev/credential-source-id` with the source's ID.
-   OpenShell refuses while a Sandbox still lists it, so the old revision's
-   Sandbox must be gone. Then delete the old source through OCC. A `404` while
-   `GET` shows `deleting` means the provider remains; a
-   `409 CREDENTIAL_WITHDRAWAL_IN_PROGRESS` means retry after withdrawal work
-   finishes.
-4. Once no old `openai` provider remains, delete the `oce-openai` profile.
-   OpenShell refuses while a provider still uses it.
