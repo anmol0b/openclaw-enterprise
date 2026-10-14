@@ -271,12 +271,11 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
         "The installed egress policy differs from its admitted routes.",
       );
     }
-    return immutableCopy({
-      plan: context.plan,
-      sandboxId: existing.id,
-      sender: this.sourceControl.sender,
-      installedAt: new Date().toISOString(),
-    });
+    // A loaded gateway policy and extension manifest do not attest that the
+    // currently running supervisor understood and enforced credential authority.
+    // Refuse readiness until an authenticated, instance-fenced applied-capability
+    // receipt is implemented and matched to this exact installation.
+    return undefined;
   }
 
   async withdrawBinding(context: EgressRevisionContext, binding: EgressRef): Promise<boolean> {

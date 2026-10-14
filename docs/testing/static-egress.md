@@ -10,7 +10,10 @@ It exercises real Fastify authentication, source and Agent admission, native IAM
 controller transactions, OpenShell adapters, Ed25519 extension identity, TLS gRPC
 and HTTPS provider request/response bytes. The Kubernetes Secret Driver uses its
 actual SDK against a TLS storage fixture that supplies UID/resourceVersion.
-Gateway loaded-policy observations are fixtures. Compute placement is passive;
+Gateway loaded-policy observations are fixtures. The suite explicitly checks
+that these observations without an applied-capability receipt refuse installation;
+it inserts a synthetic installation only to exercise the authority separately.
+Compute placement is passive;
 no real Sandbox, model service or cluster is launched by this suite.
 
 The cases protect separate failures: current permission revoked between the two

@@ -24,7 +24,7 @@ supported operations and configuration.
 - Source: `apps/controller/src/drivers/egress-proxy/openshell-authority.ts:createOpenShellEgressAuthority`
 - Source: `packages/occ/src/index.ts:createEgressForwarder`
 - Assumptions: source admission and Agent deployment produced an exact plan;
-  Compute recorded authenticated loaded-policy evidence; the Agent is running;
+  a future verified applied-capability receipt permits installation; the Agent is running;
   its service principal holds exact source `operate` permission.
 
 ## Flow
@@ -65,9 +65,10 @@ grant, binding and route identities in `AgentRevision.egressPlan`.
 Compute passes the selected Driver's attachment to Sandbox provisioning. The
 Sandbox returns its full prepared network configuration, including auxiliary
 rules. The adapter compares every loaded rule and middleware against that output
-and the protected plan, then records the immutable Sandbox identity through the worker's state callback. Repeated identical
-observations preserve the first installation record. Missing counterpart or
-mismatched policy leaves provisioning incomplete or failed.
+and the protected plan. The gateway observations cannot prove that the running
+supervisor applied the protected capability, so the adapter refuses installation
+until an authenticated, instance-fenced applied-capability receipt is available.
+Missing counterpart or mismatched policy also leaves provisioning incomplete or failed.
 
 ### 2. Capture identity, operation and first authority decision
 

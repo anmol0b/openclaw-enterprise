@@ -5,8 +5,9 @@ credential sources. This is an implementation slice of
 [RFC 0020](../../../specs/rfcs/0020-egress-proxy-credential-lifecycle/index.md),
 not qualification of an OpenShell deployment or completion of that proposal.
 The bundled OpenShell release does not provide the required credential-access
-counterpart. Missing negotiation or loaded policy evidence refuses admission or
-provisioning; legacy credential substitution is not protected readiness.
+counterpart. Protected revision installation remains refused until an authenticated
+supervisor applied-capability receipt is available and verified. A gateway
+manifest and loaded policy alone do not establish protected readiness.
 
 ## Supported boundary
 
@@ -100,8 +101,10 @@ bound. Gateway signing uses `[openshell.gateway.gateway_jwt]`. Insecure transpor
 Compute gives the paired Sandbox the admitted plan. The adapter requires exact
 loaded network policy and middleware configuration, including every auxiliary
 rule produced by the paired Sandbox,
-`credential_authority: true` and `fail_closed`, before recording the immutable
-Sandbox ID. A first-slice withdrawal destroys only that owned single-binding
+`credential_authority: true` and `fail_closed`. It still refuses to record an
+installation: the gateway observations do not prove the current supervisor
+applied the protected capability. An authenticated, instance-fenced receipt is
+required before protected provisioning can become ready. A first-slice withdrawal destroys only that owned single-binding
 Sandbox and confirms absence. A policy-only reduction for multiple bindings is
 not implemented. Deployment qualification must additionally prove the actual
 supervisor enforces the hook and the workload cannot bypass it.

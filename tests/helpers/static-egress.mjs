@@ -442,8 +442,19 @@ export async function staticEgressFixture(
     },
   };
   observed.policy = structuredClone({ version: 1, ...attachment.configuration });
-  const installation = await egress.attachmentStatus(context, attachment);
-  assert.ok(installation, "loaded exact policy must be observed through the real gateway client");
+  assert.equal(
+    await egress.attachmentStatus(context, attachment),
+    undefined,
+    "a loaded gateway policy without an applied-capability receipt must not become ready",
+  );
+  // This synthetic record exercises the authority independently of runtime
+  // installation. It is not evidence of an enforcing supervisor or readiness.
+  const installation = {
+    plan: context.plan,
+    sandboxId,
+    sender: egress.sourceControl.sender,
+    installedAt: new Date().toISOString(),
+  };
   await app.controller.transact((unit) =>
     unit.credentialSources.recordEgressInstallation(installation),
   );

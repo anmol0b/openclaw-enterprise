@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { egressInjectionDigest } from "../../packages/occ/src/egress.ts";
 import { staticEgressFixture, unary } from "../helpers/static-egress.mjs";
+
+test("credential header digest uses ordered UTF-8 bytes and u64 lengths", () => {
+  assert.equal(
+    egressInjectionDigest([
+      ["authorization", "Bearer synthetic-vector"],
+      ["x-api-key", "key-é"],
+    ]),
+    "d1e3baea080e3a4d5ec5ac5feb168ded341a545d201aea2d1d1104dca7ec6b23",
+  );
+});
 
 test("protected inference uses real admission, fresh IAM, versioned Secret reads and TLS authority/provider wires", async (t) => {
   const f = await staticEgressFixture(t);
