@@ -134,7 +134,7 @@ import {
   immutableCopy,
   isNonEmptyString,
 } from "@openclaw-enterprise/utils";
-import { resolveConfiguredHarnessId } from "./configured-harness.ts";
+import { requireFallbackProviders, resolveConfiguredHarnessId } from "./configured-harness.ts";
 import { requireDeployableRoster } from "./openclaw-roster.ts";
 import {
   capability,
@@ -358,6 +358,7 @@ export {
 } from "./native-worker-support.ts";
 export {
   backendDefinitionMap,
+  gatewayEndpointRewritesIpv4,
   validateBackendDefinitions,
   validateSelectedBackendDrivers,
   validateServiceAccountBackendBinding,
@@ -406,7 +407,11 @@ export {
   urlHoldsUserinfo,
 } from "./model-provider-settings.ts";
 export { requireOpenClawRoster } from "./openclaw-roster.ts";
-export { CODEX_APPROVAL_POLICY_SETTING, codexApprovalPolicy } from "./configuration-settings.ts";
+export {
+  CODEX_APPROVAL_POLICY_SETTING,
+  codexApprovalPolicy,
+  refuseLiteralGatewayPassword,
+} from "./configuration-settings.ts";
 export { PostgresCommitOutcomeUnknownError };
 export {
   PostgresHumanAuthentication,
@@ -2480,9 +2485,7 @@ export class OpenClawController {
         configurationInput.secretBindings,
         harnessAuth,
       );
-      validateModelProviderSettings(configurationInput.values);
-      validateConfigurationSettings(configurationInput.values);
-      this.validateComputeConfiguration(configurationInput.values);
+      this.validateConfigurationContent(configurationInput.values);
       await configurationDriver.validate({
         id: "cfg_00000000-0000-4000-8000-000000000000",
         namespaceId: namespace.id,
@@ -4268,19 +4271,36 @@ export class OpenClawController {
           "The selected Configuration Driver cannot validate Preset values.",
         );
       }
-      // The model provider and Compute rules first, as on Configuration create and update, so
-      // a value they refuse gets the same message wherever it is written. A variable without a
-      // default is still a placeholder here; the Configuration it fills is checked on create.
-      // Only text the render put a placeholder into waits on a variable, located by its path: an
-      // escaped token is literal text that stays in the launch render, so it is checked as
-      // written (finding 1214), even where it reads like a placeholder elsewhere (finding 1220).
+      // The content rules Configuration create and update run, so a value they refuse gets the
+      // same message wherever it is written. A variable without a default is still a
+      // placeholder here; the Configuration it fills is checked on create. Only text the render
+      // put a placeholder into waits on a variable, located by its path: an escaped token is
+      // literal text that stays in the launch render, so it is checked as written (finding
+      // 1214), even where it reads like a placeholder elsewhere (finding 1220).
       const options: ConfigurationValidationOptions = { unresolved, unresolvedType };
-      validateModelProviderSettings(values, options);
-      this.validateComputeConfiguration(values, options);
+      this.validateConfigurationContent(values, options);
       // Validation owns native credential rules; Preset CRUD never creates runtime resources.
       await driver.validateValues(values, options);
     }
     return template;
+  }
+
+  /**
+   * The Configuration content rules every write runs, in one order, so a value one refuses is
+   * refused, with the same message, wherever it is written: Configuration create and update,
+   * Agent provisioning and Preset defaults (finding 1311). A Preset save passes `options`,
+   * locating its unfilled variables. The model provider settings; the Codex approval policy and
+   * a literal Gateway password; the agents shape, fallback provider and Gateway roster rules
+   * (findings 1305 and 1308); then the selected Compute Driver's rules.
+   */
+  private validateConfigurationContent(
+    values: OpenClawConfigurationDocument,
+    options?: ConfigurationValidationOptions,
+  ): void {
+    validateModelProviderSettings(values, options);
+    validateConfigurationSettings(values, options);
+    requireDeployableRoster(values, options);
+    this.validateComputeConfiguration(values, options);
   }
 
   // Configuration content every topology of the selected Compute Driver refuses is refused
@@ -5094,10 +5114,7 @@ export class OpenClawController {
         values,
         createdAt: this.timestamp(),
       });
-      validateModelProviderSettings(values);
-      validateConfigurationSettings(values);
-      requireDeployableRoster(values);
-      this.validateComputeConfiguration(values);
+      this.validateConfigurationContent(values);
       await driver.validate(configuration);
       const metadata = await state.configurations.createConfiguration({
         id: configuration.id,
@@ -5438,12 +5455,9 @@ export class OpenClawController {
         values,
         createdAt: advanced.createdAt,
       });
-      validateModelProviderSettings(values);
       // A stored Configuration that predates these rules still reads, and deployment refuses it
       // as before; only a replacement that keeps the refused value fails.
-      validateConfigurationSettings(values);
-      requireDeployableRoster(values);
-      this.validateComputeConfiguration(values);
+      this.validateConfigurationContent(values);
       await driver.validate(configuration);
       // Registered before the write: a replace that applied but answered with an error (a
       // timeout, a lost response) would otherwise leave the stored Configuration one generation
@@ -10387,8 +10401,11 @@ export class OpenClawController {
       configuredHarnessId = resolveConfiguredHarnessId(configuration.values);
     } catch (error) {
       // A model selection that names no supported Harness is the Configuration's own fault,
-      // not this Agent's; deployment refuses it with this message. Nothing below can run.
+      // not this Agent's; deployment refuses it with this message. Nothing below can run. A
+      // fallback on another provider is refused here, by name, as the Harness rules below refuse
+      // every other selection on another provider (finding 1298).
       if (error instanceof ConfigurationHarnessError) {
+        requireFallbackProviders(configuration.values);
         return;
       }
       throw error;

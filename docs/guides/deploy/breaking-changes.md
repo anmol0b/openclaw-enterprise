@@ -1,23 +1,105 @@
 # Breaking-change notices
 
-OpenClaw Enterprise is pre-alpha; upgrades may break existing Installations.
-Before upgrading, read notices newer than your commit here, in the
+OpenClaw Enterprise (OCE) is pre-alpha; upgrades can break existing Installations.
+Before upgrading, read notices newer than your commit here and in the
 [earlier notices](breaking-changes-archive.md),
+[notices before October 12](breaking-changes-before-2026-10-12.md),
 [notices before October 11](breaking-changes-before-2026-10-11.md), and
 [notices before October 10](breaking-changes-before-2026-10-10.md).
 Follow the [upgrade checklist](upgrade-checklist.md) and
 [production image upgrades](production-upgrade.md).
-Entries are newest first. Untested steps lack real-Installation proof.
+Entries are newest first. _Untested_ steps lack real-Installation proof.
 
 ## 2026-10-14: refresh sources release bootstrap references
 
-Refresh registration and reauthorization return `secrets: {}`. Refresh updates
-require explicit inputs; empty updates return `409`. The last-committed
-issuer-rotated Secret-ID guard survives deletion and value changes.
+Refresh registration and reauthorization return `secrets: {}`; empty refresh
+updates return `409`. Last-committed issuer-rotated Secret-ID rejection survives
+deletion and value changes.
 
-Apply qualified migration0054 first; its catalog fingerprint and real upgrade
-validation remain unqualified in this candidate. Missing legacy history stays
-unavailable. See [handoff, recovery and deletion limits](../../reference/credential-sources.md#update-a-source).
+Before applying `0054_credential_refresh_secret_handoff`, qualify it for the target
+Installation. Catalog correspondence was measured for the selected SQL/history
+tuple; full migration/history and real upgrade qualification remain incomplete.
+Missing legacy history stays unavailable. See [recovery and deletion limits](../../reference/credential-sources.md#update-a-source).
+
+## 2026-10-14: every model selection must use the Harness provider
+
+**What breaks.** On Kubernetes Compute, Configuration, Preset and Agent saves
+and deployment refuse a model selection off the primary model's provider:
+fallbacks, Agent entries, `subagents.model` and the other `*Model` settings,
+`models` policy keys, `modelPolicy.allow`, hook models,
+`channels.modelByChannel`, and an `apiKey` on another `models.providers`
+entry (`openrouter:auto` and `openrouter:free` count as `openrouter`).
+Dedicated Codex refuses every `apiKey`, `mediaModels` and `voiceModel`, and
+unqualified policy entries. Every Compute refuses another-provider fallbacks at
+save. A Preset variable's provider is checked at launch; a number
+or boolean model variable is refused. Preset saves also check `agents` rosters.
+Every Compute also refuses a literal key in `memory.search.remote` (also per
+Agent), `tools.media` requests, speech and Talk provider `apiKey`s, web fetch,
+OpenTelemetry and edge auth credential headers, skill `apiKey`s and
+`cron.webhookToken`, and a header name there or in MCP `headers` that is not an
+HTTP field name. It also refuses a literal secret in the other slots OpenClaw
+marks sensitive: Gateway, hooks, sandbox SSH and storage secrets, and channel
+and plugin settings such as `botToken` or `webSearch.apiKey`
+([list](../../reference/configuration/secrets.md#secret-boundaries)). Preset
+saves also refuse a literal `gateway.auth.password` or invalid `approvalPolicy`;
+provisioning checks `agents` rosters.
+
+**Who is affected.** Configurations and Presets that select a second provider
+or give it an `apiKey`, set an `apiKey`, media or voice model for Dedicated
+Codex, or hold a literal key or secret in one of those slots.
+
+**How to tell.** A `400` names the setting: `... must select
+<provider>/<model>, the provider of the Agent's Harness authentication
+binding`, `... must use the primary model's provider`, `... must be
+provider/model references`, `... must be unset`, or `... holds a credential
+value inline, where a reference is required`.
+
+**Steps.** Move or remove the setting the `400` names, keeping only the
+primary model's provider, or make a literal key a `${NAME}` reference or a
+SecretRef, then save and deploy again.
+
+## 2026-10-14: observability URLs must not hide another host
+
+**What breaks.** Profile preflight and API and worker startup refuse an
+`observability.url` that contains a tab, newline, or a backslash before the
+query. The parser stored a different host. A backslash in the query stays.
+
+**Who is affected.** Profiles with `controlPlane.observabilityUrl`, and
+Installations whose startup `observability.url` uses one of those characters.
+
+**How to tell.** Preflight reports `controlPlane.observabilityUrl must not
+contain a tab or newline, or a backslash before the query`. Startup logs
+`OBSERVABILITY_URL_INVALID`.
+
+**Steps.** Write the host you mean, with no tab, newline, or backslash before the
+query, and upgrade. _untested_ against a live Installation.
+
+## 2026-10-14: proxy and MCP URLs must name a host
+
+**What breaks.** Configuration and Preset saves refuse a proxy, channel proxy,
+MCP server, or plugin URL whose authority is empty (`https:///v1`) or whose
+`//` is missing (`https:/v1`).
+
+**Who is affected.** Configurations and Presets that save one of those
+spellings in a proxy, channel, MCP, or plugin URL.
+
+**How to tell.** The save answers `400` naming the field: `has an empty
+authority or a missing //, which parses as a different host.`
+
+**Steps.** Write an absolute http or https URL with the host you mean, and
+save again.
+
+## 2026-10-14: OpenShell gateway IPv4 hosts must be four decimal octets
+
+**What breaks.** Startup and both gateway clients refuse an OpenShell
+`endpoint` whose IPv4 host is not four decimal octets with no leading zeros.
+
+**Who is affected.** Backends whose `configuration.endpoint` uses one of those
+spellings.
+
+**How to tell.** The report says `IPv4 host must be four decimal octets`.
+
+**Steps.** Write those four octets, then restart.
 
 ## 2026-10-14: model endpoint URLs refuse rewritten spellings and IP hosts
 
@@ -246,77 +328,3 @@ values still upgrade, including `10.0.0.1/32`, `0.0.0.0/0`, `::/64`, and
 
 **Steps.** Write the canonical value (`10.0.0.1/32` for `010.0.0.1/32`, and
 `::ffff:10.0.0.1/128` for `::ffff:010.0.0.1/128`) and upgrade again.
-
-## 2026-10-13: execution API CIDRs must be explicit and nonzero
-
-**What breaks.** `helm upgrade` fails when a saved `executionCluster.apiCidrs`
-entry is `0.0.0.0/0`, `::/0`, or a leading-zero address such as `010.44.0.2/32`.
-Those values used to render. A `/0` became egress to any address on the
-execution API port, and the apiserver accepted the leading-zero form with a
-warning. The upgrade now stops before it writes that policy.
-
-**Who is affected.** Saved releases that use one of those spellings. A canonical
-IPv4 CIDR with prefix 1 through 32, such as `192.0.2.0/28`, and a canonical
-IPv6 CIDR with a nonzero prefix, such as `2001:db8::/64`, still upgrade. A
-disabled execution cluster is not checked.
-
-**How to tell.** Helm stops with
-`executionCluster.apiCidrs requires an explicit IPv4 or IPv6 CIDR with a nonzero prefix`.
-
-**Steps.** Replace `0.0.0.0/0` or `::/0` with the execution API addresses you
-mean to allow. Rewrite `010.44.0.2/32` as `10.44.0.2/32`. Upgrade again.
-
-## 2026-10-13: demo cluster CIDRs must be one canonical IPv4 host
-
-**What breaks.** `helm upgrade` of the observability demo fails when a
-`cluster.cidrs` entry is not one IPv4 address in canonical form with prefix
-`/32`. A saved `010.0.0.1/32` used to install. Kubernetes applied it and named
-`10.0.0.1/32` as the spelling a future release will require. The upgrade now
-stops before it writes that policy.
-
-**Who is affected.** Demo releases whose saved `cluster.cidrs` use a leading
-zero, an octet above 255, or a prefix other than `/32`. A canonical endpoint
-such as `10.43.0.1/32` upgrades unchanged.
-
-**How to tell.** Helm stops in `prometheus.yaml` with
-`cluster.cidrs requires exact IPv4 /32 endpoints`.
-
-**Steps.** Replace the saved value with its canonical spelling (`010.0.0.1/32`
-becomes `10.0.0.1/32`) and upgrade again. The scrape policy then uses that
-`/32`.
-
-## 2026-10-13: OpenShell gateway readiness requires timeoutMs
-
-**What breaks.** Controller startup fails when `gateway.readiness` is set and
-`timeoutMs` is omitted. That configuration starts today. The field must be a
-positive safe integer. Omitted readiness is unchanged.
-
-**Who is affected.** Installations, and the real k3d helper, that set
-`gateway.readiness` with only `serviceName` and `podSelector`.
-
-**How to tell.** Startup logs `startup-error` with code `STARTUP_FAILED`. The
-Installation loader reports `OpenShell gateway readiness timeout must be a
-positive safe integer.` The message does not name `timeoutMs`.
-
-**Steps.** Set `gateway.readiness.timeoutMs` to a positive millisecond window.
-The real helper uses 120000. Then start again.
-
-## 2026-10-13: OpenShell network policy names must be unique
-
-**What breaks.** Controller startup refuses an Installation whose
-`policy.networkPolicies` repeat a name, or name a policy
-`workspace-node-enrollment`. Those configurations start today. A duplicate name
-keeps only the last rule. A policy named `workspace-node-enrollment` is replaced
-when a workspace-node binding exists.
-
-**Who is affected.** Installations with duplicate policy names, or with a policy
-named `workspace-node-enrollment`.
-
-**How to tell.** Startup logs `startup-error` with code
-`OPENSHELL_NETWORK_POLICY_NAME_REJECTED` and reason `rename-or-merge`. The log
-does not include the policy name. Loading the Installation configuration names
-the duplicate or reserved policy.
-
-**Steps.** Rename or merge duplicate `policy.networkPolicies` names. Rename a
-policy called `workspace-node-enrollment`. Keep each policy's binaries and
-endpoints. _untested_ against a live Installation.
