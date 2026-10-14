@@ -43,6 +43,16 @@ a real model response or installed OpenShell enforcement. A separate interrupted
 response probe with request/stream retry counts set to zero observed one request
 and a failed CLI turn; it is not a provider-effect recovery test.
 
+The companion `openshell-receipt.json` contains actual protobuf bytes from the
+supplier's connected gateway token, TLS registry, OPA installation and receipt-query
+fixture. The consumer decodes those bytes, preserving uint64 values, and verifies
+the captured claim shape with a local fixture signing key and renewed timestamps;
+it does not reuse or establish custody of the producer's token. The separate
+`openshell-operation.json` captures the sender's TLS/gRPC request after a 100 ms
+delay. Its deadline remains creation plus 30 seconds. The consumer checks that
+historical operation refuses before material access. These two captures come from
+different synthetic component fixtures, not one installed Sandbox.
+
 With a migrated disposable database selected through `OCC_TEST_DATABASE_URL`, run:
 
 ```sh

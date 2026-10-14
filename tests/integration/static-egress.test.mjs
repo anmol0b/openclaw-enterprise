@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import { generateKeyPairSync, sign } from "node:crypto";
+import { createRequire } from "node:module";
+import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
 import { egressInjectionDigest } from "../../packages/occ/src/egress.ts";
 import {
   pluginRuntimeSpecForRevision,
@@ -16,6 +19,52 @@ test("credential header digest uses ordered UTF-8 bytes and u64 lengths", () => 
     ]),
     "d1e3baea080e3a4d5ec5ac5feb168ded341a545d201aea2d1d1104dca7ec6b23",
   );
+});
+
+test("supplier-produced receipt protobuf and registered-instance claims decode through the consumer contract", async () => {
+  const vector = JSON.parse(
+    readFileSync(new URL("../fixtures/static-egress/openshell-receipt.json", import.meta.url)),
+  );
+  const require = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
+  const definition = require("@grpc/proto-loader").loadSync(
+    new URL(
+      "../../apps/controller/src/drivers/sandbox/proto/openshell-gateway.proto",
+      import.meta.url,
+    ).pathname,
+    { keepCase: true, longs: String, enums: String },
+  );
+  // Bytes were produced by Rust's actual OPA/registry/gateway fixture, independently
+  // of this decoder. In particular, uint64 generations must not round through Number.
+  const receipt = definition["openshell.v1.LoadedEnforcementEvidence"].deserialize(
+    Buffer.from(vector.protobuf_hex, "hex"),
+  );
+  assert.deepEqual(receipt, vector.receipt);
+  assert.equal(receipt.instance_id, vector.verified_extension_claims.instance_id);
+  assert.equal(receipt.sandbox_id, vector.verified_extension_claims.sandbox_id);
+  const keys = generateKeyPairSync("ed25519");
+  const identity = new OpenShellEgressIdentity({
+    issuer: vector.verified_extension_claims.iss,
+    audience: vector.verified_extension_claims.aud,
+    keyId: "fixture-key",
+    publicKey: keys.publicKey.export({ type: "spki", format: "pem" }),
+    sender: { id: "fixture-sender", generation: 1 },
+  });
+  // The capture has no bearer or signing key. Re-sign its claim shape with a local
+  // fixture key and fresh times; this checks compatibility, not producer key custody.
+  const header = Buffer.from(
+    JSON.stringify({ alg: "EdDSA", typ: "openshell-ext+jwt", kid: "fixture-key" }),
+  ).toString("base64url");
+  const current = Math.floor(Date.now() / 1000);
+  const claims = { ...vector.verified_extension_claims, iat: current, exp: current + 60 };
+  const token = (value) => {
+    const payload = Buffer.from(JSON.stringify(value)).toString("base64url");
+    const signed = `${header}.${payload}`;
+    return `Bearer ${signed}.${sign(null, Buffer.from(signed), keys.privateKey).toString("base64url")}`;
+  };
+  const peer = await identity.verify(token(claims));
+  assert.equal(peer.instanceId, receipt.instance_id);
+  assert.equal(peer.sandboxId, receipt.sandbox_id);
+  assert.equal(await identity.verify(token({ ...claims, instance_id: undefined })), undefined);
 });
 
 test("protected inference uses real admission, fresh IAM, versioned Secret reads and TLS authority/provider wires", async (t) => {
@@ -517,6 +566,27 @@ test("signed supervisor instance and UUIDv7 creation horizon refuse old callers 
   const now = () => new Date(Date.now() + elapsed);
   const f = await staticEgressFixture(t, { now });
   const reads = f.secretReads;
+  const operation = JSON.parse(
+    readFileSync(new URL("../fixtures/static-egress/openshell-operation.json", import.meta.url)),
+  );
+  const serializedCreation = Number.parseInt(
+    operation.request_context.request_id.replaceAll("-", "").slice(0, 12),
+    16,
+  );
+  const serializedDeadline =
+    Number(operation.deadline.seconds) * 1000 + operation.deadline.nanos / 1e6;
+  assert.equal(serializedCreation, operation.creation_ms);
+  assert.equal(serializedDeadline, serializedCreation + 30_000);
+  assert.equal(operation.capture_delay_ms, 100);
+  // The independently captured delayed sender wire is historical, never a reusable
+  // authorization. Rebind only the fixture Sandbox to reach the real horizon check.
+  const historical = f.capture();
+  historical.request.context.request_id = operation.request_context.request_id;
+  historical.deadline = operation.deadline;
+  assert.ok(
+    (await unary(f.clients.HttpCredentialAccess, "Resolve", historical, f.metadata())).refused,
+  );
+  assert.equal(f.secretReads, reads);
   for (const claims of [
     { instance_id: undefined },
     { instance_id: "10000000-0000-4000-8000-000000000001" },
