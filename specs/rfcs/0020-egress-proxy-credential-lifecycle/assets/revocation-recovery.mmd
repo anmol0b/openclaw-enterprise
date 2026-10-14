@@ -49,10 +49,17 @@ sequenceDiagram
   Note over C,F: Accepted final-check race remains, original deadlines bound in-flight work<br/>Logical denial, detach and provider revocation are distinct<br/>Revoke only if supported, no exported bearer recall or undo of sent effects
   opt Credential rejection
     F->>R: reportRejection
-    R->>R: Durably deduplicate authenticated receipt / material version
-    R-->>F: recorded / obsolete / Refusal
-    Note over F,R: Exact source, grant and store-qualified version<br/>Late N cannot invalidate or schedule recovery for N+1
-    R->>R: Persist exact-version fence across eviction / reread<br/>Static: no replacement approval, dynamic: one owned recovery obligation<br/>Duplicates cannot repeat recovery work
+    R->>R: Authenticate receipt and exact material version
+    alt Invalid or unauthorized feedback
+      R-->>F: Refusal, no state change
+    else Duplicate or obsolete feedback
+      R-->>F: Recorded outcome or obsolete, no new work
+    else New authenticated feedback
+      R->>R: Durably commit dedup record and exact-version fence<br/>Include required coalesced recovery obligation
+      Note over F,R: Static: no replacement approval<br/>Dynamic: owner handles recovery
+      R-->>F: recorded, only after durable commit
+    end
+    Note over F,R: Exact source, grant, store, version<br/>Fence survives eviction / reread<br/>Late N cannot invalidate N+1<br/>or schedule its recovery
     F->>F: Return SafeResponse<br/>No automatic retry
   end
   Note over C,R: Unknown send / refresh / clone effects retain their original owner and attempt<br/>Known partial failure retains cleanup obligations, never blind replay
