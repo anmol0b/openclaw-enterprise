@@ -42,7 +42,6 @@ export function validateConnectedInputs(input) {
     input.provider?.certificatePath,
     input.provider?.privateKeyPath,
     input.openShellBackend?.rootCertificatePath,
-    input.openShellBackend?.auth?.path,
   ]) {
     assert.ok(
       typeof path === "string" && isAbsolute(path),
@@ -68,13 +67,27 @@ export function validateConnectedInputs(input) {
   const gateway = new URL(input.openShellBackend.endpoint);
   assert.equal(gateway.protocol, "https:");
   assert.equal(gateway.username + gateway.password + gateway.search + gateway.hash, "");
-  assert.equal(input.openShellBackend.auth.mode, "bearerTokenFile");
+  const auth = input.openShellBackend.auth;
+  assert.ok(auth && typeof auth === "object", "explicit Backend authentication is required");
+  const authPaths =
+    auth.mode === "bearerTokenFile" ? ["path"] : ["certificatePath", "privateKeyPath"];
+  assert.ok(
+    auth.mode === "bearerTokenFile" || auth.mode === "mtls",
+    "Backend authentication must be bearerTokenFile or mtls",
+  );
+  assert.deepEqual(Object.keys(auth).sort(), ["mode", ...authPaths].sort());
+  for (const key of authPaths) {
+    assert.ok(
+      typeof auth[key] === "string" && isAbsolute(auth[key]),
+      "explicit absolute Backend authentication paths are required",
+    );
+  }
   assert.equal(input.openShellBackend.insecureTransport, undefined);
   const provider = new URL(input.provider.origin);
   assert.equal(provider.protocol, "https:");
   assert.ok(
-    provider.hostname.endsWith(".test"),
-    "use a fixture-only .test origin, never a real provider",
+    provider.hostname.endsWith(".test") || provider.hostname === "host.openshell.internal",
+    "use a fixture-only .test origin or the native host.openshell.internal fixture alias",
   );
   assert.equal(provider.pathname, "/v1");
   assert.equal(provider.username + provider.password + provider.search + provider.hash, "");

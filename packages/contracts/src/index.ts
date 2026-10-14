@@ -1139,6 +1139,11 @@ export interface SandboxResourceRef {
 /** Provider-owned endpoint through which the Agent Gateway reaches its dedicated Harness. */
 export interface SandboxHarnessEndpoint {
   readonly url: string;
+  /** Public PEM CA certificates for this WSS endpoint; absent means system trust. */
+  readonly tls?: {
+    /** Certificate bytes only, never a source path, private key or client credential. */
+    readonly caBundle: string;
+  };
   /** Provider-local workspace root served by the Harness workspace node. */
   readonly workspaceRoot?: string;
 }

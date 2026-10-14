@@ -28,7 +28,111 @@ import {
   serializeConnectedRequest,
   sourceAccessBindingBody,
   validateConnectedDatabaseUrl,
+  validateConnectedInputs,
 } from "../helpers/egress-connected-inputs.mjs";
+
+test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS fixtures", () => {
+  const inputs = () => ({
+    version: 1,
+    namespaceId: "ns_fixture",
+    model: "fixture-model",
+    apiOrigin: "http://127.0.0.1:3000",
+    serviceKeyPath: "/fixture/service-key",
+    kubeconfigPath: "/fixture/kubeconfig",
+    kubernetesContext: "k3d-fixture",
+    controllerNamespace: "oce-system",
+    controllerSelector: "app=controller",
+    openShellGatewayNamespace: "openshell",
+    openShellGatewaySelector: "app=gateway",
+    runtimeClass: "openshell",
+    oceCommit: "a".repeat(40),
+    supplierCommit: "b".repeat(40),
+    images: Object.fromEntries(
+      ["agent", "controller", "gateway", "openShellGateway", "sandbox", "supervisor"].map(
+        (role) => [role, `fixture/${role}@sha256:${"a".repeat(64)}`],
+      ),
+    ),
+    openShellBackend: {
+      endpoint: "https://gateway.test:8443",
+      rootCertificatePath: "/fixture/root.pem",
+      auth: { mode: "bearerTokenFile", path: "/fixture/bearer" },
+    },
+    provider: {
+      origin: "https://provider.test:9443/v1",
+      bindHost: "127.0.0.1",
+      bindPort: 9443,
+      certificatePath: "/fixture/provider.pem",
+      privateKeyPath: "/fixture/provider.key",
+    },
+  });
+  const mtls = {
+    mode: "mtls",
+    certificatePath: "/fixture/client.pem",
+    privateKeyPath: "/fixture/client.key",
+  };
+  for (const auth of [inputs().openShellBackend.auth, mtls]) {
+    for (const host of ["provider.test", "host.openshell.internal"]) {
+      const input = inputs();
+      input.openShellBackend.auth = auth;
+      input.provider.origin = `https://${host}:9443/v1`;
+      assert.equal(validateConnectedInputs(input), input);
+    }
+  }
+  const rejectedAuth = [
+    undefined,
+    { mode: "unauthenticated" },
+    { mode: "bearerTokenFile", path: "relative" },
+    { mode: "bearerTokenFile", path: "/fixture/token", privateKeyPath: "/fixture/key" },
+    { mode: "mtls", certificatePath: "/fixture/client.pem" },
+    { ...mtls, certificatePath: "relative.pem" },
+    { ...mtls, privateKeyPath: "relative.key" },
+    { ...mtls, path: "/fixture/token" },
+    { ...mtls, rejectUnauthorized: false },
+  ];
+  for (const auth of rejectedAuth) {
+    const input = inputs();
+    input.openShellBackend.auth = auth;
+    assert.throws(() => validateConnectedInputs(input));
+  }
+  // These guards precede credential reads and provider binding. Alias acceptance
+  // must not admit ordinary providers, suffix lookalikes or implicit routing.
+  for (const mutate of [
+    (input) => {
+      input.openShellBackend.endpoint = "http://gateway.test:8443";
+    },
+    (input) => {
+      input.openShellBackend.rootCertificatePath = "relative.pem";
+    },
+    (input) => {
+      input.openShellBackend.insecureTransport = true;
+    },
+    ...[
+      "http://provider.test:9443/v1",
+      "https://api.openai.com:9443/v1",
+      "https://other.openshell.internal:9443/v1",
+      "https://host.openshell.internal.example.com:9443/v1",
+      "https://host.openshell.internal:9443/v1?override=1",
+    ].map((origin) => (input) => {
+      input.provider.origin = origin;
+    }),
+    (input) => {
+      input.provider.bindHost = "host.openshell.internal";
+    },
+    (input) => {
+      input.provider.bindPort = 9444;
+    },
+    (input) => {
+      input.provider.certificatePath = "relative.pem";
+    },
+    (input) => {
+      input.provider.privateKeyPath = "relative.key";
+    },
+  ]) {
+    const input = inputs();
+    mutate(input);
+    assert.throws(() => validateConnectedInputs(input));
+  }
+});
 
 test("connected database selection rejects missing, remote and redirected observers before effects", () => {
   const url = (overrides = {}) =>
@@ -170,9 +274,18 @@ test("connected request bytes pass the real Fastify parser and preserve missing-
   assert.equal(unknownField.code, "INVALID_REQUEST");
   // A schema-valid request must reach the missing real counterpart guard. An
   // undefined captured body or generic 400 cannot masquerade as that refusal.
-  const unsupported = await request("POST", `${prefix}/credential-sources`, sourceBody);
-  assertConnectedResponse(unsupported, 409);
-  assert.equal(unsupported.body.error.code, "CREDENTIAL_GATEWAY_NOT_CONFIGURED");
+  for (const origin of [
+    "https://provider.test:9443/v1",
+    "https://host.openshell.internal:9443/v1",
+  ]) {
+    const unsupported = await request(
+      "POST",
+      `${prefix}/credential-sources`,
+      protectedSourceBody("synthetic", secret.ref, origin),
+    );
+    assertConnectedResponse(unsupported, 409);
+    assert.equal(unsupported.body.error.code, "CREDENTIAL_GATEWAY_NOT_CONFIGURED");
+  }
   const configuration = await api(
     "POST",
     `${prefix}/configurations`,

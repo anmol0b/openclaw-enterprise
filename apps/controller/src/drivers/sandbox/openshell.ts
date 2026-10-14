@@ -2393,9 +2393,11 @@ export class OpenShellSandboxDriver implements SandboxDriver {
 
   async harnessEndpoint(context: SandboxHarnessContext): Promise<SandboxHarnessEndpoint> {
     const { service } = await this.exactHarnessService(context, "resolve a Harness endpoint");
+    const caBundle = this.backend.client.publicRootCertificate();
     return Object.freeze({
       url: harnessWebSocketUrl(service.advertisedUrl),
       workspaceRoot: "/sandbox/enterprise",
+      ...(caBundle === undefined ? {} : { tls: Object.freeze({ caBundle }) }),
     });
   }
 

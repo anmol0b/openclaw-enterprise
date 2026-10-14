@@ -40,6 +40,14 @@ authenticated handshake, or `failed` with the Harness's held startup failure,
 which Compute validates and fails the revision with; anything else is `starting`.
 Compute activates only a `serving` Harness.
 
+The endpoint may supply `tls.caBundle`: public PEM CA certificates for a WSS
+origin. It accepts no private keys, client credentials or source paths. Omission
+keeps system trust. Kubernetes Compute mounts this trust read-only into only the
+exact dedicated Agent Gateway, combining any execution-cluster root into one
+`NODE_EXTRA_CA_CERTS` bundle. Certificate and hostname verification remain enabled.
+The separate immutable revision ConfigMap precedes Gateway rollout and is removed
+after revision workloads terminate; changing its certificates requires a new revision.
+
 `enrollHarness(context, installation)` is required when a revision has a protected
 egress plan. Compute calls it after committing the verified installation and
 checking current evidence again. The Driver authenticates the exact Harness

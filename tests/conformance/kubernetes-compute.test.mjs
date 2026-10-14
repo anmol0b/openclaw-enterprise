@@ -15,7 +15,9 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer as createHttpsServer } from "node:https";
+import { once } from "node:events";
 import { inspect } from "node:util";
 import { inflateRawSync } from "node:zlib";
 import test from "node:test";
@@ -64,6 +66,7 @@ import {
 } from "../../apps/controller/src/drivers/compute/operation-context.ts";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
+import { harnessTlsFixture } from "../helpers/harness-tls.mjs";
 import { openAiStaticProvider } from "../../apps/controller/src/drivers/egress-proxy/openai-provider.ts";
 import {
   conformanceKubeconfig,
@@ -11116,6 +11119,7 @@ function supervisorPeerLabels(revisionId) {
 function providerReadinessFixture({
   provisionHarness,
   harnessEndpoint,
+  providerPort = 8080,
   lifecycleDrivers = [],
   nodeEnrollment,
   workspaceNodePeerLabels = async ({ revision }) => supervisorPeerLabels(revision.id),
@@ -11139,7 +11143,7 @@ function providerReadinessFixture({
                 namespace: "openshell-system",
                 podLabels: { app: "openshell-gateway" },
                 address: "10.43.0.50",
-                port: 8080,
+                port: providerPort,
               },
             },
           }),
@@ -11542,15 +11546,40 @@ test("provider Harness requires its assigned network profile before readiness an
   }
 });
 
-test("provider Harness endpoint owns Gateway transport through preparation and activation", async () => {
+test("provider Harness endpoint owns Gateway transport through preparation and activation", async (t) => {
+  const tls = await harnessTlsFixture(t);
+  const untrusted = await harnessTlsFixture(t);
+  const controllerRequire = createRequire(
+    new URL("../../apps/controller/package.json", import.meta.url),
+  );
+  const socketRequire = createRequire(controllerRequire.resolve("@kubernetes/client-node"));
+  const { WebSocketServer } = socketRequire("ws");
+  const server = createHttpsServer({ key: tls.key, cert: tls.cert });
+  const sockets = new WebSocketServer({ server });
+  t.after(() => {
+    for (const client of sockets.clients) {
+      client.terminate();
+    }
+    sockets.close();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  sockets.on("connection", (socket, request) => {
+    assert.equal(request.headers.authorization, "Bearer test-transport");
+    socket.send("trust-ok");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const providerPort = server.address().port;
+  let providerCaBundle = tls.caBundle;
   const hooks = [];
   const provisions = [];
   const endpoints = [];
   const setupRequests = [];
-  const providerUrl = "ws://tenant--sandbox.openshell.localhost:8080/";
+  const providerUrl = `wss://localhost:${providerPort}/`;
   const providerWorkspaceRoot = "/sandbox/enterprise";
   const peerLookups = [];
   const fixture = providerReadinessFixture({
+    providerPort,
     // The Sandbox, and so its relay Pod's labels, exists only once provisioned.
     async workspaceNodePeerLabels({ revision: target }) {
       peerLookups.push(target.id);
@@ -11587,7 +11616,11 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
     },
     async harnessEndpoint(context) {
       endpoints.push(context);
-      return { url: providerUrl, workspaceRoot: providerWorkspaceRoot };
+      return {
+        url: providerUrl,
+        workspaceRoot: providerWorkspaceRoot,
+        tls: { caBundle: providerCaBundle },
+      };
     },
     lifecycleDrivers: [
       {
@@ -11704,7 +11737,7 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
     undefined,
     undefined,
     undefined,
-    { url: providerUrl, workspaceRoot: providerWorkspaceRoot },
+    { url: providerUrl, workspaceRoot: providerWorkspaceRoot, tls: { caBundle: providerCaBundle } },
   );
   gateway.metadata.generation = 1;
   gateway.status = {
@@ -11829,6 +11862,16 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
   assert.equal(endpoints.length, 0);
   const bootstrapGateway = objects.get(key("Deployment", gatewayName, gatewayNamespace));
   assert.ok(bootstrapGateway);
+  assert.equal(
+    bootstrapGateway.spec.template.spec.containers[0].env.some(
+      ({ name }) => name === "NODE_EXTRA_CA_CERTS",
+    ),
+    false,
+  );
+  const configurationName = `gateway-${digest(revision.agentId)}-rev-${digest(revision.id)}`;
+  const initialSnapshot = structuredClone(
+    objects.get(key("ConfigMap", configurationName, gatewayNamespace)),
+  );
   assert.notEqual(
     bootstrapGateway.spec.template.spec.containers[0].env.find(
       ({ name }) => name === "APP_SERVER_URL",
@@ -11952,8 +11995,98 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
     providerWorkspaceRoot,
   );
   assert.deepEqual(gateway.spec.template.spec.hostAliases, [
-    { ip: "10.43.0.50", hostnames: ["tenant--sandbox.openshell.localhost"] },
+    { ip: "10.43.0.50", hostnames: ["localhost"] },
   ]);
+
+  // Endpoint discovery must not rewrite the immutable configuration created for
+  // bootstrap. Only this revision's Gateway receives the separate public bundle.
+  assert.deepEqual(
+    objects.get(key("ConfigMap", configurationName, gatewayNamespace)),
+    initialSnapshot,
+  );
+  const deployedGateway = objects.get(key("Deployment", gatewayName, gatewayNamespace));
+  const trustMount = gatewayContainer.volumeMounts.find(({ name }) => name === "harness-trust");
+  assert.ok(trustMount, "the provider endpoint CA must be mounted into the Gateway");
+  const trustVolume = deployedGateway.spec.template.spec.volumes.find(
+    ({ name }) => name === trustMount.name,
+  );
+  assert.equal(trustMount.readOnly, true);
+  assert.equal(trustVolume.configMap.optional, false);
+  const trust = objects.get(key("ConfigMap", trustVolume.configMap.name, gatewayNamespace));
+  assert.equal(trust.immutable, true);
+  assert.equal(trust.metadata.labels["openclaw.dev/revision"], revision.id);
+  assert.deepEqual(trust.data, { "ca-bundle.pem": tls.caBundle });
+  assert.equal(gatewayContainer.env.filter(({ name }) => name === "NODE_EXTRA_CA_CERTS").length, 1);
+  const trustPath = gatewayContainer.env.find(({ name }) => name === "NODE_EXTRA_CA_CERTS").value;
+  assert.equal(trustPath, `${trustMount.mountPath}/${trustVolume.configMap.items[0].path}`);
+  assert.equal(
+    provisions[0].requirements.environment.some(({ name }) => name === "NODE_EXTRA_CA_CERTS"),
+    false,
+  );
+  const trustWrite = writes.findIndex(
+    ({ kind, metadata }) => kind === "ConfigMap" && metadata.name === trust.metadata.name,
+  );
+  const rolloutWrite = writes.findIndex(
+    ({ kind, spec }) =>
+      kind === "Deployment" &&
+      spec.template.spec.volumes.some(({ name }) => name === "harness-trust"),
+  );
+  assert.ok(
+    trustWrite >= 0 && trustWrite < rolloutWrite,
+    "public trust exists before the Gateway rollout",
+  );
+
+  // Materialize the actual projection in a private directory. A fresh Node
+  // process exercises ws's default TLS path, as the pinned Gateway client does;
+  // no ca/rejectUnauthorized override or process trust mutation is supplied.
+  const projectedPath = join(tls.directory, "projected-ca.pem");
+  await writeFile(projectedPath, trust.data[trustVolume.configMap.items[0].key]);
+  const probe = async (caPath, url = providerUrl) => {
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+      const WebSocket = require(${JSON.stringify(socketRequire.resolve("ws"))});
+      const socket = new WebSocket(process.env.APP_SERVER_URL, {
+        headers: { Authorization: "Bearer " + process.env.APP_SERVER_TOKEN },
+        handshakeTimeout: 2000,
+      });
+      socket.on("message", (data) => {
+        if (data.toString() !== "trust-ok") process.exitCode = 2;
+        socket.close();
+      });
+      socket.on("error", (error) => { process.stderr.write(String(error.code)); process.exitCode = 1; });
+    `,
+      ],
+      {
+        env: {
+          APP_SERVER_URL: url,
+          APP_SERVER_TOKEN: "test-transport",
+          ...(caPath === undefined ? {} : { NODE_EXTRA_CA_CERTS: caPath }),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let errors = "";
+    child.stderr.on("data", (chunk) => {
+      errors += chunk;
+    });
+    const [code] = await once(child, "exit");
+    return { code, errors };
+  };
+  assert.deepEqual(await probe(projectedPath), { code: 0, errors: "" });
+  for (const caPath of [undefined, untrusted.rootCertificatePath]) {
+    const denied = await probe(caPath);
+    assert.equal(denied.code, 1);
+    assert.match(
+      denied.errors,
+      /UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY/,
+    );
+  }
+  const mismatch = await probe(projectedPath, `wss://127.0.0.1:${providerPort}/`);
+  assert.equal(mismatch.code, 1);
+  assert.equal(mismatch.errors, "ERR_TLS_CERT_ALTNAME_INVALID");
   assert.deepEqual(
     provisions[0].requirements.files.map(({ name, environmentVariable }) => ({
       name,
@@ -12076,7 +12209,7 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
           podSelector: { matchLabels: { app: "openshell-gateway" } },
         },
       ],
-      ports: [{ protocol: "TCP", port: 8080 }],
+      ports: [{ protocol: "TCP", port: providerPort }],
     },
   ]);
 
@@ -12165,6 +12298,14 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
   await driver.activateRevision(revision, authContext(revision));
   assert.equal(harnessObservations.length, observedBeforeActivation + 1);
   assert.equal(harnessObservations.at(-1).transportToken, "test-transport");
+
+  providerCaBundle = untrusted.caBundle;
+  await assert.rejects(
+    driver.activateRevision(revision, authContext(revision)),
+    /invalid immutable Kubernetes ConfigMap/,
+  );
+  assert.deepEqual(objects.get(key("ConfigMap", trust.metadata.name, gatewayNamespace)), trust);
+  providerCaBundle = tls.caBundle;
 
   // Ready credential attachments do not stand in for a serving Harness: a revision whose
   // Sandbox carries gateway-held credentials waits for the Harness too.
@@ -12407,6 +12548,110 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
   );
   assert.ok(unreachable instanceof DependencyUnavailableError, String(unreachable));
   assert.equal(driver.describePrepareRevisionFailure(unreachable).stage, "sandbox_provision");
+});
+
+test("provider Harness public trust rejects invalid material and composes with execution trust", async (t) => {
+  const provider = await harnessTlsFixture(t);
+  const execution = await harnessTlsFixture(t);
+  for (const crossCluster of [false, true]) {
+    const configured = crossCluster
+      ? twoClusterOptions()
+      : routedOptions({
+          runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" },
+        });
+    configured.network.providerHarness = {
+      namespace: "provider",
+      podLabels: { app: "provider" },
+      address: "10.43.0.50",
+      port: 8443,
+    };
+    if (crossCluster) {
+      configured.executionCluster.caBundle = execution.caBundle;
+    }
+    const driver = new KubernetesComputeDriver(configured);
+    const revision = routedRevision(driver);
+    const target = { name: kubernetesNamespaceName(tenant.id), plane: "control" };
+    const ownership = { namespaceId: tenant.id, agentId: revision.agentId };
+    const configuration = driver.gatewayConfiguration(revision, "node", target);
+    const endpoint = {
+      url: "wss://harness.example.test:8443/",
+      tls: { caBundle: provider.caBundle },
+    };
+    const render = (value) =>
+      driver.deployment(
+        `gateway-${digest(revision.agentId)}`,
+        ownership,
+        target,
+        configured.images.gateway,
+        "gateway-account",
+        "gateway",
+        {},
+        "info",
+        configuration,
+        false,
+        undefined,
+        undefined,
+        [],
+        [],
+        undefined,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        value,
+      );
+    const writes = [];
+    driver.apiClients = Promise.resolve({
+      core: {
+        async readNamespacedConfigMap() {
+          throw Object.assign(new Error("not found"), { statusCode: 404 });
+        },
+        async patchNamespacedConfigMap({ body }) {
+          writes.push(body);
+        },
+      },
+    });
+    await driver.reconcileHarnessTrust(revision, endpoint, target);
+    assert.deepEqual(writes[0].data, {
+      "ca-bundle.pem": provider.caBundle + (crossCluster ? "\n" + execution.caBundle : ""),
+    });
+    const pod = render(endpoint).spec.template.spec;
+    const roots = pod.containers[0].env.filter(({ name }) => name === "NODE_EXTRA_CA_CERTS");
+    assert.deepEqual(roots, [
+      { name: "NODE_EXTRA_CA_CERTS", value: "/etc/openclaw-harness-trust/ca-bundle.pem" },
+    ]);
+    const system = render({ url: endpoint.url }).spec.template.spec;
+    assert.equal(
+      system.volumes.some(({ name }) => name === "harness-trust"),
+      false,
+    );
+    assert.deepEqual(
+      system.containers[0].env.filter(({ name }) => name === "NODE_EXTRA_CA_CERTS"),
+      crossCluster
+        ? [{ name: "NODE_EXTRA_CA_CERTS", value: "/etc/openclaw/execution-ca.pem" }]
+        : [],
+    );
+    for (const tls of [
+      { caBundle: "" },
+      { caBundle: "not a certificate" },
+      { caBundle: provider.cert },
+      { caBundle: provider.caBundle + provider.key },
+      { caBundle: provider.caBundle, privateKey: provider.key },
+      { caBundlePath: provider.rootCertificatePath },
+    ]) {
+      assert.throws(() => render({ url: endpoint.url, tls }), /TLS trust/);
+      const before = writes.length;
+      await assert.rejects(
+        driver.reconcileHarnessTrust(revision, { url: endpoint.url, tls }, target),
+        /TLS trust/,
+      );
+      assert.equal(writes.length, before, "invalid trust must fail before any ConfigMap write");
+    }
+    assert.throws(
+      () => render({ ...endpoint, url: "ws://harness.example.test:8443/" }),
+      /TLS trust requires a WSS endpoint/,
+    );
+  }
 });
 
 test("provider Harness readiness preserves API errors and owner cancellation", async () => {
@@ -15031,7 +15276,8 @@ test("retiring a running embedded revision waits for gateway Pods and removes ow
 // Finding 860: retiring the last OpenShell revision left the workspace-node pair
 // (supervisor egress to the Gateway, Gateway ingress from supervisors) in the namespace.
 for (const stopped of [false, true]) {
-  test(`retiring the last ${stopped ? "stopped " : ""}OpenShell revision removes every Agent NetworkPolicy it wrote`, async () => {
+  test(`retiring the last ${stopped ? "stopped " : ""}OpenShell revision removes every Agent NetworkPolicy it wrote`, async (t) => {
+    const tls = await harnessTlsFixture(t);
     const cleanupCalls = [];
     const driver = new KubernetesComputeDriver(
       options({
@@ -15120,6 +15366,32 @@ for (const stopped of [false, true]) {
     );
     save(sibling);
 
+    const trustName = `harness-trust-${digest(revision.agentId)}-rev-${digest(revision.id)}`;
+    const trust = {
+      ...driver.manifest(
+        "v1",
+        "ConfigMap",
+        trustName,
+        { ...ownership, servicePrincipalId: revision.servicePrincipalId, revisionId: revision.id },
+        target,
+      ),
+      immutable: true,
+      data: { "ca-bundle.pem": tls.caBundle },
+    };
+    save(trust);
+    const siblingTrust = {
+      ...driver.manifest(
+        "v1",
+        "ConfigMap",
+        `harness-trust-${digest("agent-sibling")}-rev-${digest(revision.id)}`,
+        { ...ownership, agentId: "agent-sibling", revisionId: revision.id },
+        target,
+      ),
+      immutable: true,
+      data: { "ca-bundle.pem": tls.caBundle },
+    };
+    save(siblingTrust);
+
     const deleted = [];
     const missing = (kind, name) =>
       Object.assign(new Error(`${kind} ${name} not found`), { code: 404 });
@@ -15175,6 +15447,12 @@ for (const stopped of [false, true]) {
 
     await driver.retireRevision(revision);
     assert.deepEqual(cleanupCalls, [revision.id]);
+    assert.equal(
+      objects.has(key("ConfigMap", trustName)),
+      false,
+      "retirement removes exact public trust",
+    );
+    assert.deepEqual(objects.get(key("ConfigMap", siblingTrust.metadata.name)), siblingTrust);
     assert.equal(objects.has(key("Deployment", gatewayName)), false);
     for (const name of policyNames) {
       assert.equal(objects.has(key("NetworkPolicy", name)), false, `${name} must be deleted`);

@@ -130,8 +130,9 @@ through Fastify's real content parser, authentication and native IAM with
 in-memory storage and fixture Compute. Valid protected requests must reach the
 missing-counterpart refusal; an unrelated `400` cannot qualify them. It also
 checks the connected observer's database guards, proto3 uint64 handling and
-rejection of partial assistant output, and the obfuscated provider vectors. It starts no provider, cluster or model
-runtime and supplies no installation receipt.
+rejection of partial assistant output, exact bearer/mTLS input shapes, fixture
+hostname restrictions and obfuscated provider vectors. It starts no provider,
+cluster or model runtime and supplies no installation receipt.
 
 ## Select the prepared connected lane
 
@@ -161,20 +162,24 @@ Set `OCC_TEST_EGRESS_CONNECTED_INPUTS` to an absolute path to a private JSON fil
 The [input validator](../../tests/helpers/egress-connected-inputs.mjs) defines its
 exact contract:
 
-| Input                                                                                                | Required preparation                                                                                                                                                                              |
-| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`, `namespaceId`, `model`                                                                    | Version `1`, the existing `ns_*` tenant ID and explicit Codex model name.                                                                                                                         |
-| `apiOrigin`, `serviceKeyPath`                                                                        | Loopback controller origin and absolute path to its provisioned non-Agent service key.                                                                                                            |
-| `kubeconfigPath`, `kubernetesContext`, `runtimeClass`                                                | Explicit kubeconfig, disposable `k3d-*` context and approved OpenShell RuntimeClass.                                                                                                              |
-| `controllerNamespace`, `controllerSelector`, `openShellGatewayNamespace`, `openShellGatewaySelector` | Exact namespaces and selectors for the prepared controller (both API and worker) and supplier gateway Pods.                                                                                       |
-| `oceCommit`, `supplierCommit`                                                                        | Accepted 40-character source commits. These are recorded provenance; Pod image references do not establish build-source equivalence.                                                              |
-| `images`                                                                                             | Digest-pinned references under `agent`, `controller`, `gateway`, `openShellGateway`, `sandbox`, and `supervisor`, imported and registered in k3s. Use the exact references rendered in Pod specs. |
-| `openShellBackend`                                                                                   | HTTPS `endpoint`, absolute `rootCertificatePath`, and `auth: { mode: "bearerTokenFile", path: "…" }`. No insecure transport.                                                                      |
-| `provider`                                                                                           | Fixture-only HTTPS `.test` `origin` ending `/v1`, explicit reachable `bindHost`, matching high `bindPort`, and absolute `certificatePath`/`privateKeyPath`.                                       |
+| Input                                                                                                | Required preparation                                                                                                                                                                                                                         |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`, `namespaceId`, `model`                                                                    | Version `1`, the existing `ns_*` tenant ID and explicit Codex model name.                                                                                                                                                                    |
+| `apiOrigin`, `serviceKeyPath`                                                                        | Loopback controller origin and absolute path to its provisioned non-Agent service key.                                                                                                                                                       |
+| `kubeconfigPath`, `kubernetesContext`, `runtimeClass`                                                | Explicit kubeconfig, disposable `k3d-*` context and approved OpenShell RuntimeClass.                                                                                                                                                         |
+| `controllerNamespace`, `controllerSelector`, `openShellGatewayNamespace`, `openShellGatewaySelector` | Exact namespaces and selectors for the prepared controller (both API and worker) and supplier gateway Pods.                                                                                                                                  |
+| `oceCommit`, `supplierCommit`                                                                        | Accepted 40-character source commits. These are recorded provenance; Pod image references do not establish build-source equivalence.                                                                                                         |
+| `images`                                                                                             | Digest-pinned references under `agent`, `controller`, `gateway`, `openShellGateway`, `sandbox`, and `supervisor`, imported and registered in k3s. Use the exact references rendered in Pod specs.                                            |
+| `openShellBackend`                                                                                   | HTTPS `endpoint`, absolute `rootCertificatePath`, and exactly `auth: { mode: "bearerTokenFile", path: "…" }` or `auth: { mode: "mtls", certificatePath: "…", privateKeyPath: "…" }`. All auth paths must be absolute; no insecure transport. |
+| `provider`                                                                                           | Fixture-only HTTPS `.test` or exact `host.openshell.internal` `origin` ending `/v1`, explicit reachable IP `bindHost`, matching high `bindPort`, and absolute `certificatePath`/`privateKeyPath`.                                            |
 
 The parent operator prepares the provider certificate/SAN, supervisor DNS and
 routing, trusted CA store and scoped egress. The test binds that listener but
-changes none of those settings. Use synthetic material only; no real provider
+changes none of those settings. The native `host.openshell.internal` alias must
+resolve to the prepared listener address and appear in its certificate SAN;
+it permits no other provider hostname. mTLS requires a controller build with
+Backend mTLS support; input validation alone does not establish that support.
+Use synthetic material only; no real provider
 credential is required. Supply the controller's loopback PostgreSQL URL through
 `OCC_TEST_DATABASE_URL` in an existing private environment file. URL query
 parameters are rejected because they can override the selected host or database.

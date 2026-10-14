@@ -9,6 +9,7 @@ import {
   asRecord,
   isNonEmptyString,
   numericErrorStatus,
+  publicCaBundle,
   sha256Hex,
   splitModelRef,
 } from "@openclaw-enterprise/utils";
@@ -1079,6 +1080,9 @@ const CONFIGURATION_DIRECTORY = "/etc/openclaw";
 const WRITABLE_CONFIGURATION_PATH = "/home/node/.openclaw/openclaw.json";
 const CONFIGURATION_DOCUMENT = "openclaw.json";
 const CONFIGURATION_VOLUME = "openclaw-configuration";
+const HARNESS_TRUST_VOLUME = "harness-trust";
+const HARNESS_TRUST_DIRECTORY = "/etc/openclaw-harness-trust";
+const HARNESS_TRUST_FILE = "ca-bundle.pem";
 const PLUGIN_RUNTIME_VOLUME = "openclaw-plugin-runtime";
 export const PLUGIN_RUNTIME_STATUS_PORT = 18_791;
 const PLUGIN_RUNTIME_STATUS_PATH = "/openclaw/plugin-runtime/status";
@@ -1666,6 +1670,24 @@ function providerHarnessUrl(
     throw new ConfigurationFailure(
       "SandboxDriver Harness workspace root must be an absolute path without surrounding whitespace.",
     );
+  }
+  if (endpoint.tls !== undefined) {
+    if (
+      url.protocol !== "wss:" ||
+      asRecord(endpoint.tls) === undefined ||
+      Object.keys(endpoint.tls).some((key) => key !== "caBundle")
+    ) {
+      throw new ConfigurationFailure(
+        "SandboxDriver TLS trust requires a WSS endpoint and only a public CA bundle.",
+      );
+    }
+    try {
+      publicCaBundle(endpoint.tls.caBundle);
+    } catch {
+      throw new ConfigurationFailure(
+        "SandboxDriver TLS trust must contain only valid PEM CA certificates.",
+      );
+    }
   }
   return url;
 }
@@ -5579,6 +5601,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
         environment: Record<string, string>,
         providerEndpoint?: SandboxHarnessEndpoint,
       ) => {
+        await this.prepareRevisionStage("gateway_config_map", () =>
+          this.reconcileHarnessTrust(revision, providerEndpoint, gatewayNamespace),
+        );
         await this.prepareRevisionStage("gateway_channel_network_policy", () =>
           this.reconcileChannelNetworkPolicy(revision, channels, gatewayNamespace),
         );
@@ -6520,6 +6545,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       gatewayNamespace,
       gatewayOwnership,
     );
+    await this.reconcileHarnessTrust(revision, providerEndpoint, gatewayNamespace);
     await this.reconcile(
       this.deployment(
         gatewayName,
@@ -7196,6 +7222,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
     namespace: KubernetesNamespaceAddress,
   ): Promise<void> {
     const gatewayNamespace = this.gatewayNamespace(revision, namespace);
+    await this.deleteOwnedNamespacedResource(
+      "ConfigMap",
+      this.harnessTrustName(revision.agentId, revision.id),
+      this.pluginRuntimeOwnership(revision),
+      gatewayNamespace,
+    );
     await this.deleteOwnedNamespacedResource(
       "ConfigMap",
       `gateway-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
@@ -13760,6 +13792,52 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     }
   }
 
+  private harnessTrustName(agentId: string, revisionId: string): string {
+    return `harness-trust-${sha256Hex(agentId, 12)}-rev-${sha256Hex(revisionId, 12)}`;
+  }
+
+  private async reconcileHarnessTrust(
+    revision: AgentRevision,
+    endpoint: SandboxHarnessEndpoint | undefined,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<void> {
+    if (endpoint?.tls === undefined) {
+      return;
+    }
+    const network = this.options.network.providerHarness;
+    if (network === undefined) {
+      throw new ConfigurationFailure(
+        "SandboxDriver Harness endpoint requires an exact provider network route.",
+      );
+    }
+    providerHarnessUrl(endpoint, network);
+    // The endpoint arrives after the configuration snapshot. Keep its public
+    // trust separately revision-owned and immutable; drift requires a new revision.
+    const ownership = this.pluginRuntimeOwnership(revision);
+    await this.reconcile(
+      {
+        ...this.manifest(
+          "v1",
+          "ConfigMap",
+          this.harnessTrustName(revision.agentId, revision.id),
+          ownership,
+          namespace,
+        ),
+        immutable: true,
+        data: {
+          [HARNESS_TRUST_FILE]: [
+            publicCaBundle(endpoint.tls.caBundle),
+            this.options.executionCluster?.caBundle,
+          ]
+            .filter((bundle) => bundle !== undefined)
+            .join("\n"),
+        },
+      },
+      ownership,
+      namespace,
+    );
+  }
+
   private deployment(
     name: string,
     ownership: Ownership,
@@ -13839,6 +13917,33 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       providerEndpoint === undefined
         ? undefined
         : providerHarnessUrl(providerEndpoint, providerNetwork!);
+    if (providerEndpoint?.tls !== undefined) {
+      if (role !== "gateway" || !dedicated || configuration === undefined) {
+        throw new ConfigurationFailure(
+          "SandboxDriver TLS trust belongs only to its dedicated Agent Gateway.",
+        );
+      }
+      volumes.push({
+        name: HARNESS_TRUST_VOLUME,
+        configMap: {
+          name: this.harnessTrustName(
+            required(ownership.agentId, "Harness trust Agent ID"),
+            configuration.revisionId,
+          ),
+          items: [{ key: HARNESS_TRUST_FILE, path: HARNESS_TRUST_FILE }],
+          optional: false,
+        },
+      });
+      volumeMounts.push({
+        name: HARNESS_TRUST_VOLUME,
+        mountPath: HARNESS_TRUST_DIRECTORY,
+        readOnly: true,
+      });
+      variables.push({
+        name: "NODE_EXTRA_CA_CERTS",
+        value: `${HARNESS_TRUST_DIRECTORY}/${HARNESS_TRUST_FILE}`,
+      });
+    }
     const initContainers = privateHome
       ? [this.privateStateInitContainer(role, image, embedded, writableConfiguration)]
       : [];
@@ -14298,7 +14403,10 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
           name: "OPENCLAW_PEER_PLUGIN_STATUS_URL",
           value: `https://${this.options.executionCluster.harnessRouting.hostname}${this.harnessRoutePath(ownership)}/plugin-status`,
         });
-        if (this.options.executionCluster.caBundle !== undefined) {
+        if (
+          this.options.executionCluster.caBundle !== undefined &&
+          providerEndpoint?.tls === undefined
+        ) {
           variables.push({
             name: "NODE_EXTRA_CA_CERTS",
             value: `${configuration?.usesWritableNativeAdminConfig ? MANAGED_CONFIGURATION_DIRECTORY : CONFIGURATION_DIRECTORY}/execution-ca.pem`,
