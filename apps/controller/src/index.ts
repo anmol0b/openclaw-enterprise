@@ -1385,7 +1385,9 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
         ? { actorServiceKeyId: admitted.serviceKeyId }
         : undefined;
     const details =
-      result?.details === undefined && admissionDetails === undefined && actorKeyDetails === undefined
+      result?.details === undefined &&
+      admissionDetails === undefined &&
+      actorKeyDetails === undefined
         ? evidenceDetails
         : { ...evidenceDetails, ...admissionDetails, ...result?.details, ...actorKeyDetails };
     return factory.create({
