@@ -15,8 +15,11 @@ class Element {
     this.attributes.set(name, value);
   }
   toggleAttribute(name, value) {
-    if (value) this.attributes.set(name, "");
-    else this.attributes.delete(name);
+    if (value) {
+      this.attributes.set(name, "");
+    } else {
+      this.attributes.delete(name);
+    }
   }
   append(...children) {
     this.childNodes.push(...children);
@@ -34,11 +37,17 @@ class Element {
 }
 
 function find(node, predicate) {
-  if (typeof node === "string") return undefined;
-  if (predicate(node)) return node;
+  if (typeof node === "string") {
+    return undefined;
+  }
+  if (predicate(node)) {
+    return node;
+  }
   for (const child of node.childNodes) {
     const found = find(child, predicate);
-    if (found) return found;
+    if (found) {
+      return found;
+    }
   }
 }
 

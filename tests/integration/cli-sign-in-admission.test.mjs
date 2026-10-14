@@ -80,7 +80,9 @@ test("CLI code lookup and decision reserve the shared budget before persistence"
     assert.equal((await promptly(sameAccount)).statusCode, 429);
     assert.equal((await promptly(sameAddress)).statusCode, 429);
   } finally {
-    for (const release of waiters) release(undefined);
+    for (const release of waiters) {
+      release(undefined);
+    }
     await Promise.all([...pending, sameAccount, sameAddress, unrelated]);
   }
   assert.equal((await invoke(service, "lookup")).statusCode, 429);
