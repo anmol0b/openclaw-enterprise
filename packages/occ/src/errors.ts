@@ -350,10 +350,27 @@ function keyedSettingMessage(
  * and paragraph separator characters show as ?, and a key that is not a plain ID is quoted.
  */
 export function keyedSettingPath(parent: string, key: string): string {
-  const shown = key.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|\p{Cs}/gu, "?");
+  const shown = shownKey(key);
   return /^[A-Za-z0-9_-]+$/.test(shown)
     ? `${parent}.${shown}`
     : `${parent}[${JSON.stringify(shown)}]`;
+}
+
+// Control, format, line and paragraph separator characters and lone surrogates show as ?.
+const shownKey = (key: string): string => key.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|\p{Cs}/gu, "?");
+
+/**
+ * A submitted key a message names, such as a header name, in double quotes: characters
+ * keyedSettingPath hides show as ?, and a key longer than `limit` code points is cut with …,
+ * so the message keeps its cap (`limit` is at least 1). Use it only for keys that are not secrets.
+ */
+export function quotedSettingKey(key: string, limit: number): string {
+  const characters = Array.from(shownKey(key));
+  return JSON.stringify(
+    characters.length <= limit
+      ? characters.join("")
+      : `${characters.slice(0, limit - 1).join("")}…`,
+  );
 }
 
 /**
@@ -375,6 +392,32 @@ export function agentEntryMessage(key: string, message: (path: string) => string
 /** Builds a message that names the Configuration setting `models.providers.<key>`. */
 export function modelProviderMessage(key: string, message: (path: string) => string): string {
   return keyedSettingMessage("models.providers", key, message);
+}
+
+const MEBIBYTE = 1024 * 1024;
+
+const byteSize = (bytes: number): string =>
+  bytes % MEBIBYTE === 0
+    ? `${bytes / MEBIBYTE} MiB`
+    : bytes % 1024 === 0
+      ? `${bytes / 1024} KiB`
+      : `${bytes} bytes`;
+
+/**
+ * Configuration values whose stored JSON reaches the Configuration Driver's size limit. The
+ * message names the limit and never the content, so HTTP returns it.
+ */
+export class ConfigurationSizeError extends Error {
+  readonly limitBytes: number;
+
+  /** `limitBytes` is the first refused size: stored JSON must be smaller. */
+  constructor(limitBytes: number) {
+    super(
+      `Configuration values are too large: stored as JSON they must be smaller than ${byteSize(limitBytes)}. Remove or shorten settings, then save again.`,
+    );
+    this.name = "ConfigurationSizeError";
+    this.limitBytes = limitBytes;
+  }
 }
 
 const inlineCredentialMessage =
@@ -413,6 +456,9 @@ export class GatewayPasswordValueError extends ModelCredentialValueError {
 const modelProviderSettingMessages = {
   baseUrl: (path: string): string =>
     `Configuration field ${path} must be an absolute http or https URL.`,
+  // An http(s) scheme followed by one or no slash, which the URL parser accepts (finding 1285).
+  baseUrlSlashes: (path: string): string =>
+    `Configuration field ${path} must start with https:// or http:// (the // after the scheme is missing).`,
   api: (path: string): string =>
     `Configuration field ${path} must name a model API the runtime supports, such as openai-responses, openai-completions or anthropic-messages.`,
 } as const;
@@ -868,6 +914,17 @@ export class CredentialGatewayNotConfiguredError extends Error {
       "This Installation has no Credential Gateway, so credential sources are unavailable. An administrator must select the OpenShell Credential Gateway Driver; see https://docs-enterprise.openclaw.org/reference/credential-sources/",
     );
     this.name = "CredentialGatewayNotConfiguredError";
+  }
+}
+
+/** A Driver rejected nonsecret source configuration before registration. */
+export class CredentialSourceConfigError extends Error {
+  readonly field: string;
+
+  constructor(field: string, message: string) {
+    super(message);
+    this.name = "CredentialSourceConfigError";
+    this.field = field;
   }
 }
 

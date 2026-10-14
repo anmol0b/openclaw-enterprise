@@ -844,10 +844,10 @@ test("Deploy freezes public repository selection without exposing provider grant
   assert.equal(cleared.status, 200);
   const historical = await f.request("GET", `${path}/revisions/${deployed.data.id}`);
   assert.deepEqual(historical.data.repositoryCredentials, snapshot);
-  assert.deepEqual(
-    (await f.request("GET", `${path}/revisions`)).data[0].repositoryCredentials,
-    snapshot,
-  );
+  // The list names the revision without its saved settings; the snapshot stays on the GET.
+  const [listed] = (await f.request("GET", `${path}/revisions`)).data;
+  assert.equal(listed.id, deployed.data.id);
+  assert.equal(Object.hasOwn(listed, "repositoryCredentials"), false);
   const independent = await f.request("POST", `${path}/deploy`);
   assert.equal(independent.status, 202, JSON.stringify(independent));
   assert.equal(Object.hasOwn(independent.data, "repositoryCredentials"), false);
@@ -1059,5 +1059,67 @@ test("Provisioning rejects a forbidden repository profile before queueing or cre
     f.controller.provisionAgent(f.actorId, { ...body, namespaceId: f.namespace.id }),
     /repository selections are not approved/,
   );
+  assert.deepEqual((await f.request("GET", f.collection)).data, []);
+});
+
+// Finding 1145: the provisioning request answers the 409 Agent create gives for repository
+// bindings its topology cannot deliver, instead of a 202 the worker's admission then fails.
+test("Provisioning refuses repository bindings on a topology Agent create refuses before queueing", async (t) => {
+  const configurationDriver = createTestConfigurationDriver();
+  // Accepting or refusing the request creates no Configuration; only the worker would.
+  configurationDriver.createExact = async () => assert.fail("The request created Configuration");
+  configurationDriver.inspectExact = async () => assert.fail("The request inspected Configuration");
+  const f = await fixture(t, {
+    harness: "codex",
+    configurationDriver,
+    compute: kubernetesCompute(KubernetesComputeDriver, true),
+  });
+  await f.state.transact((unit) =>
+    unit.namespaces.transitionNamespaceStatus(f.namespace.id, "provisioning", "ready"),
+  );
+  const secret = await f.request("POST", `/namespaces/${f.namespace.id}/secrets`, {
+    name: "Provisioning model",
+    value: "synthetic-model-key",
+  });
+  assert.equal(secret.status, 201);
+  const plan = (name) => ({
+    requestId: `req_${randomUUID()}`,
+    name,
+    executionMode: "dedicated",
+    configuration: { kind: "agent", values: f.configuration.values },
+    harnessAuth: { method: "api_key", source: secret.data.ref },
+    repositoryBindings: selection,
+  });
+  // Without a Sandbox the plan passes admission and reaches the provisioning queue, which
+  // in-memory state does not provide (the PostgreSQL provisioning tests cover acceptance).
+  await assert.rejects(
+    f.controller.provisionAgent(f.actorId, {
+      ...plan("Plain provisioning"),
+      namespaceId: f.namespace.id,
+    }),
+    /requires durable PostgreSQL state/,
+  );
+  // Selecting a Sandbox Driver puts every Agent in a Sandbox, where Kubernetes Compute delivers
+  // no repository credentials. No Sandbox runtime is invoked.
+  const sandbox = {
+    id: "repository-provisioning-sandbox",
+    capability: "sandbox",
+    implementation: "test-sandbox",
+    facets: ["networking", "filesystem", "process"],
+    async cleanup() {},
+  };
+  f.controller.registerDriver(sandbox);
+  f.controller.selectDriver("sandbox", sandbox.id);
+  const created = await f.request("POST", f.collection, {
+    name: "Sandboxed repository Agent",
+    configurationId: f.configuration.id,
+    executionMode: "dedicated",
+    repositoryBindings: selection,
+  });
+  assert.equal(created.status, 409, JSON.stringify(created));
+  const refused = await f.request("POST", `${f.collection}/provision`, plan("Sandboxed plan"));
+  assert.equal(refused.status, 409, JSON.stringify(refused));
+  assert.equal(refused.error.code, "RESOURCE_CONFLICT");
+  assert.equal(refused.error.message, created.error.message);
   assert.deepEqual((await f.request("GET", f.collection)).data, []);
 });

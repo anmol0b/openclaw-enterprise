@@ -30,6 +30,7 @@
     "tests/integration/password-sign-in-admission.test.mjs",
     "tests/integration/google-login-transport.test.mjs",
     "tests/conformance/slack-channel-directory.test.mjs",
+    "tests/conformance/bounded-response-reads.test.mjs",
     "tests/conformance/repository-credentials-github.test.mjs",
     "tests/integration/repository-credentials-driver.test.mjs",
     "tests/integration/known-device-cookie.test.mjs",
@@ -96,7 +97,8 @@
     "tests/integration/full-integration-preflight.test.mjs",
     "tests/conformance/repository-material-expiry-probe.test.mjs",
     "tests/integration/container-promote.test.mjs",
-    "tests/conformance/controller-stop-yields.test.mjs"
+    "tests/conformance/controller-stop-yields.test.mjs",
+    "tests/integration/dev-up-model-provider.test.mjs"
   ],
   "serialFiles": {
     "tests/conformance/postgres-auth-binding.test.mjs": "tsc --build of a fixture project that references packages/occ; if that output is stale, it rebuilds workspace output that other files read",
@@ -108,6 +110,9 @@
     },
     {
       "path": "tests/integration/qa-fixture-inputs.test.mjs"
+    },
+    {
+      "path": "tests/integration/github-app-observer.test.mjs"
     },
     {
       "path": "tests/integration/dev-codex-seccomp-failure.test.mjs"
@@ -241,6 +246,9 @@
     },
     {
       "path": "tests/conformance/slack-channel-directory.test.mjs"
+    },
+    {
+      "path": "tests/conformance/bounded-response-reads.test.mjs"
     },
     {
       "path": "tests/conformance/slack-proxy-reset.test.mjs"
@@ -470,6 +478,9 @@
     },
     {
       "path": "tests/conformance/controller-stop-yields.test.mjs"
+    },
+    {
+      "path": "tests/integration/dev-up-model-provider.test.mjs"
     }
   ]
 }

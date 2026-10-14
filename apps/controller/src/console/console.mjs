@@ -40,6 +40,14 @@ const externalAttemptStorageKeys = {
 const oidcLabelStorageKey = "occ.console.oidcLabel";
 // Google gradient G: https://commons.wikimedia.org/wiki/File_talk:Google_Favicon_2025.svg
 // GitHub mark: https://github.com/primer/octicons/blob/main/icons/mark-github-24.svg
+// A retained view revalidates each read it made. A paged read keeps its cursor, so it compares
+// data and meta, without the request ID that differs on every call.
+function readSignature(result, includeMeta = false) {
+  return JSON.stringify(
+    includeMeta ? { data: result.data, meta: { ...result.meta, requestId: undefined } } : result,
+  );
+}
+
 function providerIcon(provider) {
   if (provider !== "github" && provider !== "google") {
     return null;
@@ -160,6 +168,21 @@ const githubMembershipFailures = {
       ? "Could not check your GitHub organization membership. Try again later or use your password."
       : "Could not check your GitHub organization membership. Try again later; if this keeps happening, ask an administrator.",
 };
+
+// The provider could not answer, or refused this Installation's client: an outage or a
+// configuration fault, not a refusal of the person. Where password sign-in is recovery-only,
+// only the recovery administrator has a password to fall back on.
+function providerUnavailableFailure(label) {
+  return (password) =>
+    password
+      ? `${label} sign-in is unavailable right now. Try again later or use your password.`
+      : `${label} sign-in is unavailable right now. Try again later. If you are an administrator, use Recovery sign-in.`;
+}
+
+// The callback failed inside OCE (its database or audit store), so no sign-in can finish.
+function signInUnavailableFailure(label) {
+  return `Could not finish signing in with ${label}. Sign-in is unavailable right now; try again later.`;
+}
 
 // The provider authenticated an identity attached to a disabled account. Retrying, a
 // password or an attach cannot help, so only an administrator is named.
@@ -822,11 +845,17 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
     : null;
   const authReason = current.url.searchParams.get("authReason");
   const reasonFailure =
-    providerError !== null && authReason === "account-disabled"
-      ? accountDisabledFailure(providerError.label)
-      : authError === "github" && Object.hasOwn(githubMembershipFailures, authReason ?? "")
-        ? githubMembershipFailures[authReason]
-        : null;
+    providerError === null
+      ? null
+      : authReason === "account-disabled"
+        ? accountDisabledFailure(providerError.label)
+        : authReason === "provider-unavailable"
+          ? providerUnavailableFailure(providerError.label)
+          : authReason === "unavailable"
+            ? signInUnavailableFailure(providerError.label)
+            : authError === "github" && Object.hasOwn(githubMembershipFailures, authReason ?? "")
+              ? githubMembershipFailures[authReason]
+              : null;
   const externalAttempt = takeExternalAttempt();
   if (externalAttempt !== null && providerError === null) {
     // Adopt only the session this tab's own provider attempt created.
@@ -996,7 +1025,10 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
       const validations = await Promise.allSettled(
         [...retainedState.reads.keys()].map(async (path) => {
           if (!fresh.has(path)) {
-            fresh.set(path, await request(path));
+            fresh.set(
+              path,
+              await request(path, { includeMeta: retainedState.metaReads.has(path) }),
+            );
           }
         }),
       );
@@ -1010,7 +1042,8 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
         validations.every((result) => result.status === "fulfilled") &&
         JSON.stringify(retainedState.user) === JSON.stringify(session.user) &&
         [...retainedState.reads].every(
-          ([path, value]) => JSON.stringify(fresh.get(path)) === value,
+          ([path, value]) =>
+            readSignature(fresh.get(path), retainedState.metaReads.has(path)) === value,
         );
       if (unchanged) {
         mountedViewState = retainedState;
@@ -1041,6 +1074,7 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
       reusable: true,
       mutations: 0,
       reads: new Map(),
+      metaReads: new Set(),
       resumeHandlers: new Set(),
       user: session.user,
     };
@@ -1057,7 +1091,10 @@ async function loadPage({ fromNavigation = false, reuseView = fromNavigation } =
         // Live reads (runtime status, log pages) differ on every call; replaying them to
         // revalidate a cached view would only spend the reader's rate limit.
         if ((options.method ?? "GET") === "GET" && options.revalidate !== false) {
-          viewState.reads.set(path, JSON.stringify(result));
+          viewState.reads.set(path, readSignature(result, options.includeMeta));
+          if (options.includeMeta) {
+            viewState.metaReads.add(path);
+          }
         }
         return result;
       } catch (error) {
