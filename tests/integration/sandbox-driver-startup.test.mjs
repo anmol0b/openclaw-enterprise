@@ -36,6 +36,7 @@ import {
 import { createInstallationDriverConfiguration as installation } from "../helpers/installation-driver-configuration.mjs";
 import { loadInstallationFile } from "../helpers/installation-file.mjs";
 import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
+import { harnessTlsFixture } from "../helpers/harness-tls.mjs";
 
 const controllerRequire = createRequire(
   new URL("../../apps/controller/package.json", import.meta.url),
@@ -1281,6 +1282,54 @@ test("OpenShell rejects projected Agent identity before gateway mutation", async
     return true;
   });
   assert.deepEqual(gatewayClient.calls, []);
+});
+
+test("OpenShell Harness endpoints expose only the Backend public CA", async (t) => {
+  const tls = await harnessTlsFixture(t);
+  const gatewayClient = workspaceGatewayClient();
+  gatewayClient.getService = async () => ({
+    targetPort: 8080,
+    authorizationMode: "SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH",
+    advertisedUrl: "https://harness.example.test:8080/",
+    url: "https://harness.example.test:8080/",
+  });
+  const endpoint = async (rootCertificatePath) => {
+    const backend = backendFor(gatewayClient);
+    backend.client = new OpenShellGateway(
+      {
+        endpoint: "https://gateway.example.test:8080/",
+        // Endpoint trust never reads or exports administrator authentication.
+        auth: { mode: "bearerTokenFile", path: join(tls.directory, "not-readable-admin-token") },
+        ...(rootCertificatePath === undefined ? {} : { rootCertificatePath }),
+      },
+      { gatewayClient },
+    );
+    const driver = new OpenShellSandboxDriver(sandboxInstallation().drivers.sandbox.configuration, {
+      id: "openshell-sandbox",
+      implementation: "openshell",
+      backend,
+    });
+    const { context, revision, requirements } = codexSandboxFixture(driver);
+    return driver.harnessEndpoint({ ...context, revision, requirements });
+  };
+  assert.deepEqual(await endpoint(tls.rootCertificatePath), {
+    url: "wss://harness.example.test:8080/",
+    workspaceRoot: "/sandbox/enterprise",
+    tls: { caBundle: tls.caBundle },
+  });
+  assert.equal((await endpoint()).tls, undefined, "unconfigured roots keep system trust");
+  const invalidRoot = join(tls.directory, "invalid-root.pem");
+  for (const content of [
+    "",
+    tls.cert,
+    tls.caBundle + tls.key,
+    "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----",
+  ]) {
+    await writeFile(invalidRoot, content);
+    await assert.rejects(endpoint(invalidRoot), /readable public PEM CA certificate bundle/);
+  }
+  await assert.rejects(endpoint("relative-ca.pem"), /absolute path/);
+  await assert.rejects(endpoint(join(tls.directory, "missing-root.pem")), /readable public PEM CA/);
 });
 
 test("OpenShell provisions dedicated Codex with bearer passthrough and provider files", async () => {

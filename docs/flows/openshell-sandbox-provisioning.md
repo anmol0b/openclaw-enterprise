@@ -1,7 +1,7 @@
 ---
 created: "2026-09-21"
 updated: 2026-10-14
-last_updated_session: authoring-run/217a5c5f-ae2d-47c4-9dd6-d16ed0244627
+last_updated_session: authoring-run/c696045b-5231-4253-a4bd-823334718d6a
 ---
 
 # OpenShell Sandbox provisioning flow
@@ -277,17 +277,15 @@ initialization or file reads. After dispatch, cancellation rejects the caller an
 cancels local gRPC, not necessarily the remote mutation. The lifecycle must
 recover uncertain effects.
 
-`GetService` returns a normalized URL for local clients and the advertised
-hostname/port for workload transport. The Driver requires the unnamed
-bearer-passthrough exposure on the admitted app-server port; `harnessEndpoint`
-returns its WebSocket origin and provider-local `/sandbox/enterprise` workspace
-root. Missing, malformed or changed exposure fails closed.
+`GetService` distinguishes the local client URL from its advertised origin.
+`harnessEndpoint` validates the exposure and returns that WebSocket origin,
+`/sandbox/enterprise` workspace root and optional public Backend CA from
+`apps/controller/src/backends/openshell.ts:publicRootCertificate`.
 
 The revision provider survives an uncertain create; revision cleanup deletes
 the Sandbox first.
 
-The runtime opens provider files through their reported absolute paths. Any
-Gateway failure prevents readiness.
+Runtime opens reported absolute provider paths; Gateway failures prevent readiness.
 
 OpenShell's supervisor opens the node connection. Kubernetes-only uses the
 in-cluster WSS route; Compose uses the Agent Gateway Service URL. In both cases,
@@ -299,21 +297,23 @@ process-group signaling returns `EPERM`.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:prepareRevision`
 
-After creation, Compute verifies revision ownership. With `harnessEndpoint`, it
-resolves the provider endpoint and replaces the first Gateway’s fail-closed
-template. The resulting Deployment receives that exact
-origin as `APP_SERVER_URL`, the provider-local root as
-`OPENCLAW_REMOTE_WORKSPACE_ROOT`, and, in the owned k3d profile, an exact host
-alias to the provider address. Compute grants Gateway egress only to the
-configured provider peer and port, leaves the direct Agent Service on its
-inactive selector, and omits the Compute-owned Harness route. A serving
-predecessor is not rewritten during successor preparation; activation resolves
-the candidate endpoint again before cutover. A provisioning Driver without
-`harnessEndpoint` keeps the Kubernetes Service or private-route path and the
-canonical `/home/node/workspace` root.
+Compute verifies revision ownership and resolves `harnessEndpoint` before
+replacing the fail-closed Gateway. It sets `APP_SERVER_URL`,
+`OPENCLAW_REMOTE_WORKSPACE_ROOT` and the configured provider host alias.
+`apps/controller/src/drivers/compute/kubernetes/index.ts:reconcileHarnessTrust`
+validates `tls.caBundle` into a separate immutable revision ConfigMap, preserving
+the earlier snapshot. Only that Gateway mounts the combined public endpoint/execution
+CA bundle via `NODE_EXTRA_CA_CERTS`. Node `ws` verifies certificates and
+hostnames; unspecified trust retains system roots.
 
-Compute then waits for the provider-owned Harness Pod and exact workspace node.
-Missing enrollment keeps the revision inactive. The dedicated Harness wrapper
+Preparation preserves serving predecessors. Activation re-resolves the endpoint.
+Both reconcile trust before rollout; drift requires a new revision.
+Compute admits configured provider egress, keeps the Agent Service inactive and
+omits its Harness route. Drivers without `harnessEndpoint`
+retain Kubernetes routing and `/home/node/workspace`.
+
+Compute waits for the provider Pod and exact workspace node; missing enrollment
+keeps the revision inactive. The dedicated Harness wrapper
 rereads the provider setup before every node retry and retains the latest valid
 value while the projection is unavailable. It relaunches the workspace-node
 process one second after every exit without capping attempts, so Gateway rollout
@@ -328,7 +328,9 @@ shutdown, `shutdownRevisionRuntime` calls `cleanup` with the revision. The
 Gateway client sends `DeleteSandbox` with the same `workspace_scope`; a missing
 Sandbox is an idempotent success. Codex cleanup then verifies and deletes the
 revision provider. Namespace cleanup removes the shared profile after its
-runtime providers are gone.
+runtime providers are gone. Compute removes the public trust ConfigMap through
+`apps/controller/src/drivers/compute/kubernetes/index.ts:deleteRetiredRevisionArtifacts`
+after revision workloads terminate.
 
 Namespace deletion calls `cleanup` without a revision after revision resources
 are gone. OpenShell verifies Workspace ownership, deletes remaining owned runtime
@@ -359,6 +361,8 @@ networking. Native OpenClaw remains verification-only.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 16:28: Trace public Harness endpoint trust projection and retirement in the accompanying uncommitted change. (authoring-run/c696045b-5231-4253-a4bd-823334718d6a - a071498ddb2ac4dd5d9a22ec678cf0d602c61a0a)
 
 - 2026-10-14 12:17: Document candidate preflight/import in the accompanying uncommitted change. (authoring-run/217a5c5f-ae2d-47c4-9dd6-d16ed0244627 - dc5648b67d2618cc43ef07562298e986a94674e7)
 
