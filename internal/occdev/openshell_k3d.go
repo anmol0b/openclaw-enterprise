@@ -60,6 +60,10 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 	if err := r.validateDevelopmentImageSelection(); err != nil {
 		return err
 	}
+	openShellImages, err := r.selectOpenShellImages(sandboxDriver)
+	if err != nil {
+		return err
+	}
 	repositoryInputs, err := r.loadDevelopmentRepositoryInputs(sandboxDriver)
 	if err != nil {
 		return err
@@ -151,6 +155,9 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 		return err
 	}
 	if err := r.pinEndpoint(ctx); err != nil {
+		return err
+	}
+	if err := r.validateOpenShellImageRevisions(ctx, openShellImages); err != nil {
 		return err
 	}
 	if err := r.checkLegacyNATTable(ctx); err != nil {

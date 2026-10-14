@@ -132,6 +132,8 @@ for supported engines, images, and security restrictions.
 - `OCC_DEVELOPMENT_K3D_DNS_RESOLVER` — Optional IPv4 resolver for either local k3d profile, or `k3d` for k3d's default; Linux Docker defaults to the host's upstream resolver.
 - `OCC_DEVELOPMENT_K3S_IMAGE` — K3s node image or channel for Compose control plane without OpenShell; default: `+v1.35`. Kubernetes-only and OpenShell profiles use their pinned image.
 - `OCC_DEVELOPMENT_KUBERNETES_DISK_THRESHOLD_PERCENT` — Disposable cluster disk-pressure threshold; default: `5`.
+- `OCC_DEVELOPMENT_OPENSHELL_GATEWAY_IMAGE`, `OCC_DEVELOPMENT_OPENSHELL_SANDBOX_IMAGE`, `OCC_DEVELOPMENT_OPENSHELL_SUPERVISOR_IMAGE` — Complete set of local SHA-256 image references for an explicit [OpenShell candidate](../../guides/deploy/local-openshell-images.md); requires the source revision selector.
+- `OCC_DEVELOPMENT_OPENSHELL_SOURCE_REVISION` — Full OpenShell commit that all three candidate image revision labels must match; consistency evidence, not build provenance.
 - `OCC_DEVELOPMENT_OPENSHELL_HELM_CHART` — Optional absolute OpenShell Gateway chart directory or archive; set it together with the workspace chart override.
 - `OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART` — Optional absolute OpenShell workspace chart directory or archive; set it together with the Gateway chart override.
 - `OCC_DEVELOPMENT_OPENSHELL_AGENT_SANDBOX_MANIFEST` — Optional absolute Agent Sandbox manifest; otherwise the helper downloads its checksum-verified pinned manifest.
