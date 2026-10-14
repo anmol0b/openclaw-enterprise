@@ -48,7 +48,12 @@ export interface OpenShellGatewayClientOptions {
   readonly endpoint: string;
   readonly auth?:
     | { readonly mode: "unauthenticated" }
-    | { readonly mode: "bearerTokenFile"; readonly path: string };
+    | { readonly mode: "bearerTokenFile"; readonly path: string }
+    | {
+        readonly mode: "mtls";
+        readonly certificatePath: string;
+        readonly privateKeyPath: string;
+      };
   readonly requestTimeoutMs?: number;
   /** Bounds one Sandbox deletion: the DeleteSandbox call plus any wait for its completion. */
   readonly sandboxDeleteTimeoutMs?: number;
@@ -900,10 +905,13 @@ function ipEndpointCredentials(
   grpc: typeof import("@grpc/grpc-js"),
   address: string,
   rootCertificate: Buffer | undefined,
+  clientCertificate: Buffer | undefined,
+  clientPrivateKey: Buffer | undefined,
 ): ChannelCredentials {
-  const secureContext = createSecureContext(
-    rootCertificate === undefined ? {} : { ca: rootCertificate },
-  );
+  const secureContext = createSecureContext({
+    ...(rootCertificate === undefined ? {} : { ca: rootCertificate }),
+    ...(clientCertificate === undefined ? {} : { cert: clientCertificate, key: clientPrivateKey }),
+  });
   class IpEndpointCredentials extends grpc.ChannelCredentials {
     _isSecure(): boolean {
       return true;
@@ -950,7 +958,7 @@ async function metadata(
   auth: OpenShellGatewayClientOptions["auth"],
 ): Promise<Metadata> {
   const value = new grpc.Metadata();
-  if (auth === undefined || auth.mode === "unauthenticated") {
+  if (auth === undefined || auth.mode === "unauthenticated" || auth.mode === "mtls") {
     return value;
   }
   if (!isAbsolute(auth.path)) {
@@ -1002,6 +1010,16 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     }
     if (options.auth?.mode === "bearerTokenFile" && !isAbsolute(options.auth.path)) {
       throw new OpenShellGatewayFailure("OpenShell bearer token file path must be absolute.");
+    }
+    if (options.auth?.mode === "mtls") {
+      if (!normalizeEndpoint(options.endpoint).secure) {
+        throw new OpenShellGatewayFailure("OpenShell mTLS requires an HTTPS endpoint.");
+      }
+      if (!isAbsolute(options.auth.certificatePath) || !isAbsolute(options.auth.privateKeyPath)) {
+        throw new OpenShellGatewayFailure(
+          "OpenShell mTLS certificate and private key paths must be absolute.",
+        );
+      }
     }
     if (options.rootCertificatePath !== undefined && !isAbsolute(options.rootCertificatePath)) {
       throw new OpenShellGatewayFailure("OpenShell root certificate path must be absolute.");
@@ -1932,10 +1950,26 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
           ? undefined
           : readFileSync(this.options.rootCertificatePath);
       const address = new URL(`https://${endpoint.target}`).hostname.replace(/^\[(.*)\]$/, "$1");
+      // Administrator credentials belong only to this gRPC control channel.
+      // Service HTTP/WebSocket calls retain their scoped bearer identity.
+      const clientCertificate =
+        this.options.auth?.mode === "mtls"
+          ? readFileSync(this.options.auth.certificatePath)
+          : undefined;
+      const clientPrivateKey =
+        this.options.auth?.mode === "mtls"
+          ? readFileSync(this.options.auth.privateKeyPath)
+          : undefined;
       credentials =
         isIP(address) === 0
-          ? grpc.credentials.createSsl(rootCertificate)
-          : ipEndpointCredentials(grpc, address, rootCertificate);
+          ? grpc.credentials.createSsl(rootCertificate, clientPrivateKey, clientCertificate)
+          : ipEndpointCredentials(
+              grpc,
+              address,
+              rootCertificate,
+              clientCertificate,
+              clientPrivateKey,
+            );
     }
     return {
       grpc,

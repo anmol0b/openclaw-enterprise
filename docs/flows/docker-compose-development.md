@@ -1,7 +1,7 @@
 ---
 created: 2026-08-24
-updated: 2026-10-09
-last_updated_session: authoring-run/3980117d-b11c-47c0-9f7a-765c1481ee7b
+updated: 2026-10-14
+last_updated_session: authoring-run/b0bd473e-3b1d-44cc-a1b1-4a1d411a1829
 ---
 
 # Compose development flow
@@ -60,8 +60,12 @@ graph TD
   KCodex -->|failure| KRollback
   KDriver -->|OpenShell| KOpenFirst["Prepare OpenShell assets,<br/>install routing, then import runtime"]
   KRoutingFirst --> KOnly["Install selected control-plane profile<br/>and retain all readiness gates"]
-  KOpenFirst --> KOnly
-  KOnly --> KWorkspace
+  KOpenFirst --> KProtection{"Protected egress?"}
+  KProtection -->|Off| KOnly
+  KProtection -->|On| KAuthority["Prepare authority TLS and registry<br/>Install Gateway without readiness wait"]
+  KAuthority --> KOnly
+  KOnly --> KWait["Complete readiness gates<br/>including protected Gateway rollout"]
+  KWait --> KWorkspace
   KControl -->|Compose| KConfig["Validate Compose and claim<br/>private state with snapshot"]
   KConfig --> KStart["Bootstrap OCC and create<br/>the owned k3d cluster"]
   KStart --> KReady["Import runtime and start<br/>API and Kubernetes worker"]
@@ -182,6 +186,42 @@ before creating the corresponding Gateway Workspace. Startup waits until the
 OCC Namespace becomes ready. See the
 [OpenShell flow](openshell-sandbox-provisioning.md#0-create-the-development-control-plane).
 
+### 6. Start protected OpenShell transport
+
+`internal/occdev/egress_k3d.go:protectedEgressSelection`,
+`internal/occdev/openshell_k3d.go:installDevelopmentPlatform`,
+`apps/controller/src/drivers/sandbox/openshell-gateway-client.ts:createClient`
+
+The explicit protected profile requires Kubernetes control plane and reviewed
+candidate images/charts. It prepares authority server TLS and its public CA,
+then installs OpenShell with native PKI and a TLS middleware registration.
+OpenShell owns the complete Gateway server/client certificate and extension-JWT
+key set. The launcher reads only its public key ID and writes the paired Backend,
+egress Driver and authority listener settings into the Installation.
+
+Gateway startup contacts the registry, so `installDevelopmentPlatform` defers
+its readiness wait until after the OCE release's normal readiness gates. API
+composition starts the authority; Backend validation is declarative, and worker
+startup/preflight and health do not require a Gateway call. The final Gateway
+rollout gate still precedes Namespace readiness. Any failure returns to the
+existing owned-cluster rollback path; no empty registry response substitutes for
+negotiation.
+
+The chart projects the administrative client certificate into API and worker
+only. The Backend supplies it to verified gRPC TLS for DNS or exact-IP server
+identities. Service traffic keeps its separate scoped bearer identity. The API
+alone receives authority TLS and the issuer public key; selected Gateway and
+supervisor Pods can reach that listener through narrow NetworkPolicies. See the
+[Backend authentication boundary](../reference/backends.md#openshell-gateway).
+
+`selectedDevelopmentDatabase` validates an optional disposable database name
+before effects. `installKubernetesControlPlane` uses that name in creation, readiness,
+migrator and application URLs. Bootstrap, API and worker share the limited
+application-role URL. Unselected profiles retain the existing database and
+transport defaults. The [launch guide](../guides/deploy/local-openshell-images.md#select-the-protected-profile)
+owns inputs; [packaging verification](../testing/static-egress.md#protected-launch-packaging)
+distinguishes local proof from pending connected runtime qualification.
+
 ## Debugging and Verification
 
 - `./scripts/dev-up` should show PostgreSQL readiness, migration completion,
@@ -238,6 +278,8 @@ OCC Namespace becomes ready. See the
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-14 16:11: Add the default-off protected OpenShell launch, native mTLS credential ownership, authority-first readiness and disposable database selection. (authoring-run/b0bd473e-3b1d-44cc-a1b1-4a1d411a1829 - 126b6a1b13b48281aee5d3ca4d476ec75da8a24a)
 
 - 2026-10-09 19:04: Import tagged development images through the platform-selected archive path and retain digest verification. (authoring-run/3980117d-b11c-47c0-9f7a-765c1481ee7b - 6d0bb202d97f487cbd5e41d64e0f1f5ab196d083)
 

@@ -518,12 +518,12 @@ test("startup requires protected OpenShell transport or an explicit NetworkPolic
   delete undeclared.backend[0].configuration.insecureTransport;
   await assert.rejects(
     load(undeclared),
-    /requires TLS with bearerTokenFile authentication, or insecureTransport: network-policy/,
+    /requires TLS with bearerTokenFile or mtls authentication, or insecureTransport: network-policy/,
   );
   // TLS alone is not enough; the gateway must also authenticate OCC.
   const tlsOnly = sandboxInstallation();
   tlsOnly.backend[0].configuration = { endpoint: "https://openshell-gateway.openshell.svc:8080" };
-  await assert.rejects(load(tlsOnly), /requires TLS with bearerTokenFile authentication/);
+  await assert.rejects(load(tlsOnly), /requires TLS with bearerTokenFile or mtls authentication/);
 
   const protectedTransport = sandboxInstallation();
   protectedTransport.backend[0].configuration = {
@@ -534,6 +534,29 @@ test("startup requires protected OpenShell transport or an explicit NetworkPolic
   // The declaration is only for unprotected transport, so it cannot mask a protected setup.
   protectedTransport.backend[0].configuration.insecureTransport = "network-policy";
   await assert.rejects(load(protectedTransport), /insecureTransport is only for unprotected/);
+
+  const mtls = sandboxInstallation();
+  mtls.backend[0].configuration = {
+    endpoint: "https://openshell-gateway.openshell.svc:8080",
+    auth: {
+      mode: "mtls",
+      certificatePath: "/etc/openclaw/openshell/tls.crt",
+      privateKeyPath: "/etc/openclaw/openshell/tls.key",
+    },
+  };
+  await load(mtls);
+  for (const change of [
+    { privateKeyPath: undefined },
+    { certificatePath: "relative.crt" },
+    { path: "/unexpected" },
+  ]) {
+    const invalid = structuredClone(mtls);
+    Object.assign(invalid.backend[0].configuration.auth, change);
+    await assert.rejects(load(invalid), /configuration.auth/);
+  }
+  mtls.backend[0].configuration.endpoint = "http://openshell-gateway.openshell.svc:8080";
+  mtls.backend[0].configuration.insecureTransport = "network-policy";
+  await assert.rejects(load(mtls), /mtls requires HTTPS/);
 
   // Every gateway call's deadline stays within the registration fence.
   const slow = sandboxInstallation();

@@ -364,14 +364,13 @@ func (r *runner) installOpenShellGateway(ctx context.Context, state *development
 			return err
 		}
 	}
-	if err := r.ensureOpenShellJWTSecret(ctx, state, namespace); err != nil {
-		return err
+	if !state.ProtectedEgress {
+		if err := r.ensureOpenShellJWTSecret(ctx, state, namespace); err != nil {
+			return err
+		}
 	}
 	values := []string{
 		"--set-string=fullnameOverride=" + openShellGatewayService,
-		"--set=pkiInitJob.enabled=false",
-		"--set=server.disableTls=true",
-		"--set=server.auth.allowUnauthenticatedUsers=true",
 		"--set-string=serviceAccount.name=" + openShellGatewayService,
 		"--set-string=sandboxServiceAccount.name=openshell-sandbox",
 		"--set=workspaceResources.enabled=false",
@@ -385,6 +384,15 @@ func (r *runner) installOpenShellGateway(ctx context.Context, state *development
 		"--set=sandboxRuntime.image.pullPolicy=Never",
 		"--set=supervisor.image.pullPolicy=Never",
 	}
+	if state.ProtectedEgress {
+		path, err := r.writeProtectedOpenShellValues(state)
+		if err != nil {
+			return err
+		}
+		values = append(values, "-f", path)
+	} else {
+		values = append(values, "--set=pkiInitJob.enabled=false", "--set=server.disableTls=true", "--set=server.auth.allowUnauthenticatedUsers=true")
+	}
 	if state.DeploymentMode == "k3d" {
 		values = append(values, "--set=service.type=ClusterIP")
 	} else {
@@ -397,7 +405,12 @@ func (r *runner) installOpenShellGateway(ctx context.Context, state *development
 	} {
 		values = append(values, openShellImageValues(selected.prefix, selected.image)...)
 	}
-	args := []string{"upgrade", "--install", openShellGatewayService, assets.gatewayChart, "--namespace", namespace, "--kubeconfig", filepath.Join(state.directory, "kubeconfig"), "--kube-context", "k3d-" + state.Cluster, "--wait", "--timeout", timeout.String()}
+	args := []string{"upgrade", "--install", openShellGatewayService, assets.gatewayChart, "--namespace", namespace, "--kubeconfig", filepath.Join(state.directory, "kubeconfig"), "--kube-context", "k3d-" + state.Cluster, "--timeout", timeout.String()}
+	// The registry contacts OCC at startup. Install both releases before waiting
+	// for the protected Gateway; native PKI hooks still complete synchronously.
+	if !state.ProtectedEgress {
+		args = append(args, "--wait")
+	}
 	args = append(args, values...)
 	if err := r.run(ctx, "helm", args...); err != nil {
 		return err

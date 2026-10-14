@@ -50,6 +50,51 @@ charts; use the [paired chart overrides](local-kubernetes-development.md#start-t
 when the reviewed candidate needs matching charts. A chart override alone does
 not select candidate images.
 
+## Select the protected profile
+
+For a fresh Kubernetes control plane with a matching protected-inference
+candidate, set the image selectors above without starting the stack, then add:
+
+```bash
+export OCC_DEVELOPMENT_PROTECTED_EGRESS=1
+export OCC_DEVELOPMENT_CONTROLLER_IMAGE='<reviewed-controller-image>'
+export OCC_KUBERNETES_RUNTIME_IMAGE='<reviewed-runtime-image>'
+export OCC_DEVELOPMENT_OPENSHELL_HELM_CHART='<absolute-gateway-chart-directory>'
+export OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART='<absolute-workspace-chart-directory>'
+export OCC_DEVELOPMENT_DATABASE_NAME=openclaw_k8s_connected
+./scripts/dev-up
+```
+
+The Gateway chart must support the secure `supervisor.middleware` registry. The
+controller and runtime must include the reviewed protected-inference implementation;
+normal version and image-revision checks remain mandatory. The launcher keeps
+the runtime's ordinary components and selects its approved Codex binary paths.
+It does not build images or install missing capabilities.
+
+The profile registers the authority, generates its server certificate, and uses
+OpenShell's native PKI hook for Gateway server/client certificates and extension
+signing keys. Only the API and worker receive the administrative mTLS client key.
+The authority receives only the issuer public key. Gateway installation precedes
+OCE installation; Gateway readiness waits until the authority can answer its
+registry negotiation. A failure uses the normal owned-cluster rollback and
+retained-state recovery path.
+
+`OCC_DEVELOPMENT_DATABASE_NAME` is optional. When selected it must match
+`openclaw_k8s_[a-z0-9_]+` and be at most 63 characters. The launcher uses it for
+database creation, readiness, migration, bootstrap, API and worker connections;
+the application still uses the limited `occ_app` role. Unset it to retain the
+default `openclaw_enterprise` database on a fresh launch.
+
+This profile is off when `OCC_DEVELOPMENT_PROTECTED_EGRESS` is unset or `0`, and
+requires both Kubernetes control plane and OpenShell when enabled. It does not
+qualify a model turn or supply a provider fixture. Resolve the separate Agent
+Gateway server-trust and fixture prerequisites in
+[protected launch verification](../../testing/static-egress.md#protected-launch-packaging)
+before running connected tests. If those tests use the native host alias, select
+the verified owned private host IPv4 through
+`OCC_DEVELOPMENT_OPENSHELL_HOST_GATEWAY_IP`; reachability and server-certificate
+checks remain prerequisites.
+
 ## Verify imported identities
 
 Keep the launcher's three `OpenShell <component> image: source=… containerd=…`

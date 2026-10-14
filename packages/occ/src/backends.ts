@@ -312,10 +312,23 @@ function validateOpenShellBackend(
       isAbsolute(authRecord.path)
     ) {
       auth = { mode: "bearerTokenFile", path: authRecord.path };
+    } else if (
+      authRecord.mode === "mtls" &&
+      Object.keys(authRecord).length === 3 &&
+      isNonEmptyString(authRecord.certificatePath) &&
+      isAbsolute(authRecord.certificatePath) &&
+      isNonEmptyString(authRecord.privateKeyPath) &&
+      isAbsolute(authRecord.privateKeyPath)
+    ) {
+      auth = {
+        mode: "mtls",
+        certificatePath: authRecord.certificatePath,
+        privateKeyPath: authRecord.privateKeyPath,
+      };
     } else {
       throw new ScopeViolationError(
         path(id, "configuration.auth") +
-          " must be unauthenticated or bearerTokenFile with an absolute path.",
+          " must be unauthenticated, bearerTokenFile with an absolute path, or mtls with absolute certificatePath and privateKeyPath.",
       );
     }
   }
@@ -331,11 +344,14 @@ function validateOpenShellBackend(
     endpoint === undefined
       ? (scheme ?? (rootCertificatePath === undefined ? "http" : "https")) === "https"
       : (endpoint as string).startsWith("https://");
-  const protectedTransport = tls && auth?.mode === "bearerTokenFile";
+  if (auth?.mode === "mtls" && !tls) {
+    throw new ScopeViolationError(path(id, "configuration.auth") + " mtls requires HTTPS.");
+  }
+  const protectedTransport = tls && (auth?.mode === "bearerTokenFile" || auth?.mode === "mtls");
   if (!protectedTransport && insecureTransport === undefined) {
     throw new ScopeViolationError(
       path(id, "configuration") +
-        " requires TLS with bearerTokenFile authentication, or insecureTransport: network-policy.",
+        " requires TLS with bearerTokenFile or mtls authentication, or insecureTransport: network-policy.",
     );
   }
   if (protectedTransport && insecureTransport !== undefined) {

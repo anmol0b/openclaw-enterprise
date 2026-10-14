@@ -100,10 +100,10 @@ drivers:
       authority:
         host: 127.0.0.1
         port: 9444
-        certificatePath: /etc/openclaw/egress/tls.crt
-        privateKeyPath: /etc/openclaw/egress/tls.key
-        issuerPublicKeyPath: /etc/openclaw/egress/issuer.pub
-        issuer: https://openshell-gateway.example.com
+        certificatePath: /etc/openclaw/egress/tls/tls.crt
+        privateKeyPath: /etc/openclaw/egress/tls/tls.key
+        issuerPublicKeyPath: /etc/openclaw/egress/issuer/issuer.pub
+        issuer: openshell-gateway:openshell-gateway
         audience: oce-egress
         keyId: current
 ```
@@ -111,8 +111,8 @@ drivers:
 The API owns this TLS listener; the worker does not open another listener.
 Development requires loopback. Production requires an explicitly configured
 reachable host and operator-provided TLS and issuer trust. The existing Backend
-must use explicit HTTPS and bearer-file authentication. No new chart exposure or
-publication is provided by this change. All phases of an operation must reach
+must use explicit HTTPS and [bearer-file or mTLS authentication](../backends.md#openshell-gateway).
+All phases of an operation must reach
 the same authority process; outstanding handles are local and restart fails
 closed. It allows at most 1,024 pending or outstanding operations, reserving
 capacity before authentication or storage awaits, and 4,096 replay reservations.
@@ -128,6 +128,32 @@ The operator registers the authority as `[[openshell.supervisor.middleware]]`
 with `grpc_endpoint`, `audience`, `tls_ca_cert_path`, and a 4 MiB payload
 bound. Gateway signing uses `[openshell.gateway.gateway_jwt]`. Insecure transport is unsupported. Both peers must negotiate
 `openshell.supervisor-middleware.http-credential-access.v1`.
+
+### Helm packaging
+
+The OCE chart's `egressAuthority.enabled` defaults to `false`. When enabled, set
+`port` to the authority listener port, `tlsSecretName` to a Secret with `tls.crt`
+and `tls.key`, and `issuerSecretName` to a Secret with `public.pem`. The chart
+mounts these at the example paths above on the API only. It exposes a ClusterIP
+Service named `openclaw-enterprise-egress-authority`, with a NetworkPolicy limited
+to `clients`: each entry must contain an explicit `namespaceSelector` and
+`podSelector.matchLabels`. Select only the Gateway and trusted supervisors.
+The Installation's production listener host must accept that Service traffic;
+use its exact DNS name in the server certificate and middleware endpoint.
+
+For native mTLS, `backend.openshell.clientSecretName` projects `ca.crt`, `tls.crt`
+and `tls.key` under `/etc/openclaw/openshell` into the API and worker. It does not
+project those credentials to Agents or bootstrap/migration Jobs. The issuer's
+private signing key is never selected by the authority volume. The supervisor
+receives public authority trust through the supplier's middleware registration.
+
+The [protected local launch profile](../../guides/deploy/local-openshell-images.md#select-the-protected-profile)
+creates these bindings and TLS inputs, uses native OpenShell PKI, and installs
+the authority before waiting for Gateway readiness. Neither chart configuration
+nor successful startup qualifies connected enforcement; follow the
+[verification boundary](../../testing/static-egress.md#protected-launch-packaging).
+
+### Loaded enforcement
 
 Compute gives the paired Sandbox the admitted plan. The adapter requires exact
 loaded network policy and middleware configuration, including every auxiliary

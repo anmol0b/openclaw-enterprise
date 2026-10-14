@@ -53,6 +53,28 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
+        {{- if $.Values.backend.openshell.clientSecretName }}
+        - name: openshell-client
+          secret:
+            secretName: {{ $.Values.backend.openshell.clientSecretName | quote }}
+            items:
+              - {key: ca.crt, path: ca.crt}
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        {{- end }}
+        {{- if and (eq $component "api") $.Values.egressAuthority.enabled }}
+        - name: egress-authority-tls
+          secret:
+            secretName: {{ $.Values.egressAuthority.tlsSecretName | quote }}
+            items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        - name: egress-authority-issuer
+          secret:
+            secretName: {{ $.Values.egressAuthority.issuerSecretName | quote }}
+            items:
+              - {key: public.pem, path: issuer.pub}
+        {{- end }}
         {{- if $oidcCa }}
         - name: oidc-ca
           secret:
@@ -392,6 +414,19 @@ spec:
               value: {{ include "openclaw.positiveSafeInteger" (dict "name" "worker.convergenceTimeoutMs" "value" $.Values.worker.convergenceTimeoutMs) | quote }}
             {{- end }}
           volumeMounts:
+            {{- if $.Values.backend.openshell.clientSecretName }}
+            - name: openshell-client
+              mountPath: /etc/openclaw/openshell
+              readOnly: true
+            {{- end }}
+            {{- if and (eq $component "api") $.Values.egressAuthority.enabled }}
+            - name: egress-authority-tls
+              mountPath: /etc/openclaw/egress/tls
+              readOnly: true
+            - name: egress-authority-issuer
+              mountPath: /etc/openclaw/egress/issuer
+              readOnly: true
+            {{- end }}
             {{- if $oidcCa }}
             - name: api-extra-ca
               mountPath: /etc/openclaw/api-extra-ca
@@ -454,6 +489,10 @@ spec:
             {{- if eq $component "api" }}
             - name: http
               containerPort: {{ $.Values.api.port }}
+            {{- if $.Values.egressAuthority.enabled }}
+            - name: egress-tls
+              containerPort: {{ $.Values.egressAuthority.port }}
+            {{- end }}
             {{- end }}
           {{- end }}
           {{- if eq $component "api" }}

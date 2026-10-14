@@ -76,3 +76,54 @@ are released. Fresh revisions with matching gateway/supervisor candidates are th
 intended installed scope; mixed-version hot activation and no-bypass networking
 require separate runtime proof. There is no successful installed native model-turn
 evidence in this consumer suite.
+
+## Protected launch packaging
+
+The [explicit local profile](../guides/deploy/local-openshell-images.md#select-the-protected-profile)
+generates normal Installation and Helm inputs. For a local packaging check,
+select the matching supplier chart through the test-only
+`OCC_TEST_OPENSHELL_CHART` and an installed Helm executable through `OCC_HELM_BIN`:
+
+```sh
+OCC_TEST_OPENSHELL_CHART=/absolute/supplier/deploy/helm/openshell \
+OCC_HELM_BIN=/absolute/bin/helm \
+GOEXPERIMENT=jsonv2 go test ./internal/occdev
+node --test --test-name-pattern='OpenShell mTLS|OpenShell service transport never' \
+  tests/conformance/openshell-gateway-wire.test.mjs
+OCC_HELM_BIN=/absolute/bin/helm node --test --test-name-pattern='protected authority' \
+  tests/integration/production-kubernetes-packaging.test.mjs
+```
+
+The Go case runs the release coordinator with command-boundary fixtures, loads
+its output through real controller composition, checks the generated server
+certificate, and renders both charts with real Helm. It proves configuration,
+credential projection, database selection and startup ordering, not a cluster,
+PostgreSQL execution or installed middleware negotiation. The wire cases use
+generated CA/client certificates and actual loopback gRPC TLS, including DNS and
+IP server identity, foreign-client refusal and absence of client credentials on
+the separate service transport. They do not prove OpenShell's role mapping.
+
+Connected qualification additionally requires reviewed, revision-matched images,
+normal Agent admission, a disposable `openclaw_k8s_` database, and verified public
+Gateway server trust for the Agent's WSS client. The Backend's API/worker trust
+mount alone does not configure that client. Never project the administrator
+client Secret into an Agent to solve server trust.
+
+For a synthetic HTTPS provider, the supervisor reads its normal system CA bundle;
+`SSL_CERT_FILE` does not configure upstream TLS re-encryption. A fixture image may
+preserve the original bundle at `/etc/ssl/certs/ca-certificates.crt` and append the
+fixture's public CA. Preserve all normal binaries/components, record the base and
+derived image digests and CA fingerprint, and identify results as fixture-image
+proof. Keep the CA private key outside images and Pods. Do not change host trust
+or disable hostname checking.
+
+The existing `server.hostGatewayIP` supplier value maps `host.openshell.internal`.
+The protected launcher passes the optional canonical private IPv4 selected by
+`OCC_DEVELOPMENT_OPENSHELL_HOST_GATEWAY_IP` to that value.
+Use it only after verifying the owned host address is reachable from the selected
+runtime and the fixture server certificate covers that exact hostname. A connected
+test must explicitly admit that owned origin; it must not accept arbitrary
+external hosts. Initial enrollment does not establish automatic recovery after
+a Harness process restart; qualify any required reconciliation/redeployment
+separately. Packaging and loopback tests do not establish a connected model turn,
+supervisor enforcement or no-bypass networking.

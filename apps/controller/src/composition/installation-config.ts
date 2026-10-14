@@ -856,7 +856,8 @@ export async function loadInstallationConfiguration(options: {
       openShellBackend?.drivers.egress_proxy !== egressProxy.id ||
       openShellBackend.configuration.endpoint === undefined ||
       !openShellBackend.configuration.endpoint.startsWith("https://") ||
-      openShellBackend.configuration.auth?.mode !== "bearerTokenFile")
+      (openShellBackend.configuration.auth?.mode !== "bearerTokenFile" &&
+        openShellBackend.configuration.auth?.mode !== "mtls"))
   ) {
     throw new Error(
       "Protected egress requires paired Kubernetes/OpenShell Drivers and an authenticated TLS gateway endpoint.",

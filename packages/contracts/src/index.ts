@@ -164,7 +164,12 @@ export interface OpenShellBackendConfiguration {
   readonly port?: number;
   readonly auth?:
     | { readonly mode: "unauthenticated" }
-    | { readonly mode: "bearerTokenFile"; readonly path: string };
+    | { readonly mode: "bearerTokenFile"; readonly path: string }
+    | {
+        readonly mode: "mtls";
+        readonly certificatePath: string;
+        readonly privateKeyPath: string;
+      };
   /** At most 30 s; it bounds how late a timed-out credential registration can land. */
   readonly requestTimeoutMs?: number;
   readonly rootCertificatePath?: string;
