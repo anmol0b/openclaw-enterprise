@@ -350,6 +350,26 @@ test("provider authentication rejection fences the exact material version and en
 
 test("protected admission requires the actual counterpart and exact loaded policy; withdrawal removes only its owned Sandbox", async (t) => {
   const f = await staticEgressFixture(t);
+  // Inspect the production attachment before protobuf can erase an explicit zero.
+  // OpenShell requires omission for automatic TLS termination, not TERMINATE or SKIP.
+  for (const [index, route] of f.context.plan.routes.entries()) {
+    const endpoints = f.attachment.configuration.network_policies[`oce-egress-${index}`].endpoints;
+    assert.equal(Object.hasOwn(endpoints[0], "tls"), false);
+    const origin = new URL(route.origin);
+    assert.deepEqual(endpoints, [
+      {
+        host: origin.hostname,
+        ports: [Number(origin.port || 443)],
+        protocol: "rest",
+        enforcement: "NETWORK_ENFORCEMENT_MODE_ENFORCE",
+        access: "NETWORK_ACCESS_PRESET_FULL",
+        path: route.path,
+      },
+    ]);
+  }
+  const middleware = f.attachment.configuration.network_middlewares["oce-egress"];
+  assert.equal(middleware.on_error, "fail_closed");
+  assert.equal(middleware.credential_authority, true);
   const contract = "openshell.supervisor-middleware.contract";
   const capability = "openshell.supervisor-middleware.http-credential-access.v1";
   // The supervisor performs its own Describe with locally compiled capabilities. An
@@ -387,6 +407,14 @@ test("protected admission requires the actual counterpart and exact loaded polic
   await assert.rejects(f.egress.configureRevision(f.context));
   f.observed.available = true;
   const expectedPolicy = structuredClone(f.observed.policy);
+  assert.equal(await f.egress.verifyInstallation(f.context, f.installation), true);
+  // A reported TLS bypass must fail both initial installation and receipt revalidation,
+  // even when the supplier still reports the original loaded-enforcement evidence.
+  f.observed.policy.network_policies["oce-egress-0"].endpoints[0].tls = "NETWORK_TLS_MODE_SKIP";
+  await assert.rejects(f.egress.attachmentStatus(f.context, f.attachment), /differs/);
+  assert.equal(await f.egress.verifyInstallation(f.context, f.installation), false);
+  f.observed.policy = structuredClone(expectedPolicy);
+  assert.equal(await f.egress.verifyInstallation(f.context, f.installation), true);
   f.observed.policy.network_middlewares["oce-egress"].credential_authority = false;
   assert.equal(await f.egress.attachmentStatus(f.context, f.attachment), undefined);
   f.observed.policy = structuredClone(expectedPolicy);

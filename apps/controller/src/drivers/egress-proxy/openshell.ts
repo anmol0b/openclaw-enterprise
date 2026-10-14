@@ -133,7 +133,6 @@ export function openShellEgressConfiguration(
                 host: origin.hostname,
                 ports: [Number(origin.port || 443)],
                 protocol: "rest",
-                tls: "NETWORK_TLS_MODE_TERMINATE",
                 enforcement: "NETWORK_ENFORCEMENT_MODE_ENFORCE",
                 access: "NETWORK_ACCESS_PRESET_FULL",
                 path: route.path,
