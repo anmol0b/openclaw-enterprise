@@ -5,6 +5,7 @@ import {
   validPluginApprovers,
 } from "@openclaw-enterprise/contracts";
 import { codexApprovalPolicy } from "@openclaw-enterprise/occ";
+import { harnessEgressEnrollment, type HarnessEgressEnrollment } from "./egress-enrollment.ts";
 
 export const PLUGIN_RUNTIME_DIRECTORY = "/etc/openclaw/plugin-runtime";
 export const PLUGIN_RUNTIME_MANIFEST = "runtime.json";
@@ -61,6 +62,7 @@ export type PluginRuntimeSpec =
       readonly repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy;
       readonly modelEndpoint?: CodexModelEndpoint;
       readonly providerTools?: "none";
+      readonly egressEnrollment?: HarnessEgressEnrollment;
     };
 
 function validateDriverMatchesRuntime(
@@ -107,7 +109,10 @@ function pluginFreeRuntimeForRevision(
       approvalPolicy: codexSessionApprovalPolicy(revision),
       ...(revision.egressPlan === undefined
         ? {}
-        : { providerTools: protectedProviderTools(revision) }),
+        : {
+            providerTools: protectedProviderTools(revision),
+            egressEnrollment: harnessEgressEnrollment(revision.egressPlan),
+          }),
       ...(revision.pluginApprovers === undefined
         ? {}
         : { pluginApprovers: revision.pluginApprovers }),
@@ -156,7 +161,10 @@ export function pluginRuntimeSpecForRevision(
           approvalPolicy: codexSessionApprovalPolicy(revision),
           ...(revision.egressPlan === undefined
             ? {}
-            : { providerTools: protectedProviderTools(revision) }),
+            : {
+                providerTools: protectedProviderTools(revision),
+                egressEnrollment: harnessEgressEnrollment(revision.egressPlan),
+              }),
           pluginApprovers: revision.pluginApprovers,
           ...(openaiBaseUrl === undefined
             ? {}
@@ -286,6 +294,12 @@ function runtimeManifest(runtime: PluginRuntimeSpec): Readonly<Record<string, un
   return {
     kind: runtime.kind,
     selections: runtime.selections,
+    ...(runtime.kind === "codex" && runtime.egressEnrollment !== undefined
+      ? { egressEnrollment: runtime.egressEnrollment }
+      : {}),
+    ...(runtime.kind === "codex" && runtime.providerTools !== undefined
+      ? { providerTools: runtime.providerTools }
+      : {}),
     ...(runtime.kind === "codex" && runtime.modelEndpoint !== undefined
       ? { modelEndpoint: runtime.modelEndpoint }
       : {}),

@@ -8,8 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConsoleAppFixture } from "./console-app.mjs";
 import { createDevelopmentComputeDriver } from "./development.mjs";
+import { createTestKubernetesComputeDriver } from "./kubernetes-compute.mjs";
 import { KubernetesSecretDriver } from "../../apps/controller/src/drivers/secret/kubernetes/index.ts";
 import { createOpenShellBackend } from "../../apps/controller/src/backends/openshell.ts";
+import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
 import { OpenShellSandboxDriver } from "../../apps/controller/src/drivers/sandbox/openshell.ts";
 import { OpenShellCredentialGatewayDriver } from "../../apps/controller/src/drivers/credential-gateway/openshell.ts";
 import { OpenShellEgressProxyDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
@@ -51,7 +53,14 @@ const listen = (server) =>
  * not a Kubernetes API server or an OpenShell supervisor. No authorization/provider logic is mocked. */
 export async function staticEgressFixture(
   t,
-  { appFactory = createConsoleAppFixture, includeLegacy = false, now = () => new Date() } = {},
+  {
+    appFactory = createConsoleAppFixture,
+    includeLegacy = false,
+    now = () => new Date(),
+    physicalPlacement = false,
+    recordInstallation = true,
+    serviceTransport,
+  } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "oce-egress-wire-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -83,6 +92,7 @@ export async function staticEgressFixture(
   const [key, cert] = await Promise.all([readFile(keyPath), readFile(certPath)]);
   const objects = new Map();
   let namespace;
+  let runtimeNamespace;
   let secretReads = 0;
   let secretReadBarrier;
   const kubeRequests = [];
@@ -92,7 +102,11 @@ export async function staticEgressFixture(
     kubeRequests.push([request.method, url.pathname]);
     if (url.pathname === "/api/v1/namespaces") {
       const nsId = namespace.id;
-      assert.equal(url.searchParams.get("labelSelector"), `openclaw.dev/gateway-namespace=${nsId}`);
+      assert.ok(
+        [`openclaw.dev/gateway-namespace=${nsId}`, `openclaw.dev/namespace=${nsId}`].includes(
+          url.searchParams.get("labelSelector"),
+        ),
+      );
       response.end(
         JSON.stringify({
           apiVersion: "v1",
@@ -245,14 +259,31 @@ export async function staticEgressFixture(
         callback({ code: grpc.status.NOT_FOUND });
         return;
       }
-      assert.equal(call.request.workspace_scope.workspace, namespace.name);
+      if (call.request.workspace_scope.workspace !== runtimeNamespace.name) {
+        callback({ code: grpc.status.NOT_FOUND });
+        return;
+      }
       assert.equal(call.request.name, observed.sandbox.name);
       callback(null, {
         sandbox: { metadata: observed.sandbox, status: { phase: "SANDBOX_PHASE_READY" } },
       });
     },
+    GetService(call, callback) {
+      if (
+        !observed.service ||
+        call.request.sandbox !== observed.sandbox?.name ||
+        call.request.workspace_scope.workspace !== runtimeNamespace.name
+      ) {
+        callback({ code: grpc.status.NOT_FOUND });
+        return;
+      }
+      callback(null, observed.service);
+    },
     GetSandboxPolicyStatus(call, callback) {
-      assert.equal(call.request.workspace_scope.workspace, namespace.name);
+      if (call.request.workspace_scope.workspace !== runtimeNamespace.name) {
+        callback({ code: grpc.status.NOT_FOUND });
+        return;
+      }
       callback(null, {
         revision: {
           version: 1,
@@ -279,16 +310,44 @@ export async function staticEgressFixture(
     ),
   );
   t.after(() => gateway.forceShutdown());
-  const backend = createOpenShellBackend({
-    id: "openshell-test",
-    type: "openshell",
-    configuration: { endpoint: `https://127.0.0.1:${gatewayPort}`, rootCertificatePath: certPath },
-    drivers: {
-      sandbox: "openshell-sandbox",
-      credential_gateway: "openshell-credentials",
-      egress_proxy: "openshell-egress",
-    },
+  const transport = new GrpcOpenShellGatewayClient({
+    endpoint: `https://127.0.0.1:${gatewayPort}`,
+    rootCertificatePath: certPath,
   });
+  // The fixture's gRPC metadata and local Harness HTTP listener occupy separate
+  // ports. Both transports are production clients; no enrollment decision is mocked.
+  const gatewayClient =
+    serviceTransport === undefined
+      ? transport
+      : new Proxy(transport, {
+          get(target, property) {
+            const owner = [
+              "getServiceDocument",
+              "postServiceDocument",
+              "serviceWebSocketHandshake",
+            ].includes(property)
+              ? serviceTransport
+              : target;
+            const value = owner[property];
+            return typeof value === "function" ? value.bind(owner) : value;
+          },
+        });
+  const backend = createOpenShellBackend(
+    {
+      id: "openshell-test",
+      type: "openshell",
+      configuration: {
+        endpoint: `https://127.0.0.1:${gatewayPort}`,
+        rootCertificatePath: certPath,
+      },
+      drivers: {
+        sandbox: "openshell-sandbox",
+        credential_gateway: "openshell-credentials",
+        egress_proxy: "openshell-egress",
+      },
+    },
+    { gatewayClient },
+  );
   t.after(() => backend.client.close());
   const egressOptions = { middlewareName: "oce-authority", binaries: ["/usr/bin/model-client"] };
   const sandbox = new OpenShellSandboxDriver(
@@ -326,6 +385,9 @@ export async function staticEgressFixture(
     { binaries: egressOptions.binaries },
     { id: "openshell-credentials", backend },
   );
+  const placement = createTestKubernetesComputeDriver("placement", {
+    authentication: { mode: "kubeconfig", kubeconfigPath, context: "fixture" },
+  });
   const app = await appFactory(t, {
     now,
     provisionedPeople: [],
@@ -333,7 +395,7 @@ export async function staticEgressFixture(
     computeDriver: {
       ...createDevelopmentComputeDriver(),
       async resolveSandboxNamespace(value) {
-        return value;
+        return physicalPlacement ? placement.resolveSandboxNamespace(value) : value;
       },
     },
   });
@@ -343,6 +405,9 @@ export async function staticEgressFixture(
     app.controller.selectDriver(driver.capability, driver.id);
   }
   namespace = await app.createNamespace(`egress-${randomUUID().slice(0, 8)}`, { ready: true });
+  runtimeNamespace = physicalPlacement
+    ? await placement.resolveSandboxNamespace(namespace)
+    : namespace;
   const createdSecret = await app.request("POST", `/namespaces/${namespace.id}/secrets`, {
     body: { name: "provider-key", value: "synthetic-key-initial" },
   });
@@ -441,7 +506,7 @@ export async function staticEgressFixture(
   );
   assert.ok(revision.egressPlan, "deployment must admit the consumed protected plan");
   const context = {
-    namespace,
+    namespace: runtimeNamespace,
     revision,
     plan: revision.egressPlan,
     signal: AbortSignal.timeout(5000),
@@ -480,10 +545,12 @@ export async function staticEgressFixture(
   };
   const installation = await egress.attachmentStatus(context, attachment);
   assert.ok(installation, "the adapter must validate the complete supplier observation");
-  await app.controller.transact((unit) =>
-    unit.credentialSources.recordEgressInstallation(installation),
-  );
-  await app.activateRevision(namespace.id, agent.id, revision.id);
+  if (recordInstallation) {
+    await app.controller.transact((unit) =>
+      unit.credentialSources.recordEgressInstallation(installation),
+    );
+    await app.activateRevision(namespace.id, agent.id, revision.id);
+  }
 
   const keys = generateKeyPairSync("ed25519");
   const identity = new OpenShellEgressIdentity({
@@ -635,6 +702,7 @@ export async function staticEgressFixture(
   return {
     ...app,
     namespace,
+    runtimeNamespace,
     secret,
     source,
     legacySource,
@@ -645,6 +713,9 @@ export async function staticEgressFixture(
     context,
     attachment,
     egress,
+    installation,
+    sandboxDriver: sandbox,
+    gatewayClient: backend.client.clientForNamespace(runtimeNamespace.name),
     observed,
     clients,
     metadata,

@@ -5839,7 +5839,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
         if (
           egressContext !== undefined &&
           (this.egressProxyDriver?.id !== revision.egressPlan!.egressDriverId ||
-            context?.recordEgressInstallation === undefined)
+            context?.recordEgressInstallation === undefined ||
+            sandboxDriver.enrollHarness === undefined)
         ) {
           throw new DependencyUnavailableError(
             "The admitted protected egress composition is unavailable.",
@@ -5880,6 +5881,23 @@ export class KubernetesComputeDriver implements ComputeDriver {
             return incomplete();
           }
           await context!.recordEgressInstallation!(installed);
+          if (!(await this.egressProxyDriver!.verifyInstallation(egressContext, installed))) {
+            return incomplete();
+          }
+          const transportToken = await this.prepareRevisionStage("harness_auth", () =>
+            this.sandboxTransportTokenText(revision),
+          );
+          await this.prepareRevisionStage("sandbox_provision", () =>
+            sandboxDriver.enrollHarness!(
+              {
+                ...sandboxContext,
+                revision,
+                requirements,
+                transportToken,
+              },
+              installed,
+            ),
+          );
         }
         if (this.options.runtime !== undefined) {
           // The Sandbox, and with it the supervisor's exact peer labels, exists only

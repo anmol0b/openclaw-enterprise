@@ -17,7 +17,7 @@ SSH, or installed Compute combinations. See [Driver selection](selection.md).
 ### Driver interface
 
 The [shared interface](../../../packages/contracts/src/index.ts) exposes the
-required `facets` and `cleanup` members, an optional `harnessHome`, plus nine optional methods.
+required `facets` and `cleanup` members, an optional `harnessHome`, plus optional lifecycle and transport methods.
 
 | Member                                   | Contract                                                                                                                                                                                                                                                                                                                                                                       |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -39,6 +39,14 @@ transport with the Agent transport token. It answers `serving` only after an
 authenticated handshake, or `failed` with the Harness's held startup failure,
 which Compute validates and fails the revision with; anything else is `starting`.
 Compute activates only a `serving` Harness.
+
+`enrollHarness(context, installation)` is required when a revision has a protected
+egress plan. Compute calls it after committing the verified installation and
+checking current evidence again. The Driver authenticates the exact Harness
+transport and binds a fresh startup challenge to that execution and plan before
+releasing its first model probe. A starting transport can remain pending for the
+next reconcile. Enrollment conveys neither credential material nor permission to
+send; see [protected static inference](../credential-sources/protected-inference.md).
 
 `observeHarness(context)` reads the provider's own lifecycle record of a dedicated
 revision's Harness Sandbox, without contacting the Harness. It answers `running`,

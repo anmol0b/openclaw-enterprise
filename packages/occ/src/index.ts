@@ -4636,7 +4636,7 @@ export class OpenClawController {
       if (
         !(await driver.verifyInstallation(
           {
-            namespace,
+            namespace: await this.credentialNamespace(namespace),
             revision,
             plan: use.installation.plan,
             signal: AbortSignal.timeout(Math.ceil(remaining)),
