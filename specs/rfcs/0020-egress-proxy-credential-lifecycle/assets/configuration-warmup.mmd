@@ -1,0 +1,64 @@
+---
+title: "Proposed background preparation"
+config:
+  theme: base
+  htmlLabels: true
+  themeVariables:
+    fontFamily: "Arial, sans-serif"
+    fontSize: "16px"
+    actorBkg: "#EDF2F7"
+    actorBorder: "#879AB0"
+    actorTextColor: "#25364A"
+    noteBkgColor: "#F7F1E5"
+    noteBorderColor: "#B3A078"
+    noteTextColor: "#344054"
+    signalColor: "#748798"
+    signalTextColor: "#25364A"
+  sequence:
+    useMaxWidth: false
+    actorMargin: 18
+    width: 116
+    height: 44
+    diagramMarginX: 12
+    diagramMarginY: 12
+    messageMargin: 16
+    noteMargin: 8
+    mirrorActors: true
+    wrap: true
+---
+sequenceDiagram
+  participant C as OCC / Compute
+  participant S as Source control
+  participant E as Egress driver
+  participant B as Sandbox
+  participant L as Refresh owner
+  participant I as Issuer
+  Note over C,I: Proposed contracts, not separate daemons, calls/returns do not imply implementation
+  Note over C,S: Trusted Backend factory binds immutable identities and versioned provider schemas
+  Note over C,S: New static sources default live, existing sources keep approved version / snapshot<br/>Exact source-update authority required for live opt-in
+  Note over C,S: Validate selected store, scope and exact version<br/>Failed opt-in preserves approved admission, known revocation denies
+  C->>S: applySource(Source, Command)
+  S-->>C: Change of SourceStatus
+  Note over C,S: Applied configuration is not material readiness
+  opt Dynamic source
+    C->>L: configureRefresh(LifecycleConfig, Command)
+    L-->>C: Accepted configuration
+    Note over L,I: One fenced owner per family, warm while Agents are idle
+    L->>L: Persist exact attempt and uncertainty marker
+    Note over L,I: SecretDriver.readCredentialInput for authorized roots only<br/>Canonical rotated input supersedes bootstrap seed
+    L->>I: issue(IssuerAttempt, Bounds)
+    I->>I: Owner-authorized provider exchange<br/>Provider definition validates actual grant / expiry
+    I-->>L: Candidate, known refusal or uncertain attempt
+    L->>L: Commit replacement input and candidate before readiness
+    C->>L: refreshStatus(WarmKey, Bounds)
+    L-->>C: Readiness and activity reported separately
+    Note over C,L: Valid old material stays ready during routine renewal, cold required grants have a bounded wait
+  end
+  C->>E: configureRevision(Plan, Command)
+  E-->>C: Change of exact Attachment
+  C->>B: installEgress(Attachment, Command)
+  B-->>C: Change of InstallReceipt
+  C->>E: attachmentStatus joins Sandbox egressStatus
+  E-->>C: Exact generation and binding set
+  Note over C,I: Known partial failure: failed plus cleanup obligations, unknown effects: inspect / reconcile, no blind replay
+  Note over C,B: Static usability is checked during resolve, authenticated Harness serving is a separate gate

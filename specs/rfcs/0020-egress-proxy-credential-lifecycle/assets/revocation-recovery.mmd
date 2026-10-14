@@ -1,0 +1,58 @@
+---
+title: "Proposed withdrawal and recovery"
+config:
+  theme: base
+  htmlLabels: true
+  themeVariables:
+    fontFamily: "Arial, sans-serif"
+    fontSize: "16px"
+    actorBkg: "#EDF2F7"
+    actorBorder: "#879AB0"
+    actorTextColor: "#25364A"
+    noteBkgColor: "#F7F1E5"
+    noteBorderColor: "#B3A078"
+    noteTextColor: "#344054"
+    signalColor: "#748798"
+    signalTextColor: "#25364A"
+  sequence:
+    useMaxWidth: false
+    actorMargin: 18
+    width: 116
+    height: 44
+    diagramMarginX: 12
+    diagramMarginY: 12
+    messageMargin: 16
+    noteMargin: 8
+    mirrorActors: true
+    wrap: true
+---
+sequenceDiagram
+  participant C as OCC / reconciler
+  participant E as Egress driver
+  participant B as Sandbox
+  participant F as Forwarder
+  participant R as Resolver
+  Note over C,R: Proposed flow, exact operations and cleanup survive restart
+  C->>C: Commit denial and durable withdrawal intent
+  C->>E: withdrawBinding(exact binding)
+  E->>E: Persist tombstone<br/>Advance policy generation
+  Note over E,B: Sandbox enforces Egress-owned configuration<br/>Late installs cannot restore a tombstoned binding
+  C->>E: attachmentStatus
+  E-->>C: Successor: remaining bindings
+  C->>B: installEgress(successor, Command)
+  C->>B: egressStatus for exact successor
+  B-->>C: Receipt: binding set and policy generation
+  C->>E: attachmentStatus / inspect / reconcile
+  E-->>C: Detached evidence or outstanding cleanup
+  F->>C: EgressAuthorizer.check for next operation
+  C-->>F: Deny withdrawn authority
+  Note over C,F: Accepted final-check race remains, original deadlines bound in-flight work<br/>Logical denial, detach and provider revocation are distinct<br/>Revoke only if supported, no exported bearer recall or undo of sent effects
+  opt Credential rejection
+    F->>R: reportRejection
+    R->>R: Durably deduplicate authenticated receipt / material version
+    R-->>F: recorded / obsolete / Refusal
+    Note over F,R: Exact source, grant and store-qualified version<br/>Late N cannot invalidate or schedule recovery for N+1
+    R->>R: Persist exact-version fence across eviction / reread<br/>Static: no replacement approval, dynamic: one owned recovery obligation<br/>Duplicates cannot repeat recovery work
+    F->>F: Return SafeResponse<br/>No automatic retry
+  end
+  Note over C,R: Unknown send / refresh / clone effects retain their original owner and attempt<br/>Known partial failure retains cleanup obligations, never blind replay

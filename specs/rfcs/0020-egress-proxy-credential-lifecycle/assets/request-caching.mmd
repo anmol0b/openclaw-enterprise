@@ -1,0 +1,56 @@
+---
+title: "Proposed request · authorize and resolve"
+config:
+  theme: base
+  htmlLabels: true
+  themeVariables:
+    fontFamily: "Arial, sans-serif"
+    fontSize: "16px"
+    actorBkg: "#EDF2F7"
+    actorBorder: "#879AB0"
+    actorTextColor: "#25364A"
+    noteBkgColor: "#F7F1E5"
+    noteBorderColor: "#B3A078"
+    noteTextColor: "#344054"
+    signalColor: "#748798"
+    signalTextColor: "#25364A"
+  sequence:
+    useMaxWidth: false
+    actorMargin: 18
+    width: 116
+    height: 44
+    diagramMarginX: 12
+    diagramMarginY: 12
+    messageMargin: 16
+    noteMargin: 8
+    mirrorActors: true
+    wrap: true
+---
+sequenceDiagram
+  participant A as Agent /<br/>bootstrap
+  participant S as Forwarder
+  participant C as EgressAuthorizer<br/>OCC
+  participant R as Resolver
+  Note over A,R: Proposed flow, calls/returns do not imply implementation
+  A->>S: Authenticated operation
+  S->>S: capture seals operation<br/>forward owns subsequent steps
+  S->>C: check(before_access)<br/>Caller, operation, versioned route and grant
+  C-->>S: Allow, deny or unavailable
+  break Denied or authority unavailable
+    Note over A,C: Refuse before material access
+    S-->>A: Refuse before material access
+  end
+  opt Allowed credentialed operation
+    S->>R: resolve with AccessPermit
+    R-->>S: Use-bound handle + evidence or typed refusal
+    Note over S,R: Static: admitted live or approved version / snapshot<br/>Cache binds mode, target store, reference and version<br/>Snapshot reads need no latest provenance value, no implicit opt-in
+    Note over S,R: Cold / expired dynamic material: not_ready<br/>No issuance, signing, refresh or scheduling<br/>No dynamic proxy cache or fallback
+    break denied, not_ready or unavailable
+      Note over A,C: Refuse before send
+      S-->>A: Refuse before send
+    end
+  end
+  Note over S,C: Credential-free egress skips resolution,<br/>not authorization
+  S->>S: Verify unchanged captured operation<br/>MaterialHandle + evidence or none
+  Note over S,C: Continue to final check<br/>A handle is not send authority
+  Note over A,R: Management preparation has separate authorization<br/>Agent flags and bootstrap delegation cannot select it
