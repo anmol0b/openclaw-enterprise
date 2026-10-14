@@ -1797,14 +1797,17 @@ function repositories(
   const credentialSources: CredentialSourceRepository = {
     findCredentialSource,
     findCredentialSourceHandoff: async (namespaceId, credentialSourceId) => {
-      if ((await findCredentialSource(namespaceId, credentialSourceId)) === undefined)
+      if ((await findCredentialSource(namespaceId, credentialSourceId)) === undefined) {
         return undefined;
+      }
       const ids = snapshot.credentialSourceHandoffs.get(agentKey(namespaceId, credentialSourceId));
       return ids === undefined ? undefined : immutableCopy(ids);
     },
     handoffCredentialSourceSecrets: async (namespaceId, credentialSourceId, secrets) => {
       const current = await findCredentialSource(namespaceId, credentialSourceId);
-      if (current === undefined || current.state !== "ready") return undefined;
+      if (current === undefined || current.state !== "ready") {
+        return undefined;
+      }
       const ids = credentialSourceHandoffIds(namespaceId, secrets);
       for (const id of Object.values(ids)) {
         if (!snapshot.secrets.has(agentKey(namespaceId, id))) {

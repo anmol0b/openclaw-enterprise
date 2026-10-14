@@ -3809,6 +3809,8 @@ test("refresh handoff preserves the Driver's normalized configuration on record 
     ["registerSource", "configureRefresh"].includes(operation),
   );
   assert.equal(calls.length, 2);
-  for (const call of calls) assert.deepEqual(call.input.config, source.config);
+  for (const call of calls) {
+    assert.deepEqual(call.input.config, source.config);
+  }
   assert.deepEqual(await handoffIds(context, source), { client_secret: secret.id });
 });

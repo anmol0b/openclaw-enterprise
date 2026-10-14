@@ -2546,8 +2546,9 @@ export class PostgresPlatformState implements PlatformStateStore {
     const credentialSources: CredentialSourceRepository = {
       findCredentialSource,
       findCredentialSourceHandoff: async (namespaceId, credentialSourceId) => {
-        if ((await findCredentialSource(namespaceId, credentialSourceId)) === undefined)
+        if ((await findCredentialSource(namespaceId, credentialSourceId)) === undefined) {
           return undefined;
+        }
         const found = rows(
           (
             await client.query(
@@ -2557,7 +2558,9 @@ export class PostgresPlatformState implements PlatformStateStore {
             )
           ).rows,
         )[0];
-        if (found === undefined) return undefined;
+        if (found === undefined) {
+          return undefined;
+        }
         const ids = jsonObject(found.secret_ids);
         if (
           Object.keys(ids).length > 16 ||
@@ -2567,15 +2570,18 @@ export class PostgresPlatformState implements PlatformStateStore {
               typeof id !== "string" ||
               !/^sec_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id),
           )
-        )
+        ) {
           throw new DependencyUnavailableError(
             "Persisted credential source handoff IDs are invalid.",
           );
+        }
         return immutableCopy(ids as Record<string, string>);
       },
       handoffCredentialSourceSecrets: async (namespaceId, credentialSourceId, secrets) => {
         const current = await findCredentialSource(namespaceId, credentialSourceId, true);
-        if (current === undefined || current.state !== "ready") return undefined;
+        if (current === undefined || current.state !== "ready") {
+          return undefined;
+        }
         const ids = credentialSourceHandoffIds(namespaceId, secrets);
         // Input existence is checked under the caller's ordered Secret locks. Provenance has
         // no Secret FK: deleting a handed-off Secret must not delete this replay evidence.
