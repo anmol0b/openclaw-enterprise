@@ -6,6 +6,19 @@ selected local Docker or Podman engine. Keep an independent build receipt that
 maps the OpenShell source tree and full commit, build inputs, Linux platform, and
 immutable image digests. The launcher does not build candidate OpenShell images.
 
+Each image needs an engine-resolvable `name@sha256:...` manifest reference. For
+Docker, inspect the local image's `RepoDigests`:
+
+```bash
+docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' <image>
+```
+
+Use a returned reference; do not construct one from the image's `Id`. Docker's
+classic image store may leave `RepoDigests` empty after a local build. In that
+case, prepare the image through an engine that retains named manifest digests,
+or publish and pull it through a registry you control before launching. The
+launcher does not perform that registry step.
+
 From the repository root, rebuild the CLI and replace every placeholder below
 with the reviewed source commit and local image references:
 
@@ -29,7 +42,8 @@ and images whose `org.opencontainers.image.revision` label differs from the
 selected OpenShell commit. That commit identifies OpenShell, not the OCE checkout.
 Labels establish consistency, **not build provenance**; verify the build receipt
 independently. Candidate images are never pulled or replaced with released
-images. If one disappears before import, startup fails and rolls back owned resources.
+images. If one disappears before import, startup fails and attempts to roll back owned resources. Follow the printed
+recovery instructions if rollback is incomplete.
 
 Chart selection remains separate. An image selection does not change the pinned
 charts; use the [paired chart overrides](local-kubernetes-development.md#start-the-openshell-fail-closed-profile)

@@ -129,7 +129,7 @@ Host; NetworkPolicy restricts access to those Pods/port.
 
 Compose runs PostgreSQL/OCC/worker; Kubernetes-only uses `oce-system` and
 in-cluster authentication. Both install private Envoy routing and operator
-Workspaces; only API, worker, supervisors and dedicated Gateways reach the Gateway.
+Workspaces; only API, worker, supervisor callbacks and dedicated Agent Gateways reach the Gateway.
 [Local development](../guides/deploy/local-kubernetes-development.md) owns topology
 and cleanup: validated engine/state bounds deletion to the recorded cluster and
 Compose project/volumes; partial cleanup retains recovery state.

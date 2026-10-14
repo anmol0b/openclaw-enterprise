@@ -150,7 +150,7 @@ Envoy route in k3d, mounts its service key and public CA only into the Compose
 controller and `worker-kubernetes`, and records the node hostname and Envoy
 NodePort in the Installation; skip manual hybrid routing.
 
-First startup requires network access. For local assets, set
+First startup requires network access. For local chart and manifest assets, set
 `OCC_DEVELOPMENT_OPENSHELL_HELM_CHART`,
 `OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART`, and
 `OCC_DEVELOPMENT_OPENSHELL_AGENT_SANDBOX_MANIFEST` to absolute paths.
