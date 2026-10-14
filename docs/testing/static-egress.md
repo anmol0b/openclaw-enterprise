@@ -16,10 +16,15 @@ It exercises real Fastify authentication, source and Agent admission, native IAM
 controller transactions, OpenShell adapters, Ed25519 extension identity, TLS gRPC
 and HTTPS provider request/response bytes. The Kubernetes Secret Driver uses its
 actual SDK against a TLS storage fixture that supplies UID/resourceVersion.
-Gateway policy and loaded-enforcement observations are passive fixtures matching
-the supplier protobuf contract. The suite checks missing receipts refuse, then
+Gateway policies and V1 loaded-policy observations are passive fixtures matching
+the supplier protobuf contract. The suite checks missing observations refuse even
+with LOADED and legacy field 3 present, then
 records only the installation returned by the actual Driver consumer. It tests
 current evidence again at access and send, including replacement and stale records.
+The source/effective case admits the exact name-only runtime rule with distinct
+fixture hashes. Extra endpoints, binaries, policy changes and stale identities
+refuse before Secret reads. Fixture hashes are synthetic identities, not computed
+supplier policy hashes.
 These fixtures do not establish that a supervisor produced or enforced a receipt.
 The physical-placement case uses the selected Kubernetes Compute resolver against
 the TLS fixture, with logical and runtime Namespace names deliberately different.
@@ -76,7 +81,8 @@ The companion `openshell-receipt.json` contains actual protobuf bytes from the
 supplier's connected gateway token, TLS registry, OPA installation and receipt-query
 fixture. The consumer decodes those bytes, preserving uint64 values, and verifies
 the captured claim shape with a local fixture signing key and renewed timestamps;
-it does not reuse or establish custody of the producer's token. The separate
+it does not reuse or establish custody of the producer's token. That capture covers
+the nested enforcement message, not the complete V1 policy observation. The separate
 `openshell-operation.json` captures the sender's TLS/gRPC request after a 100 ms
 delay. Its deadline remains creation plus 30 seconds. The consumer checks that
 historical operation refuses before material access. These two captures come from

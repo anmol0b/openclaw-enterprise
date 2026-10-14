@@ -65,15 +65,27 @@ grant, binding and route identities in `AgentRevision.egressPlan`.
 `apps/controller/src/drivers/egress-proxy/openshell.ts:attachmentStatus`
 
 Compute passes the selected Driver's attachment to Sandbox provisioning. The
-Sandbox returns its full prepared network configuration, including auxiliary
-rules. The adapter compares every loaded rule and middleware against that output
-and the protected plan. It then validates the authenticated gateway
-`LoadedEnforcementEvidence`: exact Sandbox, current instance, policy version/hash,
-configuration/environment revisions and enforced capability. The persisted
-installation includes an immutable instance/configuration fingerprint. Missing
-counterpart, receipt or mismatched policy leaves provisioning incomplete or failed.
-The gateway producer must fence reports and queries against current registration
-and effective configuration; this consumer does not infer evidence from a manifest.
+Sandbox returns its complete prepared source policy from
+`apps/controller/src/drivers/sandbox/openshell.ts:provisionHarness`.
+The adapter compares the full source revision against that output and checks the
+protected routes and middleware against the plan. It requires the authenticated
+gateway's `LoadedPolicyObservationV1`, binding the unchanged source hash to the
+effective policy and its nested enforcement evidence. Full policies must match
+except for the exact name-only runtime rule allowed by the
+[V1 contract](../reference/credential-sources/protected-inference.md#loaded-enforcement).
+The evidence also binds Sandbox, current instance, policy version,
+configuration/environment revisions and enforced capability. The immutable local
+fingerprint includes both supplier hashes and both complete decoded policies.
+
+`apps/controller/src/drivers/egress-proxy/openshell.ts:enforcementEvidence`
+
+Installation and revalidation use the same V1 checks. Missing V1, widening or a
+changed fence refuses; LOADED and legacy field 3 cannot substitute. The gateway
+producer must compare full typed policies, including fields unknown to this
+consumer, and fence reports and queries against current registration and effective
+configuration. The local fingerprint does not compute a canonical supplier hash
+or attest the supervisor. Request authorization still runs before Secret access
+and before send.
 
 `apps/controller/src/drivers/compute/egress-enrollment.ts:HARNESS_EGRESS_ENROLLMENT_HELPER`,
 `apps/controller/src/drivers/sandbox/openshell.ts:enrollHarness`

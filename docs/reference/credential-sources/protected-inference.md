@@ -175,19 +175,34 @@ nor successful startup qualifies connected enforcement; follow the
 
 ### Loaded enforcement
 
-Compute gives the paired Sandbox the admitted plan. The adapter requires exact
-loaded network policy and middleware configuration, including every auxiliary
-rule produced by the paired Sandbox,
-`credential_authority: true` and `fail_closed`. The authenticated policy-status
-response must include `LoadedEnforcementEvidence` for the exact Sandbox, current
-registered instance, policy version/hash, configuration/environment revisions and
-`openshell.supervisor-middleware.http-credential-access.v1`. Configuration revisions
-include the installed middleware registry. The adapter stores an immutable fingerprint
-and requeries the gateway during access and send authorization. Missing, failed,
-rejected, replaced or stale evidence refuses; a cached manifest cannot substitute.
-The gateway must validate current registration and effective configuration when
-reporting and querying this evidence. A global policy override that does not match
-the admitted Sandbox revision cannot qualify.
+Compute gives the paired Sandbox the admitted plan. The Sandbox returns its complete
+prepared source policy. The adapter compares the full source revision against it,
+including filesystem, process, auxiliary rules and exact protected middleware with
+`credential_authority: true` and `fail_closed`.
+
+The authenticated `GetSandboxPolicyStatus` response must include field 4,
+`loaded_policy_observation` (`LoadedPolicyObservationV1`). Its `source_policy_hash`
+must identify the unchanged source revision. Its `enforcement.policy_hash` identifies
+the supplied `effective_policy`. The nested evidence must identify the exact Sandbox,
+current registered instance, policy version, configuration/environment revisions and
+`openshell.supervisor-middleware.http-credential-access.v1`.
+
+V1 allows identical full policies with an empty `inert_provider_rule`, or exactly
+one added rule named `_provider_oce_runtime_` followed by the first 16 hexadecimal
+SHA-256 characters of the Agent revision ID. That entire typed rule must contain
+only its matching name; every other field must be default, including empty endpoints
+and binaries. Every other source/effective field must be semantically equal. The
+producer must check full typed equality, including fields unknown to the consumer's
+protobuf schema, and refuse unknown derivations. Legacy response field 3 retains
+its source-equals-effective semantics and cannot substitute for V1.
+
+The adapter fences both supplier hashes and both complete decoded policies in a
+local fingerprint; this fingerprint is not a canonical supplier policy hash. It
+requeries the gateway during access and send authorization. Missing, failed,
+rejected, replaced, widened or stale observations refuse. The gateway must validate
+current registration and effective configuration, including the installed middleware
+registry. This observes a trusted registered supervisor; it is neither binary
+attestation nor permission to send. A mismatched global policy override cannot qualify.
 
 Before the first model probe, the generated Harness waits up to 180 seconds for
 authenticated enrollment through its existing bearer-passthrough service.

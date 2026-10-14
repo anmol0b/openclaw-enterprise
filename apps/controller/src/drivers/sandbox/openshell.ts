@@ -2219,10 +2219,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         : {
             egressAttachment: {
               plan: prepared.plan,
-              configuration: {
-                network_policies: create.spec.policy.network_policies,
-                network_middlewares: create.spec.policy.network_middlewares,
-              },
+              configuration: create.spec.policy,
             },
           }),
     });

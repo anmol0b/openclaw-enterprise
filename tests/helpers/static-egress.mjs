@@ -59,6 +59,7 @@ export async function staticEgressFixture(
     now = () => new Date(),
     physicalPlacement = false,
     recordInstallation = true,
+    inertProviderRule = false,
     serviceTransport,
   } = {},
 ) {
@@ -291,7 +292,11 @@ export async function staticEgressFixture(
           policy: observed.policy,
           policy_hash: observed.policyHash,
         },
-        loaded_enforcement: observed.evidence,
+        loaded_enforcement:
+          observed.evidence?.policy_hash === observed.policyHash ? observed.evidence : undefined,
+        loaded_policy_observation: observed.observation
+          ? { ...observed.observation, enforcement: observed.evidence }
+          : undefined,
         active_version: 1,
       });
     },
@@ -511,7 +516,19 @@ export async function staticEgressFixture(
     plan: revision.egressPlan,
     signal: AbortSignal.timeout(5000),
   };
-  const attachment = await egress.configureRevision(context);
+  const routes = await egress.configureRevision(context);
+  // Passive full-source fixture standing in for the paired Sandbox's prepared
+  // policy. This does not execute provisioning or attest supervisor installation.
+  const attachment = {
+    ...routes,
+    configuration: {
+      version: 1,
+      filesystem: { read_only: ["/usr"], read_write: ["/tmp"] },
+      landlock: { compatibility: "hard_requirement" },
+      process: { run_as_user: "1000", run_as_group: "1000" },
+      ...routes.configuration,
+    },
+  };
   const ref = sandbox.harnessResource(context);
   const sandboxId = randomUUID();
   // This is an authenticated gateway-observation fixture, not supervisor execution proof.
@@ -542,6 +559,19 @@ export async function staticEgressFixture(
     config_revision: "17395563786422799999",
     provider_env_revision: "9019556378642279999",
     enforced_capabilities: [capability],
+  };
+  const effectivePolicy = structuredClone(observed.policy);
+  const ruleName = inertProviderRule
+    ? `_provider_oce_runtime_${createHash("sha256").update(revision.id).digest("hex").slice(0, 16)}`
+    : "";
+  if (inertProviderRule) {
+    effectivePolicy.network_policies[ruleName] = { name: ruleName };
+    observed.evidence.policy_hash = "3c".repeat(32);
+  }
+  observed.observation = {
+    source_policy_hash: observed.policyHash,
+    effective_policy: effectivePolicy,
+    inert_provider_rule: ruleName,
   };
   const installation = await egress.attachmentStatus(context, attachment);
   assert.ok(installation, "the adapter must validate the complete supplier observation");

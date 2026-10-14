@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import test from "node:test";
@@ -513,13 +513,26 @@ test(
           sandboxName,
           AbortSignal.timeout(10_000),
         );
-        const receipt = status.loaded_enforcement;
-        assert.ok(receipt, "LOADED without a genuine installed receipt is insufficient");
+        const observation = status.loaded_policy_observation;
+        assert.ok(observation, "LOADED or legacy field 3 cannot substitute for a V1 observation");
+        const receipt = observation.enforcement;
+        assert.ok(receipt, "V1 requires current supervisor enforcement evidence");
         assert.equal(receipt.sandbox_id, observedSandbox.id);
         assert.equal(receipt.instance_id, installed.enforcement?.instanceId);
         assert.equal(receipt.policy_version, installed.plan.generation);
         assert.equal(status.active_version, receipt.policy_version);
-        assert.equal(status.revision.policy_hash, receipt.policy_hash);
+        assert.equal(status.revision.policy_hash, observation.source_policy_hash);
+        assert.match(observation.source_policy_hash, /^[a-f0-9]{64}$/);
+        assert.ok(observation.effective_policy);
+        const effective = structuredClone(observation.effective_policy);
+        const name = `_provider_oce_runtime_${createHash("sha256").update(revision.id).digest("hex").slice(0, 16)}`;
+        assert.equal(observation.inert_provider_rule, name);
+        assert.equal(Object.hasOwn(status.revision.policy.network_policies, name), false);
+        assert.deepEqual(effective.network_policies[name], { name });
+        delete effective.network_policies[name];
+        assert.notEqual(observation.source_policy_hash, receipt.policy_hash);
+        assert.equal(status.loaded_enforcement, undefined);
+        assert.deepEqual(effective, status.revision.policy);
         assert.ok([2, "POLICY_STATUS_LOADED"].includes(status.revision.status));
         assert.match(
           receipt.instance_id,
@@ -529,10 +542,20 @@ test(
         connectedReceiptRevision(receipt.config_revision);
         connectedReceiptRevision(receipt.provider_env_revision);
         assert.deepEqual(receipt.enforced_capabilities, [protectedEgressCapability]);
-        return receipt;
+        // Retain both supplier identities and policies for the subsequent turn's
+        // freshness comparison; enforcement.policy_hash identifies the effective policy.
+        return observation;
       };
       const receipt = await readReceipt();
-      await checkpoint("installed", { sandboxId: installed.sandboxId, receipt });
+      await checkpoint("installed", {
+        sourcePolicyHash: receipt.source_policy_hash,
+        effectivePolicyHash: receipt.enforcement.policy_hash,
+        policyVersion: String(receipt.enforcement.policy_version),
+        configRevision: connectedReceiptRevision(receipt.enforcement.config_revision),
+        providerEnvRevision: connectedReceiptRevision(receipt.enforcement.provider_env_revision),
+        capability: protectedEgressCapability,
+        derivation: "inert_runtime_provider_rule",
+      });
       const pods = await resources("pods", placement);
       const gatewayPods = pods.filter(
         ({ metadata }) =>

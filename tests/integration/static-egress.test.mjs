@@ -447,6 +447,18 @@ test("protected admission requires the actual counterpart and exact loaded polic
   };
   await assert.rejects(f.egress.attachmentStatus(f.context, f.attachment), /differs/);
   f.observed.policy = expectedPolicy;
+  // Matching network maps cannot hide a change to the admitted process/filesystem.
+  for (const change of [
+    { process: { run_as_user: "0", run_as_group: "0" } },
+    { filesystem: { read_only: ["/usr"], read_write: ["/"] } },
+    { landlock: { compatibility: "best_effort" } },
+    { version: 2 },
+  ]) {
+    f.observed.policy = { ...structuredClone(expectedPolicy), ...change };
+    await assert.rejects(f.egress.attachmentStatus(f.context, f.attachment), /differs/);
+    assert.equal(await f.egress.verifyInstallation(f.context, f.installation), false);
+  }
+  f.observed.policy = expectedPolicy;
   const originalAnnotations = f.observed.sandbox.annotations;
   f.observed.sandbox.annotations = {
     ...originalAnnotations,
@@ -507,6 +519,16 @@ test("legacy approved copies survive Secret rotation and failed live adoption; o
 test("current supplier evidence is required at access and send; stored receipts cannot authorize a replacement", async (t) => {
   const f = await staticEgressFixture(t);
   const original = structuredClone(f.observed.evidence);
+  const observation = f.observed.observation;
+  const beforeLegacy = f.secretReads;
+  delete f.observed.observation;
+  // LOADED and valid legacy field 3 remain present; neither substitutes for V1.
+  assert.equal(await f.egress.attachmentStatus(f.context, f.attachment), undefined);
+  assert.ok(
+    (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
+  );
+  assert.equal(f.secretReads, beforeLegacy);
+  f.observed.observation = observation;
   // Proto3 scalar zeros can be omitted on the wire; both encodings have one fingerprint.
   f.observed.evidence = { ...original, config_revision: "0", provider_env_revision: "0" };
   const zero = await f.egress.attachmentStatus(f.context, f.attachment);
@@ -559,6 +581,155 @@ test("current supplier evidence is required at access and send; stored receipts 
     f.controller.transact((unit) => unit.credentialSources.recordEgressInstallation(replacement)),
     /already bound/,
   );
+});
+
+test("V1 permits only the exact inert runtime rule and fences both policies before Secret access and send", async (t) => {
+  const f = await staticEgressFixture(t, { inertProviderRule: true });
+  const observation = structuredClone(f.observed.observation);
+  const originalEvidence = structuredClone(f.observed.evidence);
+  const source = structuredClone(f.observed.policy);
+  const ruleName = observation.inert_provider_rule;
+  assert.notEqual(observation.source_policy_hash, originalEvidence.policy_hash);
+  assert.equal(observation.source_policy_hash, f.observed.policyHash);
+  assert.deepEqual(observation.effective_policy.network_policies[ruleName], { name: ruleName });
+  assert.equal(await f.egress.verifyInstallation(f.context, f.installation), true);
+  const capture = f.capture();
+  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", capture, f.metadata()))
+    .ready;
+  assert.ok(ready, "the real consumer accepts the passive source != effective wire fixture");
+  assert.ok(
+    (
+      await unary(
+        f.clients.HttpCredentialAccess,
+        "AuthorizeSend",
+        f.permitRequest(capture, ready),
+        f.metadata(),
+      )
+    ).allowed,
+  );
+  const reads = f.secretReads;
+  // Each independently malformed derivation must refuse installation and current
+  // authority before the versioned Secret Driver is called.
+  for (const change of [
+    (value) => {
+      value.source_policy_hash = "4d".repeat(32);
+    },
+    (value) => {
+      delete value.effective_policy;
+    },
+    (value) => {
+      value.inert_provider_rule = "";
+    },
+    (value) => {
+      value.inert_provider_rule = `${ruleName}_other`;
+    },
+    (value) => {
+      value.effective_policy.network_policies[ruleName].name = "other";
+    },
+    (value) => {
+      value.effective_policy.network_policies[ruleName].endpoints = [
+        { host: "unexpected.example.test", ports: [443] },
+      ];
+    },
+    (value) => {
+      value.effective_policy.network_policies[ruleName].binaries = [{ path: "/usr/bin/extra" }];
+    },
+    (value) => {
+      value.effective_policy.network_policies[ruleName] = {
+        name: ruleName,
+        endpoints: [{ host: "unexpected.example.test", ports: [443] }],
+        binaries: [{ path: "/usr/bin/model-client" }],
+      };
+    },
+    (value) => {
+      value.effective_policy.network_policies["oce-egress-0"].endpoints.push({
+        host: "unexpected.example.test",
+        ports: [443],
+      });
+    },
+    (value) => {
+      value.effective_policy.network_policies.extra = {};
+    },
+    (value) => {
+      value.effective_policy.process.run_as_user = "0";
+    },
+    (value) => {
+      value.effective_policy.filesystem.read_write = ["/"];
+    },
+    (value) => {
+      value.effective_policy.landlock.compatibility = "best_effort";
+    },
+    (value) => {
+      value.effective_policy.version = 2;
+    },
+    (value) => {
+      value.effective_policy.network_policies["oce-egress-0"].endpoints[0].rules = [
+        Buffer.from([0]),
+      ];
+    },
+    (value) => {
+      value.effective_policy.network_middlewares["oce-egress"].config = {
+        fields: { enabled: { bool_value: false } },
+      };
+    },
+  ]) {
+    f.observed.observation = structuredClone(observation);
+    change(f.observed.observation);
+    assert.equal(await f.egress.attachmentStatus(f.context, f.attachment), undefined);
+    assert.ok(
+      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
+    );
+    assert.equal(f.secretReads, reads, "a widened or stale observation cannot read a Secret");
+  }
+  f.observed.observation = structuredClone(observation);
+  // Individually valid replacement identities/policies still cannot replace the
+  // saved installation fence, even when source and effective change together.
+  for (const change of [
+    () => {
+      f.observed.evidence.policy_hash = "5e".repeat(32);
+    },
+    () => {
+      f.observed.policyHash = "6f".repeat(32);
+      f.observed.observation.source_policy_hash = f.observed.policyHash;
+    },
+    () => {
+      f.observed.policy.process.run_as_user = "2000";
+      f.observed.observation.effective_policy.process.run_as_user = "2000";
+    },
+  ]) {
+    change();
+    assert.ok(
+      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
+    );
+    assert.equal(f.secretReads, reads);
+    f.observed.evidence = structuredClone(originalEvidence);
+    f.observed.policyHash = observation.source_policy_hash;
+    f.observed.policy = structuredClone(source);
+    f.observed.observation = structuredClone(observation);
+  }
+  assert.equal(await f.egress.verifyInstallation(f.context, f.installation), true);
+  const sendCapture = f.capture();
+  const sendReady = (
+    await unary(f.clients.HttpCredentialAccess, "Resolve", sendCapture, f.metadata())
+  ).ready;
+  assert.ok(sendReady, "Resolve succeeds while the runtime rule is still inert");
+  // Widen after material resolution: the fresh send check must reject a usable
+  // endpoint even though this operation already holds valid access evidence.
+  const widenedRule = f.observed.observation.effective_policy.network_policies[ruleName];
+  const protectedRule = source.network_policies["oce-egress-0"];
+  widenedRule.endpoints = structuredClone(protectedRule.endpoints);
+  widenedRule.binaries = structuredClone(protectedRule.binaries);
+  assert.ok(
+    (
+      await unary(
+        f.clients.HttpCredentialAccess,
+        "AuthorizeSend",
+        f.permitRequest(sendCapture, sendReady),
+        f.metadata(),
+      )
+    ).refused,
+  );
+  assert.equal(f.providerRequests.length, 0, "send-side widening must not permit a provider send");
 });
 
 test("selected Codex Responses wire admits local tools and finite SSE while rejecting remote tools and unprotected events", async (t) => {

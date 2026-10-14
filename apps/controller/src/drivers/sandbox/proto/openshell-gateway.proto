@@ -769,6 +769,15 @@ message GetSandboxPolicyStatusResponse {
   SandboxPolicyRevision revision = 1;
   uint32 active_version = 2;
   LoadedEnforcementEvidence loaded_enforcement = 3;
+  LoadedPolicyObservationV1 loaded_policy_observation = 4;
+}
+// Source revision is unchanged; enforcement identifies the effective policy.
+// Field 3 above retains its source == effective semantics.
+message LoadedPolicyObservationV1 {
+  string source_policy_hash = 1;
+  SandboxPolicy effective_policy = 2;
+  LoadedEnforcementEvidence enforcement = 3;
+  string inert_provider_rule = 4;
 }
 // Additive supplier contract: current accepted registration after runtime installation.
 message LoadedEnforcementEvidence {

@@ -12,7 +12,7 @@ import type {
   SandboxDriver,
 } from "@openclaw-enterprise/contracts";
 import { DependencyUnavailableError } from "@openclaw-enterprise/occ";
-import { asRecord, immutableCopy } from "@openclaw-enterprise/utils";
+import { asRecord, immutableCopy, sha256Hex } from "@openclaw-enterprise/utils";
 import { type OpenShellGateway, openShellWorkspaceName } from "../../backends/openshell.ts";
 import { openAiStaticProvider } from "./openai-provider.ts";
 
@@ -22,24 +22,38 @@ export interface OpenShellEgressOptions {
 }
 
 // Proto3 omits default fields; compare their semantics while retaining every nondefault.
-function wirePolicy(value: unknown): unknown {
+function wirePolicy(value: unknown, preserveDefaults = false, mapEntries = false): unknown {
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value).toString("base64");
+  }
   if (Array.isArray(value)) {
-    return value.map(wirePolicy);
+    return value.map((item) => wirePolicy(item, preserveDefaults));
   }
   const record = asRecord(value);
   return record
     ? Object.fromEntries(
         Object.entries(record)
           .sort(([left], [right]) => left.localeCompare(right, "en"))
-          .map(([key, item]) => [key, wirePolicy(item)])
+          .map(([key, item]) => [
+            key,
+            wirePolicy(
+              item,
+              preserveDefaults || key === "config",
+              ["network_policies", "network_middlewares", "graphql_persisted_queries"].includes(
+                key,
+              ),
+            ),
+          ])
           .filter(
             ([, item]) =>
-              item !== false &&
-              item !== 0 &&
-              item !== "" &&
-              item !== undefined &&
-              !(Array.isArray(item) && item.length === 0) &&
-              !(asRecord(item) && Object.keys(item as object).length === 0),
+              preserveDefaults ||
+              mapEntries ||
+              (item !== false &&
+                item !== 0 &&
+                item !== "" &&
+                item !== undefined &&
+                !(Array.isArray(item) && item.length === 0) &&
+                !(asRecord(item) && Object.keys(item as object).length === 0)),
           ),
       )
     : value;
@@ -64,11 +78,18 @@ function enforcementEvidence(
   status: Readonly<Record<string, unknown>>,
   sandboxId: string,
   policyVersion: number,
+  revisionId: string,
 ): EgressInstallation["enforcement"] | undefined {
   const revision = asRecord(status.revision);
-  const evidence = asRecord(status.loaded_enforcement);
+  const observation = asRecord(status.loaded_policy_observation);
+  const source = asRecord(revision?.policy);
+  const effective = asRecord(observation?.effective_policy);
+  const evidence = asRecord(observation?.enforcement);
   if (
     !revision ||
+    !observation ||
+    !source ||
+    !effective ||
     !evidence ||
     evidence.sandbox_id !== sandboxId ||
     typeof evidence.instance_id !== "string" ||
@@ -81,26 +102,68 @@ function enforcementEvidence(
     evidence.policy_version !== policyVersion ||
     typeof evidence.policy_hash !== "string" ||
     !/^[0-9a-f]{64}$/.test(evidence.policy_hash) ||
-    evidence.policy_hash !== revision.policy_hash ||
+    typeof revision.policy_hash !== "string" ||
+    !/^[0-9a-f]{64}$/.test(revision.policy_hash) ||
+    observation.source_policy_hash !== revision.policy_hash ||
     revisionNumber(evidence.config_revision) === undefined ||
     revisionNumber(evidence.provider_env_revision) === undefined ||
     !isDeepStrictEqual(evidence.enforced_capabilities, [capability])
   ) {
     return undefined;
   }
+  // This V1 observation trusts the registered supervisor and the producer's full
+  // typed comparison, including fields outside our protobuf projection. It grants
+  // no send authority. Unknown derivations must not produce an observation.
+  const inertRule = observation.inert_provider_rule ?? "";
+  if (inertRule === "") {
+    if (
+      evidence.policy_hash !== revision.policy_hash ||
+      !isDeepStrictEqual(wirePolicy(source), wirePolicy(effective))
+    ) {
+      return undefined;
+    }
+  } else {
+    const expectedName = `_provider_oce_runtime_${sha256Hex(revisionId, 16)}`;
+    const sourceRules = asRecord(source.network_policies);
+    const effectiveRules = asRecord(effective.network_policies);
+    if (
+      inertRule !== expectedName ||
+      evidence.policy_hash === revision.policy_hash ||
+      !sourceRules ||
+      !effectiveRules ||
+      Object.hasOwn(sourceRules, expectedName) ||
+      !isDeepStrictEqual(wirePolicy(effectiveRules[expectedName]), { name: expectedName }) ||
+      !isDeepStrictEqual(
+        wirePolicy(source),
+        wirePolicy({
+          ...effective,
+          network_policies: Object.fromEntries(
+            Object.entries(effectiveRules).filter(([name]) => name !== expectedName),
+          ),
+        }),
+      )
+    ) {
+      return undefined;
+    }
+  }
   return {
     instanceId: evidence.instance_id,
+    // Local change fence, not the supplier's canonical policy hash. Both supplier
+    // identities and complete decoded policies must remain stable on revalidation.
     configurationId: createHash("sha256")
       .update(
         JSON.stringify([
           sandboxId,
           evidence.instance_id,
           policyVersion,
+          observation.source_policy_hash,
           evidence.policy_hash,
           revisionNumber(evidence.config_revision),
           revisionNumber(evidence.provider_env_revision),
           capability,
-          wirePolicy(revision.policy),
+          wirePolicy(source),
+          wirePolicy(effective),
+          inertRule,
         ]),
       )
       .digest("hex"),
@@ -323,14 +386,19 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     ) {
       return undefined;
     }
-    // Compare auxiliary rules too: an enrollment rule's reserved name alone is not
-    // proof of its host, port, binary or TLS policy. The paired Sandbox supplies all of it.
-    if (!isDeepStrictEqual(wirePolicy(policies), wirePolicy(expected.network_policies))) {
+    // The paired Sandbox supplies the entire admitted source, including filesystem,
+    // process and auxiliary rules. Network-only equality cannot establish that source.
+    if (!isDeepStrictEqual(wirePolicy(policy), wirePolicy(expected))) {
       throw new DependencyUnavailableError(
-        "The installed egress policy differs from its admitted routes.",
+        "The installed egress source policy differs from its admitted policy.",
       );
     }
-    const enforcement = enforcementEvidence(status, existing.id, context.plan.generation);
+    const enforcement = enforcementEvidence(
+      status,
+      existing.id,
+      context.plan.generation,
+      context.revision.id,
+    );
     return enforcement === undefined
       ? undefined
       : immutableCopy({
@@ -373,7 +441,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     // The supplier revalidates registration, effective config and installed registry under
     // its sandbox mutation lock. Exact equality also refuses replacements of our saved fence.
     return isDeepStrictEqual(
-      enforcementEvidence(status, existing.id, context.plan.generation),
+      enforcementEvidence(status, existing.id, context.plan.generation, context.revision.id),
       installation.enforcement,
     );
   }
