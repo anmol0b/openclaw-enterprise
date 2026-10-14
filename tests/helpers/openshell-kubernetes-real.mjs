@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import {
   createKubernetesInstallationConfiguration,
+  createKubernetesClient,
   createRealKubernetesFixture,
 } from "./kubernetes-real.mjs";
 
@@ -17,6 +18,20 @@ const sandboxApiResource = "sandboxes.agents.x-k8s.io";
 const harnessPort = 18790;
 const gatewayPort = 8080;
 const transportSecretPrefix = "openclaw-agent-transport";
+
+function safeKubectlFailure(error, signal) {
+  // A child-process Error carries raw stdout/stderr. Returning it as a cause
+  // would let the test reporter publish model or credential bytes.
+  let outcome = "transport";
+  if (Number.isInteger(error.code)) {
+    outcome = `exit ${error.code}`;
+  } else if (signal?.aborted) {
+    outcome = "cancelled";
+  } else if (error.killed) {
+    outcome = "deadline";
+  }
+  return new Error(`OpenShell fixture kubectl failed (${outcome})`);
+}
 
 // The pinned Kubernetes driver, not policy.process, owns workload identity.
 // This k3d fixture leaves sandbox_uid/gid and OpenShift namespace ranges unset:
@@ -396,14 +411,41 @@ export function createOpenShellKubernetesFixture({
   openShellHelmChart,
   openShellWorkspaceHelmChart,
   openShellChartVersion = "0.1.3-pre.2",
+  commandTimeoutMs,
+  signal,
 }) {
-  const base = createRealKubernetesFixture({
+  const selection = { kubeconfigPath, kubernetesContext };
+  const original = createRealKubernetesFixture({
     kubeconfigPath,
     kubernetesContext,
     gatewayImage,
     codexImage,
     databaseUrl,
   });
+  if (commandTimeoutMs !== undefined) {
+    assert.ok(Number.isSafeInteger(commandTimeoutMs) && commandTimeoutMs > 0);
+  }
+  const base = {
+    ...original,
+    ...(commandTimeoutMs === undefined
+      ? {}
+      : createKubernetesClient({
+          selection,
+          async kubectl(...args) {
+            try {
+              const { stdout } = await execute("kubectl", original.kubectlArguments(args), {
+                timeout: commandTimeoutMs,
+                killSignal: "SIGKILL",
+                signal,
+                maxBuffer: 4 * 1024 * 1024,
+              });
+              return stdout;
+            } catch (error) {
+              throw safeKubectlFailure(error, signal);
+            }
+          },
+        })),
+  };
 
   async function kubectl(...args) {
     return base.kubectl(...args);
@@ -492,14 +534,18 @@ export function createOpenShellKubernetesFixture({
   }
 
   async function maybeResource(kind, name, namespace) {
-    try {
-      return await base.resource(kind, name, namespace);
-    } catch (error) {
-      if (/NotFound|not found/i.test(error.stderr ?? error.message)) {
-        return undefined;
-      }
-      throw error;
-    }
+    // Keep absence distinct from transport errors without retaining raw stderr.
+    const raw = await kubectl(
+      "get",
+      kind,
+      name,
+      "--namespace",
+      namespace,
+      "--ignore-not-found",
+      "-o",
+      "json",
+    );
+    return raw.trim() === "" ? undefined : JSON.parse(raw);
   }
 
   function chartImageValues(prefix, image) {
@@ -1041,7 +1087,10 @@ export function createOpenShellKubernetesFixture({
     prompt,
     appServerUrl,
     appServerTokenPath,
+    observeFailure = false,
+    timeoutMs = 300_000,
   }) {
+    assert.ok(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 300_000);
     const script = String.raw`
       const appServerUrl = ${JSON.stringify(appServerUrl)} ?? process.env.APP_SERVER_URL;
       const appServerToken = ${
@@ -1049,16 +1098,19 @@ export function createOpenShellKubernetesFixture({
           ? "process.env.APP_SERVER_TOKEN"
           : `require("node:fs").readFileSync(${JSON.stringify(appServerTokenPath)}, "utf8")`
       };
-      const timeout = setTimeout(() => fail(new Error("Codex harness turn timed out")), 300000);
+      const timeout = setTimeout(() => fail(new Error("Codex harness turn timed out")), ${timeoutMs});
       const pending = new Map();
       const items = [];
       let nextId = 1;
       let assistant = "";
       let finished = false;
+      let threadId;
 
       function fail(error) {
         clearTimeout(timeout);
-        process.stderr.write(error?.stack || String(error));
+        process.stderr.write(${observeFailure}
+          ? "Codex harness failed before its terminal result"
+          : (error?.stack || String(error)));
         process.exit(1);
       }
 
@@ -1087,8 +1139,9 @@ export function createOpenShellKubernetesFixture({
             sandbox: "danger-full-access",
             config: { project_doc_max_bytes: 131072 },
           });
+          threadId = started.thread.id;
           await request("turn/start", {
-            threadId: started.thread.id,
+            threadId,
             input: [{ type: "text", text: ${JSON.stringify(prompt)} }],
             sandboxPolicy: { type: "dangerFullAccess", networkAccess: true },
           });
@@ -1111,7 +1164,12 @@ export function createOpenShellKubernetesFixture({
           const item = message.params?.item;
           if (item?.type === "agentMessage") assistant = item.text ?? "";
         } else if (message.method === "turn/completed") {
-          if (message.params?.turn?.status !== "completed") {
+          if (${observeFailure} && message.params?.threadId !== threadId) {
+            fail(new Error("Codex completed a different thread"));
+            return;
+          }
+          const status = message.params?.turn?.status;
+          if (status !== "completed" && !(${observeFailure} && status === "failed")) {
             fail(new Error("Codex harness turn did not complete successfully"));
             return;
           }
@@ -1119,11 +1177,13 @@ export function createOpenShellKubernetesFixture({
           clearTimeout(timeout);
           // Exit once the result is flushed. Through the OpenShell service route the WebSocket
           // close handshake never completes, so waiting for it would hold kubectl exec open.
-          process.stdout.write(JSON.stringify({ assistant, items }), () => process.exit(0));
+          process.stdout.write(JSON.stringify({ assistant, items,
+            ...(${observeFailure} ? { status, error: message.params?.turn?.error } : {})
+          }), () => process.exit(0));
         } else if (message.method === "error" && message.params?.willRetry !== true) {
-          // Codex reports retried model reconnects as errors; only a final error ends the turn,
-          // and turn/completed still requires a completed status.
-          fail(new Error(message.params?.error?.message || "Codex harness turn failed"));
+          // Enforcement tests need the real terminal failed turn, not an exception
+          // that could also represent a broken WebSocket or kubectl transport.
+          if (!${observeFailure}) fail(new Error(message.params?.error?.message || "Codex harness turn failed"));
         }
       });
       socket.addEventListener("error", () => {
@@ -1149,12 +1209,21 @@ export function createOpenShellKubernetesFixture({
     );
   }
 
-  async function requestCodexTurnFromGatewayPod({ namespace, gatewayPod, providerModel, prompt }) {
+  async function requestCodexTurnFromGatewayPod({
+    namespace,
+    gatewayPod,
+    providerModel,
+    prompt,
+    observeFailure = false,
+    timeoutMs = 300_000,
+  }) {
     return requestCodexTurnFromPod({
       namespace,
       pod: gatewayPod,
       providerModel,
       prompt,
+      observeFailure,
+      timeoutMs,
     });
   }
 

@@ -1,0 +1,205 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import test from "node:test";
+import { createFastifyApp } from "../../apps/controller/src/index.ts";
+import { InMemoryAuditSink } from "../../packages/audit/src/index.ts";
+import { NativeIAMDriver } from "../../packages/iam/src/index.ts";
+import { InMemoryPlatformState, OpenClawController } from "../../packages/occ/src/index.ts";
+import {
+  createTestAuthPrincipal,
+  authenticatedHeaders,
+  signInToControllerApp,
+} from "../helpers/auth-session.mjs";
+import { createReadyComputeDriver } from "../helpers/development.mjs";
+import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
+import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
+import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
+import {
+  encodeSyntheticEvents,
+  syntheticResponsesEvents,
+} from "../fixtures/synthetic-egress-provider.mjs";
+import {
+  assertConnectedResponse,
+  assertNoConnectedAssistantOutput,
+  connectedReceiptRevision,
+  protectedAgentBody,
+  protectedConfigurationBody,
+  protectedSourceBody,
+  serializeConnectedRequest,
+  sourceAccessBindingBody,
+  validateConnectedDatabaseUrl,
+} from "../helpers/egress-connected-inputs.mjs";
+
+test("connected database selection rejects missing, remote and redirected observers before effects", () => {
+  const url = (overrides = {}) =>
+    syntheticCredentialUrl({
+      protocol: "postgresql",
+      username: "occ_app",
+      password: "synthetic-preflight-only",
+      host: "127.0.0.1",
+      port: 15432,
+      pathname: "/openclaw_k8s_egress",
+      ...overrides,
+    });
+  assert.equal(validateConnectedDatabaseUrl(url()), url());
+  for (const rejected of [
+    undefined,
+    "invalid",
+    url({ host: "database.test" }),
+    url({ pathname: "/openclaw" }),
+    url({ username: "occ_migrator" }),
+    url({ search: "?host=database.test" }),
+    url({ search: "?dbname=unowned" }),
+  ]) {
+    assert.throws(() => validateConnectedDatabaseUrl(rejected));
+  }
+});
+
+test("connected receipt observation preserves proto3 zero and uint64 precision", () => {
+  assert.equal(connectedReceiptRevision(undefined), "0");
+  assert.equal(connectedReceiptRevision("0"), "0");
+  assert.equal(connectedReceiptRevision("18446744073709551615"), "18446744073709551615");
+  for (const rejected of [null, 1, 9007199254740992, "01", "-1", "18446744073709551616"]) {
+    assert.throws(() => connectedReceiptRevision(rejected));
+  }
+});
+
+test("connected failed-turn observation rejects partial text without a completed message", () => {
+  assertNoConnectedAssistantOutput({ assistant: "", items: [] });
+  // Codex can notify a delta before a later terminal failure. Looking only at
+  // item/completed would falsely qualify that visible partial response.
+  for (const event of [
+    { method: "item/agentMessage/delta", params: { delta: "visible before failure" } },
+    { method: "item/started", params: { item: { type: "agentMessage", text: "visible" } } },
+    { method: "item/completed", params: { item: { type: "agentMessage", text: "visible" } } },
+  ]) {
+    assert.throws(() => assertNoConnectedAssistantOutput({ assistant: "", items: [event] }));
+  }
+});
+
+test("connected adversarial wire carries split and nested-JSON material without raw reflection", () => {
+  const credential = `SYNTHETIC-OCE-EGRESS-${randomUUID()}-v1`;
+  for (const mode of ["reflect-split-id", "reflect-encoded-arguments"]) {
+    const events = syntheticResponsesEvents("gpt-6", "SAFE", { mode, credential });
+    const wire = encodeSyntheticEvents(events).toString("utf8");
+    assert.equal(wire.includes(credential), false, "the vector must bypass a raw-byte-only scan");
+    assert.equal(events.at(-1).type, "response.completed");
+    if (mode === "reflect-split-id") {
+      const deltas = events.filter(({ type }) => type === "response.output_text.delta");
+      assert.equal(deltas.length, 2);
+      assert.deepEqual(
+        deltas.map(({ output_index }) => output_index),
+        [0, 0],
+      );
+      assert.equal(deltas[0].item_id, "msg_synthetic_other");
+      assert.equal(deltas[1].item_id, "msg_synthetic");
+      assert.equal(deltas.map(({ delta }) => delta).join(""), credential);
+    } else {
+      const call = events.at(-1).response.output[0];
+      assert.equal(call.type, "function_call");
+      assert.equal(call.arguments.includes(credential), false);
+      assert.equal(JSON.parse(call.arguments).value, credential);
+    }
+  }
+});
+
+test("connected request bytes pass the real Fastify parser and preserve missing-capability refusals", async (t) => {
+  // This is offline HTTP admission proof only. In-memory storage/Compute keep
+  // the parser test source-only; no installed receipt or provider is substituted.
+  const auth = await createTestAuthPrincipal();
+  const policy = {
+    identities: [auth.seed.principal],
+    groups: [],
+    memberships: [],
+    roles: auth.seed.roles,
+    bindings: auth.seed.bindings,
+    restrictions: [],
+  };
+  const auditSink = new InMemoryAuditSink();
+  let controller;
+  const app = createFastifyApp({
+    createController(installation) {
+      controller = new OpenClawController(installation, {
+        state: new InMemoryPlatformState({ auditSink }),
+        recordOperations: false,
+      });
+      return controller;
+    },
+    iamDriver: new NativeIAMDriver({ loadNativeIAMState: async () => policy }),
+    configurationDriver: createTestConfigurationDriver(),
+    secretDriver: createTestSecretDriver(),
+    computeDriver: createReadyComputeDriver("egress-preflight-compute"),
+    auditSink,
+    auth: auth.auth,
+    development: { enabled: true, installationId: auth.installationId },
+  });
+  t.after(() => app.close());
+  const session = await signInToControllerApp(app, auth);
+  const request = async (method, path, body) => {
+    const wire = serializeConnectedRequest(method, path, body);
+    const response = await app.inject({
+      method: wire.method,
+      url: wire.path,
+      headers: authenticatedHeaders(session, wire.headers),
+      ...(wire.body === undefined ? {} : { payload: wire.body }),
+    });
+    return {
+      status: response.statusCode,
+      body: response.body === "" ? undefined : response.json(),
+    };
+  };
+  const api = async (method, path, body, status = 200) =>
+    assertConnectedResponse(await request(method, path, body), status);
+  await api("POST", "/installation/bootstrap", { name: "Connected wire preflight" }, 201);
+  const namespace = await api("POST", "/namespaces", { name: "egress-preflight" }, 201);
+  await controller.handleNamespaceLifecycle(auth.seed.principal.id, namespace.id, "ready");
+  const prefix = `/namespaces/${namespace.id}`;
+  const secret = await api(
+    "POST",
+    `${prefix}/secrets`,
+    { name: "synthetic", value: "SYNTHETIC-preflight-only" },
+    201,
+  );
+  const sourceBody = protectedSourceBody("synthetic", secret.ref, "https://provider.test:9443/v1");
+  const unknownField = await api(
+    "POST",
+    `${prefix}/credential-sources`,
+    { ...sourceBody, invented: true },
+    400,
+  );
+  assert.equal(unknownField.code, "INVALID_REQUEST");
+  // A schema-valid request must reach the missing real counterpart guard. An
+  // undefined captured body or generic 400 cannot masquerade as that refusal.
+  const unsupported = await request("POST", `${prefix}/credential-sources`, sourceBody);
+  assertConnectedResponse(unsupported, 409);
+  assert.equal(unsupported.body.error.code, "CREDENTIAL_GATEWAY_NOT_CONFIGURED");
+  const configuration = await api(
+    "POST",
+    `${prefix}/configurations`,
+    protectedConfigurationBody("gpt-6"),
+    201,
+  );
+  const agentBody = protectedAgentBody("synthetic", configuration.id, `cs_${randomUUID()}`);
+  const unsupportedAgent = await request("POST", `${prefix}/agents`, agentBody);
+  assertConnectedResponse(unsupportedAgent, 409);
+  assert.equal(unsupportedAgent.body.error.code, "CREDENTIAL_GATEWAY_NOT_CONFIGURED");
+  const role = await api(
+    "POST",
+    `${prefix}/iam/roles`,
+    {
+      name: "exact source only",
+      permissions: [{ action: "operate", resourceKind: "credential_source" }],
+    },
+    201,
+  );
+  const principal = await api("POST", `${prefix}/iam/service-principals`, {}, 201);
+  const bindingBody = sourceAccessBindingBody({ servicePrincipalId: principal.id }, role, {
+    id: agentBody.harnessAuth.sourceId,
+  });
+  const missingBindingTarget = await request("POST", `${prefix}/iam/access-bindings`, bindingBody);
+  assertConnectedResponse(missingBindingTarget, 400);
+  assert.equal(missingBindingTarget.body.error.code, "INVALID_REQUEST");
+  assert.deepEqual(missingBindingTarget.body.error.details, [
+    { path: "/resourceId", code: "INVALID_VALUE" },
+  ]);
+});
