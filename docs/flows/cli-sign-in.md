@@ -87,7 +87,7 @@ locks the authorization and its parent session, returns
 has 10 active CLI sessions, then marks the authorization `consumed` and inserts
 the `cli_sessions` row with `expires_at` at the earlier of the parent session's
 end and the configured maximum. As a backstop, the `guard_cli_session` trigger
-([migrations/0049_cli_sessions.sql](../../migrations/0049_cli_sessions.sql))
+([migrations/0054_cli_sessions.sql](../../migrations/0054_cli_sessions.sql))
 refuses a row whose parent is missing, expired or another account's, whose
 guarded-profile binding differs from the parent's, or whose parent already has
 10 unexpired CLI sessions. The `issue` audit event commits with the insert, so
