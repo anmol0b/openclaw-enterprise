@@ -17,6 +17,8 @@ import type {
   AccessBinding,
   Agent,
   AgentRead,
+  AgentRevisionMetadata,
+  AgentRevisionSummaryPage,
   AgentRevisionRead,
   WorkspaceSetup,
   AgentDesiredRuntimeState,
@@ -38,6 +40,7 @@ import type {
   PluginDesiredState,
   PluginApprovers,
   Preset,
+  PresetSummary,
   RepositoryBindingSelection,
   RepositoryAccess,
   Secret,
@@ -161,6 +164,11 @@ export interface AgentReadRepository {
   listAgentsForBrowsing(namespaceId: string): Promise<readonly Readonly<AgentRead>[]>;
   findAgent(namespaceId: string, agentId: string): Promise<Readonly<Agent> | undefined>;
   listAgents(namespaceId: string): Promise<readonly Readonly<Agent>[]>;
+  /**
+   * The identity of every Agent in every live Namespace, in one read that decodes no saved
+   * settings, for callers that resolve an opaque Agent address before authorizing it.
+   */
+  listAgentReferences(): Promise<readonly Readonly<Pick<Agent, "id" | "namespaceId">>[]>;
 }
 
 export interface AgentRepository extends AgentReadRepository {
@@ -228,9 +236,32 @@ export interface AgentRevisionReadRepository {
     revisionId: string,
   ): Promise<Readonly<AgentRevision> | undefined>;
   listRevisions(namespaceId: string, agentId: string): Promise<readonly Readonly<AgentRevision>[]>;
+  /**
+   * The Agent's revisions in revision order, as listRevisions returns them but without their
+   * saved settings, so a caller that counts or picks revisions decodes only the one it uses.
+   */
+  listRevisionMetadata(
+    namespaceId: string,
+    agentId: string,
+  ): Promise<readonly Readonly<AgentRevisionMetadata>[]>;
+  /**
+   * One page of the Agent's revision summaries, newest first: at most `limit` revisions numbered
+   * below `before` (from the newest when omitted). It decodes no saved settings, so a list route
+   * costs about the same whatever the admitted snapshots weigh (finding 1323).
+   */
+  pageRevisionSummaries(
+    namespaceId: string,
+    agentId: string,
+    page: { readonly before?: number; readonly limit: number },
+  ): Promise<Readonly<AgentRevisionSummaryPage>>;
 }
 
 export interface AgentRevisionRepository extends AgentRevisionReadRepository {
+  /**
+   * Returns the stored revision. A store with a database clock stamps `createdAt` on that
+   * clock, the one that stamps controller work, so the worker can order a revision against a
+   * stop or deletion without controller clock skew (finding 1195); use the returned value.
+   */
   createRevision(revision: AgentRevision): Promise<Readonly<AgentRevision>>;
 }
 
@@ -270,6 +301,8 @@ export interface ConfigurationRepository extends ConfigurationReadRepository {
 export interface PresetReadRepository {
   findPreset(namespaceId: string, presetId: string): Promise<Readonly<Preset> | undefined>;
   listPresets(namespaceId: string): Promise<readonly Readonly<Preset>[]>;
+  /** The Namespace's Presets in listPresets order, without their templates. */
+  listPresetSummaries(namespaceId: string): Promise<readonly Readonly<PresetSummary>[]>;
 }
 
 export interface PresetRepository extends PresetReadRepository {
@@ -335,6 +368,8 @@ export interface CredentialSourceReadRepository {
   ): Promise<readonly Readonly<CredentialWithdrawal>[]>;
 }
 
+export type CredentialSourceBlockingReference = "reference" | "withdrawal_work";
+
 export interface CredentialSourceRepository extends CredentialSourceReadRepository {
   lockCredentialSource(
     namespaceId: string,
@@ -363,10 +398,30 @@ export interface CredentialSourceRepository extends CredentialSourceReadReposito
   deleteCredentialSource(namespaceId: string, credentialSourceId: string): Promise<boolean>;
   /** True while an Agent draft, active revision, or pending deployment references the source. */
   hasReferences(namespaceId: string, credentialSourceId: string): Promise<boolean>;
+  /**
+   * What keeps the source from being deleted: `reference` while an Agent draft, active
+   * revision, or pending deployment references it, which wins over `withdrawal_work`, a
+   * withdrawal attempt or retry series still queued or running for a revision that holds it.
+   */
+  findBlockingReference(
+    namespaceId: string,
+    credentialSourceId: string,
+  ): Promise<CredentialSourceBlockingReference | undefined>;
   /** Records a pending withdrawal, or returns the existing one for the same revision and source. */
   requestCredentialWithdrawal(
     withdrawal: CredentialWithdrawal,
   ): Promise<Readonly<CredentialWithdrawal>>;
+  /**
+   * Makes `requestedBy` the requester of a pending withdrawal: the principal whose
+   * `agent:operate` the worker rechecks. `requestedAt` keeps the first request's time, and a
+   * revoked withdrawal never changes.
+   */
+  reassignCredentialWithdrawal(
+    namespaceId: string,
+    revisionId: string,
+    credentialSourceId: string,
+    requestedBy: string,
+  ): Promise<Readonly<CredentialWithdrawal> | undefined>;
   /** Records the worker's latest outcome code on a pending withdrawal. */
   recordCredentialWithdrawalAttempt(
     namespaceId: string,
@@ -416,6 +471,22 @@ export interface ServiceAccountRepository extends ServiceAccountReadRepository {
   ): Promise<Readonly<ServiceAccount> | undefined>;
   deleteServiceAccount(namespaceId: string, serviceAccountId: string): Promise<boolean>;
   hasReferences(namespaceId: string, serviceAccountId: string): Promise<boolean>;
+  /**
+   * The Backend binding of an issued provider credential, for the audit record of a forced
+   * deletion that cannot revoke it. Credential and upstream IDs otherwise stay private.
+   */
+  findIssuedCredentialBinding(
+    namespaceId: string,
+    serviceAccountId: string,
+  ): Promise<
+    | Readonly<{
+        readonly backendId: string;
+        readonly workspaceId: string;
+        readonly externalAccountId: string;
+        readonly credentialId: string;
+      }>
+    | undefined
+  >;
 }
 
 const serviceAccountIdentifier =
@@ -796,6 +867,11 @@ export interface PlatformOperationRepository extends PlatformOperationReadReposi
     initiatingActorId: string,
     actorId: string,
   ): Promise<boolean>;
+  /**
+   * Makes the revision's queued credential withdrawal work claimable now instead of at its
+   * scheduled time. Claimed work is left alone. True when any queued work was waiting.
+   */
+  expediteCredentialWithdrawalWork(namespaceId: string, revisionId: string): Promise<boolean>;
 }
 
 export type { AgentProvisioningRecord } from "./agent-provisioning.ts";
@@ -1387,6 +1463,17 @@ function repositories(
               .sort((a, b) => a.id.localeCompare(b.id))
               .map((preset) => immutableCopy(preset)),
       ),
+    listPresetSummaries: async (namespaceId) =>
+      Object.freeze(
+        snapshot.namespaces.get(namespaceId)?.deletedAt !== undefined
+          ? []
+          : Array.from(snapshot.presets.values())
+              .filter((preset) => preset.namespaceId === namespaceId)
+              .sort((a, b) => a.id.localeCompare(b.id))
+              .map(({ id, namespaceId, name, createdAt }) =>
+                Object.freeze({ id, namespaceId, name, createdAt }),
+              ),
+      ),
     createPreset: async (preset) => {
       assertInitialized(snapshot);
       const namespace = await namespaces.lockNamespace(preset.namespaceId);
@@ -1745,6 +1832,26 @@ function repositories(
       );
       return immutableCopy(saved);
     },
+    reassignCredentialWithdrawal: async (
+      namespaceId,
+      revisionId,
+      credentialSourceId,
+      requestedBy,
+    ) => {
+      const current = await findCredentialWithdrawal(namespaceId, revisionId, credentialSourceId);
+      if (current === undefined || current.state !== "pending") {
+        return undefined;
+      }
+      if (!isNonEmptyString(requestedBy)) {
+        throw new ScopeViolationError("A credential withdrawal requester is missing.");
+      }
+      const saved = immutableCopy({ ...current, requestedBy });
+      snapshot.credentialWithdrawals.set(
+        withdrawalKey(namespaceId, revisionId, credentialSourceId),
+        saved,
+      );
+      return immutableCopy(saved);
+    },
     recordCredentialWithdrawalAttempt: async (
       namespaceId,
       revisionId,
@@ -1877,25 +1984,20 @@ function repositories(
       snapshot.credentialSources.set(agentKey(namespaceId, credentialSourceId), saved);
       return immutableCopy(saved);
     },
-    hasReferences: async (namespaceId, credentialSourceId) => {
+    hasReferences: async (namespaceId, credentialSourceId) =>
+      (await credentialSources.findBlockingReference(namespaceId, credentialSourceId)) !==
+      undefined,
+    findBlockingReference: async (namespaceId, credentialSourceId) => {
       if ((await findCredentialSource(namespaceId, credentialSourceId)) === undefined) {
-        return false;
+        return undefined;
       }
-      return (
-        Array.from(snapshot.agents.values()).some((agent) => {
-          const activeRevision = (
-            snapshot.revisions.get(agentKey(namespaceId, agent.id)) ?? []
-          ).find((revision) => revision.id === agent.activeRevisionId);
-          return (
-            agent.namespaceId === namespaceId &&
-            (harnessCredentialSourceReference(agent.harnessAuth, credentialSourceId) ||
-              harnessCredentialSourceReference(activeRevision?.harnessAuth, credentialSourceId) ||
-              agentCredentialSourceReference(agent.credentialSources, credentialSourceId) ||
-              agentCredentialSourceReference(activeRevision?.credentialSources, credentialSourceId))
-          );
-        }) ||
+      const revisionOperations = (withdrawal: boolean) =>
         snapshot.operations.some((operation) => {
-          if (operation.kind !== "agent_revision" || operation.namespaceId !== namespaceId) {
+          if (
+            operation.kind !== "agent_revision" ||
+            operation.namespaceId !== namespaceId ||
+            (operation.target === CREDENTIAL_WITHDRAWAL_TARGET) !== withdrawal
+          ) {
             return false;
           }
           const revision = Array.from(snapshot.revisions.values())
@@ -1908,8 +2010,24 @@ function repositories(
             harnessCredentialSourceReference(revision?.harnessAuth, credentialSourceId) ||
             agentCredentialSourceReference(revision?.credentialSources, credentialSourceId)
           );
-        })
-      );
+        });
+      const referenced =
+        Array.from(snapshot.agents.values()).some((agent) => {
+          const activeRevision = (
+            snapshot.revisions.get(agentKey(namespaceId, agent.id)) ?? []
+          ).find((revision) => revision.id === agent.activeRevisionId);
+          return (
+            agent.namespaceId === namespaceId &&
+            (harnessCredentialSourceReference(agent.harnessAuth, credentialSourceId) ||
+              harnessCredentialSourceReference(activeRevision?.harnessAuth, credentialSourceId) ||
+              agentCredentialSourceReference(agent.credentialSources, credentialSourceId) ||
+              agentCredentialSourceReference(activeRevision?.credentialSources, credentialSourceId))
+          );
+        }) || revisionOperations(false);
+      if (referenced) {
+        return "reference";
+      }
+      return revisionOperations(true) ? "withdrawal_work" : undefined;
     },
     deleteCredentialSource: async (namespaceId, credentialSourceId) => {
       if ((await findCredentialSource(namespaceId, credentialSourceId)) === undefined) {
@@ -2046,6 +2164,8 @@ function repositories(
       deleteResourceAccessBindings("service_account", serviceAccountId);
       return true;
     },
+    // Backend bindings are PostgreSQL-only, as findServiceAccountBackendBinding.
+    findIssuedCredentialBinding: async () => undefined,
   };
 
   const workspaceSetups: WorkspaceSetupRepository = {
@@ -2123,6 +2243,18 @@ function repositories(
               .map((agent) => immutableCopy(agent))
           : [],
       ),
+    listAgentReferences: async () => {
+      const live = new Set(
+        Array.from(snapshot.namespaces.values())
+          .filter((namespace) => namespace.deletedAt === undefined)
+          .map((namespace) => namespace.id),
+      );
+      return Object.freeze(
+        Array.from(snapshot.agents.values())
+          .filter((agent) => live.has(agent.namespaceId))
+          .map((agent) => Object.freeze({ id: agent.id, namespaceId: agent.namespaceId })),
+      );
+    },
     createAgent: async (agent) => {
       assertInitialized(snapshot);
       if (agent.executionMode !== "embedded" && agent.executionMode !== "dedicated") {
@@ -2271,12 +2403,15 @@ function repositories(
         throw new ScopeViolationError("The Agent references an unavailable Configuration.");
       }
       await assertConfigurationUsableByAgent(configurations, secrets, namespaceId, configurationId);
+      // Like PostgreSQL, only a supplied binding must be available; omission keeps the stored one.
+      if (harnessAuth !== undefined) {
+        await assertHarnessAuthAvailable(
+          { secrets, serviceAccounts, credentialSources },
+          namespaceId,
+          harnessAuth,
+        );
+      }
       const association = harnessAuth === undefined ? current.harnessAuth : harnessAuth;
-      await assertHarnessAuthAvailable(
-        { secrets, serviceAccounts, credentialSources },
-        namespaceId,
-        association,
-      );
       await assertAgentCredentialSourcesAvailable(
         { credentialSources },
         namespaceId,
@@ -2386,6 +2521,61 @@ function repositories(
               .map((revision) => immutableCopy(revision))
           : [],
       ),
+    listRevisionMetadata: async (namespaceId, agentId) =>
+      Object.freeze(
+        snapshot.namespaces.get(namespaceId)?.deletedAt === undefined
+          ? (snapshot.revisions.get(agentKey(namespaceId, agentId)) ?? [])
+              .filter(
+                (revision) => revision.namespaceId === namespaceId && revision.agentId === agentId,
+              )
+              .map(({ id, namespaceId, agentId, revision, backendId, createdAt }) =>
+                Object.freeze({ id, namespaceId, agentId, revision, backendId, createdAt }),
+              )
+          : [],
+      ),
+    pageRevisionSummaries: async (namespaceId, agentId, { before, limit }) => {
+      const older =
+        snapshot.namespaces.get(namespaceId)?.deletedAt === undefined
+          ? (snapshot.revisions.get(agentKey(namespaceId, agentId)) ?? [])
+              .filter(
+                (revision) =>
+                  revision.namespaceId === namespaceId &&
+                  revision.agentId === agentId &&
+                  (before === undefined || revision.revision < before),
+              )
+              .sort((left, right) => right.revision - left.revision)
+          : [];
+      const page = older
+        .slice(0, limit)
+        .map(
+          ({
+            id,
+            namespaceId,
+            agentId,
+            revision,
+            backendId,
+            configurationId,
+            configurationGeneration,
+            harness,
+            createdAt,
+          }) =>
+            immutableCopy({
+              id,
+              namespaceId,
+              agentId,
+              revision,
+              backendId,
+              configurationId,
+              configurationGeneration,
+              harness,
+              createdAt,
+            }),
+        );
+      return Object.freeze({
+        revisions: Object.freeze(page),
+        ...(older.length > limit ? { nextBefore: page.at(-1)!.revision } : {}),
+      });
+    },
     createRevision: async (revision) => {
       assertInitialized(snapshot);
       assertAdmittedAgentRevision(revision);
@@ -2813,6 +3003,7 @@ function repositories(
       // The in-memory operation log has no executing or terminal work records.
       retryFailedAgentDeletion: async () => false,
       retryFailedNamespaceDeletion: async () => false,
+      expediteCredentialWithdrawalWork: async () => false,
       findWorkAttempt: async () => undefined,
       // Recorded work never executes here, so every recorded withdrawal stays outstanding.
       hasOutstandingCredentialWithdrawalWork: async (namespaceId, revisionId) =>

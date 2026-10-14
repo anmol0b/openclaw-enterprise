@@ -202,3 +202,171 @@ test("a client reset during a pending native-admin denial still records the deni
     await app.close();
   }
 });
+
+for (const phase of ["admission", "gateway key"]) {
+  test(`a client reset while the native-admin ${phase} is pending never opens the Agent gateway`, async () => {
+    const installationId = "inst_native_admin_upgrade";
+    const agent = { id: "agent_a", namespaceId: "ns_a", desiredRuntimeState: "running" };
+    const domain = "agents.example.com";
+    const host = deriveNativeAdminHost(installationId, agent, domain);
+    const origin = `https://${host}`;
+    // An Agent gateway that only counts connection attempts.
+    const gatewayConnections = [];
+    const gateway = net.createServer((connection) => {
+      gatewayConnections.push(connection);
+      connection.destroy();
+    });
+    await new Promise((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const gates = {};
+    const entered = {};
+    const gated = (name, value) => {
+      entered[name] = true;
+      return new Promise((resolve) => {
+        gates[name] = () => resolve(value);
+      });
+    };
+    const revision = {
+      id: "rev_a",
+      compute: { id: "compute_test", implementation: "native-admin-reset-test" },
+      configuration: {
+        gateway: {
+          auth: {
+            mode: "trusted-proxy",
+            trustedProxy: {
+              userHeader: "x-occ-identity",
+              allowUsers: ["occ-workspace-files"],
+              deviceAutoApprove: { enabled: true, scopes: ["operator.admin"] },
+            },
+            identityScopes: { "occ-workspace-files": ["operator.admin"] },
+          },
+          controlUi: { enabled: true, allowedOrigins: [origin] },
+        },
+      },
+    };
+    const selection = { agent, revision };
+    const crashes = [];
+    const onUncaught = (error) => {
+      crashes.push(error);
+    };
+    process.on("uncaughtException", onUncaught);
+    const app = Fastify({ logger: false });
+    createNativeAdminAccess({
+      app,
+      installationId,
+      publicOrigin: "https://console.example.com",
+      factory: {
+        create(input) {
+          return input;
+        },
+      },
+      getController() {
+        return {
+          async resolveAgentReference(predicate) {
+            return predicate(agent) ? agent : undefined;
+          },
+          getAdministerableActiveAgentRevision() {
+            return phase === "admission" ? gated("admission", selection) : selection;
+          },
+          selectedDriver() {
+            return {
+              id: "compute_test",
+              implementation: "native-admin-reset-test",
+              getGatewayEndpoint: () => `wss://127.0.0.1:${gateway.address().port}/`,
+            };
+          },
+        };
+      },
+      selectedIAMDriver() {
+        return {
+          id: "iam_test",
+          async lookupIdentity() {
+            return {
+              kind: "principal",
+              id: "actor_1",
+              issuer: "https://issuer.example",
+              subject: "user-1",
+            };
+          },
+        };
+      },
+      getContext() {
+        return undefined;
+      },
+      getAdmission() {
+        return undefined;
+      },
+      auth: {
+        sharedCookieDomain: "example.com",
+        admissionVerifier: {
+          async verify() {
+            return {
+              method: "session",
+              decisionId: "dec_1",
+              admittedScope: { installationId },
+              externalIdentity: { issuer: "https://issuer.example", subject: "user-1" },
+              session: {
+                id: "sess_1",
+                userId: "user-1",
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              },
+            };
+          },
+        },
+      },
+      nativeAdmin: { enabled: true, domain, sharedCookieDomain: "example.com" },
+      nativeAdminGatewayApiKey() {
+        return gated("gateway key", "gateway-test-key");
+      },
+      webSocketLeaseIntervalMs: undefined,
+      auditSink: { async append() {} },
+    });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    assert.ok(address && typeof address === "object");
+    const serverSockets = [];
+    app.server.on("connection", (socket) => serverSockets.push(socket));
+    try {
+      await new Promise((resolve, reject) => {
+        const socket = net.connect(address.port, "127.0.0.1");
+        socket.on("error", reject);
+        socket.on("connect", () => {
+          socket.write(
+            `GET / HTTP/1.1\r\nHost: ${host}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\n` +
+              "Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n" +
+              "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+          );
+          const waitUntil = Date.now() + 1000;
+          const waitForPhase = () => {
+            if (entered[phase] || Date.now() > waitUntil) {
+              socket.resetAndDestroy();
+              resolve();
+              return;
+            }
+            setTimeout(waitForPhase, 10);
+          };
+          setTimeout(waitForPhase, 20);
+        });
+      });
+      assert.equal(entered[phase], true, `the upgrade must reach the pending ${phase}`);
+      // Release the gate only once the server has seen the reset.
+      const resetDeadline = Date.now() + 2000;
+      while (!serverSockets.every((socket) => socket.destroyed) && Date.now() < resetDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(serverSockets.length, 1);
+      assert.equal(serverSockets[0].destroyed, true, "the server must observe the reset");
+      gates[phase]();
+      // Give a wrongly continued upgrade time to read the key or dial the gateway.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      if (phase === "admission") {
+        assert.equal(entered["gateway key"], undefined, "a reset upgrade must not read the key");
+      }
+      assert.equal(gatewayConnections.length, 0);
+      assert.deepEqual(crashes, []);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      await app.close();
+      await new Promise((resolve) => gateway.close(resolve));
+    }
+  });
+}

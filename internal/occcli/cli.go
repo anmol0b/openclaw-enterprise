@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +21,12 @@ import (
 )
 
 const defaultTimeoutSeconds = "30"
+
+var dns1123LabelPattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$`)
+
+func dns1123Label(name string) bool {
+	return len(name) >= 1 && len(name) <= 63 && dns1123LabelPattern.MatchString(name)
+}
 
 // outputFormatsAnnotation lists the -o values a command accepts; the first replaces
 // the global "table" default.
@@ -76,6 +83,7 @@ func New(out, errOut io.Writer) *cobra.Command {
 		os.Getenv("OCC_SERVICE_KEY_FILE"),
 		"Bootstrap or service-key response file",
 	)
+	// --ca-bundle= is not refused like the flags in emptyFlagValues: it clears OCC_CA_BUNDLE.
 	flags.StringVar(
 		&app.caBundle,
 		"ca-bundle",
@@ -92,7 +100,7 @@ func New(out, errOut io.Writer) *cobra.Command {
 		&app.namespace,
 		"namespace",
 		os.Getenv("OCC_NAMESPACE"),
-		"Namespace scope for Configuration, Secret, Preset, credential source, IAM, and Agent operations",
+		"Namespace scope for Configuration, Secret, Preset, credential source, ServiceAccount, IAM, and Agent operations",
 	)
 	flags.StringVarP(&app.output, "output", "o", "table", "Output format: table, json, or yaml")
 
@@ -105,6 +113,7 @@ func New(out, errOut io.Writer) *cobra.Command {
 		app.secretCommand(),
 		app.presetCommand(),
 		app.credentialSourceCommand(),
+		app.serviceAccountCommand(),
 		app.agentCommand(),
 		developmentCommand(),
 	)
@@ -170,7 +179,11 @@ func (app *application) namespaceCommand() *cobra.Command {
 		Use:   "create NAME",
 		Short: "Create a Namespace",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(command *cobra.Command, args []string) error {
+			// createNamespace existingNamespace: a DNS-1123 label of at most 63 characters.
+			if command.Flags().Changed("existing-namespace") && !dns1123Label(existingNamespace) {
+				return fmt.Errorf("--existing-namespace must be a DNS-1123 label of at most 63 characters")
+			}
 			client, err := app.client()
 			if err != nil {
 				return err
@@ -564,13 +577,15 @@ func (app *application) credentialSourceCommand() *cobra.Command {
 		Use:   "update ID",
 		Short: "Push current or replacement Secret values to the gateway copy",
 		Args:  idArgs(credentialSourceIDArg),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(command *cobra.Command, args []string) error {
+			// An explicit empty --file was refused by refuseEmptyFlags.
+			fileSet := command.Flags().Changed("file")
 			namespace, err := app.requiredNamespace()
 			if err != nil {
 				return err
 			}
 			body := jsontext.Value("{}")
-			if updateFile != "" {
+			if fileSet {
 				body, err = readJSON(updateFile)
 				if err != nil {
 					return err
@@ -591,10 +606,85 @@ func (app *application) credentialSourceCommand() *cobra.Command {
 		&updateFile,
 		"file",
 		"",
-		"JSON document with replacement secrets; omit to re-send the current Secret values",
+		"JSON document with replacement secrets; omit to re-send the current Secret values (refused for oauth2-refresh-token: put a new sign-in's refresh token in a new Secret)",
 	)
 
-	command.AddCommand(create, list, get, update, deleteCommand)
+	rotate := &cobra.Command{
+		Use:   "rotate ID",
+		Short: "Force a refresh-type source to mint a new token",
+		Args:  idArgs(credentialSourceIDArg),
+		RunE: func(_ *cobra.Command, args []string) error {
+			namespace, client, err := app.namespaceClient()
+			if err != nil {
+				return err
+			}
+			source, err := client.RotateCredentialSource(namespace, args[0])
+			if err != nil {
+				return err
+			}
+			return app.printCredentialSource(source, false)
+		},
+	}
+
+	command.AddCommand(create, list, get, update, rotate, deleteCommand)
+	return command
+}
+
+func (app *application) serviceAccountCommand() *cobra.Command {
+	command := commandGroup("service-account", "Manage ServiceAccounts in the selected Namespace")
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List ServiceAccounts",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			namespace, client, err := app.namespaceClient()
+			if err != nil {
+				return err
+			}
+			accounts, err := client.ListServiceAccounts(namespace)
+			if err != nil {
+				return err
+			}
+			return app.printItems(accounts, true, []column{
+				{title: "ID", key: "id"},
+				{title: "NAME", key: "name"},
+			})
+		},
+	}
+
+	var force bool
+	deleteCommand := &cobra.Command{
+		Use:   "delete ID",
+		Short: "Delete an unreferenced ServiceAccount",
+		Long: "Delete an unreferenced ServiceAccount, revoking its issued access token.\n" +
+			"--force also deletes an account whose token no ChatGPT Backend can revoke, because\n" +
+			"the Backend is gone; an administrator must then revoke the token at the provider.\n" +
+			"With a ChatGPT Backend configured, --force changes nothing: the token is revoked.",
+		Args: idArgs(serviceAccountIDArg),
+		RunE: func(command *cobra.Command, args []string) error {
+			namespace, client, err := app.namespaceClient()
+			if err != nil {
+				return err
+			}
+			unrevoked, err := client.DeleteServiceAccount(namespace, args[0], force)
+			if err != nil {
+				return err
+			}
+			if unrevoked == nil {
+				return app.printDeletion("service account", args[0])
+			}
+			return app.printUnrevokedServiceAccountDeletion(command.ErrOrStderr(), args[0], unrevoked)
+		},
+	}
+	deleteCommand.Flags().BoolVar(
+		&force,
+		"force",
+		false,
+		"Delete even if no ChatGPT Backend can revoke the account's access token",
+	)
+
+	command.AddCommand(list, deleteCommand)
 	return command
 }
 
@@ -701,26 +791,43 @@ func (app *application) agentCommand() *cobra.Command {
 			})
 		},
 	}
+	var revisionLimit int
+	var revisionCursor string
 	revisions := &cobra.Command{
 		Use:   "revisions AGENT_ID",
-		Short: "List an Agent's immutable revisions (deployment IDs)",
+		Short: "List an Agent's immutable revisions (deployment IDs), newest first, one page at a time",
 		Args:  idArgs(agentIDArg),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(command *cobra.Command, args []string) error {
+			if command.Flags().Changed("limit") && (revisionLimit < 1 || revisionLimit > 100) {
+				return fmt.Errorf("--limit must be between 1 and 100")
+			}
 			namespace, client, err := app.namespaceClient()
 			if err != nil {
 				return err
 			}
-			result, err := client.ListAgentRevisions(namespace, args[0])
+			page, err := client.ListAgentRevisions(namespace, args[0], revisionLimit, revisionCursor)
 			if err != nil {
 				return err
 			}
-			rows, err := describeAgentRevisions(client, namespace, args[0], result)
+			rows, err := describeAgentRevisions(client, command.ErrOrStderr(), namespace, args[0], page.Revisions)
 			if err != nil {
 				return err
 			}
-			return app.printAgentRevisionList(rows)
+			if err := app.printAgentRevisionList(rows); err != nil {
+				return err
+			}
+			if page.NextCursor != "" {
+				limit := ""
+				if command.Flags().Changed("limit") {
+					limit = fmt.Sprintf(" --limit %d", revisionLimit)
+				}
+				noticef(command.ErrOrStderr(), "notice: older revisions may exist; run \"occ agent revisions %s%s --cursor %s\"", args[0], limit, page.NextCursor)
+			}
+			return nil
 		},
 	}
+	revisions.Flags().IntVar(&revisionLimit, "limit", 0, "revisions per page, 1 to 100 (default 50)")
+	revisions.Flags().StringVar(&revisionCursor, "cursor", "", "continue from the cursor a previous page printed")
 	deploymentStatus := &cobra.Command{
 		Use:   "deployment-status AGENT_ID [DEPLOYMENT_ID]",
 		Short: "Show durable status for one Agent deployment, by default the latest revision",
@@ -734,11 +841,7 @@ func (app *application) agentCommand() *cobra.Command {
 			if len(args) == 2 {
 				deploymentID = args[1]
 			} else {
-				result, err := client.ListAgentRevisions(namespace, args[0])
-				if err != nil {
-					return err
-				}
-				if deploymentID, err = latestRevisionID(args[0], result); err != nil {
+				if deploymentID, err = latestRevisionID(client, namespace, args[0]); err != nil {
 					return err
 				}
 			}
@@ -811,17 +914,17 @@ func (app *application) agentCommand() *cobra.Command {
 // revision: whether it is the Agent's active revision and the status of the
 // deployment that created it. A revision whose deployment status the caller may
 // not read, or that OCC no longer records, gets a null deploymentStatus.
-func describeAgentRevisions(client *occclient.Client, namespace, agentID string, value any) ([]any, error) {
-	revisions, ok := value.([]any)
-	if !ok {
-		return nil, fmt.Errorf("OCC returned an invalid resource collection")
-	}
+func describeAgentRevisions(client *occclient.Client, notices io.Writer, namespace, agentID string, revisions []any) ([]any, error) {
 	agent, err := client.GetAgent(namespace, agentID)
 	if err != nil {
 		return nil, err
 	}
 	resource, _ := agent.(map[string]any)
 	activeID, _ := resource["activeRevisionId"].(string)
+	agentReadError, agentUnreadable := resource["configurationReadError"].(map[string]any)
+	if agentUnreadable {
+		noticef(notices, "notice: Agent saved configuration is unreadable (%s); deployment status is unavailable in revision history", displayValue(agentReadError["field"]))
+	}
 	rows := make([]any, 0, len(revisions))
 	for _, item := range revisions {
 		revision, ok := item.(map[string]any)
@@ -832,7 +935,7 @@ func describeAgentRevisions(client *occclient.Client, namespace, agentID string,
 		id, _ := revision["id"].(string)
 		row["active"] = id != "" && id == activeID
 		row["deploymentStatus"] = nil
-		if id != "" {
+		if id != "" && !agentUnreadable {
 			deployment, err := client.GetAgentDeployment(namespace, agentID, id)
 			var apiErr *occclient.APIError
 			switch {
@@ -841,6 +944,10 @@ func describeAgentRevisions(client *occclient.Client, namespace, agentID string,
 					row["deploymentStatus"] = status["status"]
 				}
 			case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusForbidden):
+			case errors.As(err, &apiErr) && apiErr.Status == http.StatusServiceUnavailable:
+				// List items are summaries, so a revision whose saved settings are unreadable
+				// shows up only here; its status read fails while the others still work.
+				noticef(notices, "notice: deployment status of revision %s is unavailable: %v", id, err)
 			default:
 				return nil, err
 			}
@@ -1014,6 +1121,9 @@ func helpWithOutputFormats(help func(*cobra.Command, []string)) func(*cobra.Comm
 }
 
 func (app *application) validateOptions(command *cobra.Command) error {
+	if err := refuseEmptyFlags(command); err != nil {
+		return err
+	}
 	formats := []string{"table", "json", "yaml"}
 	if annotated, ok := command.Annotations[outputFormatsAnnotation]; ok {
 		formats = strings.Split(annotated, ",")
@@ -1033,6 +1143,38 @@ func (app *application) validateOptions(command *cobra.Command) error {
 		return fmt.Errorf("OCC timeout must be a positive integer number of seconds")
 	}
 	app.parsedTimeout = time.Duration(seconds) * time.Second
+	return nil
+}
+
+// emptyFlagValues says what each listed flag must name. These flags read an
+// empty value as omitted, so an explicit --flag= is refused before any work
+// instead of silently taking the default or failing later with a misleading
+// error. --ca-bundle= deliberately clears OCC_CA_BUNDLE, and --namespace=
+// clears OCC_NAMESPACE (service-key create then issues an Installation-scoped
+// key; Namespace commands refuse it), so neither is listed. The other string
+// flags refuse an empty value themselves.
+var emptyFlagValues = map[string]string{
+	"file":              "a JSON document",
+	"key-output":        "a key file path",
+	"level":             "error, warn, info or debug",
+	"out":               "a key file path",
+	"pod":               "a Pod",
+	"revision":          "a revision ID",
+	"service-key-file":  "a bootstrap or service-key response file",
+	"service-principal": "a ServicePrincipal ID",
+	"source":            "gateway, agent or sandbox",
+	"url":               "the OCC endpoint URL",
+}
+
+// refuseEmptyFlags refuses an explicitly empty value for a flag in
+// emptyFlagValues, in flag-name order.
+func refuseEmptyFlags(command *cobra.Command) error {
+	for _, name := range slices.Sorted(maps.Keys(emptyFlagValues)) {
+		flag := command.Flags().Lookup(name)
+		if flag != nil && flag.Changed && flag.Value.String() == "" {
+			return fmt.Errorf("--%s must name %s", name, emptyFlagValues[name])
+		}
+	}
 	return nil
 }
 

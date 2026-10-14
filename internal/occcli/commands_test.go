@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,13 +31,26 @@ type fakeOCC struct {
 
 func (fake *fakeOCC) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	key := request.Method + " " + request.URL.Path
+	requested := key
+	if request.URL.RawQuery != "" {
+		// Responses are keyed by path; the record keeps the query so tests can assert it.
+		requested += "?" + request.URL.RawQuery
+	}
 	fake.mu.Lock()
-	fake.requested = append(fake.requested, key)
+	fake.requested = append(fake.requested, requested)
 	fake.mu.Unlock()
 	data, ok := fake.responses[key]
 	if !ok {
 		writer.WriteHeader(http.StatusNotFound)
 		_, _ = writer.Write([]byte(`{"error":{"code":"NOT_FOUND","message":"not found"}}`))
+		return
+	}
+	if raw, ok := strings.CutPrefix(data, "raw:"); ok {
+		// "raw:<status> <body>" answers with that status and body, unwrapped.
+		status, _ := strconv.Atoi(raw[:3])
+		writer.Header().Set("content-type", "application/json")
+		writer.WriteHeader(status)
+		_, _ = writer.Write([]byte(raw[4:]))
 		return
 	}
 	if data == "" {
@@ -64,6 +78,25 @@ func runOCC(t *testing.T, responses map[string]string, args ...string) (string, 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return out.String(), append([]string(nil), fake.requested...), err
+}
+
+// runOCCWithNotices is runOCC that also returns what the command wrote to stderr.
+func runOCCWithNotices(t *testing.T, responses map[string]string, args ...string) (string, string, []string, error) {
+	t.Helper()
+	fake := &fakeOCC{responses: responses}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	keyFile := filepath.Join(t.TempDir(), "service-key.json")
+	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	command := New(&out, &errOut)
+	command.SetArgs(append([]string{"--url", server.URL, "--service-key-file", keyFile}, args...))
+	err := command.Execute()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return out.String(), errOut.String(), append([]string(nil), fake.requested...), err
 }
 
 func TestNamespaceTableLabelsTheAdoptedNamespaceColumn(t *testing.T) {
@@ -103,6 +136,7 @@ func TestResourceCommandsRejectNamesWithAHintBeforeCallingOCC(t *testing.T) {
 		{[]string{"--namespace", testNamespaceID, "preset", "delete", "default-codex"}, "occ preset list"},
 		{[]string{"--namespace", testNamespaceID, "agent", "deployment-status", testAgentID, "1"}, "occ agent revisions"},
 		{[]string{"--namespace", testNamespaceID, "credential-source", "update", "openai"}, "occ credential-source list"},
+		{[]string{"--namespace", testNamespaceID, "service-account", "delete", "--force", "ci-bot"}, "occ service-account list"},
 		{[]string{"--namespace", testNamespaceID, "agent", "credential-withdrawal", "request", "dogfood-agent", "cs_1"}, "occ agent list"},
 		{[]string{"--namespace", testNamespaceID, "agent", "credential-withdrawal", "get", testAgentID, "openai"}, "occ credential-source list"},
 	}
@@ -199,6 +233,128 @@ func TestPresetCommandsListShowAndDeleteNamespacePresets(t *testing.T) {
 	}
 	if out != "Deleted preset "+presetID+".\n" || !slices.Equal(requested, []string{"DELETE " + collection + "/" + presetID}) {
 		t.Fatalf("delete printed %q after %v", out, requested)
+	}
+}
+
+func TestServiceAccountDeleteForceReportsTheUnrevokedToken(t *testing.T) {
+	const accountID = "sa_66666666-6666-4666-8666-666666666666"
+	path := "/namespaces/" + testNamespaceID + "/service-accounts/" + accountID
+
+	// Without --force the CLI sends no query and prints the ordinary deletion.
+	out, requested, err := runOCC(t, map[string]string{"DELETE " + path: ""},
+		"--namespace", testNamespaceID, "service-account", "delete", accountID)
+	if err != nil {
+		t.Fatalf("%v (requests %v)", err, requested)
+	}
+	if out != "Deleted service account "+accountID+".\n" || !slices.Equal(requested, []string{"DELETE " + path}) {
+		t.Fatalf("delete printed %q after %v", out, requested)
+	}
+
+	// --force where a Backend revoked the token as usual: OCC answers 204, same output.
+	out, requested, err = runOCC(t, map[string]string{"DELETE " + path: ""},
+		"--namespace", testNamespaceID, "service-account", "delete", "--force", accountID)
+	if err != nil {
+		t.Fatalf("%v (requests %v)", err, requested)
+	}
+	if out != "Deleted service account "+accountID+".\n" || !slices.Equal(requested, []string{"DELETE " + path + "?force=true"}) {
+		t.Fatalf("forced delete printed %q after %v", out, requested)
+	}
+
+	// --force with no Backend to revoke the token: OCC reports it, and the CLI warns.
+	unrevoked := map[string]string{
+		"DELETE " + path: `{"id":"` + accountID + `","namespaceId":"` + testNamespaceID + `","revocation":"skipped","backendId":"chatgpt"}`,
+	}
+	var warnings bytes.Buffer
+	fake := &fakeOCC{responses: unrevoked}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	keyFile := filepath.Join(t.TempDir(), "service-key.json")
+	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	command := New(&stdout, &warnings)
+	command.SetArgs([]string{"--url", server.URL, "--service-key-file", keyFile,
+		"--namespace", testNamespaceID, "service-account", "delete", "--force", accountID})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "Deleted service account "+accountID+"; its access token was not revoked.\n" {
+		t.Fatalf("unexpected table output %q", stdout.String())
+	}
+	if !strings.Contains(warnings.String(), "revoke it at the provider") ||
+		!strings.Contains(warnings.String(), `ChatGPT Backend "chatgpt"`) {
+		t.Fatalf("expected a revocation warning, got %q", warnings.String())
+	}
+
+	out, _, err = runOCC(t, unrevoked,
+		"--namespace", testNamespaceID, "-o", "json", "service-account", "delete", "--force", accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shown map[string]any
+	if err := json.Unmarshal([]byte(out), &shown); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if shown["deleted"] != true || shown["id"] != accountID || shown["revocation"] != "skipped" || shown["backendId"] != "chatgpt" {
+		t.Fatalf("unexpected structured output %v", shown)
+	}
+
+	// A refusal stays an error: --force never hides one.
+	_, _, err = runOCC(t, map[string]string{},
+		"--namespace", testNamespaceID, "service-account", "delete", "--force", accountID)
+	if err == nil {
+		t.Fatal("expected the API refusal to fail the command")
+	}
+}
+
+func TestServiceAccountForceDeleteRejectsAMalformedSuccess(t *testing.T) {
+	const accountID = "sa_66666666-6666-4666-8666-666666666666"
+	keyFile := filepath.Join(t.TempDir(), "service-key.json")
+	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A forced delete succeeds only with a bodyless 204 or a full 200 envelope.
+	for _, test := range []struct {
+		respond func(http.ResponseWriter)
+		message string
+	}{
+		{func(writer http.ResponseWriter) {
+			writer.Header().Set("content-type", "application/json")
+			_, _ = writer.Write([]byte(`{"data":{"revocation":"skipped"}}`))
+		}, "OCC returned an invalid response (HTTP 200)"},
+		{func(writer http.ResponseWriter) {
+			writer.WriteHeader(http.StatusAccepted)
+		}, "OCC returned an unexpected response (HTTP 202)"},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.Method != http.MethodDelete || request.URL.RawQuery != "force=true" {
+				writer.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			test.respond(writer)
+		}))
+		command := New(&bytes.Buffer{}, &bytes.Buffer{})
+		command.SetArgs([]string{"--url", server.URL, "--service-key-file", keyFile,
+			"--namespace", testNamespaceID, "service-account", "delete", "--force", accountID})
+		err := command.Execute()
+		server.Close()
+		if err == nil || err.Error() != test.message {
+			t.Fatalf("expected %q, got %v", test.message, err)
+		}
+	}
+}
+
+func TestServiceAccountListShowsNamespaceAccounts(t *testing.T) {
+	const accountID = "sa_66666666-6666-4666-8666-666666666666"
+	out, _, err := runOCC(t, map[string]string{
+		"GET /namespaces/" + testNamespaceID + "/service-accounts": `[{"id":"` + accountID + `","namespaceId":"` + testNamespaceID + `","name":"ci-bot"}]`,
+	}, "--namespace", testNamespaceID, "service-account", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, accountID) || !strings.Contains(out, "ci-bot") {
+		t.Fatalf("expected the account in the list:\n%s", out)
 	}
 }
 
@@ -492,6 +648,7 @@ func TestServiceKeyCreateLeavesNoKeyFileWhenItCannotSaveAKey(t *testing.T) {
 
 	// Lifetimes outside 1-365 days and malformed Namespace IDs fail before any request.
 	for _, refused := range []struct{ namespace, flag, message string }{
+		{testNamespaceID, "--expires-in-days=0", "between 1 and 365"},
 		{testNamespaceID, "--expires-in-days=366", "between 1 and 365"},
 		{testNamespaceID, "--expires-in-days=-1", "between 1 and 365"},
 		{"default", "--expires-in-days=1", "OCC_NAMESPACE or --namespace"},
@@ -517,4 +674,164 @@ func TestServiceKeyCreateLeavesNoKeyFileWhenItCannotSaveAKey(t *testing.T) {
 		t.Fatalf("response without a key ID: error = %v", err)
 	}
 	assertNoKeyFile("a response without a key ID")
+}
+
+func TestServiceKeyCreateRejectsNamesTheAPIRefusesBeforeAnyRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.Header().Set("content-type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = writer.Write([]byte(`{"data":{"id":"key_1","name":"nora","key":"occ_secret"},"meta":{"requestId":"r"}}`))
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	adminKey := filepath.Join(directory, "admin.json")
+	if err := os.WriteFile(adminKey, []byte(`{"data":{"key":"admin-key"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The API counts code points, so 33 emoji are too long although 32 fit.
+	for _, name := range []string{strings.Repeat("a", 33), strings.Repeat("😀", 33), "   "} {
+		requests = 0
+		keyFile := filepath.Join(directory, "rejected-"+name+".json")
+		command := New(&bytes.Buffer{}, &bytes.Buffer{})
+		command.SetArgs([]string{
+			"--url", server.URL,
+			"--service-key-file", adminKey,
+			"--namespace", testNamespaceID,
+			"service-key", "create",
+			"--service-principal", "spn_1",
+			"--name", name,
+			"--out", keyFile,
+		})
+		err := command.Execute()
+		if err == nil || !strings.Contains(err.Error(), "1 to 32 characters") {
+			t.Fatalf("name %q: error = %v", name, err)
+		}
+		if requests != 0 {
+			t.Fatalf("name %q sent %d requests", name, requests)
+		}
+		if _, statErr := os.Stat(keyFile); !os.IsNotExist(statErr) {
+			t.Fatalf("name %q left a key file: %v", name, statErr)
+		}
+	}
+
+	for index, name := range []string{strings.Repeat("a", 32), strings.Repeat("😀", 32)} {
+		requests = 0
+		keyFile := filepath.Join(directory, "accepted-"+strconv.Itoa(index)+".json")
+		command := New(&bytes.Buffer{}, &bytes.Buffer{})
+		command.SetArgs([]string{
+			"--url", server.URL,
+			"--service-key-file", adminKey,
+			"--namespace", testNamespaceID,
+			"service-key", "create",
+			"--service-principal", "spn_1",
+			"--name", name,
+			"--out", keyFile,
+		})
+		if err := command.Execute(); err != nil || requests != 1 {
+			t.Fatalf("32-character name %q: error = %v after %d requests", name, err, requests)
+		}
+	}
+}
+
+func TestNamespaceCreateRejectsExistingNamespacesTheAPIRefuses(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.Header().Set("content-type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = writer.Write([]byte(`{"data":{"id":"ns_11111111-1111-4111-8111-111111111111","name":"support","status":"provisioning","existingNamespace":"customer-support-prod"},"meta":{"requestId":"r"}}`))
+	}))
+	defer server.Close()
+	directory := t.TempDir()
+	adminKey := filepath.Join(directory, "admin.json")
+	if err := os.WriteFile(adminKey, []byte(`{"data":{"key":"admin-key"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) error {
+		command := New(&bytes.Buffer{}, &bytes.Buffer{})
+		command.SetArgs(append([]string{"--url", server.URL, "--service-key-file", adminKey, "namespace", "create"}, args...))
+		return command.Execute()
+	}
+	for _, name := range []string{"", "Bad_Name", strings.Repeat("a", 64)} {
+		requests = 0
+		err := run("support", "--existing-namespace", name)
+		if err == nil || !strings.Contains(err.Error(), "DNS-1123 label of at most 63 characters") {
+			t.Fatalf("existing namespace %q: error = %v", name, err)
+		}
+		if requests != 0 {
+			t.Fatalf("existing namespace %q sent %d requests", name, requests)
+		}
+	}
+	requests = 0
+	if err := run("support"); err != nil || requests != 1 {
+		t.Fatalf("omitted adoption flag: error = %v after %d requests", err, requests)
+	}
+	requests = 0
+	if err := run("support", "--existing-namespace", "customer-support-prod"); err != nil || requests != 1 {
+		t.Fatalf("DNS label: error = %v after %d requests", err, requests)
+	}
+}
+
+func TestAgentBrowsingShowsUnreadableSavedSettings(t *testing.T) {
+	agentPath := "/namespaces/" + testNamespaceID + "/agents/" + testAgentID
+	unreadable := `{"id":"` + testAgentID + `","name":"legacy","configurationReadError":{"code":"SAVED_CONFIGURATION_UNREADABLE","field":"plugins"}}`
+	for _, command := range [][]string{{"agent", "get", testAgentID}, {"agent", "list"}} {
+		responses := map[string]string{"GET " + agentPath: unreadable, "GET /namespaces/" + testNamespaceID + "/agents": "[" + unreadable + "]"}
+		out, _, err := runOCC(t, responses, append([]string{"--namespace", testNamespaceID}, command...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "CONFIGURATION ERROR") || !strings.Contains(out, "SAVED_CONFIGURATION_UNREADABLE (plugins)") {
+			t.Fatalf("error variant must remain visible: %s", out)
+		}
+	}
+}
+
+// List items are summaries, so a revision whose saved settings are unreadable is
+// found only when its deployment status read fails (503). The listing keeps the
+// other revisions' status and names the unreadable one instead of failing.
+func TestAgentRevisionBrowsingKeepsHealthyStatusBesideUnreadableSnapshot(t *testing.T) {
+	responses := agentRevisionResponses()
+	agentPath := "/namespaces/" + testNamespaceID + "/agents/" + testAgentID
+	responses["GET "+agentPath+"/deployments/"+testRevision2ID] = `raw:503 {"error":{"code":"DEPENDENCY_UNAVAILABLE","message":"Persisted AgentRevision plugin state is invalid."}}`
+	for _, format := range []string{"table", "json", "yaml"} {
+		out, notices, _, err := runOCCWithNotices(t, responses, "--namespace", testNamespaceID, "--output", format, "agent", "revisions", testAgentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, testRevision2ID) || !strings.Contains(out, "succeeded") {
+			t.Fatalf("%s must list both revisions and the healthy status: %s", format, out)
+		}
+		if !strings.Contains(notices, "deployment status of revision "+testRevision2ID+" is unavailable") {
+			t.Fatalf("%s must name the revision whose status is unavailable: %q", format, notices)
+		}
+	}
+}
+
+// The revisions command shows one page; it passes --limit and --cursor through
+// and prints how to read the next page.
+func TestAgentRevisionsPagesWithCursor(t *testing.T) {
+	responses := agentRevisionResponses()
+	agentPath := "/namespaces/" + testNamespaceID + "/agents/" + testAgentID
+	responses["GET "+agentPath+"/revisions"] = `raw:200 {"data":[{"id":"` + testRevision2ID + `","revision":2,"createdAt":"2026-09-30T01:00:00.000Z"}],"meta":{"requestId":"req_test","nextCursor":"v1.2"}}`
+	out, notices, requested, err := runOCCWithNotices(t, responses, "--namespace", testNamespaceID, "agent", "revisions", testAgentID, "--limit", "1", "--cursor", "v1.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(requested, "GET "+agentPath+"/revisions?cursor=v1.3&limit=1") {
+		t.Fatalf("limit and cursor must reach OCC: %v", requested)
+	}
+	if !strings.Contains(out, testRevision2ID) || strings.Contains(out, testRevision1ID) {
+		t.Fatalf("expected only the page's revision:\n%s", out)
+	}
+	if !strings.Contains(notices, "occ agent revisions "+testAgentID+" --limit 1 --cursor v1.2") {
+		t.Fatalf("expected a next-page hint that keeps --limit: %q", notices)
+	}
+	for _, limit := range []string{"0", "101"} {
+		if _, _, err := runOCC(t, responses, "--namespace", testNamespaceID, "agent", "revisions", testAgentID, "--limit", limit); err == nil {
+			t.Fatalf("--limit %s must be refused locally", limit)
+		}
+	}
 }

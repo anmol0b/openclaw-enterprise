@@ -7,6 +7,7 @@ import type {
   ComputeDriver,
   ConfigurationDriver,
   CredentialGatewayDriver,
+  CredentialRefreshDriver,
   DriverImplementation,
   IAMDriver,
   Identity,
@@ -35,6 +36,7 @@ import {
   KubernetesComputeDriver,
   type KubernetesComputeDriverOptions,
 } from "../drivers/compute/kubernetes/index.ts";
+import { refuseRewrittenIpv4Host, refuseWrittenUserinfo } from "../auth/configuration.ts";
 import { createExternalDriver, loadDriverPackage } from "./driver-packages.ts";
 import { SshComputeDriver, type SshComputeDriverOptions } from "../drivers/compute/ssh/index.ts";
 import {
@@ -63,6 +65,7 @@ import {
   OpenShellCredentialGatewayDriver,
   type OpenShellCredentialGatewayOptions,
 } from "../drivers/credential-gateway/openshell.ts";
+import { OpenShellCredentialRefreshDriver } from "../drivers/credential-refresh/openshell.ts";
 
 import { loadInstallationPresets, type ShadowedDefaultPreset } from "./installation-presets.ts";
 
@@ -97,6 +100,7 @@ export interface InstallationStartupConfiguration {
     readonly secret: SelectedDriverConfiguration;
     readonly sandbox?: SelectedDriverConfiguration;
     readonly credential_gateway?: SelectedDriverConfiguration;
+    readonly credential_refresh?: SelectedDriverConfiguration;
     readonly plugin?: SelectedDriverConfiguration;
     readonly service_account?: { readonly id: string };
     readonly repo?: SelectedDriverConfiguration;
@@ -120,6 +124,7 @@ export interface InstallationRuntimeDrivers {
   readonly secretDriver: SecretDriver;
   readonly sandboxDriver?: SandboxDriver;
   readonly credentialGatewayDriver?: CredentialGatewayDriver;
+  readonly credentialRefreshDriver?: CredentialRefreshDriver;
   readonly pluginDriver?: PluginDriver;
   readonly repoDriver?: RepoDriver;
   readonly repositoryReceipt?: Readonly<{
@@ -273,6 +278,19 @@ function observabilityConfiguration(value: unknown): { readonly url: string } | 
       "observability.url must be an absolute HTTP or HTTPS URL without credentials or a fragment.",
     );
   }
+  // URL parsing drops an empty user info (http://@host), which profile preflight refuses.
+  refuseWrittenUserinfo("observability.url", raw);
+  // Other IPv4 spellings parse as a different address, so startup must not store url.href.
+  refuseRewrittenIpv4Host("observability.url", raw, url);
+  // A tab or newline is deleted. A backslash before the query becomes a slash, so the stored
+  // href can name another host. A backslash in the query does not change the host.
+  const queryAt = raw.search(/[?#]/u);
+  const beforeQuery = queryAt === -1 ? raw : raw.slice(0, queryAt);
+  if (/[\t\n\r]/u.test(raw) || beforeQuery.includes("\\")) {
+    throw new Error(
+      "observability.url must not contain a tab or newline, or a backslash before the query; the URL parser drops or rewrites them into a different host.",
+    );
+  }
   return Object.freeze({ url: url.href });
 }
 
@@ -281,6 +299,7 @@ function backendConfiguration(
   serviceAccount: InstallationStartupConfiguration["drivers"]["service_account"],
   repoSelection: InstallationStartupConfiguration["drivers"]["repo"],
   credentialGatewayId: string | undefined,
+  credentialRefreshId: string | undefined,
 ): readonly BackendDefinition[] {
   const backends = validateBackendDefinitions(value ?? []);
   if (serviceAccount !== undefined && !backends.some((backend) => backend.type === "chatgpt")) {
@@ -288,6 +307,9 @@ function backendConfiguration(
   }
   if (repoSelection !== undefined && !backends.some((backend) => backend.type === "github")) {
     throw new Error("drivers.repo requires an owning backend entry with type github.");
+  }
+  if (credentialRefreshId !== undefined && credentialGatewayId === undefined) {
+    throw new Error("drivers.credential_refresh requires drivers.credential_gateway.");
   }
   if (
     credentialGatewayId !== undefined &&
@@ -303,6 +325,12 @@ function backendConfiguration(
       if (backend.drivers.credential_gateway !== credentialGatewayId) {
         throw new Error(
           `backend[${backend.id}].drivers.credential_gateway must match the selected drivers.credential_gateway.id.`,
+        );
+      }
+      // Refresh state lives on the gateway's provider record, so both roles share this Backend.
+      if (backend.drivers.credential_refresh !== credentialRefreshId) {
+        throw new Error(
+          `backend[${backend.id}].drivers.credential_refresh must match the selected drivers.credential_refresh.id.`,
         );
       }
       continue;
@@ -354,6 +382,7 @@ function selected(
     | "secret"
     | "sandbox"
     | "credential_gateway"
+    | "credential_refresh"
     | "plugin"
     | "repo",
   implementation: string,
@@ -400,6 +429,37 @@ function schemaMismatch(schema: Record<string, unknown>, configuration: unknown)
     // The generic message still fails closed.
   }
   return "";
+}
+
+/**
+ * The CA bundle a dedicated Harness node trusts for its Gateway connection.
+ * `OCC_GATEWAY_CA_PATH`, when set, names the Gateway-only bundle; an empty value means
+ * no private Gateway CA. The chart sets it whenever the API's `NODE_EXTRA_CA_CERTS`
+ * also carries other roots (the OIDC CA opt-in), so those roots stay out of Harness Pods.
+ * Without it, the API's `NODE_EXTRA_CA_CERTS` is the Gateway bundle.
+ */
+export async function readHarnessNodeCa(
+  environment: Readonly<Record<string, string | undefined>>,
+): Promise<string | undefined> {
+  const gatewayCaPath = environment.OCC_GATEWAY_CA_PATH;
+  const path = gatewayCaPath ?? environment.NODE_EXTRA_CA_CERTS;
+  if (path === undefined || path === "") {
+    return undefined;
+  }
+  if (gatewayCaPath !== undefined && !isAbsolute(gatewayCaPath)) {
+    throw new Error("OCC_GATEWAY_CA_PATH must identify an absolute mounted-file path.");
+  }
+  const bundle = await readFile(path, "utf8");
+  const certificates = bundle.match(
+    /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g,
+  );
+  if (
+    certificates === null ||
+    certificates.reduce((rest, certificate) => rest.replace(certificate, ""), bundle).trim()
+  ) {
+    throw new Error("The Harness trust bundle must contain only public CA certificates.");
+  }
+  return certificates.map((certificate) => new X509Certificate(certificate).toString()).join("\n");
 }
 
 export async function loadInstallationConfiguration(options: {
@@ -463,6 +523,7 @@ export async function loadInstallationConfiguration(options: {
       "secret",
       "sandbox",
       "credential_gateway",
+      "credential_refresh",
       "plugin",
       "service_account",
       "repo",
@@ -498,11 +559,23 @@ export async function loadInstallationConfiguration(options: {
       OpenShellCredentialGatewayDriver,
     );
   }
+  let credentialRefresh: SelectedDriverConfiguration | undefined;
+  if (drivers.credential_refresh !== undefined) {
+    const selection = object(drivers.credential_refresh, "drivers.credential_refresh");
+    closed(selection, ["id", "configuration"], "drivers.credential_refresh");
+    credentialRefresh = selected(
+      selection,
+      "credential_refresh",
+      "openshell",
+      OpenShellCredentialRefreshDriver,
+    );
+  }
   const backends = backendConfiguration(
     configuration.backend,
     serviceAccount,
     repoSelection,
     credentialGateway?.id,
+    credentialRefresh?.id,
   );
   const openShellBackend = backends.find(
     (backend): backend is OpenShellBackendDefinition => backend.type === "openshell",
@@ -688,6 +761,7 @@ export async function loadInstallationConfiguration(options: {
       secret,
       ...(sandbox === undefined ? {} : { sandbox }),
       ...(credentialGateway === undefined ? {} : { credential_gateway: credentialGateway }),
+      ...(credentialRefresh === undefined ? {} : { credential_refresh: credentialRefresh }),
       ...(plugin === undefined ? {} : { plugin }),
       ...(serviceAccount === undefined ? {} : { service_account: serviceAccount }),
       ...(repoSelection === undefined ? {} : { repo: repoSelection }),
@@ -733,6 +807,14 @@ export async function loadInstallationConfiguration(options: {
             backend: openShell!,
           },
         );
+  const credentialRefreshDriver =
+    credentialRefresh === undefined
+      ? undefined
+      : new OpenShellCredentialRefreshDriver(credentialRefresh.configuration, {
+          id: credentialRefresh.id,
+          implementation: credentialRefresh.implementation,
+          backend: openShell!,
+        });
   let computeDriver: ComputeDriver;
   if (computePackage !== undefined) {
     computeDriver = createExternalDriver(
@@ -763,25 +845,7 @@ export async function loadInstallationConfiguration(options: {
             nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
           ),
         ),
-        readNodeCa: async () => {
-          const path = environment.NODE_EXTRA_CA_CERTS;
-          if (path === undefined) {
-            return undefined;
-          }
-          const bundle = await readFile(path, "utf8");
-          const certificates = bundle.match(
-            /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g,
-          );
-          if (
-            certificates === null ||
-            certificates.reduce((rest, certificate) => rest.replace(certificate, ""), bundle).trim()
-          ) {
-            throw new Error("The Harness trust bundle must contain only public CA certificates.");
-          }
-          return certificates
-            .map((certificate) => new X509Certificate(certificate).toString())
-            .join("\n");
-        },
+        readNodeCa: () => readHarnessNodeCa(environment),
       },
     );
   }
@@ -822,6 +886,7 @@ export async function loadInstallationConfiguration(options: {
     secretDriver,
     ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
     ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
+    ...(credentialRefreshDriver === undefined ? {} : { credentialRefreshDriver }),
     createIAMDriver,
     ...(pluginDriver === undefined ? {} : { pluginDriver }),
     ...(repositoryRuntime ?? {}),
