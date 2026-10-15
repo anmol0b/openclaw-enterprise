@@ -27,7 +27,10 @@ import {
   currentComputeAbortSignal,
   withComputeAbortSignal,
 } from "../../compute/operation-context.ts";
-import { createKubernetesClientConfiguration } from "../../kubernetes/client.ts";
+import {
+  createKubernetesClientConfiguration,
+  withKubernetesRequestDeadline,
+} from "../../kubernetes/client.ts";
 import { OAUTH_PHASE_ANNOTATION } from "../../kubernetes/oauth-seal.ts";
 import { kubernetesRequest } from "../../kubernetes/request.ts";
 import {
@@ -455,8 +458,8 @@ export class KubernetesSecretDriver implements SecretDriver {
       AbortSignal.timeout(Math.min(remaining, 2_147_483_647)),
       ...(owner ? [owner] : []),
     ]);
-    const { observed } = await withComputeAbortSignal(signal, () =>
-      this.readOwnedSecret(input.secret),
+    const { observed } = await withKubernetesRequestDeadline(deadline, () =>
+      withComputeAbortSignal(signal, () => this.readOwnedSecret(input.secret)),
     );
     signal.throwIfAborted();
     const version = observed.metadata?.resourceVersion;

@@ -320,14 +320,14 @@ export class CredentialProxy {
     try {
       // Recheck the same accepted response owner after selection, including any independent material read.
       const material = await this.selectMaterial(source, captured, signal);
-      if (!("evidence" in material)) {
-        return { kind: "refused", error: material };
-      }
-      const { evidence } = material;
       const afterSelection = accessEnded();
       if (afterSelection) {
         return { kind: "refused", error: afterSelection };
       }
+      if (!("evidence" in material)) {
+        return { kind: "refused", error: material };
+      }
+      const { evidence } = material;
       if (evidence.kind !== "no_material_required" && material.value === undefined) {
         return { kind: "refused", error: { kind: "not_ready", code: "material_missing" } };
       }

@@ -1161,6 +1161,28 @@ test("closing the accepted duplex during Kubernetes namespace verification preve
   );
 });
 
+test("an elapsed deadline prevents the Kubernetes Secret GET even before the timeout callback runs", async (t) => {
+  const f = await staticEgressFixture(t);
+  const captured = f.capture();
+  const before = f.secretReads;
+  const placement = f.pauseNamespaceVerification();
+  t.after(placement.release);
+  const pending = f.resolve(captured);
+  await placement.reached;
+
+  // Advance only wall time. This separates the absolute deadline from a timeout callback
+  // that may not have run yet, for example when an event-loop turn takes too long.
+  const { seconds, nanos } = captured.deadline;
+  const deadline = Number(seconds) * 1000 + nanos / 1e6;
+  const clock = t.mock.method(Date, "now", () => deadline);
+  placement.release();
+  const result = await pending;
+  clock.mock.restore();
+  assert.ok(result.refused);
+  assert.equal(f.secretReads, before, "no Secret GET reached Kubernetes after the deadline");
+  assert.equal(f.providerRequests.length, 0);
+});
+
 test("policy verification crossing the request deadline cannot start material selection", async (t) => {
   const f = await syntheticDispatchFixture(t);
   const forwarder = new CredentialProxy({
@@ -1179,6 +1201,27 @@ test("policy verification crossing the request deadline cannot start material se
   );
   assert.equal(f.reads, 0, "the material owner must not be called on an expired access decision");
   assert.deepEqual(result, { kind: "refused", error: { kind: "deadline_exceeded" } });
+  assert.equal(f.arrivals, 0);
+});
+
+test("a selection returning at the request deadline reports deadline exceeded, not material readiness", async (t) => {
+  const f = await syntheticDispatchFixture(t);
+  const forwarder = new CredentialProxy({
+    ...f.ports,
+    read: async (...args) => {
+      const material = await f.ports.read(...args);
+      f.advance(Date.parse(f.request.deadlineAt) - f.ports.now());
+      return material;
+    },
+  });
+  const result = await forwarder.resolve(
+    "synthetic-peer",
+    f.association.installation.sandboxId,
+    f.request,
+    new AbortController().signal,
+  );
+  assert.deepEqual(result, { kind: "refused", error: { kind: "deadline_exceeded" } });
+  assert.equal(f.reads, 1, "selection legitimately started before the deadline");
   assert.equal(f.arrivals, 0);
 });
 
