@@ -11,7 +11,7 @@ import {
 } from "@openclaw-enterprise/contracts";
 import { immutableCopy } from "@openclaw-enterprise/utils";
 import { isDeepStrictEqual } from "node:util";
-import { parseUnambiguousJson } from "./openai-json.ts";
+import { parseUnambiguousJson } from "../repo/credentials/json-members.ts";
 import { isGitHubWireCredential } from "../repo/github/credentials/wire-credential.ts";
 
 function closedRequest(route: EgressRoute, request: EgressRequest): boolean {

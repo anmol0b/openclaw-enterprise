@@ -1,6 +1,9 @@
-/** JSON.parse discards duplicate members. Refuse them before selecting a model or
- * releasing original response bytes, since peers may disagree about the winning value. */
-export function parseUnambiguousJson(text: string): unknown {
+/** Parse grammar first, then report decoded duplicate names in each object.
+ * Depth counts containing objects and arrays; a root object has depth 1. */
+export function parseJsonMembers(
+  text: string,
+  onDuplicate: (decodedName: string, depth: number) => void,
+): unknown {
   const parsed: unknown = JSON.parse(text);
   const stack: { keys: Set<string> | undefined; expectingKey: boolean }[] = [];
   for (const [token] of text.matchAll(/"(?:\\.|[^"\\])*"|[{}[\],:]/gs)) {
@@ -15,7 +18,7 @@ export function parseUnambiguousJson(text: string): unknown {
       } else if (frame?.keys && frame.expectingKey && token.startsWith('"')) {
         const key: string = JSON.parse(token);
         if (frame.keys.has(key)) {
-          throw new Error("Ambiguous JSON members are unsupported.");
+          onDuplicate(key, stack.length);
         }
         frame.keys.add(key);
         frame.expectingKey = false;
@@ -23,4 +26,11 @@ export function parseUnambiguousJson(text: string): unknown {
     }
   }
   return parsed;
+}
+
+/** Strict consumers must never select a value from ambiguous JSON. */
+export function parseUnambiguousJson(text: string): unknown {
+  return parseJsonMembers(text, () => {
+    throw new Error("Ambiguous JSON members are unsupported.");
+  });
 }

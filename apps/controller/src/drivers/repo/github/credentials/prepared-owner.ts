@@ -134,9 +134,9 @@ export function createGitHubPreparationOwner(options: PreparationOptions) {
             assertCurrent,
             (response) => {
               // Capture before transport close: a late/lost response still has a cleanup owner.
-              const packet = parseInstallationTokenResponse(response.body);
-              if (typeof packet?.token === "string" && packet.token.length > 0) {
-                candidate = Buffer.from(packet.token);
+              const { packet, token } = parseInstallationTokenResponse(response.body);
+              if (token !== undefined) {
+                candidate = Buffer.from(token);
               }
               const result = validateInstallationTokenResponse(
                 response.status,

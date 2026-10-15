@@ -19,6 +19,7 @@ export function createGitHubProtocol({
   keyPair = generateKeyPairSync("rsa", { modulusLength: 2048 }),
   tokenLifetimeMs = 3600000,
   tokenResponse = (packet) => packet,
+  encodeIssueResponse = JSON.stringify,
   beforeIssueResponse,
   beforeMetadataResponse,
   issueResponse = (response) => response,
@@ -95,7 +96,10 @@ export function createGitHubProtocol({
             repositories: [resources.repo],
           }),
         });
-        json(issued.status, issued.body);
+        if (!disconnect(request, response, url)) {
+          response.writeHead(issued.status, { "content-type": "application/json" });
+          response.end(encodeIssueResponse(issued.body));
+        }
         return;
       }
       if (request.method === "DELETE" && url.pathname === "/installation/token") {

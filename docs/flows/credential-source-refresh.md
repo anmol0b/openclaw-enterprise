@@ -1,7 +1,7 @@
 ---
 created: "2026-10-08"
 updated: "2026-10-15"
-last_updated_session: authoring-run/2dd241b3-7f84-47ce-902b-82a2c5af66ac
+last_updated_session: authoring-run/3af8b480-048d-4e5e-a05c-f5a92f357ccd
 ---
 
 # Credential source refresh Flow
@@ -184,6 +184,12 @@ opaque material version. A late, invalid or ambiguous result stays quarantined
 across owner changes. If storage loses a token before commit, the recorded attempt
 still blocks replay. Recovery and cleanup need an explicit owner.
 
+The shared response parser identifies custody separately from scope evidence
+(see [response capture](repository-credentials.md#4-reserve-acquire-and-dispatch)).
+Ambiguous fields quarantine a uniquely identified token for cleanup. Repeated
+root token keys leave no candidate to revoke automatically; the retained intent
+blocks replay and requires explicit recovery.
+
 The trusted Resolver gets only a read port. It can receive still-eligible
 committed material during renewal. Cold, expired or differently admitted material
 returns `not_ready`, including when validity runs out during the read. The
@@ -235,6 +241,8 @@ own their detached warm reads. Clearing a local buffer does not revoke a provide
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 20:51: Document accompanying separation of token custody from ambiguous response evidence. (authoring-run/3af8b480-048d-4e5e-a05c-f5a92f357ccd - 53c4297eb1e0894042a1698609c3e672aef2c97b)
 
 - 2026-10-15 20:30: Document draft buffer cleanup on failed PostgreSQL publication. (authoring-run/2dd241b3-7f84-47ce-902b-82a2c5af66ac - 13a8d9bf7aca5402c822f0e1e2e6e1e98eb3e71b)
 

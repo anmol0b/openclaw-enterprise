@@ -399,3 +399,43 @@ test("warm reader wipes its detached selection when it cannot return it", async 
   assert.equal(keyReads(), 1);
   assert.equal(clock.pendingTimers(), 0);
 });
+
+test("ambiguous issuance retains only identifiable cleanup material and never reissues", async (t) => {
+  for (const variation of ["permissions", "token", "escaped-token", "invalid-utf8"]) {
+    await t.test(variation, async (t) => {
+      const f = await setup(t, {
+        encodeIssueResponse(packet) {
+          const encoded = JSON.stringify(packet);
+          // Issue a real fixture token first, then send an ambiguous raw response.
+          if (variation === "permissions") {
+            return encoded.replace('"permissions":{', '"permissions":{"contents":"admin",');
+          }
+          if (variation === "invalid-utf8") {
+            return Buffer.concat([
+              Buffer.from(encoded.slice(0, -1) + ',"unknown":"'),
+              Buffer.from([0xff]),
+              Buffer.from('"}'),
+            ]);
+          }
+          const key = variation === "token" ? "token" : String.raw`to\u006ben`;
+          return encoded.slice(0, -1) + `,"${key}":${JSON.stringify(packet.token)}}`;
+        },
+      });
+      assert.equal(await f.owner().run("ambiguous", f.bounds()), "quarantined");
+      assert.equal((await f.reader.readWarm(f.admission)).kind, "not_ready");
+      const row = await f.store.readCurrent(f.admission.familyId, (row) => row);
+      const candidate = row.attempts[0].candidate;
+      assert.equal(candidate !== undefined, variation === "permissions");
+      if (candidate) {
+        // Cleanup retained the actual issued token, even though it cannot be published.
+        assert.equal(f.github.authorize(`Bearer ${Buffer.from(candidate).toString()}`), true);
+        candidate.fill(0);
+      }
+      assert.equal(await f.owner().run("ambiguous", f.bounds()), "blocked");
+      assert.equal(await f.owner().run("replacement", f.bounds()), "blocked");
+      assert.equal(f.github.issuesOfTokens.length, 1);
+      assert.equal(f.github.trace.filter((entry) => entry.method === "DELETE").length, 0);
+      assert.deepEqual(f.github.errors, []);
+    });
+  }
+});

@@ -1,3 +1,4 @@
+import { parseJsonMembers } from "../../../credentials/json-members.ts";
 import type {
   AcquireOutcome,
   AttemptContext,
@@ -35,16 +36,37 @@ type AcquisitionPolicy = Readonly<{
 type OutcomePayload<T> = T extends OriginalOutcome ? Omit<T, keyof OriginalOutcome> : never;
 type AcquisitionDecision = OutcomePayload<AcquireOutcome>;
 
-export function parseInstallationTokenResponse(body: Buffer): Record<string, unknown> | undefined {
+/** Custody identification is independent of evidence that permits using the token. */
+export function parseInstallationTokenResponse(body: Buffer): Readonly<{
+  token: string | undefined;
+  packet: Record<string, unknown> | undefined;
+}> {
   try {
-    const packet: unknown = JSON.parse(body.toString("utf8"));
-    if (packet !== null && typeof packet === "object" && !Array.isArray(packet)) {
-      return packet as Record<string, unknown>;
+    let ambiguous = false;
+    let ambiguousToken = false;
+    const parsed = parseJsonMembers(
+      new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(body),
+      (name, depth) => {
+        ambiguous = true;
+        if (depth === 1 && name === "token") {
+          ambiguousToken = true;
+        }
+      },
+    );
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const packet = parsed as Record<string, unknown>;
+      return {
+        token:
+          !ambiguousToken && typeof packet.token === "string" && packet.token.length > 0
+            ? packet.token
+            : undefined,
+        packet: ambiguous ? undefined : packet,
+      };
     }
   } catch {
-    // A malformed body still leaves the provider status available for classification.
+    // Malformed bytes or grammar identify neither a credential nor scope evidence.
   }
-  return undefined;
+  return { token: undefined, packet: undefined };
 }
 
 export function observeAcquisitionResponse({
@@ -54,12 +76,11 @@ export function observeAcquisitionResponse({
   attempt,
   response,
 }: ResponseObservationDependencies): AcquisitionObservation {
-  const packet = parseInstallationTokenResponse(response.body);
+  const { packet, token } = parseInstallationTokenResponse(response.body);
   let credential: CredentialRef | undefined;
-  const token = packet?.token;
   const observedWallMs = clock.wallNow();
   const expiry = typeof packet?.expires_at === "string" ? Date.parse(packet.expires_at) : NaN;
-  if (typeof token === "string" && token.length > 0) {
+  if (token !== undefined) {
     const bytes = Buffer.from(token);
     try {
       // Capture in the response callback, before timeout or close can discard its body.

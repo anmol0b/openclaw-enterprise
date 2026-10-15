@@ -1,7 +1,7 @@
 ---
 created: "2026-09-17"
 updated: 2026-10-15
-last_updated_session: authoring-run/35418147-f92b-4808-96cf-a6db4d91f2bb
+last_updated_session: authoring-run/3af8b480-048d-4e5e-a05c-f5a92f357ccd
 ---
 
 # Repository credential service flow
@@ -219,20 +219,14 @@ deadline. Acceptance, reuse, dispatch and authentication honor the earlier deadl
 cleanup retains separate expiry and callback drainage. Wall-clock changes cannot
 shorten custody or restart use lifetime.
 
-`apps/controller/src/drivers/repo/github/credentials/driver.ts:createGitHubDriver`
-composes acquisition and capture through
-`apps/controller/src/drivers/repo/github/credentials/driver/acquisition.ts:createCredentialAcquisition`,
-authentication through
-`apps/controller/src/drivers/repo/github/credentials/driver/access.ts:createCredentialAuthentication`,
-retirement through
-`apps/controller/src/drivers/repo/github/credentials/driver/retirement.ts:createCredentialRetirement`,
-and session-bound plans, credentials and original outcomes through
-`apps/controller/src/drivers/repo/github/credentials/driver/state.ts:createGitHubDriverState`.
-Acquisition observes and captures material inside the transport response callback
-through `apps/controller/src/drivers/repo/github/credentials/driver/acquisition-response.ts:observeAcquisitionResponse`.
-Its pure `classifyAcquisitionResponse` checks status, scope and usable lifetime;
-acquisition then rechecks admission synchronously before accepting the original
-credential. Rejected material retains its cleanup owner.
+`apps/controller/src/drivers/repo/github/credentials/driver/acquisition-response.ts:observeAcquisitionResponse`
+captures a uniquely identified root token before validating status, scope and
+usable lifetime. Invalid UTF-8, malformed JSON or any duplicate member name
+disqualifies the response as evidence. With duplicate permission fields, retain
+the token only for cleanup. With duplicate root token fields, never guess which
+token to revoke, even if the values match. Recheck admission synchronously before
+accepting a validated credential.
+
 Its bounded credential transport,
 `apps/controller/src/drivers/repo/github/credentials/provider-transport.ts:createProviderTransport`,
 uses `apps/controller/src/drivers/repo/github/credentials/provider-transport/request.ts:sendProviderRequest`
@@ -370,6 +364,8 @@ client and alternate-adapter checks; live-provider behavior requires separate qu
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 20:51: Document accompanying separation of token custody from ambiguous response evidence. (authoring-run/3af8b480-048d-4e5e-a05c-f5a92f357ccd - 53c4297eb1e0894042a1698609c3e672aef2c97b)
 
 - 2026-10-15 04:44: Bound upload-pack streaming separately while retaining exchange and credential fencing. (authoring-run/35418147-f92b-4808-96cf-a6db4d91f2bb - 00bbc7cd976ab7be317ce1e0a9d36ad72ce10567)
 
