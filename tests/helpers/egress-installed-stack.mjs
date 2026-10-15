@@ -163,23 +163,7 @@ export async function createRunEvidence(t, setup, progress) {
   };
 }
 
-export async function observePreparedStack(t, setup, evidence, progress) {
-  const {
-    input,
-    databaseUrl,
-    controller,
-    f: { kubectl },
-  } = setup;
-  const { api } = evidence;
-  const namespacePath = `/namespaces/${controller.namespaceId}`;
-  progress.stage = "prepared-stack-observation";
-  const namespace = await api("GET", namespacePath);
-  assert.equal(namespace.status, "ready");
-  const placements = JSON.parse(await kubectl("get", "namespaces", "-o", "json")).items.filter(
-    ({ metadata }) => metadata.labels?.["openclaw.dev/namespace"] === namespace.id,
-  );
-  assert.equal(placements.length, 1, "select a single-cluster tenant placement");
-  const placement = placements[0].metadata.name;
+export async function selectLiveControllerPods({ input, f: { kubectl } }) {
   const controllerPods = JSON.parse(
     await kubectl(
       "get",
@@ -202,11 +186,39 @@ export async function observePreparedStack(t, setup, evidence, progress) {
     );
   }
   for (const pod of controllerPods) {
-    assert.ok(pod.spec.containers.some(({ image }) => image === input.images.controller));
+    const { name, namespace, deletionTimestamp, labels } = pod.metadata;
+    assert.equal(namespace, input.controllerNamespace);
+    assert.ok(["api", "worker"].includes(labels["app.kubernetes.io/component"]));
+    assert.ok(!deletionTimestamp, `${name} is terminating`);
+    assert.ok(
+      pod.spec.containers.some(({ image }) => image === input.images.controller),
+      `${name} must use the candidate controller image`,
+    );
     assert.ok(
       pod.status?.conditions?.some(({ type, status }) => type === "Ready" && status === "True"),
     );
   }
+  return controllerPods;
+}
+
+export async function observePreparedStack(t, setup, evidence, progress) {
+  const {
+    input,
+    databaseUrl,
+    controller,
+    f: { kubectl },
+  } = setup;
+  const { api } = evidence;
+  const namespacePath = `/namespaces/${controller.namespaceId}`;
+  progress.stage = "prepared-stack-observation";
+  const namespace = await api("GET", namespacePath);
+  assert.equal(namespace.status, "ready");
+  const placements = JSON.parse(await kubectl("get", "namespaces", "-o", "json")).items.filter(
+    ({ metadata }) => metadata.labels?.["openclaw.dev/namespace"] === namespace.id,
+  );
+  assert.equal(placements.length, 1, "select a single-cluster tenant placement");
+  const placement = placements[0].metadata.name;
+  const controllerPods = await selectLiveControllerPods(setup);
   const gateway = new OpenShellGateway(input.openShellBackend);
   t.after(() => gateway.close());
   const gatewayClient = gateway.clientForNamespace(placement);

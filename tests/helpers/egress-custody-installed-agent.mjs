@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { sha256Hex } from "../../packages/utils/src/hashing.ts";
 import assert from "node:assert/strict";
+import { selectLiveControllerPods } from "./egress-installed-stack.mjs";
 import { observeInstalledProtection } from "./egress-installed-agent.mjs";
 import { protectedConfigurationBody, sourceAccessBindingBody } from "./egress-connected-inputs.mjs";
 import {
@@ -31,7 +32,9 @@ export async function admitRepositoryAgent(
     "if (!p.apiOrigin || !p.issuerCaPath || !p.custodyKeyPath) process.exit(1);",
     "process.stdout.write(p.apiOrigin);",
   ].join("\n");
-  for (const pod of stack.controllerPods) {
+  // The prepared-stack observation predates any deliberate API restart. Inspect the live pair.
+  const controllerPods = await selectLiveControllerPods(setup);
+  for (const pod of controllerPods) {
     const origin = await setup.f.kubectl(
       "exec",
       "-n",
