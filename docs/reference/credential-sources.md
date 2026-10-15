@@ -19,10 +19,7 @@ production Agent path; see its
 
 The optional [protected static inference path](credential-sources/protected-inference.md)
 uses request-bound live Secret resolution. Its limits and explicit opt-in for existing
-sources differ from the gateway-copy behavior described below. While its
-`egress_proxy` Driver is selected, OCC refuses new sources of types the protected
-provider does not support, today every type except `openai`; register those
-before selecting the Driver.
+sources differ from the gateway-copy behavior described below.
 
 ## Register a source
 
