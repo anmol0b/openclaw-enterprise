@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import test from "node:test";
 import { createFastifyApp } from "../../apps/controller/src/index.ts";
 import { InMemoryAuditSink } from "../../packages/audit/src/index.ts";
@@ -25,8 +26,10 @@ import {
   protectedAgentBody,
   protectedConfigurationBody,
   protectedSourceBody,
+  sendConnectedRequest,
   serializeConnectedRequest,
   sourceAccessBindingBody,
+  takeConnectedControllerBinding,
   validateConnectedDatabaseUrl,
   validateConnectedInputs,
 } from "../helpers/egress-connected-inputs.mjs";
@@ -173,11 +176,10 @@ test("connected workload binding accepts only the maintained launcher identity a
 
 test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS fixtures", () => {
   const inputs = () => ({
-    version: 1,
+    version: 2,
     namespaceId: "ns_fixture",
     model: "fixture-model",
     apiOrigin: "http://127.0.0.1:3000",
-    serviceKeyPath: "/fixture/service-key",
     kubeconfigPath: "/fixture/kubeconfig",
     kubernetesContext: "k3d-fixture",
     controllerNamespace: "oce-system",
@@ -205,6 +207,18 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
       privateKeyPath: "/fixture/provider.key",
     },
   });
+  const selection = (input) => ({
+    apiOrigin: input.apiOrigin,
+    namespaceId: input.namespaceId,
+    model: input.model,
+    providerOrigin: input.provider.origin,
+  });
+  const input = inputs();
+  const controller = selection(input);
+  for (const field of Object.keys(controller)) {
+    assert.throws(() => validateConnectedInputs(input, { ...controller, [field]: "different" }));
+  }
+  const validate = (input) => validateConnectedInputs(input, selection(input));
   const mtls = {
     mode: "mtls",
     certificatePath: "/fixture/client.pem",
@@ -215,7 +229,7 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
       const input = inputs();
       input.openShellBackend.auth = auth;
       input.provider.origin = `https://${host}:9443/v1`;
-      assert.equal(validateConnectedInputs(input), input);
+      assert.equal(validate(input), input);
     }
   }
   const rejectedAuth = [
@@ -232,11 +246,14 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
   for (const auth of rejectedAuth) {
     const input = inputs();
     input.openShellBackend.auth = auth;
-    assert.throws(() => validateConnectedInputs(input));
+    assert.throws(() => validate(input));
   }
   // These guards precede credential reads and provider binding. Alias acceptance
   // must not admit ordinary providers, suffix lookalikes or implicit routing.
   for (const mutate of [
+    (input) => {
+      input.serviceKeyPath = "/fixture/not-the-controller-key";
+    },
     (input) => {
       input.openShellBackend.endpoint = "http://gateway.test:8443";
     },
@@ -270,8 +287,68 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
   ]) {
     const input = inputs();
     mutate(input);
-    assert.throws(() => validateConnectedInputs(input));
+    assert.throws(() => validate(input));
   }
+});
+
+test("the authenticated connected request stays on the runner's exact loopback controller", async (t) => {
+  const listen = async (handler) => {
+    const server = createServer(handler);
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => server[Symbol.asyncDispose]());
+    return `127.0.0.1:${server.address().port}`;
+  };
+  let foreignRequests = 0;
+  const foreign = await listen((_request, response) => {
+    foreignRequests++;
+    response.writeHead(403).end();
+  });
+  const serviceKey = `fixture-${randomUUID()}`;
+  const local = await listen((request, response) => {
+    assert.equal(request.headers["x-api-key"], serviceKey);
+    if (request.url === "/redirect") {
+      response.writeHead(307, { location: `http://${foreign}/foreign` }).end();
+    } else {
+      response.writeHead(204).end();
+    }
+  });
+  const controller = (apiOrigin) => {
+    const env = {
+      OCC_TEST_EGRESS_CONNECTED_CONTROLLER: JSON.stringify({ apiOrigin }),
+      OCC_TEST_EGRESS_CONNECTED_SERVICE_KEY: serviceKey,
+    };
+    const result = takeConnectedControllerBinding(env);
+    assert.equal(
+      env.OCC_TEST_EGRESS_CONNECTED_SERVICE_KEY,
+      undefined,
+      "child commands must not inherit the service key",
+    );
+    return result;
+  };
+  for (const origin of [
+    `http://localhost:${local.split(":")[1]}`,
+    `http://${local}/`,
+    "http://127.0.0.1",
+    "http://foreign.test:3000",
+  ]) {
+    assert.throws(() => controller(origin));
+  }
+  const binding = controller(`http://${local}`);
+  const get = async (path) =>
+    sendConnectedRequest(
+      binding,
+      serializeConnectedRequest("GET", path),
+      AbortSignal.timeout(5_000),
+    );
+  assert.equal((await get("/prepared")).status, 204, "the selected controller did receive the key");
+  // Fetch follows a leading slash and backslash as an authority, and a custom API-key
+  // header is not stripped on cross-origin redirects. Both must stop before disclosure.
+  await assert.rejects(
+    get("/" + "\\" + foreign + "/foreign"),
+    /only go to the selected controller/,
+  );
+  await assert.rejects(get("/redirect"));
+  assert.equal(foreignRequests, 0, "neither request reached the foreign listener");
 });
 
 test("connected database selection rejects missing, remote and redirected observers before effects", () => {
