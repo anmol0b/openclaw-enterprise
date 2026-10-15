@@ -1,3 +1,4 @@
+import { installEgressAuthority } from "./egress-authority.ts";
 import type { AuditEventFactory } from "@openclaw-enterprise/audit";
 import type {
   AuditEvent,
@@ -142,6 +143,8 @@ export async function composePostgresDevelopment(
     }
     const sandboxDriver = drivers?.sandboxDriver;
     const credentialGatewayDriver = drivers?.credentialGatewayDriver;
+    const egressProxyDriver = drivers?.egressProxyDriver;
+    const egressAuthority = drivers?.egressAuthority;
     const credentialRefreshDriver = drivers?.credentialRefreshDriver;
     const configurationDriver =
       options.configurationDriver ??
@@ -255,6 +258,10 @@ export async function composePostgresDevelopment(
       controller.registerDriver(sandboxDriver);
       controller.selectDriver("sandbox", sandboxDriver.id);
     }
+    if (egressProxyDriver !== undefined) {
+      controller.registerDriver(egressProxyDriver);
+      controller.selectDriver("egress_proxy", egressProxyDriver.id);
+    }
     if (credentialGatewayDriver !== undefined) {
       controller.registerDriver(credentialGatewayDriver);
       controller.selectDriver("credential_gateway", credentialGatewayDriver.id);
@@ -351,6 +358,9 @@ export async function composePostgresDevelopment(
       },
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });
+    if (egressProxyDriver !== undefined && egressAuthority !== undefined) {
+      await installEgressAuthority(app, controller, egressProxyDriver, egressAuthority);
+    }
     app.get("/healthz", async () => ({ status: "ok" }));
     app.get("/readyz", async () => {
       await pool.query("SELECT 1");

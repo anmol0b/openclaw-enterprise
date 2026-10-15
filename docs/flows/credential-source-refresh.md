@@ -18,6 +18,11 @@ read status, or delete the source. This flow covers those calls; the
 [credential source lifecycle flow](credential-source-lifecycle.md) owns
 binding, admission, dispatch, and withdrawal, which are the same for every type.
 
+The separate [OCE-prepared GitHub core](#6-oce-prepared-github-core) implements
+background production and warm-only reading behind a trusted transaction port.
+It has no production registration or regular Agent caller yet. It does not change
+the supported OpenShell OAuth lifecycle described above.
+
 ## Entry Points
 
 - Trigger: `POST /namespaces/:namespaceId/credential-sources` with a `refresh`
@@ -162,7 +167,45 @@ After the usual reference check and `deleting` mark, OCC calls `removeRefresh`,
 which sends `DeleteProviderRefresh` with `allow_missing`, and then the gateway's
 `removeSource`. A failure leaves the record `deleting` for retry.
 
+### 6. OCE-prepared GitHub core
+
+`apps/controller/src/drivers/repo/github/credentials/prepared-owner.ts:createGitHubPreparationOwner`
+
+A background worker can prepare one admitted GitHub App grant without traffic
+from an Agent. The owner commits an `issuing` attempt before retrieving the exact
+signing key version, then checks the family, owner epoch and that attempt again
+before calling GitHub. It reuses the existing signer and installation-token
+exchange. This is the [OCE-owned GitHub preparation option](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/lifecycle.md#github-issuer-bridge).
+
+GitHub issuance cannot be atomic with local storage. The owner verifies the exact
+returned repository, rights and provider expiry. The publication transaction
+rechecks the fence and remaining validity, then commits the token with its own
+opaque material version. A late, invalid or ambiguous result stays quarantined
+across owner changes. If storage loses a token before commit, the recorded attempt
+still blocks replay. Recovery and cleanup need an explicit owner.
+
+The trusted Resolver gets only a read port. It can receive still-eligible
+committed material during renewal. Cold, expired or differently admitted material
+returns `not_ready`, including when validity runs out during the read. The
+Resolver must authorize both access and the actual send.
+
+To connect this core, admission, takeover, preparation and reads must share a
+durable family transaction, encrypted custody and retained attempt history. The
+port currently accepts only one grant per family; its family ID must include the
+installation and namespace boundary. Connect a background worker with bounded
+attempts and an exact-version signing-key lookup, then give the Resolver only the
+read facet. Neither component is registered in production yet.
+
 ## Debugging and Verification
+
+- `node --test tests/integration/repository-credentials-github-prepared.test.mjs`
+  exercises producer → transaction commit → warm consumer over loopback HTTPS,
+  with a generated App key and actual JWT signature verification. It covers
+  renewal overlap, duplicate attempts, latest-admission fences, rejected provider
+  scope/expiry, cancellation, and transaction failures before/after commit.
+  Its serializable in-memory fixture reconnects owners to shared committed state;
+  it is not production durability, process-crash, live-provider, installed-runtime,
+  cluster or regular Agent workflow proof. No production owner is registered.
 
 - Read the source: `status.refresh.state`, `lastRefreshAt`, `failureCode`, and
   `recoveryAction` explain the last mint without exposing a token.
@@ -188,6 +231,8 @@ which sends `DeleteProviderRefresh` with `allow_missing`, and then the gateway's
 ## Changelog
 
 - 2026-10-14 21:40: Refuse the three-label `<port>.<protocol>.<service>` short form of the gateway's Services. (fix-1366 - bc85338f2)
+- 2026-10-14 21:46: Document the GitHub preparation fence, warm reader and required production join. (authoring-run/bb74066d-9a10-4c10-932f-fb5843e85628 - fc20eb0174eaf8ae9d4ccb327ec65236c49ef4fb)
+
 - 2026-10-09 23:30: Update refuses a recorded refresh token; update and rotation hold only the source lock and audit failures. (fix-848-978-979)
 
 - 2026-10-08 16:19: Registration sends the gateway no refresh secrets; a failed update keeps the new material. (claude-code/session_014fi7Uq1LyofgqwLrLoQ3yY - f79f896b3)

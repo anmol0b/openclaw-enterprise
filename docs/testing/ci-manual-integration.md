@@ -47,6 +47,13 @@ Model/service lanes require configured credentials and infrastructure.
 
 ## No GitHub workflow entrypoint
 
+[Connected static inference](static-egress.md#select-the-prepared-connected-lane)
+belongs to the explicitly selected `egress-connected` CLI lane. It requires a
+parent-prepared protected controller, database, authenticated OpenShell stack
+and synthetic HTTPS origin. It neither provisions those dependencies nor joins
+the generic `openshell` lane, `ci` or `full`. Selected missing inputs and skips
+fail; source preflight runs separately in `checks-baseline-2`.
+
 [repository-credentials-k3d-real.test.mjs](../../tests/integration/repository-credentials-k3d-real.test.mjs)
 belongs to the explicitly selected `repository-credentials-installed` CLI lane,
 excluded from both workflow groups and Full Integration dispatch. The lane is

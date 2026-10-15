@@ -1,5 +1,7 @@
 import type {
   InitialWorkspaceFiles,
+  StaticEgressSource,
+  EgressInstallation,
   AgentDesiredRuntimeState,
   AgentStatus,
   CredentialSourceState,
@@ -473,11 +475,16 @@ export const credentialSources = occSchema.table(
     name: collatedText("name").notNull(),
     type: text("type").notNull(),
     config: jsonb("config").$type<Readonly<Record<string, string>>>().notNull(),
+    egress: jsonb("egress").$type<StaticEgressSource>(),
     driverId: text("driver_id").notNull(),
     state: text("state").$type<CredentialSourceState>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (table): PgTableExtraConfigValue[] => [
+    check(
+      "credential_sources_egress_valid",
+      sql`${table.egress} IS NULL OR occ.static_egress_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id})`,
+    ),
     unique("credential_sources_namespace_id_id_unique").on(table.namespaceId, table.id),
     unique("credential_sources_namespace_id_name_unique").on(table.namespaceId, table.name),
     check(
@@ -655,6 +662,33 @@ export const agentRevisions = occSchema.table(
     ),
     check("agent_revisions_spec_object", sql`jsonb_typeof(${table.admittedSpec}) = 'object'`),
     check(
+      "agent_revisions_egress_scope",
+      sql`NOT (${table.admittedSpec} ? 'egress_plan') OR COALESCE(
+        jsonb_typeof(${table.admittedSpec}->'egress_plan') = 'object'
+        AND ${table.admittedSpec}->'egress_plan'->'execution'->>'namespaceId' = ${table.namespaceId}
+        AND ${table.admittedSpec}->'egress_plan'->'execution'->>'agentId' = ${table.agentId}
+        AND ${table.admittedSpec}->'egress_plan'->'execution'->>'revisionId' = ${table.id}
+        AND jsonb_typeof(${table.admittedSpec}->'egress_plan'->'routes') = 'array',
+        false)`,
+    ),
+    // Migration 0055 installs this NOT VALID to preserve old, unreadable history.
+    check(
+      "agent_revisions_execution_admission",
+      sql`COALESCE(
+        jsonb_typeof(${table.admittedSpec}->'execution_admission') = 'object'
+        AND (${table.admittedSpec}->'execution_admission') ?& ARRAY['version', 'mode']
+        AND ((${table.admittedSpec}->'execution_admission') - 'version' - 'mode') = '{}'::jsonb
+        AND ${table.admittedSpec}->'execution_admission'->'version' = '2'::jsonb
+        AND (
+          (${table.admittedSpec}->'execution_admission'->>'mode' = 'unprotected'
+            AND NOT (${table.admittedSpec} ? 'egress_plan')
+            AND NOT ((${table.admittedSpec}->'harness_auth') ? 'protectedExecutionVersion'))
+          OR (${table.admittedSpec}->'execution_admission'->>'mode' = 'protected'
+            AND ${table.admittedSpec} ? 'egress_plan'
+            AND ${table.admittedSpec} #> '{harness_auth,protectedExecutionVersion}' = '2'::jsonb)
+        ), false)`,
+    ),
+    check(
       "agent_revisions_admitted_snapshot",
       sql`(${table.admittedSpec} ?& ARRAY[
           'configuration_id', 'configuration_kind', 'configuration_generation',
@@ -664,7 +698,7 @@ export const agentRevisions = occSchema.table(
           - 'configuration_id' - 'configuration_kind' - 'configuration_generation'
           - 'draft_spec' - 'harness' - 'compute' - 'sandbox_driver_id'
           - 'secret_driver_id' - 'secret_bindings' - 'harness_auth' - 'credential_sources' - 'plugins'
-          - 'repository_credentials') = '{}'::jsonb
+          - 'repository_credentials' - 'egress_plan' - 'execution_admission') = '{}'::jsonb
         AND jsonb_typeof(${table.admittedSpec}->'configuration_id') = 'string'
         AND (${table.admittedSpec}->>'configuration_id') ~ ${identifierPatterns.configuration}
         AND jsonb_typeof(${table.admittedSpec}->'configuration_kind') = 'string'
@@ -708,7 +742,7 @@ export const agentRevisions = occSchema.table(
           NOT (${table.admittedSpec} ? 'secret_bindings')
           OR occ.secret_bindings_are_valid(${table.admittedSpec}->'secret_bindings', ${table.namespaceId})
         )
-        AND occ.harness_auth_is_valid(${table.admittedSpec}->'harness_auth', ${table.namespaceId}, true)
+        AND occ.harness_auth_is_valid((${table.admittedSpec}->'harness_auth') - 'protectedExecutionVersion', ${table.namespaceId}, true)
         AND (
           NOT (${table.admittedSpec} ? 'repository_credentials')
           OR occ.repository_credentials_are_valid(${table.admittedSpec}->'repository_credentials')
@@ -1579,5 +1613,165 @@ export const apikey = occSchema.table(
   (table) => [
     index("apikey_config_id_idx").on(table.configId),
     index("apikey_reference_id_idx").on(table.referenceId),
+  ],
+);
+
+/** Exact authenticated runtime installation; admission remains owned by the revision. */
+export const egressInstallations = occSchema.table(
+  "egress_installations",
+  {
+    senderId: text("sender_id").notNull(),
+    sandboxId: text("sandbox_id").notNull(),
+    namespaceId: text("namespace_id").notNull(),
+    revisionId: text("revision_id").notNull(),
+    agentId: text("agent_id").notNull(),
+    installation: jsonb("installation").$type<EgressInstallation>().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.senderId, table.sandboxId] }),
+    check(
+      "egress_installations_check",
+      sql`length(${table.senderId}) BETWEEN 1 AND 200 AND length(${table.sandboxId}) BETWEEN 1 AND 200`,
+    ),
+    check(
+      "egress_installations_check1",
+      sql`COALESCE(${table.installation}->'sender'->>'id' = ${table.senderId}
+        AND ${table.installation}->>'sandboxId' = ${table.sandboxId}
+        AND ${table.installation}->'plan'->'execution'->>'namespaceId' = ${table.namespaceId}
+        AND ${table.installation}->'plan'->'execution'->>'revisionId' = ${table.revisionId}
+        AND ${table.installation}->'plan'->'execution'->>'agentId' = ${table.agentId}, false)`,
+    ),
+    unique().on(table.namespaceId, table.revisionId),
+    foreignKey({
+      columns: [table.namespaceId, table.agentId, table.revisionId],
+      foreignColumns: [agentRevisions.namespaceId, agentRevisions.agentId, agentRevisions.id],
+    }).onDelete("cascade"),
+  ],
+);
+
+export const egressRejectedMaterial = occSchema.table(
+  "egress_rejected_material",
+  {
+    namespaceId: text("namespace_id")
+      .notNull()
+      .references(() => namespaces.id, { onDelete: "cascade" }),
+    secretDriverId: text("secret_driver_id").notNull(),
+    materialId: text("material_id").notNull(),
+    materialVersion: text("material_version").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.namespaceId, table.secretDriverId, table.materialId, table.materialVersion],
+    }),
+    check(
+      "egress_rejected_material_check",
+      sql`length(${table.secretDriverId}) > 0 AND length(${table.materialId}) > 0 AND length(${table.materialVersion}) > 0`,
+    ),
+  ],
+);
+
+/** Metadata only: possible dispatch, observed response policy and independent settlement. */
+export const egressSendReceipts = occSchema.table(
+  "egress_send_receipts",
+  {
+    senderId: text("sender_id").notNull(),
+    senderGeneration: bigint("sender_generation", { mode: "number" }).notNull(),
+    instanceId: text("instance_id").notNull(),
+    useId: text("use_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    binding: jsonb("binding").notNull(),
+    authorization: jsonb("authorized_dispatch"),
+    observation: jsonb("observation"),
+    outcome: jsonb("outcome").notNull(),
+    settled: boolean("settled").notNull().default(false),
+    feedback: text("feedback"),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.senderId,
+        table.senderGeneration,
+        table.instanceId,
+        table.useId,
+        table.attemptId,
+      ],
+    }),
+    check("egress_send_receipts_check_0", sql`length(sender_id) > 0`),
+    check("egress_send_receipts_check_1", sql`sender_generation > 0`),
+    check("egress_send_receipts_check_2", sql`length(instance_id) > 0`),
+    check("egress_send_receipts_check_3", sql`length(use_id) > 0`),
+    check("egress_send_receipts_check_4", sql`length(attempt_id) > 0`),
+    check("egress_send_receipts_check_5", sql`jsonb_typeof(binding) = 'object'`),
+    check("egress_send_receipts_check_6", sql`jsonb_typeof(outcome) = 'object'`),
+    check("egress_send_receipts_check_7", sql`feedback = 'fenced'`),
+    check(
+      "egress_send_receipts_check_8",
+      sql`(binding->'sender'->>'id' = sender_id
+      AND (binding->'sender'->>'generation')::bigint = sender_generation
+      AND binding->>'instanceId' = instance_id
+      AND binding->>'useId' = use_id AND binding->>'attemptId' = attempt_id
+      AND length(binding->>'deadlineAt') > 0
+      AND jsonb_typeof(binding->'material') IN ('object', 'null')) IS TRUE`,
+    ),
+    check(
+      "egress_send_receipts_check_9",
+      sql`(
+    (outcome->>'kind' = 'refused' AND outcome->'dispatched' = 'false'::jsonb AND settled)
+    OR (outcome->>'kind' IN ('response', 'provider_rejected', 'response_blocked')
+        AND outcome->>'dispatch' = 'confirmed' AND settled)
+    OR (outcome->>'kind' = 'uncertain' AND outcome->>'dispatch' = 'possible')
+  ) IS TRUE`,
+    ),
+    check(
+      "egress_send_receipts_check_10",
+      sql`outcome->>'kind' <> 'provider_rejected' OR feedback IS NOT DISTINCT FROM 'fenced'`,
+    ),
+    check(
+      "egress_send_receipts_check_11",
+      sql`outcome->>'kind' <> 'response_blocked' OR (outcome->>'code' = 'response_policy') IS TRUE`,
+    ),
+    check(
+      "egress_send_receipts_check_12",
+      sql`outcome->>'kind' NOT IN ('response', 'provider_rejected')
+    OR ((outcome->>'status')::integer BETWEEN 100 AND 599) IS TRUE`,
+    ),
+    check(
+      "egress_send_receipts_check_13",
+      sql`observation IS NULL OR (jsonb_typeof(observation) = 'object'
+    AND observation->>'kind' IN ('response', 'provider_rejected', 'response_blocked')
+    AND observation->>'dispatch' = 'confirmed'
+    AND CASE WHEN observation->>'kind' = 'response_blocked'
+      THEN observation->>'code' = 'response_policy'
+      ELSE (observation->>'status')::integer BETWEEN 100 AND 599 END) IS TRUE`,
+    ),
+    check(
+      "egress_send_receipts_check_14",
+      sql`observation->>'kind' IS DISTINCT FROM 'provider_rejected' OR feedback IS NOT DISTINCT FROM 'fenced'`,
+    ),
+    check(
+      "egress_send_receipts_check_15",
+      sql`observation IS NULL OR NOT settled OR outcome = observation OR outcome->>'kind' = 'uncertain'`,
+    ),
+    check(
+      "egress_send_receipts_check_16",
+      sql`feedback IS NULL OR ((observation IS NOT NULL OR (settled AND outcome->>'dispatch' = 'confirmed'))
+    AND binding->'material'->>'kind' = 'static') IS TRUE`,
+    ),
+    check(
+      "egress_send_receipts_check_17",
+      sql`authorized_dispatch IS NULL OR (jsonb_typeof(authorized_dispatch) = 'object'
+    AND binding->'material'->>'kind' = 'static'
+    AND authorized_dispatch->'association'->'installation'->>'instanceId' = instance_id
+    AND authorized_dispatch->'association'->'execution'->>'installationId' = binding->'material'->'source'->>'installationId'
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz > (authorized_dispatch->>'authorizedAt')::timestamptz
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (authorized_dispatch->>'authorizedAt')::timestamptz + interval '1 second'
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->>'deadlineAt')::timestamptz
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->'material'->>'usableUntil')::timestamptz
+    AND length(authorized_dispatch->'association'->>'exchangeId') > 0
+    AND length(authorized_dispatch->'association'->>'responseId') > 0
+    AND length(authorized_dispatch->'association'->>'custodyId') > 0
+    AND length(authorized_dispatch->>'requestDigest') = 64
+    AND length(authorized_dispatch->>'injectionDigest') = 64) IS TRUE`,
+    ),
   ],
 );

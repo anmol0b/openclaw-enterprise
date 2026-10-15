@@ -158,6 +158,7 @@ function revision(overrides = {}) {
   delete native.gateway.auth;
   return {
     id: "revision-plugin-compute-1",
+    executionAdmission: { version: 2, mode: "unprotected" },
     namespaceId: tenant.id,
     agentId: agent.id,
     revision: 1,
@@ -3259,12 +3260,38 @@ test("Codex runtime gates startup and readiness on a successful native authentic
       ready: true,
     },
     {
+      name: "protected profile without enrollment refuses before any native process",
+      protectedInference: true,
+      missingEnrollment: true,
+    },
+    {
+      name: "protected probe retains zero retry settings despite ignoring user config",
+      protectedInference: true,
+      checkRetryArguments: true,
+      events: [started, assistant, completed],
+      ready: true,
+    },
+    {
       name: "provider PAT metadata rejection keeps the revision unready",
       pat: true,
       providerPat: true,
       loginStatus: 1,
       loginStderr: "personal access token metadata request failed with status 401 Unauthorized",
       failureCode: "AUTHENTICATION_FAILED",
+    },
+    {
+      // A timeout can follow provider dispatch. Enrollment must not turn it into
+      // permission for the wrapper to submit another protected business request.
+      name: "protected probe timeout never starts a second business request",
+      protectedInference: true,
+      probeTimeouts: 1,
+      failureCode: "MODEL_PROBE_TIMEOUT",
+    },
+    {
+      name: "protected probe refuses an unexpected native stream retry",
+      protectedInference: true,
+      events: [started, recoveredStreamError, assistant, completed],
+      cause: { kind: "PROBE_STATUS", detail: "error-event" },
     },
     {
       name: "verifier-only app server starts without exposing either token input",
@@ -3620,9 +3647,10 @@ test("Codex runtime gates startup and readiness on a successful native authentic
     },
   ];
   for (const scenario of scenarios) {
-    await t.test(scenario.name, () => {
+    await t.test(scenario.name, async () => {
       const directory = mkdtempSync(join(tmpdir(), "openclaw-plugin-ready-"));
       const marker = join(directory, "ready");
+      mkdirSync(join(directory, "codex"));
       writeFileSync(marker, "stale\n", { mode: 0o600 });
       try {
         const diagnostics = [];
@@ -3633,12 +3661,23 @@ test("Codex runtime gates startup and readiness on a successful native authentic
         let nativeCalls = 0;
         let loginCalls = 0;
         let probeCalls = 0;
+        let probeArguments;
         let clock = 0;
         const retryTimers = [];
+        let enrollmentHandler;
         const sandbox = {
           URL,
+          Buffer,
           setTimeout(callback, delay) {
-            retryTimers.push({ callback, delay });
+            const timer = { callback, delay };
+            retryTimers.push(timer);
+            return timer;
+          },
+          clearTimeout(timer) {
+            const index = retryTimers.indexOf(timer);
+            if (index >= 0) {
+              retryTimers.splice(index, 1);
+            }
           },
           console: {
             error(message) {
@@ -3667,10 +3706,37 @@ test("Codex runtime gates startup and readiness on a successful native authentic
               OPENCLAW_RUNTIME_STATUS_PORT: "18791",
               OPENCLAW_POD_UID: "pod-runtime-auth-gate",
               OPENCLAW_PLUGIN_READY_MARKER: marker,
-              ...(scenario.tokenVerifier
+              ...(scenario.tokenVerifier || scenario.protectedInference
                 ? { APP_TOKEN_SHA: sha256("fixture-transport-token") }
                 : { APP_SERVER_TOKEN: "fixture-transport-token" }),
               APP_SERVER_PORT: "4500",
+              ...(scenario.protectedInference
+                ? { OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID: revisionId }
+                : {}),
+              ...(scenario.protectedInference
+                ? pluginRuntimeEnvironment({
+                    kind: "codex",
+                    selections: {},
+                    providerTools: "none",
+                    egressEnrollment: scenario.missingEnrollment
+                      ? undefined
+                      : {
+                          plan: { id: "protected-plan", generation: 1 },
+                          execution: {
+                            installationId: "installation",
+                            namespaceId: "namespace",
+                            agentId: "agent",
+                            servicePrincipalId: "principal",
+                            revisionId,
+                            executionId: "execution",
+                          },
+                        },
+                    modelEndpoint: {
+                      modelProvider: "openai-compatible",
+                      baseUrl: "https://provider.example.test/v1",
+                    },
+                  })
+                : {}),
             },
             on() {},
             exit() {
@@ -3695,8 +3761,20 @@ test("Codex runtime gates startup and readiness on a successful native authentic
             if (specifier === "node:http") {
               return {
                 createServer(handler) {
-                  statusHandler = handler;
-                  return { listen() {} };
+                  return {
+                    listen(port) {
+                      if (port === 4500) {
+                        enrollmentHandler = handler;
+                      } else {
+                        statusHandler = handler;
+                      }
+                    },
+                    on() {},
+                    close(callback) {
+                      callback();
+                    },
+                    closeAllConnections() {},
+                  };
                 },
               };
             }
@@ -3714,7 +3792,7 @@ test("Codex runtime gates startup and readiness on a successful native authentic
                       loginEnvironment.CODEX_LOGIN_MODE,
                       sandbox.process.env.CODEX_LOGIN_MODE,
                     );
-                    if (scenario.tokenVerifier) {
+                    if (scenario.tokenVerifier || scenario.protectedInference) {
                       assert.equal(
                         sandbox.process.env.APP_TOKEN_SHA,
                         sha256("fixture-transport-token"),
@@ -3765,6 +3843,7 @@ test("Codex runtime gates startup and readiness on a successful native authentic
                     };
                   }
                   probeCalls++;
+                  probeArguments = Array.from(args);
                   assert.ok(options.timeout > 0 && options.timeout <= 30000);
                   if (scenario.expectedTimeouts) {
                     assert.equal(options.timeout, scenario.expectedTimeouts[probeCalls - 1]);
@@ -3800,8 +3879,71 @@ test("Codex runtime gates startup and readiness on a successful native authentic
             return nodeRequire(specifier);
           },
         };
+        if (scenario.missingEnrollment) {
+          assert.throws(
+            () => vm.runInNewContext(AGENT_RUNTIME_ENTRYPOINT, sandbox),
+            /protected inference profile is invalid/,
+          );
+          assert.equal(nativeCalls, 0);
+          assert.equal(appServerStarts, 0);
+          assert.equal(existsSync(marker), false);
+          return;
+        }
         vm.runInNewContext(AGENT_RUNTIME_ENTRYPOINT, sandbox);
-        if (scenario.probeTimeouts) {
+        if (scenario.protectedInference) {
+          // Supply only the trusted peer's enrollment exchange. The actual wrapper
+          // still controls all probe calls and retry decisions under test here.
+          let challenge;
+          const response = (onBody) => ({
+            writeHead(status) {
+              assert.equal(status, 200);
+            },
+            on(_event, listener) {
+              this.finished = listener;
+            },
+            end(body) {
+              onBody(JSON.parse(body));
+              this.finished?.();
+            },
+          });
+          const request = {
+            url: "/openclaw/runtime/egress-enrollment",
+            headers: {
+              authorization: "Bearer fixture-transport-token",
+              "content-type": "application/json",
+            },
+          };
+          await enrollmentHandler(
+            { ...request, method: "GET" },
+            response((body) => {
+              challenge = body;
+            }),
+          );
+          await enrollmentHandler(
+            {
+              ...request,
+              method: "POST",
+              async *[Symbol.asyncIterator]() {
+                yield Buffer.from(JSON.stringify(challenge));
+              },
+            },
+            response(() => {}),
+          );
+          await waitForCondition("protected startup probe", () => probeCalls > 0);
+        }
+        if (scenario.protectedInference && scenario.ready) {
+          await waitForCondition("protected plugin-free startup", () => existsSync(marker));
+        }
+        if (scenario.checkRetryArguments) {
+          assert.ok(probeArguments.includes("--ignore-user-config"));
+          assert.ok(
+            probeArguments.includes("model_providers.openai-compatible.request_max_retries=0"),
+          );
+          assert.ok(
+            probeArguments.includes("model_providers.openai-compatible.stream_max_retries=0"),
+          );
+        }
+        if (scenario.probeTimeouts && !scenario.protectedInference) {
           assert.equal(appServerStarts, 0);
           assert.equal(existsSync(marker), false);
           assert.equal(readRuntimeStatusFromHandler(statusHandler).runtimeFailure, undefined);
@@ -3822,7 +3964,11 @@ test("Codex runtime gates startup and readiness on a successful native authentic
         assert.equal(
           nativeCalls,
           loginCalls +
-            (loginFailed ? 0 : scenario.probeTimeouts && !scenario.expiredBudget ? 2 : 1),
+            (loginFailed
+              ? 0
+              : scenario.probeTimeouts && !scenario.expiredBudget && !scenario.protectedInference
+                ? 2
+                : 1),
         );
         const jsonDiagnostics = diagnostics
           .filter((message) => message.startsWith("{"))
@@ -3848,8 +3994,10 @@ test("Codex runtime gates startup and readiness on a successful native authentic
           startupPhases.map(({ phase, outcome }) => [phase, outcome]),
           [
             ["codex-login", loginFailed ? "failed" : "ok"],
+            ...(scenario.protectedInference ? [["egress-enrollment", "ok"]] : []),
             ...(loginFailed ? [] : [["model-probe", scenario.ready ? "ok" : "failed"]]),
             ...(scenario.ready ? [["native-spawn", "ok"]] : []),
+            ...(scenario.ready && scenario.protectedInference ? [["plugin-install", "ok"]] : []),
           ],
         );
         for (const phase of startupPhases) {

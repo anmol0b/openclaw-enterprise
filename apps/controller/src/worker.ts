@@ -1,3 +1,6 @@
+import { assertExecutionReleaseAllowed } from "@openclaw-enterprise/contracts";
+import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
+import { isDeepStrictEqual } from "node:util";
 import { isSecretHarnessAuth, isServiceAccountHarnessAuth } from "@openclaw-enterprise/contracts";
 import { isPositiveSafeInteger } from "@openclaw-enterprise/utils";
 import { randomUUID } from "node:crypto";
@@ -51,6 +54,7 @@ import {
   ActivationPendingError,
   CredentialSourceRevisionError,
   CredentialWithdrawalRefusedError,
+  DependencyUnavailableError,
   SandboxRevisionUnsupportedError,
   ScopeViolationError,
   TransientDependencyError,
@@ -132,6 +136,7 @@ export interface ControllerWorkerOptions {
   readonly computeDriver?: ComputeDriver;
   readonly sandboxDriver?: SandboxDriver;
   readonly credentialGatewayDriver?: CredentialGatewayDriver;
+  readonly egressProxyDriver?: EgressProxyDriver;
   readonly pollIntervalMs?: number;
   readonly leaseDurationMs?: number;
   readonly maxAttempts?: number;
@@ -253,14 +258,17 @@ function causeStatusLogFields(error: object): {
 /**
  * Log fields that say which dependency failed and why, without provider text:
  * a transient dependency names itself and a closed reason; any other failure
- * gives only its error class. Either adds the HTTP status of an SDK error, its
- * own or its cause's, and the Status reason a cause keeps.
+ * gives its error class and any fixed Driver request diagnostic. Other errors add
+ * the HTTP status of an SDK error, its own or its cause's, and the Status reason a cause keeps.
  */
 function revisionFailureLogFields(error: unknown): {
   readonly dependency?: string;
   readonly cause?: string;
   readonly status?: number;
   readonly reason?: string;
+  readonly method?: string;
+  readonly grpcStatus?: number;
+  readonly validationCategory?: string;
 } {
   if (error instanceof TransientDependencyError) {
     return { dependency: error.dependency, cause: error.reason, ...causeStatusLogFields(error) };
@@ -276,6 +284,10 @@ function revisionFailureLogFields(error: unknown): {
             LOGGED_ERROR_NAME.test(candidate),
         );
   const errorClass = name ?? "Error";
+  if (error instanceof DependencyUnavailableError && error.requestDiagnostic !== undefined) {
+    const { method, grpcStatus, validationCategory } = error.requestDiagnostic;
+    return { cause: errorClass, method, grpcStatus, validationCategory };
+  }
   // Kubernetes SDK errors carry the HTTP status in `code`.
   const status = loggedHttpStatus(record);
   if (status !== undefined) {
@@ -913,6 +925,7 @@ export class ControllerWorker {
   private provisioningController: OpenClawController | undefined;
   private readonly sandbox: SandboxDriver | undefined;
   private readonly credentialGateway: CredentialGatewayDriver | undefined;
+  private readonly egressProxy: EgressProxyDriver | undefined;
   private readonly backends: readonly BackendDefinition[];
   private readonly backendMap: ReadonlyMap<string, BackendDefinition>;
   private readonly requireComputePreflight: boolean;
@@ -1038,6 +1051,7 @@ export class ControllerWorker {
     }
     this.sandbox = drivers?.sandboxDriver ?? options.sandboxDriver;
     this.credentialGateway = drivers?.credentialGatewayDriver ?? options.credentialGatewayDriver;
+    this.egressProxy = drivers?.egressProxyDriver ?? options.egressProxyDriver;
     if (
       (drivers?.installation.drivers.credential_gateway === undefined) !==
       (drivers?.credentialGatewayDriver === undefined)
@@ -1127,6 +1141,7 @@ export class ControllerWorker {
       this.configuration,
       this.sandbox,
       this.credentialGateway,
+      this.egressProxy,
       this.iam,
       this.secretDriver,
       this.repoDriver,
@@ -1378,6 +1393,7 @@ export class ControllerWorker {
       throw new Error(`The selected production Compute Driver requires ${operation}.`);
     }
     if (operation === "activateRevision") {
+      assertExecutionReleaseAllowed(revision);
       this.stoppedPredecessors.delete(revision.id);
     }
     await stage.call(this.compute, revision, context);
@@ -1528,6 +1544,7 @@ export class ControllerWorker {
     revision: Readonly<AgentRevision>,
     context: ComputeRevisionContext,
   ): Promise<{ readonly observation: ComputeReadiness; readonly context: ComputeRevisionContext }> {
+    assertExecutionReleaseAllowed(revision);
     const timing = this.deployTimings.get(claim.idempotencyKey);
     const started = Date.now();
     try {
@@ -4094,6 +4111,11 @@ export class ControllerWorker {
   ): Promise<
     { readonly context: ComputeRevisionContext } | { readonly result: RevisionDispatchResult }
   > {
+    try {
+      assertExecutionReleaseAllowed(revision);
+    } catch {
+      return { result: { outcome: "permanent", code: "EXECUTION_ADMISSION_UNAVAILABLE" } };
+    }
     const bindings = revisionSecretBindings(revision);
     if ("result" in bindings) {
       return { result: bindings.result };
@@ -4193,7 +4215,23 @@ export class ControllerWorker {
       ) {
         return { result: { outcome: "permanent", code: "HARNESS_AUTH_SOURCE_UNAVAILABLE" } };
       }
-      harnessAuth = { ...auth, source };
+      if (source.egress !== undefined) {
+        const control = this.egressProxy?.sourceControl;
+        const provider = control?.providers.find((entry) =>
+          isDeepStrictEqual(entry.ref, source.egress!.key.provider),
+        );
+        if (!provider || !isDeepStrictEqual(control?.backend, source.egress.key.backend)) {
+          return { result: { outcome: "permanent", code: "EGRESS_PROVIDER_UNAVAILABLE" } };
+        }
+        // Provider defaults must reach the normal Harness too. In particular, a
+        // source with an omitted optional endpoint cannot escape its protected profile.
+        harnessAuth = {
+          ...auth,
+          source: { ...source, config: provider.normalizeConfig(source.config) },
+        };
+      } else {
+        harnessAuth = { ...auth, source };
+      }
     } else {
       harnessAuth = revision.harnessAuth;
     }
@@ -4242,6 +4280,18 @@ export class ControllerWorker {
     }
     return {
       context: {
+        ...(revision.egressPlan === undefined
+          ? {}
+          : {
+              recordEgressInstallation: async (installation) => {
+                if (!isDeepStrictEqual(installation.plan, revision.egressPlan)) {
+                  throw new Error("Egress receipt does not match the admitted revision.");
+                }
+                await this.state.transact((state) =>
+                  state.credentialSources.recordEgressInstallation(installation),
+                );
+              },
+            }),
         secretEnvironment: Object.freeze(resolved),
         harnessAuth,
         ...(credentialSources.length === 0

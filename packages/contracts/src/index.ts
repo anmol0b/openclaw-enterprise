@@ -1,3 +1,38 @@
+import type {
+  ExecutionAdmission,
+  StaticEgressSource,
+  CredentialInputRead,
+  VersionedSecretValue,
+  EgressPlan,
+  EgressAttachment,
+  EgressInstallation,
+} from "./egress.ts";
+
+export type {
+  EgressRef,
+  EgressSourceKey,
+  ExecutionAdmission,
+  StaticEgressSource,
+  CredentialInputRead,
+  VersionedSecretValue,
+  EgressExecution,
+  InferenceGrant,
+  EgressBinding,
+  EgressRoute,
+  EgressPlan,
+  EgressInstallation,
+  EgressRequest,
+  InferenceOperation,
+  StaticMaterialEvidence,
+  EgressRefusal,
+  EgressResponse,
+  EgressAttachment,
+  EgressRevisionContext,
+  CredentialProviderDefinition,
+  CredentialSourceControl,
+  EgressProxyDriver,
+} from "./egress.ts";
+export { assertExecutionAdmission, assertExecutionReleaseAllowed } from "./egress.ts";
 import type { WorkspaceSetup } from "./workspace-setup.ts";
 
 export type { ComputePreparationFailureEvidence } from "./compute-preparation.ts";
@@ -93,6 +128,7 @@ export const DRIVER_CAPABILITIES = Object.freeze([
   "repo",
   "credential_gateway",
   "credential_refresh",
+  "egress_proxy",
 ] as const);
 
 export type DriverCapability = (typeof DRIVER_CAPABILITIES)[number];
@@ -131,7 +167,12 @@ export interface OpenShellBackendConfiguration {
   readonly port?: number;
   readonly auth?:
     | { readonly mode: "unauthenticated" }
-    | { readonly mode: "bearerTokenFile"; readonly path: string };
+    | { readonly mode: "bearerTokenFile"; readonly path: string }
+    | {
+        readonly mode: "mtls";
+        readonly certificatePath: string;
+        readonly privateKeyPath: string;
+      };
   /** At most 30 s; it bounds how late a timed-out credential registration can land. */
   readonly requestTimeoutMs?: number;
   readonly rootCertificatePath?: string;
@@ -149,6 +190,7 @@ export interface OpenShellBackendDefinition {
   readonly drivers: {
     readonly sandbox: string;
     readonly credential_gateway: string;
+    readonly egress_proxy?: string;
     /** Refreshes the gateway's refresh-type sources; absent when none are offered. */
     readonly credential_refresh?: string;
   };
@@ -364,6 +406,7 @@ export type CredentialSourceState = "registering" | "ready" | "deleting";
 
 /** OCC record for a credential held by the selected Credential Gateway; never values. */
 export interface CredentialSource {
+  readonly egress?: StaticEgressSource;
   readonly id: string;
   readonly namespaceId: string;
   readonly name: string;
@@ -376,6 +419,7 @@ export interface CredentialSource {
 }
 
 export interface CredentialSourceMetadata {
+  readonly egress?: Pick<StaticEgressSource, "adoption" | "retention">;
   readonly id: string;
   readonly namespaceId: string;
   readonly name: string;
@@ -486,6 +530,8 @@ export type ResolvedHarnessAuth =
   | Extract<HarnessAuthSnapshot, { source: ServiceAccountReference } | { method: "runtime" }>;
 
 export interface ComputeRevisionContext {
+  /** Worker persists only an authenticated receipt for this admitted plan. */
+  readonly recordEgressInstallation?: (installation: EgressInstallation) => Promise<void>;
   readonly workspaceSetup?: Readonly<WorkspaceSetup>;
   readonly harnessAuth: ResolvedHarnessAuth;
   /** Non-model sources resolved again at dispatch, in admission order. */
@@ -782,6 +828,8 @@ export interface RevisionHarnessDescriptor extends HarnessDescriptor {
 }
 
 export interface AgentRevision extends Scope {
+  readonly executionAdmission: ExecutionAdmission;
+  readonly egressPlan?: EgressPlan;
   readonly id: string;
   readonly namespaceId: string;
   readonly agentId: string;
@@ -834,6 +882,10 @@ export type AgentRevisionRead =
 export function freezeAgentRevision(revision: AgentRevision): Readonly<AgentRevision> {
   return Object.freeze({
     ...revision,
+    executionAdmission: immutableCopy(revision.executionAdmission),
+    ...(revision.egressPlan === undefined
+      ? {}
+      : { egressPlan: immutableCopy(revision.egressPlan) }),
     configuration: immutableCopy(revision.configuration),
     ...(revision.secretBindings === undefined
       ? {}
@@ -1095,10 +1147,13 @@ export interface HarnessWorkloadRequirements {
   readonly files: readonly SandboxWorkloadFile[];
   /** Credential Gateway attachments the paired Sandbox must consume in full. */
   readonly credentialAttachments: readonly CredentialSourceAttachment[];
+  readonly egressAttachment?: EgressAttachment;
   readonly labels: Readonly<Record<string, string>>;
 }
 
 export interface SandboxResourceRef {
+  /** Trusted Sandbox output, including its exact auxiliary rules, for independent observation. */
+  readonly egressAttachment?: EgressAttachment;
   readonly namespaceName: string;
   readonly resourceName: string;
   readonly agentId: string;
@@ -1108,6 +1163,11 @@ export interface SandboxResourceRef {
 /** Provider-owned endpoint through which the Agent Gateway reaches its dedicated Harness. */
 export interface SandboxHarnessEndpoint {
   readonly url: string;
+  /** Public PEM CA certificates for this WSS endpoint; absent means system trust. */
+  readonly tls?: {
+    /** Certificate bytes only, never a source path, private key or client credential. */
+    readonly caBundle: string;
+  };
   /** Provider-local workspace root served by the Harness workspace node. */
   readonly workspaceRoot?: string;
 }
@@ -1329,6 +1389,8 @@ export interface SecretDriver extends Driver {
   /** Replace an exact current value atomically; used to fence device authorization exchanges. */
   compareAndSwap?(secret: Secret, expected: string, value: string): Promise<boolean>;
   delete(secret: Secret): Promise<void>;
+  /** Authoritative, versioned read confined to trusted credential resolution. */
+  readCredentialInput?(input: CredentialInputRead): Promise<VersionedSecretValue>;
   /** Verify live exact ownership and return only safe projection identity. */
   resolve(secret: Secret): Promise<SecretBackendRef>;
   /** Verify live ownership and use the current value only within a transient server-side operation. */
@@ -1485,6 +1547,16 @@ export interface SandboxDriver extends Driver {
   ): OpenClawConfigurationDocument;
   ensureNamespace?(context: SandboxNamespaceContext): Promise<void>;
   provisionHarness?(context: SandboxHarnessContext): Promise<SandboxResourceRef>;
+  /**
+   * Release the exact protected Harness startup only after Compute has committed
+   * this current installation. Authenticate the transport peer and bind its fresh
+   * startup challenge to the admitted execution/plan. No material or send authority
+   * is conveyed. A starting transport may remain pending until the next reconcile.
+   */
+  enrollHarness?(
+    context: SandboxHarnessStatusContext,
+    installation: EgressInstallation,
+  ): Promise<void>;
   /**
    * Returns the provider-owned transport for the exact provisioned Harness. When present,
    * Compute must route the Agent Gateway through this endpoint instead of its native Harness
@@ -1789,6 +1861,10 @@ export interface ConfigurationValidationOptions {
 }
 
 export interface ComputeDriver extends Driver {
+  /** Admission capability check, not release authority. Missing support fails closed. */
+  validateExecutionAdmission?(
+    revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+  ): void;
   readonly supportsWorkspaceSetup?: true;
   readonly capability: "compute";
   /** Deployment must observe and provision Agent-owned runtime credentials before revision admission. */

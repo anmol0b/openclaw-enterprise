@@ -142,6 +142,10 @@ bootstrap:
     fileName: initial-admin-service-key.json
 
 backend:
+  openshell:
+    # Mount a dedicated administrator mTLS Secret only in API and worker.
+    # Keys: ca.crt, tls.crt, tls.key. Configure the Backend paths separately.
+    clientSecretName: ""
   chatgpt:
     enabled: false
     secretName: occ-chatgpt-admin
@@ -307,3 +311,14 @@ worker:
   leaseDurationMs: 5000
   maxAttempts: 5
   convergenceTimeoutMs: 900000
+
+# Optional credential authority listener owned by the single API process.
+# The Installation egress_proxy authority must use the same port and file paths.
+egressAuthority:
+  enabled: false
+  port: 9444
+  tlsSecretName: ""
+  issuerSecretName: ""
+  # Only public.pem is projected from the Gateway's issuer Secret.
+  # Every client requires both namespaceSelector and podSelector.matchLabels.
+  clients: []

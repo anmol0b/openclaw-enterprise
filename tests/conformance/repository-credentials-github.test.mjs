@@ -625,6 +625,14 @@ test("refused and cancelled observations remain independently captured and token
           body: { ...body, permissions: { ...body.permissions, administration: "write" } },
         };
       }
+      if (mode === "surplus-repository") {
+        const repositories = [...body.repositories, { id: 74, full_name: "Fixture/Other" }];
+        return { status, body: { ...body, repositories } };
+      }
+      if (mode === "absent-expiry") {
+        const { expires_at: _expiresAt, ...unverifiable } = body;
+        return { status, body: unverifiable };
+      }
       if (mode === "missing-checks") {
         const { checks: _checks, ...permissions } = body.permissions;
         return { status, body: { ...body, permissions } };
@@ -661,6 +669,8 @@ test("refused and cancelled observations remain independently captured and token
   });
   for (const { name, selected, expected } of [
     { name: "surplus permissions", selected: "surplus", expected: "rejected" },
+    { name: "widened repository scope", selected: "surplus-repository", expected: "rejected" },
+    { name: "absent provider expiry", selected: "absent-expiry", expected: "rejected" },
     { name: "missing checks permission", selected: "missing-checks", expected: "rejected" },
     { name: "provider refusal", selected: "refused", expected: "reauthorization-required" },
     { name: "insufficient lifetime", selected: "short", expected: "rejected" },
@@ -683,6 +693,11 @@ test("refused and cancelled observations remain independently captured and token
         360000,
       );
       assert.equal(result.kind, expected);
+      if (selected === "surplus-repository") {
+        assert.equal(result.code, "scope-mismatch");
+      } else if (selected === "absent-expiry") {
+        assert.equal(result.code, "invalid-response");
+      }
       assert.equal(owned.records.size, 1);
       await owned.driver.settle(result);
       const [credential] = owned.records.keys();

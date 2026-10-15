@@ -14,6 +14,13 @@ The gateway holds Secret values; OCC stores metadata and references. Admission
 freezes identity in the AgentRevision; the worker passes the live record to Compute.
 [OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md) covers attachment and readiness.
 
+With `egress_proxy` selected, new static sources instead admit live versioned
+Secret references. Existing sources need exact source-update opt-in while unbound.
+They skip legacy gateway registration; source readiness alone does not establish
+installed protection. The [protected request flow](credential-source-egress.md)
+owns that path and its runtime qualification limits. The gateway-copy trace below
+continues to describe sources without a protected descriptor.
+
 ## Entry Points
 
 - Trigger: `POST`, `PATCH`, or `DELETE /namespaces/:namespaceId/credential-sources[/:credentialSourceId]`,
@@ -314,6 +321,8 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 - 2026-10-14 14:04: Scope PAT authentication and OpenShell prerequisites. (authoring-run/dba0a6cb-33d9-40fd-b38b-e20cddf4b75f - 96a2b79fa)
 
 - 2026-10-13 20:30: Document provider-managed Codex PAT authentication. (01a136ee-8824-7043-b9e2-49eccacac3bd - ed9018c09)
+- 2026-10-14 12:34: Distinguish protected source admission from legacy gateway copies. (authoring-run/fe204745-17c9-4662-82e0-e194d7c187cb - dc5648b67d2618cc43ef07562298e986a94674e7)
+
 - 2026-10-13 20:07: Check provider ownership before profile updates. (authoring-run/01a136d4-3550-7042-834c-cf11f51f41f2 - 146c80ef66b5860cb9bea296d2574156468a103c)
 
 - 2026-10-12 14:00: Every source, including `openai`, owns its OpenShell profile; no profile is shared by type. (claude-code/session_014fi7Uq1LyofgqwLrLoQ3yY - e0bb26d84)

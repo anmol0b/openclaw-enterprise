@@ -22,6 +22,7 @@ export async function commitAckProxy(databaseUrl) {
   let armed = false;
   let skipCommits = 0;
   let observed = false;
+  let commits = 0;
   const sockets = new Set();
   const server = net.createServer((client) => {
     client.setNoDelay(true);
@@ -87,6 +88,9 @@ export async function commitAckProxy(databaseUrl) {
         }
         const frame = backend.subarray(0, size);
         backend = backend.subarray(size);
+        if (frame[0] === 67 && frame.subarray(5, -1).toString() === "COMMIT") {
+          commits++;
+        }
         if (dropping && frame[0] === 67 && frame.subarray(5, -1).toString() === "COMMIT") {
           observed = true;
           return close();
@@ -116,6 +120,9 @@ export async function commitAckProxy(databaseUrl) {
       }
       skipCommits = skip;
       armed = true;
+    },
+    get commits() {
+      return commits;
     },
     get observedCommit() {
       return observed;

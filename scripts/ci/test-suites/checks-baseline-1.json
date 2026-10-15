@@ -57,6 +57,7 @@
     "tests/integration/controller-lifecycle.test.mjs",
     "tests/conformance/configuration-occ.test.mjs",
     "tests/conformance/credential-source-occ.test.mjs",
+    "tests/conformance/credential-source-adoption.test.mjs",
     "tests/conformance/kubernetes-real-kubectl.test.mjs",
     "tests/conformance/secret-occ.test.mjs",
     "tests/conformance/http-errors.test.mjs",
@@ -85,7 +86,10 @@
     "tests/conformance/grafana-overview-dashboard.test.mjs",
     "tests/conformance/split-layout-tenants.test.mjs",
     "tests/conformance/split-layout-adopt.test.mjs",
-    "tests/conformance/url-authority.test.mjs"
+    "tests/conformance/url-authority.test.mjs",
+    "tests/integration/static-egress.test.mjs",
+    "tests/integration/egress-enrollment.test.mjs",
+    "tests/integration/egress-installation-exchange.test.mjs"
   ],
   "files": [
     {
@@ -129,6 +133,9 @@
     },
     {
       "path": "tests/conformance/credential-source-occ.test.mjs"
+    },
+    {
+      "path": "tests/conformance/credential-source-adoption.test.mjs"
     },
     {
       "path": "tests/conformance/docker-compute.test.mjs"
@@ -359,6 +366,15 @@
     },
     {
       "path": "tests/conformance/url-authority.test.mjs"
+    },
+    {
+      "path": "tests/integration/static-egress.test.mjs"
+    },
+    {
+      "path": "tests/integration/egress-enrollment.test.mjs"
+    },
+    {
+      "path": "tests/integration/egress-installation-exchange.test.mjs"
     }
   ]
 }

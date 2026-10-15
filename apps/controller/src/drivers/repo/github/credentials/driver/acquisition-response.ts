@@ -14,7 +14,6 @@ type AcquisitionObservation = Readonly<{
   packet: Record<string, unknown> | undefined;
   credential: CredentialRef | undefined;
   observedWallMs: number;
-  expiry: number;
 }>;
 
 type ResponseObservationDependencies = Readonly<{
@@ -35,6 +34,18 @@ type AcquisitionPolicy = Readonly<{
 type OutcomePayload<T> = T extends OriginalOutcome ? Omit<T, keyof OriginalOutcome> : never;
 type AcquisitionDecision = OutcomePayload<AcquireOutcome>;
 
+export function parseInstallationTokenResponse(body: Buffer): Record<string, unknown> | undefined {
+  try {
+    const packet: unknown = JSON.parse(body.toString("utf8"));
+    if (packet !== null && typeof packet === "object" && !Array.isArray(packet)) {
+      return packet as Record<string, unknown>;
+    }
+  } catch {
+    // A malformed body still leaves the provider status available for classification.
+  }
+  return undefined;
+}
+
 export function observeAcquisitionResponse({
   state,
   custody,
@@ -42,17 +53,8 @@ export function observeAcquisitionResponse({
   attempt,
   response,
 }: ResponseObservationDependencies): AcquisitionObservation {
-  let packet: Record<string, unknown> | undefined;
+  const packet = parseInstallationTokenResponse(response.body);
   let credential: CredentialRef | undefined;
-  try {
-    const parsed: unknown = JSON.parse(response.body.toString("utf8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      packet = parsed as Record<string, unknown>;
-    }
-  } catch {
-    // Preserve status-based failure handling; the response finally wipes bytes,
-    // while the lifecycle retains cleanup ownership for uncertain issuance.
-  }
   const token = packet?.token;
   const observedWallMs = clock.wallNow();
   const expiry = typeof packet?.expires_at === "string" ? Date.parse(packet.expires_at) : NaN;
@@ -76,24 +78,55 @@ export function observeAcquisitionResponse({
       bytes.fill(0);
     }
   }
-  return { packet, credential, observedWallMs, expiry };
+  return { packet, credential, observedWallMs };
 }
 
 export function classifyAcquisitionResponse(
   status: number,
   observation: AcquisitionObservation | undefined,
-  { repositoryId, repository, permissions, minimumValidityMs }: AcquisitionPolicy,
+  policy: AcquisitionPolicy,
 ): AcquisitionDecision {
-  if ([401, 403, 404, 422].includes(status)) {
-    return {
-      kind: "reauthorization-required",
-      code: "authority-unavailable",
-    };
+  const { packet, credential, observedWallMs = NaN } = observation ?? {};
+  const decision = validateInstallationTokenResponse(
+    status,
+    packet,
+    credential,
+    observedWallMs,
+    policy,
+  );
+  if (decision.kind !== "validated") {
+    return decision;
   }
-  if (status !== 201 || !observation?.credential) {
+  return {
+    kind: "acquired",
+    credential: decision.credential,
+    observedWallMs,
+    expiresAtWallMs: decision.usableUntil,
+  };
+}
+
+/** Validate after capture so even a rejected grant retains a cleanup owner. */
+export function validateInstallationTokenResponse<Credential>(
+  status: number,
+  packet: Record<string, unknown> | undefined,
+  credential: Credential | undefined,
+  observedWallMs: number,
+  { repositoryId, repository, permissions, minimumValidityMs }: AcquisitionPolicy,
+):
+  | Readonly<{
+      kind: "validated";
+      credential: Credential;
+      providerExpiresAt: number;
+      usableUntil: number;
+    }>
+  | Exclude<AcquisitionDecision, { kind: "acquired" }> {
+  if ([401, 403, 404, 422].includes(status)) {
+    return { kind: "reauthorization-required", code: "authority-unavailable" };
+  }
+  if (status !== 201 || credential === undefined) {
     return { kind: "uncertain" };
   }
-  const { packet, credential, observedWallMs, expiry } = observation;
+  const expiry = typeof packet?.expires_at === "string" ? Date.parse(packet.expires_at) : NaN;
   const token = packet?.token;
   if (typeof token !== "string" || !/^[\x21-\x7e]{1,16384}$/.test(token)) {
     return { kind: "uncertain" };
@@ -117,6 +150,9 @@ export function classifyAcquisitionResponse(
     return { kind: "rejected", code: "scope-mismatch" };
   }
   if (
+    typeof packet?.expires_at !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(packet.expires_at) ||
+    !Number.isFinite(observedWallMs) ||
     !Number.isFinite(expiry) ||
     expiry <= observedWallMs + providerClockSkewMs ||
     expiry > observedWallMs + tokenLifetimeMs + providerClockSkewMs
@@ -127,9 +163,9 @@ export function classifyAcquisitionResponse(
     return { kind: "rejected", code: "insufficient-validity" };
   }
   return {
-    kind: "acquired",
+    kind: "validated",
     credential,
-    observedWallMs,
-    expiresAtWallMs: expiry - providerClockSkewMs,
+    providerExpiresAt: expiry,
+    usableUntil: expiry - providerClockSkewMs,
   };
 }

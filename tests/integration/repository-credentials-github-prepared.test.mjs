@@ -1,0 +1,367 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { request } from "node:https";
+import { createGitHubPreparationOwner } from "../../apps/controller/src/drivers/repo/github/credentials/prepared-owner.ts";
+import { createGitHubWarmReader } from "../../apps/controller/src/drivers/repo/github/credentials/prepared-reader.ts";
+import { createGitHubKeyOwner } from "../../apps/controller/src/drivers/repo/github/credentials/material.ts";
+import { createPreparedStore } from "../fixtures/repository-credentials/github/prepared-store.mjs";
+import {
+  startGitHubFixture,
+  fixtureAppId,
+  fixtureRepository,
+  fixtureRepositoryId,
+  fixtureInstallationId,
+} from "../fixtures/repository-credentials/github.mjs";
+import { createControlledClock } from "../fixtures/repository-credentials/clock.mjs";
+
+// The trusted consumer injects only committed bytes into a real loopback request.
+function readRepository(github, material) {
+  return new Promise((resolve, reject) => {
+    const outgoing = request(
+      `${github.origin}/repos/${fixtureRepository}`,
+      {
+        ca: github.tls.ca,
+        headers: { authorization: `Bearer ${Buffer.from(material.bytes).toString()}` },
+      },
+      (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode));
+        response.once("error", reject);
+      },
+    );
+    outgoing.once("error", reject);
+    outgoing.setTimeout(5000, () => outgoing.destroy(new Error("fixture consumer timeout")));
+    outgoing.end();
+  });
+}
+
+async function setup(t, options = {}) {
+  const clock = createControlledClock();
+  const admission = {
+    familyId: "family",
+    generation: 1,
+    ownerEpoch: 1,
+    inputVersion: "key-version-1",
+    grant: {
+      id: "grant",
+      isolationId: "namespace",
+      appId: fixtureAppId,
+      installationId: fixtureInstallationId,
+      repositoryId: fixtureRepositoryId,
+      repository: fixtureRepository,
+      profile: "git-read",
+    },
+  };
+  const database = createPreparedStore(admission);
+  const store = database.connect();
+  const github = await startGitHubFixture(t, { clock, ...options });
+  const key = createGitHubKeyOwner({ privateKey: github.privateKey, appId: fixtureAppId, clock });
+  t.after(() => key.close());
+  let keyReads = 0;
+  const owner = (target = admission, duringKeyLookup) =>
+    createGitHubPreparationOwner({
+      admission: target,
+      store: database.connect(),
+      clock,
+      apiOrigin: github.origin,
+      ca: github.tls.ca,
+      renewBeforeMs: 120000,
+      minimumValidityMs: 10000,
+      async getKey() {
+        keyReads++;
+        // Secret resolution is downstream of the committed uncertainty marker.
+        assert.equal(
+          await store.readCurrent(admission.familyId, (row) => row.attempts.at(-1)?.state),
+          "issuing",
+        );
+        await duringKeyLookup?.();
+        return key;
+      },
+    });
+  const reader = createGitHubWarmReader({ readCurrent: store.readCurrent }, clock.wallNow);
+  const bounds = () => ({
+    signal: new AbortController().signal,
+    deadlineMonoMs: clock.monotonicNow() + 30000,
+  });
+  return {
+    clock,
+    admission,
+    database,
+    store,
+    github,
+    owner,
+    reader,
+    bounds,
+    keyReads: () => keyReads,
+  };
+}
+
+test("background issuance commits before warm reads; renewal preserves eligible material", async (t) => {
+  let gate;
+  let arrived;
+  const fixture = await setup(t, {
+    beforeIssueResponse: async () => {
+      arrived?.();
+      await gate;
+    },
+  });
+  const { admission, owner, reader, github, bounds, clock } = fixture;
+  assert.equal((await reader.readWarm(admission)).kind, "not_ready");
+  assert.equal(fixture.keyReads(), 0);
+  assert.equal(github.issuesOfTokens.length, 0);
+  assert.equal(clock.pendingTimers(), 0);
+  assert.equal(await owner().run("first", bounds()), "committed");
+  const first = await reader.readWarm(admission);
+  assert.equal(first.kind, "warm");
+  assert.equal(first.material.providerExpiresAt, github.issuesOfTokens[0].expires);
+  assert.equal(await readRepository(github, first.material), 200);
+  assert.equal(await owner().run("first", bounds()), "blocked");
+  assert.equal(await owner().run("not-due", bounds()), "ready");
+  assert.equal(github.issuesOfTokens.length, 1);
+  const wrongGrant = structuredClone(admission);
+  wrongGrant.grant.profile = "git-write";
+  assert.equal((await reader.readWarm(wrongGrant)).kind, "not_ready");
+  assert.equal(github.issuesOfTokens.length, 1);
+  assert.equal(fixture.keyReads(), 1);
+  assert.equal(clock.pendingTimers(), 0);
+
+  await clock.advance(3480000);
+  let release;
+  gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const atProvider = new Promise((resolve) => {
+    arrived = resolve;
+  });
+  const renewing = owner().run("renew", bounds());
+  await atProvider;
+  const duringRenewal = await reader.readWarm(admission);
+  assert.equal(duringRenewal.material.attemptId, "first");
+  assert.equal(duringRenewal.material.materialVersion, first.material.materialVersion);
+  duringRenewal.material.bytes.fill(0);
+  assert.equal(await owner().run("overlap", bounds()), "blocked");
+  release();
+  assert.equal(await renewing, "committed");
+  const warm = await reader.readWarm(admission);
+  assert.equal(warm.material.attemptId, "renew");
+  assert.notEqual(warm.material.materialVersion, first.material.materialVersion);
+  assert.equal(await readRepository(github, warm.material), 200);
+  first.material.bytes.fill(0);
+  warm.material.bytes.fill(0);
+  await clock.advance(3600000);
+  assert.equal((await reader.readWarm(admission)).kind, "not_ready");
+  assert.equal(github.issuesOfTokens.length, 2);
+  assert.equal(fixture.keyReads(), 2);
+  assert.equal(clock.pendingTimers(), 0);
+  assert.deepEqual(github.errors, []);
+});
+
+test("stale owners and changed admission quarantine late tokens, across takeover", async (t) => {
+  for (const change of ["ownerEpoch", "inputVersion", "grant", "enabled", "admittedGrantCount"]) {
+    await t.test(change, async (t) => {
+      let mutate;
+      const f = await setup(t, { beforeIssueResponse: async () => mutate() });
+      mutate = () =>
+        f.store.transact(f.admission.familyId, (row) => {
+          if (change === "ownerEpoch") {
+            row.admission.ownerEpoch++;
+            // Takeover may quarantine the old intent before its late reply arrives.
+            row.attempts[0].state = "quarantined";
+          }
+          if (change === "inputVersion") {
+            row.admission.inputVersion = "key-version-2";
+          }
+          if (change === "grant") {
+            row.admission.grant.profile = "git-write";
+          }
+          if (change === "enabled") {
+            row.enabled = false;
+          }
+          if (change === "admittedGrantCount") {
+            row.admittedGrantCount = 2;
+          }
+        });
+      assert.equal(await f.owner().run("late", f.bounds()), "quarantined");
+      assert.equal((await f.reader.readWarm(f.admission)).kind, "not_ready");
+      const row = await f.store.readCurrent(f.admission.familyId, (row) => row);
+      assert.equal(row.attempts[0].state, "quarantined");
+      assert.ok(row.attempts[0].candidate.length > 0);
+      assert.equal(
+        await f.owner(row.admission).run("takeover", f.bounds()),
+        row.enabled && row.admittedGrantCount === 1 ? "blocked" : "fenced",
+      );
+      assert.equal(f.github.issuesOfTokens.length, 1);
+    });
+  }
+});
+
+test("provider scope and expiry are verified without invented lifetime", async (t) => {
+  for (const variation of [
+    "permissions",
+    "missing-permission",
+    "repositories",
+    "missing-expiry",
+    "invalid-expiry",
+    "ambiguous-expiry",
+    "distant-expiry",
+  ]) {
+    await t.test(variation, async (t) => {
+      const f = await setup(t, {
+        tokenResponse(packet) {
+          if (variation === "permissions") {
+            packet.permissions.administration = "write";
+          }
+          if (variation === "missing-permission") {
+            delete packet.permissions.contents;
+          }
+          if (variation === "repositories") {
+            packet.repositories.push({ id: 999, full_name: "other/repo" });
+          }
+          if (variation === "missing-expiry") {
+            delete packet.expires_at;
+          }
+          if (variation === "invalid-expiry") {
+            packet.expires_at = "unknown";
+          }
+          if (variation === "ambiguous-expiry") {
+            packet.expires_at = packet.expires_at.replace("Z", "");
+          }
+          if (variation === "distant-expiry") {
+            packet.expires_at = "2099-01-01T00:00:00Z";
+          }
+          return packet;
+        },
+      });
+      assert.equal(await f.owner().run("invalid", f.bounds()), "quarantined");
+      assert.equal((await f.reader.readWarm(f.admission)).kind, "not_ready");
+      assert.equal(await f.owner().run("retry", f.bounds()), "blocked");
+      assert.equal(f.github.issuesOfTokens.length, 1);
+    });
+  }
+});
+
+test("lost transaction receipts never replay issuance and readiness requires committed material", async (t) => {
+  for (const phase of ["begin", "publish"]) {
+    for (const failure of ["before", "after"]) {
+      await t.test(`${phase}-${failure}`, async (t) => {
+        let fail;
+        const f = await setup(t, { beforeIssueResponse: async () => fail?.() });
+        if (phase === "begin") {
+          f.database.failNextCommit(failure);
+        } else {
+          fail = () => f.database.failNextCommit(failure);
+        }
+        assert.equal(await f.owner().run("ambiguous", f.bounds()), "quarantined");
+        const warm = await f.reader.readWarm(f.admission);
+        assert.equal(warm.kind, phase === "publish" && failure === "after" ? "warm" : "not_ready");
+        // Reconnect an owner to committed storage: no process-local deduplication proof.
+        if (!(phase === "begin" && failure === "before")) {
+          assert.equal(await f.owner().run("ambiguous", f.bounds()), "blocked");
+          assert.equal(
+            await f.owner().run("new-id", f.bounds()),
+            phase === "publish" && failure === "after" ? "ready" : "blocked",
+          );
+        }
+        assert.equal(f.github.issuesOfTokens.length, phase === "publish" ? 1 : 0);
+      });
+    }
+  }
+});
+
+test("lost provider reply and cancellation quarantine issuance; no takeover replay", async (t) => {
+  const cancellation = new AbortController();
+  const f = await setup(t, { beforeIssueResponse: () => cancellation.abort() });
+  assert.equal(
+    await f.owner().run("cancelled", { ...f.bounds(), signal: cancellation.signal }),
+    "quarantined",
+  );
+  assert.equal((await f.reader.readWarm(f.admission)).kind, "not_ready");
+  await f.store.transact(f.admission.familyId, (row) => {
+    row.admission.ownerEpoch++;
+  });
+  const admission = await f.store.readCurrent(f.admission.familyId, (row) => row.admission);
+  assert.equal(await f.owner(admission).run("replacement", f.bounds()), "blocked");
+  assert.equal(f.github.issuesOfTokens.length, 1);
+});
+
+test("warm return waits for commit and rejects withdrawal of already committed material", async (t) => {
+  let gate;
+  let announce;
+  const paused = new Promise((resolve) => {
+    announce = resolve;
+  });
+  const f = await setup(t, {
+    beforeIssueResponse: () => {
+      gate = f.database.pauseNextCommit();
+      announce();
+    },
+  });
+  const producing = f.owner().run("commit-gated", f.bounds());
+  await paused;
+  await gate.entered;
+  let returned = false;
+  const reading = f.reader.readWarm(f.admission).then((result) => {
+    returned = true;
+    return result;
+  });
+  // A reader cannot observe a transaction draft, even when the token exists upstream.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(returned, false);
+  gate.release();
+  assert.equal(await producing, "committed");
+  const result = await reading;
+  assert.equal(result.kind, "warm");
+  result.material.bytes.fill(0);
+  await f.store.transact(f.admission.familyId, (row) => {
+    row.enabled = false;
+  });
+  assert.equal((await f.reader.readWarm(f.admission)).kind, "not_ready");
+  assert.equal(await f.owner().run("after-withdrawal", f.bounds()), "fenced");
+  assert.equal(f.github.issuesOfTokens.length, 1);
+});
+
+test("quarantining this attempt during key lookup prevents any GitHub issuance", async (t) => {
+  const { admission, database, owner, github, bounds } = await setup(t);
+  const store = database.connect();
+  const superseded = owner(admission, async () => {
+    await store.transact(admission.familyId, (row) => {
+      const attempt = row.attempts.find((entry) => entry.id === "withdraw-during-key");
+      assert.equal(attempt.state, "issuing");
+      attempt.state = "quarantined";
+    });
+  });
+  assert.equal(await superseded.run("withdraw-during-key", bounds()), "quarantined");
+  assert.equal(
+    github.issuesOfTokens.length,
+    0,
+    "issuer must not receive an already quarantined attempt",
+  );
+  assert.equal(await owner().run("replacement", bounds()), "blocked");
+});
+
+test("material that expires while the repository read returns never reaches the warm consumer", async (t) => {
+  const { admission, database, owner, github, clock, bounds, keyReads } = await setup(t);
+  const store = database.connect();
+  assert.equal(await owner().run("expire-during-read", bounds()), "committed");
+  let selected;
+  const lagged = createGitHubWarmReader(
+    {
+      async readCurrent(familyId, select) {
+        selected = await store.readCurrent(familyId, select);
+        await clock.advance(3600000);
+        return selected;
+      },
+    },
+    clock.wallNow,
+  );
+  const result = await lagged.readWarm(admission);
+  assert.equal(selected?.kind, "warm", "store selected eligible material before the delay");
+  assert.equal(result.kind, "not_ready", "reader must check remaining lifetime on return");
+  assert.ok(
+    selected.material.bytes.every((byte) => byte === 0),
+    "discarded material was wiped",
+  );
+  assert.equal(github.issuesOfTokens.length, 1);
+  assert.equal(keyReads(), 1);
+  assert.equal(clock.pendingTimers(), 0);
+});

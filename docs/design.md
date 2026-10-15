@@ -29,6 +29,12 @@ token authentication to OCC, and general credential-free model inference remain
 planned. The two-cluster profile is experimental.
 
 <a id="openclaw-as-the-open-enterprise-agent-platform"></a>
+Optional [protected static inference](reference/credential-sources/protected-inference.md)
+retains request-bound authority, current Secret resolution and response protection
+for synthetic protocol verification. Protected admission is unavailable with all
+shipped Compute Drivers pending Compute-owned release and incompatible-reader
+fencing. This slice does not complete RFC 0020 or qualify a deployed runtime.
+
 <a id="summary"></a>
 <a id="motivation"></a>
 <a id="goals"></a>

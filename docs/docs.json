@@ -189,6 +189,10 @@
                     "label": "Credential Withdrawal"
                   },
                   {
+                    "page": "reference/credential-sources/protected-inference",
+                    "label": "Protected Inference"
+                  },
+                  {
                     "page": "guides/topics/audit-log",
                     "label": "Audit Log"
                   }
@@ -937,6 +941,7 @@
               "guides/deploy/local-repository-credentials",
               "guides/deploy/local-compose-kubernetes",
               "guides/deploy/openshell-credential-sources",
+              "guides/deploy/local-openshell-images",
               "reference/settings/development",
               "design/resources",
               "design/access",
@@ -1015,7 +1020,9 @@
               "testing/repository-credentials",
               "testing/repository-credentials-artifacts",
               "testing/repository-credentials-platform",
-              "flows/agent-presets"
+              "flows/agent-presets",
+              "flows/credential-source-egress",
+              "testing/static-egress"
             ]
           }
         ]

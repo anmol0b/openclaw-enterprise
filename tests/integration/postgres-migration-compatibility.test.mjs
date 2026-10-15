@@ -1204,7 +1204,7 @@ function receiptsMatchEntries(receipts, entries) {
   );
 }
 
-async function seedCanonicalData(db, { preset = false } = {}) {
+async function seedCanonicalData(db, { preset = false, executionAdmission = false } = {}) {
   const installation = `ins_${randomUUID()}`;
   const namespace = `ns_${randomUUID()}`;
   const configuration = `cfg_${randomUUID()}`;
@@ -1248,6 +1248,9 @@ async function seedCanonicalData(db, { preset = false } = {}) {
           draft_spec: {},
           harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
           harness_auth: { method: "runtime" },
+          ...(executionAdmission
+            ? { execution_admission: { version: 2, mode: "unprotected" } }
+            : {}),
           compute: { id: "kubernetes", implementation: "test" },
         },
       ],
@@ -1634,10 +1637,12 @@ test(
       [51, "preProvisioningDeploymentOutcome"],
       [52, "preComputePreparationFailureEvidence"],
       [53, "preCredentialSourcePat"],
+      [54, "preStaticEgress"],
+      [55, "preSendReceipts"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
-        await seedCanonicalData(db, { preset: prefix >= 25 });
+        await seedCanonicalData(db, { preset: prefix >= 25, executionAdmission: prefix >= 55 });
         const before = await canonicalData(db);
         const receipts = await historyReceipts(db.migrator);
         assert.deepEqual(await runHistoryMigration(db, "production", true), {
@@ -1896,6 +1901,8 @@ test(
       [51, "preProvisioningDeploymentOutcome"],
       [52, "preComputePreparationFailureEvidence"],
       [53, "preCredentialSourcePat"],
+      [54, "preStaticEgress"],
+      [55, "preSendReceipts"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -1978,11 +1985,13 @@ test(
       [51, "preProvisioningDeploymentOutcome"],
       [52, "preComputePreparationFailureEvidence"],
       [53, "preCredentialSourcePat"],
+      [54, "preStaticEgress"],
+      [55, "preSendReceipts"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
         if (prefix) {
-          await seedCanonicalData(db, { preset: prefix >= 25 });
+          await seedCanonicalData(db, { preset: prefix >= 25, executionAdmission: prefix >= 55 });
         }
         const before = await historySnapshot(db);
         const data = prefix ? await canonicalData(db) : undefined;

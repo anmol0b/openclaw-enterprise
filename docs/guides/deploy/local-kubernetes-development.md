@@ -134,9 +134,9 @@ export OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell
 
 The CLI creates one k3d cluster with pinned OpenShell `v0.1.3-pre.2`, Agent
 Sandbox, cert-manager, and Envoy Gateway assets and digest-resolved images.
-PostgreSQL, the central OpenShell Gateway, and OCE run in `oce-system`; the
-Agent Sandbox controller stays in `agent-sandbox-system`. Tenant Workspaces,
-Sandboxes, and Agent Pods use separate OCC-owned `oce-*` Namespaces. Startup
+PostgreSQL, OpenShell Gateway and OCE run in `oce-system`; the Agent Sandbox
+controller runs in `agent-sandbox-system`. Tenant Workspaces, Sandboxes, and
+Agent Pods use separate OCC-owned `oce-*` Namespaces. Startup
 exposes a loopback-only proxy, waits for bootstrap Namespace/Workspace readiness,
 and writes kubeconfig and the administrator service key to private state.
 
@@ -153,11 +153,12 @@ for console and Agent hosts, and prints the browser CA path.
 `OCC_DEVELOPMENT_BROWSER_PORT` must differ from Compose and k3d API ports.
 Skip manual hybrid routing.
 
-First startup requires network access. To use reviewed local assets instead,
-set
+First startup requires network access. For local chart and manifest assets, set
 `OCC_DEVELOPMENT_OPENSHELL_HELM_CHART`,
 `OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART`, and
 `OCC_DEVELOPMENT_OPENSHELL_AGENT_SANDBOX_MANIFEST` to absolute paths.
+
+For candidates, [override the OpenShell images](local-openshell-images.md).
 
 To choose the host engine:
 
@@ -166,9 +167,8 @@ export OCC_DEVELOPMENT_CONTAINER_ENGINE=podman
 ./scripts/dev-up
 ```
 
-Use `docker` for Docker Engine. Kubernetes-only startup needs no Compose and
-rejects Compose arguments. Keep profile exports for cleanup; without them,
-startup defaults to Compose with Docker Compute.
+Use `docker` for Docker Engine. Kubernetes-only rejects Compose arguments. Keep
+profile exports for cleanup; startup otherwise defaults to Compose with Docker Compute.
 
 Startup prints the private [state directory](../../reference/settings/development.md#required-development-controller-environment)
 containing kubeconfig and credentials. Its default is `openclaw-development`

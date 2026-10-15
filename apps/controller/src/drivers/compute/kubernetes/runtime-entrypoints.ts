@@ -1,5 +1,6 @@
 import { PLUGIN_RUNTIME_TRANSLATOR_SOURCE } from "../../plugin/runtime-translator.ts";
 import { nodeProgramArguments } from "../node-program.ts";
+import { HARNESS_EGRESS_ENROLLMENT_HELPER } from "../egress-enrollment.ts";
 import { gatewayStateMigrationHelper, startupPhaseHelper } from "../runtime-startup.ts";
 
 // Match the pinned OpenClaw service stop budget: 315s drain, 10s cleanup,
@@ -1206,6 +1207,13 @@ function assertCodexPluginRuntime(runtime) {
   }
   if (!isPlainObject(runtime.manifest.selections ?? {})) {
     throw new Error("Codex plugin selections are invalid.");
+  }
+  if ((runtime.manifest.providerTools !== undefined || runtime.manifest.egressEnrollment !== undefined) &&
+      (runtime.manifest.providerTools !== "none" ||
+       !isPlainObject(runtime.manifest.egressEnrollment) ||
+       runtime.manifest.modelEndpoint?.modelProvider !== "openai-compatible" ||
+       typeof runtime.manifest.modelEndpoint.baseUrl !== "string")) {
+    throw new Error("Codex protected inference profile is invalid.");
   }
 }
 
@@ -3332,6 +3340,7 @@ const { performance } = require("node:perf_hooks");
 ${PLUGIN_RUNTIME_HELPERS}
 ${AUTH_PROBE_FAILURE_HELPER}
 ${CODEX_STDERR_FILTER_HELPER}
+${HARNESS_EGRESS_ENROLLMENT_HELPER}
 ${startupPhaseHelper("agent")}
 
 function agentRuntimeReady() {
@@ -3553,6 +3562,10 @@ function probeCodexAuthentication(timeout) {
         "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + '.wire_api="responses"',
         "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".requires_openai_auth=true",
         "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".supports_websockets=false",
+        ...(pluginRuntime.manifest.providerTools !== "none" ? [] : [
+          "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".request_max_retries=0",
+          "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".stream_max_retries=0",
+        ]),
       ]),
       "Reply only READY. Do not use tools.",
     ], {
@@ -3596,7 +3609,7 @@ function probeCodexAuthentication(timeout) {
     for (const event of events) {
       if (event.type === "turn.started") turnStarted = true;
       if (event.type === "error") {
-        if (!turnStarted || turnCompleted || !isRecoveredNativeStreamError(event) ||
+        if (pluginRuntime?.manifest.providerTools === "none" || !turnStarted || turnCompleted || !isRecoveredNativeStreamError(event) ||
           ++recoveredStreamErrors > MAX_RECOVERED_STREAM_RETRIES) return finish(codexProbeStatusFailure(event.message, "error-event"));
         continue;
       }
@@ -3647,7 +3660,7 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     providerStatus: result.providerStatus,
     providerCode: result.providerCode,
   }));
-  if (result.code === "MODEL_PROBE_TIMEOUT" && attempt === 1 && performance.now() + 1000 < deadline) {
+  if (pluginRuntime?.manifest.providerTools !== "none" && result.code === "MODEL_PROBE_TIMEOUT" && attempt === 1 && performance.now() + 1000 < deadline) {
     setTimeout(() => startAuthenticatedCodex(2, deadline), 1000);
     return;
   }
@@ -3757,8 +3770,20 @@ child.on("exit", (code, signal) => {
   }
 })();
 }
-const modelProbeStartedAt = Date.now();
-startAuthenticatedCodex();
+let modelProbeStartedAt = Date.now();
+if (pluginRuntime?.manifest.egressEnrollment === undefined) {
+  startAuthenticatedCodex();
+} else {
+  const enrollmentStartedAt = Date.now();
+  waitForHarnessEgressEnrollment(pluginRuntime.manifest.egressEnrollment).then(() => {
+    logStartupPhase("egress-enrollment", enrollmentStartedAt);
+    modelProbeStartedAt = Date.now();
+    startAuthenticatedCodex();
+  }, () => {
+    logStartupPhase("egress-enrollment", enrollmentStartedAt, "failed");
+    holdFailedAuthentication("egress-enrollment", "UNAVAILABLE");
+  });
+}
 }
 `;
 

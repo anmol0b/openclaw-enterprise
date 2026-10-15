@@ -8,6 +8,12 @@ export function bindPlatformUnitOfWork(
   lifetime: RepositoryTransactionLifetime,
 ): PlatformUnitOfWork {
   return Object.freeze({
+    egressSendReceipts: bindRepository(repositories.egressSendReceipts, lifetime, [
+      "find",
+      "insert",
+      "save",
+      "authorize",
+    ]),
     installations: bindRepository(repositories.installations, lifetime, [
       "findInstallation",
       "getInstallation",
@@ -55,6 +61,8 @@ export function bindPlatformUnitOfWork(
       "hasReferences",
     ]),
     credentialSources: bindRepository(repositories.credentialSources, lifetime, [
+      "findEgressInstallation",
+      "isEgressMaterialRejected",
       "findCredentialSource",
       "listCredentialSources",
       "lockCredentialSource",
@@ -62,6 +70,9 @@ export function bindPlatformUnitOfWork(
       "markCredentialSourceDeleting",
       "markCredentialSourceReady",
       "replaceCredentialSourceSecrets",
+      "recordEgressInstallation",
+      "rejectEgressMaterial",
+      "admitEgressSource",
       "deleteCredentialSource",
       "hasReferences",
       "findBlockingReference",

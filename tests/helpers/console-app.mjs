@@ -238,7 +238,7 @@ export async function createConsoleAppFixture(t, options = {}) {
       return super.transact((unit) => policyUnit.run(unit, () => work(unit)));
     }
   }
-  const platformState =
+  const basePlatformState =
     options.state ??
     new ConsolePlatformState({
       auditSink,
@@ -246,6 +246,7 @@ export async function createConsoleAppFixture(t, options = {}) {
       resolveIAMIdentity: (identityId) =>
         policy.identities.find((identity) => identity.id === identityId),
     });
+  const platformState = options.wrapState?.(basePlatformState) ?? basePlatformState;
   const iamDriver = new NativeIAMDriver(
     {
       async loadNativeIAMState() {
@@ -257,16 +258,32 @@ export async function createConsoleAppFixture(t, options = {}) {
           const namespaces = await view.namespaces.listNamespaces();
           const roles = [];
           const bindings = [];
+          const principals = [];
           for (const namespace of namespaces) {
+            principals.push(...(await view.iamPolicy.listServicePrincipals(namespace.id)));
+            principals.push(
+              ...(await view.agents.listAgents(namespace.id)).map((agent) => ({
+                id: agent.servicePrincipalId,
+                namespaceId: agent.namespaceId,
+                agentId: agent.id,
+                kind: "service_principal",
+              })),
+            );
             roles.push(...(await view.iamPolicy.listRoles(namespace.id)));
             bindings.push(...(await view.iamPolicy.listAccessBindings(namespace.id)));
           }
-          return { roles, bindings };
+          return { roles, bindings, principals };
         };
         const unit = policyUnit.getStore();
         const managed = await (unit ? readPolicy(unit) : platformState.read(readPolicy));
         return {
           ...policy,
+          identities: [
+            ...policy.identities,
+            ...managed.principals.filter(
+              (principal) => !policy.identities.some((identity) => identity.id === principal.id),
+            ),
+          ],
           roles: [...policy.roles, ...managed.roles],
           bindings: [...policy.bindings, ...managed.bindings],
         };
