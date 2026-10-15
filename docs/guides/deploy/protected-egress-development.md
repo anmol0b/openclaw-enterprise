@@ -8,36 +8,42 @@ remains closed until the installed pair and its release authority are qualified.
 
 Use a disposable database for the first upgrade. The supported starting schema
 includes `0054_credential_source_pat` and `0055_compute_revision_admission`.
-Migrations 0056 through 0060 append static egress, send receipts, prepared GitHub
-custody and egress, and protected credential-free metadata. Migration checks compare
-the receipt ledger, catalog and effective grants.
+Migrations 0056 through 0061 add the egress schema and check the revision's
+Harness authentication shape. Migration checks compare the receipt ledger,
+catalog and effective grants.
 
 A private development database whose 0055 was `static_egress` has a different history.
 Stop its writers and withdraw it using its own matching release and quiesced backup, or
 retire it and create a fresh disposable installation. Never renumber applied receipts.
-Withdraw any running anonymous reader with its owning release before this upgrade.
-Its saved peer admission stays intact as history; it does not grant Conduit access
-or let the new controller release an execution admitted before the cutoff.
 
-For a development database you intend to keep, stop admission, workers and
-maintenance writers, then take and verify a physical database snapshot. Confirm
-the previous migration command accepts the restored catalog. On PostgreSQL
+Before upgrading from 0055, pause new admissions. Use the release that owns each
+execution, including any anonymous reader, to stop it, retire predecessors and
+reconcile outstanding work. Confirm the stop completed, no revision is active and
+no cleanup remains. Stay on that release if you cannot finish or need to deploy
+the same Agent again.
+
+Stop workers and maintenance writers, then take and verify a physical database
+snapshot. Confirm the previous migration command accepts the restored catalog. On PostgreSQL
 18.6, a quiesced database copy (`CREATE DATABASE ... TEMPLATE ... STRATEGY FILE_COPY`
 with the same database-level access) preserved the catalog and receipt history.
 A logical dump and restore can reparse CHECK expressions and fail that exact
 catalog check even when the restore command succeeds. Retain the matching
 controller, runtime, supplier and configuration revisions with the snapshot.
-Apply the normal migration once. Start the matching API and workers with
-`conduit` unselected. Create a fresh, explicitly unprotected revision to
-resume development. Existing credential sources keep their previous meaning;
-there is no automatic source adoption, credential copying or new access grant.
-Keep an installation on the previous release if it has running revisions the new
-reader cannot safely manage. Execution authority and material approval are independent. A grant
-restricted to one executable does not authorize the whole execution. Withhold the
-new binding unless durable evidence shows equivalent authority or an authorized
-binder explicitly admits the broader access. Source update permission alone is
-not that consent. An unprotected restart must use a fresh execution without the
-previous mounts, helpers, sessions or delayed reattachment.
+
+Apply the normal migration once. Keep the stopped Agent and its revision for
+read-only inspection and audit. The revision list preserves its identity. Revision detail
+reports `SAVED_CONFIGURATION_UNREADABLE` because 0055 recorded no execution
+admission. Deploying that Agent returns 503 without creating a revision or
+queuing work. The controller must be able to read every revision to stop or retire it.
+Leave the saved Compute admission, credential-source reference and history intact.
+
+To resume development, start the matching API and workers with `conduit`
+unselected. Create a **new Agent** in the same Namespace, with its own Configuration
+and service principal. Deploy revision 1 and confirm its execution admission is
+`unprotected`. Start without the old credential, grants, mounts, helpers or sessions.
+Do not arrange to reattach them later. Withhold any new binding unless durable evidence
+shows equivalent authority or an authorized binder explicitly admits the broader access.
+Permission to update a source is not that consent.
 
 If the migration transaction fails, verify the previous history before resuming
 the old installation. After a successful migration, switching binaries alone
