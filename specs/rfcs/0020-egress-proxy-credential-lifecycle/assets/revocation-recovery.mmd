@@ -38,7 +38,7 @@ sequenceDiagram
   E->>E: Persist tombstone<br/>Advance policy generation
   Note over E,B: Sandbox enforces Egress-owned configuration<br/>Late installs cannot restore a tombstoned binding
   C->>E: attachmentStatus
-  E-->>C: Successor: remaining bindings
+  E-->>C: Successor: remaining routes and bindings
   C->>B: installEgress(successor, Command)
   C->>B: egressStatus for exact successor
   B-->>C: Receipt: binding set and policy generation

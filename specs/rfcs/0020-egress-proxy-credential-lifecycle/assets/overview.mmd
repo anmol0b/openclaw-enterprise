@@ -1,5 +1,5 @@
 ---
-title: "Proposed Agent egress responsibilities"
+title: "Proposed protected Agent egress responsibilities"
 config:
   theme: base
   htmlLabels: true
@@ -23,24 +23,24 @@ config:
       bottom: 14
 ---
 flowchart TB
-  %% Proposed contract roles; boxes do not prescribe separate daemons.
-  Agent["<b>Agent workload</b><br/>No provider credentials"]
-  Network["<b>SandboxDriver</b><br/>Network enforcement<br/>installEgress / egressStatus"]
-  Driver["<b>EgressProxyDriver</b><br/>Configure / withdraw<br/>Management only"]
-  Sender["<b>EgressForwarder</b><br/>capture / forward<br/>Inject + protect responses"]
-  OCC["<b>EgressAuthorizer</b><br/>OCC check before access<br/>and before send"]
+  %% Proposed responsibilities, not necessarily separate processes.
+  Agent["<b>Agent execution</b><br/>Processes share authority<br/>No provider credential"]
+  Sandbox["<b>SandboxDriver</b><br/>Bind the execution<br/>and prevent bypass"]
+  Driver["<b>EgressProxyDriver</b><br/>Configure and withdraw<br/>Management only"]
+  Sender["<b>EgressForwarder</b><br/>Bind request and reply<br/>Inject, send, protect"]
+  OCC["<b>EgressAuthorizer</b><br/>Current execution,<br/>installation and policy"]
+  Resolver["<b>CredentialResolver</b><br/>Admitted static key or<br/>prepared dynamic token"]
   Provider["<b>Provider</b><br/>GitHub / inference"]
-  Resolver["<b>CredentialResolver</b><br/>resolve if needed<br/>Static / warm dynamic"]
-  Agent -. request .-> Network
-  Network -. permitted traffic .-> Sender
-  Driver -. exact attachment .-> Network
-  Driver -. admitted configuration .-> Sender
-  Sender -. checks 1 and 2 .-> OCC
-  Sender -. between checks .-> Resolver
+  Agent -. request .-> Sandbox
+  Sandbox -. authenticated exchange .-> Sender
+  Driver -. attachment .-> Sandbox
+  Driver -. configuration .-> Sender
+  Sender -. two fresh checks .-> OCC
+  Sender -. resolve if needed .-> Resolver
   Sender -. authorized send .-> Provider
   class Agent,Provider external
   class Sender action
-  class Network gate
+  class Sandbox gate
   class Driver,OCC,Resolver api
   classDef api fill:#EDF2F7,stroke:#879AB0,color:#25364A,stroke-width:1px
   classDef action fill:#EBF3F0,stroke:#7F9D93,color:#2B4038,stroke-width:1px

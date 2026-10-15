@@ -2,266 +2,144 @@
 rfc: index.md
 ---
 
-# Egress Proxy security model
+# Security, verification and retirement of the Credential Gateway
 
-[RFC-0020](index.md) must let a potentially compromised Agent use a provider without giving it the
-provider credential or a way around enforcement. A trusted sender checks authority before it obtains
-material and again before it sends. Even then, withdrawal can race dispatch, and blocking a response
-cannot undo the provider’s action.
+[RFC-0020](index.md) lets a potentially compromised Agent use an approved provider operation without
+receiving the provider credential. The security principal is the **whole admitted Agent execution**.
+If a repository read is allowed, the Agent, its child process and code it downloads can all make
+that read and see the permitted response. Another execution, even of the same Agent, has no claim
+on that exchange. The [contracts](contracts.md) specify how to enforce this boundary. The evidence
+below is required before relying on it.
 
-Review this as a proposed security contract, not evidence of a qualified system.
-[Lifecycle](lifecycle.md) covers preparation, rotation, startup and recovery.
-[Management](control-contracts.md) and [runtime contracts](runtime-contracts.md) define the proposed
-fields, checks and results.
+## Where authority and secrets reside
 
-## Assets and threat model
+| Caller | Authority and exposure |
+| --- | --- |
+| Agent in protected mode | Sandbox prevents direct egress. Before queuing, the trusted sender binds the request **and its response destination** to the authenticated execution and exact supervisor installation. The installation receipt says which installation to expect. The connection must prove it, for example with a supervisor-only client key enrolled to that verified installation. A sandbox bearer presented first, an old receipt or a relay that sees only voluntary traffic is insufficient. Refuse admission if provenance or enforcement is unavailable. |
+| Agent in explicit unprotected mode | OCE gives the Agent a control-plane identity but does not govern its direct network requests. Admit no managed binding, clone, policy route or provider credential, including an ambient substitute. Protection is versioned independently of binding count. A protected execution with no effective routes denies all egress. |
+| Trusted repository bootstrap | Authenticated delegation covers this executor, execution, repository and original deadline. Each Git operation needs current authority and already prepared material. Compute gates startup on observed clone success and retains ownership of partial-workspace cleanup. |
+| Configuration or discovery in OCC | Authenticate the service and initiating user, capture the business operation, then authorize preparation for that source, scope and destination. The trusted sender in the OpenClaw Control Plane (OCC) checks authority before material access and again before each send. Return a sanitized business response, never a token or a callback that can consume one. |
 
-The design protects provider credentials and refresh inputs; admitted sources,
-routes and grants; Agent and caller identities; provider operations and their
-responses; and workspace data preserved during parking or a fork. An Agent can
-be compromised, issue malicious requests, or try to obtain provider material.
-A Secret writer can change live-adopted values; existing explicit-update sources
-retain approved immutable material until an authorized source update. A provider,
-store or network can fail, return unexpected content, or leave an effect uncertain.
+OCE alone holds the GitHub App key, signs and exchanges the App JWT, validates the actual repository
+grant and expiry, and commits encrypted installation tokens. OCE owns background renewal,
+withdrawal and fenced takeover. OpenShell may own a *different* credential family. An Agent request
+can read eligible committed material during an issuer outage. A cold or expired lookup cannot
+issue, refresh or schedule preparation. An authority partition or unavailable Resolver fails closed.
 
-The trust boundary is between Agent workloads and trusted senders, resolvers,
-lifecycle owners, Secret Drivers and OCC. Trusted components and their
-configuration need their own protection and isolation. A resolver handle
-guards mistakes among trusted callers; it does not defend against hostile code
-in the same process. A route constrains mediated use, but cannot narrow the
-authority of a bearer stolen from a trusted component or provider.
+The sender, Resolver, credential owner, Secret Driver and their configuration are trusted. A custody handle
+cannot confine hostile code in a trusted process, and a route cannot constrain a bearer stolen there.
+Keep keys, tokens and handles out of the Agent, UI and diagnostics. Record nonsecret caller, scope,
+purpose, version and attempt evidence. Check response status, headers, body, trailers and encoding on
+errors as well as success. Start with a bounded response withheld in full until accepted. Blocking
+it cannot undo a provider action, and streaming needs protection at each release boundary.
 
-| Abuse or failure                                                     | Proposed boundary                                                                                                       |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| An Agent tries to steal credentials or bypass its grant.             | Enforce egress and keep material and handles outside the workload. OCC checks each operation against current authority. |
-| A caller substitutes an operation, route or material after approval. | Bind the final check to the actual immutable operation and selected material identity and version.                      |
-| A shared source or warm token is used across the wrong scope.        | Authorize each Agent; partition resolver reuse by admitted source generation, normalized grant and isolation boundary.  |
-| A provider returns a credential in a response.                       | Apply provider-specific response policy; redact or refuse forms that cannot be handled safely.                          |
-| A refresh, send or clone has an unknown outcome.                     | Retain the attempt and reconcile the effect or reauthorize; do not blindly replay it.                                   |
-| An owner loses access or a workspace is copied.                      | Hold and park on confirmed last-owner loss; a deep fork receives a fresh stopped identity and no inherited authority.   |
+## Required verification on the protected path
 
-These boundaries depend on qualified enforcement and custody. Source inspection
-or fixture behavior alone cannot prove them.
+Start with one bodyless metadata read of repository `123` and a recognizable, safe response. Record
+**source**, **independent contract-peer**, **installed runtime** and **live-provider** evidence
+separately. The peer exercises the portable contract. The actual protected OpenShell composition,
+including local use, must demonstrate channel ownership and bypass prevention. Record exact versions,
+policy, custody, clocks and deadlines. Accepted configuration, usable material, installation of the
+exact policy and a serving Agent are four separate observations. No-op CI establishes none of the
+protected-path guarantees.
 
-## Callers and trust boundaries
+For each exchange, count allowed access permits, released send permits, material reads, requests
+observed at the provider, and response bytes **at each recipient**. Record denials too. A missing
+observation is unknown, not zero. In the replacement cases, A and B are successive supervisor
+installations. Current state may invalidate A's exchange but can never relabel it as B's.
 
-OCC admits source, binding, backend, provider, route and grant configuration.
-The trusted sender derives caller context from an authenticated boundary, not
-from the request's assertions. An Agent has a stable Namespace-scoped
-ServicePrincipal and a separate bearer for an individual execution. Each Agent
-must be authorized to use a binding, even when the source is shared.
+| Exercise | Required observation |
+| --- | --- |
+| Parent and sibling each make the admitted read | For **each** exchange: one access permit, one material read, one send permit, one matching provider request. Only its bound recipient gets the expected response. No executable allowlist or client hook is needed. |
+| Cross two live executions or splice another stream onto an authenticated connection | Reject the mismatched origin, stream or recipient before material access. Zero allowed permits, reads, provider requests or provider bytes at either execution. |
+| Replace A before the first check | Try A's queued request, its still-open channel and B presenting A's proof first. The same zero counts apply. A fresh admitted exchange from B succeeds. |
+| Replace A after its material read, or lose its response destination after dispatch | In the first case, count A's access permit and read, then zero send permits and provider requests. In the second, count the provider request, zero response bytes at B, actual or unknown delivery at A, and no retry. |
+| Allow a protected read needing no credential, then withdraw the last route | Both permits, **zero** material reads, one provider request and the expected response only at its recipient. After withdrawal, deny even this read. Losing the entire policy plan or rolling back to an incompatible reader must never release an execution into direct networking. |
+| Lose the dispatch-record acknowledgment *before permit release* | Zero send permits released, zero provider requests. Reconcile the exact committed attempt without releasing a replacement permit. |
+| Lose the provider reply *after a write* | Record the send permit and write; the provider effect remains uncertain. One permit does not prove exactly-once delivery. Never replay to resolve the uncertainty. |
+| Lose the credential-rejection acknowledgment, then restart and redeliver | Before acknowledgment, durably deduplicate the authenticated receipt, fence its exact store and version, and commit any coalesced recovery obligation. Observe one obligation for rejected N, none for N+1, no second recovery and no business retry. |
 
-### Agent and bootstrap
+Exercise DNS, destination and TLS authority, redirects, raw TCP, opaque SSH, UDP and QUIC from the
+sandbox. Deny operations that cannot be classified. Swap two live custody handles or replay a consumed permit:
+neither permits a provider write. Put forbidden data in the last response trailer: for the bounded
+read, release no provider bytes. A metadata read qualifies neither clone nor push. For ref-constrained push,
+the trusted sender must parse *all* ref commands, including object IDs, authorize each, and dispatch exactly the checked operation. An allowed first ref followed by a
+forbidden second must result in no provider write. Otherwise refuse protected push.
 
-Trusted bootstrap is a separate caller with authenticated delegation limited to
-the execution and configured repository. It need not traverse the Agent's proxy.
-Its request-path resolution is warm-only, and its delegation does not grant
-management preparation. Its clone and cleanup duties are in
-[repository preparation](lifecycle.md#2-prepare-the-optional-repository).
+Cover static inference and GitHub first. For rotating credentials, race grants sharing one input
+family, crash between provider rotation and durable replacement, and attempt stale-owner publication.
+Preserve uncertain work and require reauthorization if the replacement cannot be recovered. Later
+coverage includes GitHub preclone, custom dynamic providers, and actual Codex OAuth startup, account
+metadata and renewal or reconnect over the selected WebSocket or HTTP/SSE path.
 
-### Management preparation
+## Withdrawal, last-owner loss and recovery
 
-Configuration or discovery authenticates a control-plane caller separately. Authorize the exact
-Installation, Namespace, source, purpose, operation, scope and destination, including applicable
-initiating-user and saved-binding rights. No Agent flag or request field can confer this authority.
+![Withdrawal, installation of the remaining policy, and recovery after credential rejection](assets/revocation-recovery.svg)
 
-Management captures the business operation *before* seeking preparation authority. Only if
-authorized may it ask the designated owner to prepare or refresh material. In MVP, that owner is
-OpenShell; the business Forwarder is a trusted library inside OCC. OCC may hold an access token
-briefly for injection. It checks authority before obtaining that material and again, after
-preparation, before *each* provider send. The lifecycle owner separately authorizes issuer calls.
-Later service or worker placements must preserve these boundaries.
+[Diagram source](assets/revocation-recovery.mmd). Observe OCC denial, confirmed detachment and
+provider-supported revocation separately. A send may **start after withdrawal was acknowledged** if
+its final check raced the change. Bound dispatch start and the original deadline; cancellation is
+best effort. Ordered send admission and renewable stream leases are later work.
 
-### Retrieval and recovery
+Keep the withdrawal tombstone while a late installation is possible. Test stale commands, conflicting
+request IDs, forged receipts, cleanup after catalog removal, and withdrawal of one binding while
+another continues. Accepted cleanup survives loss of the requester's access. After restart, reconcile
+the original owner, attempt and outstanding effects; neither a timeout nor an earlier observation of
+absence settles them.
 
-Only designated trusted sender or custody code may consume usable material. There is no arbitrary
-caller callback, exported signing or refresh root, second refresher or token returned to an Agent or
-UI. Provisioning roots to the lifecycle owner requires its own authorization. Return a sanitized
-business response and audit caller, initiating principal, source, grant, destination, purpose and
-outcome without secrets.
+Confirmed loss of the *last* authorized owner installs a hold and fences new admissions. Report
+`parking` until stop and data preservation justify `parked`. A team Agent with another authorized owner
+continues; an unavailable directory is not confirmed owner loss. Restart, repair, deletion and
+garbage collection must respect the hold. Release requires current authority and fresh admission.
+External identity-provider offboarding is separate work.
 
-Deny use on withdrawal, unavailable authority, failed preparation or material still unusable by the
-original deadline. Failed or cancelled retrieval may nonetheless have caused a refresh. Preserve
-that attempt; never replay it blindly.
-[Management retrieval](lifecycle.md#management-preparation-and-retrieval) does not weaken warm-only
-Agent and bootstrap resolution.
+For an authorized deep fork, capture the declared readable artifacts at an immutable version and
+recheck source-read and destination-create rights before visibility. Give the copy independent data
+and a fresh, stopped runtime home. Inherit no credentials, grants, approvals or sessions; keep copied
+schedules, hooks and pending work inert. Preserve authorized read-only access to the original.
 
-## Authorize each operation
+## Retire the legacy path without widening existing grants
 
-Consider a Git read of repository `123`. The sender needs to know who is calling, which repository
-and action policy covers, and which exact material it would send. A valid token alone answers none
-of those questions.
+Migrate execution authority and static-material approval **independently**. If a legacy grant
+allowed the parent read but barred the sibling above, retain its safe authorized path or withhold
+the binding until someone authorized to bind this Agent to this source explicitly admits whole-execution
+access. Carry authority forward only with durable evidence of equivalence. Fence incompatible readers first. Moving to
+unprotected requires a new execution without old mounts, helpers, sessions or late reattachment.
 
-1. **Capture.** Authenticate the caller and seal the actual operation: destination, protocol
-   authority and policy-relevant content. For a stream, expose those semantics to OCC and enforce a
-   registered grammar and finite bounds. A digest alone is not inspectable; unbounded buffering is
-   not required.
-2. **Before access.** Check current authority online for this caller, versioned route, normalized
-   grant and operation. Require an admitted binding for credentialed use. The provider classifies
-   GitHub repository ID and action; a request cannot select another source or backend, load a driver
-   or widen the grant. Refuse on unavailable authority, ambiguous route, unsupported operation or
-   insufficient scope.
-3. **Before send.** Check online again over the same immutable operation, caller, versioned route
-   and grant, now with nonsecret identity and version of the material selected, or explicit `none`.
-   For static material bind admitted mode and reference, selected store, scope and exact version. A
-   snapshot does not depend on the provenance Secret’s current value. Consumer permission cannot
-   approve replacement. Policy never receives credential bytes, and the sender cannot substitute
-   material or operation.
-4. **Dispatch.** Recheck usability and send once within the short finite send-start limit and
-   original absolute deadline. A changed route or grant needs readmission and repeated checks.
+If an operator approved static `v1` and a Secret writer later stored `v2`, keep serving approved
+`v1` in `explicit_update` mode unless revoked. Verify its exact version or owned immutable snapshot,
+including scope and store. If material or ownership cannot be verified, fail closed until an
+authorized source update. Running attachments keep their approved material until replacement
+installation is verified, subject to current denial or revocation. The provenance Secret need
+not remain readable. With zero retention, read that snapshot again. Test rejection, eviction and reread; the version fence must survive. To adopt
+live updates, require `credential_source:update` and `secret:operate`, stage and validate a separate
+candidate, then activate mode, material reference and generation together. Failed opt-in preserves
+approval; uncertain activation requires reconciliation. Verify adoption and outstanding use before
+retiring the old key.
 
-Apply the sequence to credential-free operations and cache hits too. Every HTTP subrequest,
-redirect, retry or new operation on a reused connection needs both fresh checks and any resolution.
-No transport encoding, cached allow or retry can remove a check or extend the original deadline.
-Concrete deadlines, time protocol and enforcement remain to be selected. The final-check race is
-described [below](#withdrawal-and-owner-loss).
+| Credential Gateway method | Responsibility that must survive retirement |
+| --- | --- |
+| `listSourceTypes` | `CredentialSourceControl.describeTypes`, including provider schema and Harness compatibility |
+| `registerSource` | `applySource`, then separately `configureRefresh` for dynamic inputs |
+| `updateSource` | `applySource` with admitted configuration and static adoption or approved replacement |
+| `sourceStatus` | Configuration status, distinct from per-grant `refreshStatus` |
+| `removeSource` | `removeSource`, `removeRefresh` and owned provider/profile cleanup |
+| `attachForRevision` | `configureRevision`, then Sandbox `installEgress` |
+| `attachmentStatus` | Join Egress `attachmentStatus` to Sandbox `egressStatus` for the exact installation |
+| `withdraw` | Durable withdrawal, `withdrawBinding` and late-attachment rechecks |
+| Additional `validateSourceConfig` | OCC schema validation and provider `normalizeInput`, without I/O and before Secret access |
 
-## Resolution and custody
+Move persisted driver IDs, revision and Harness snapshots, Agent bindings and authentication
+selection to exact source, binding, route and execution admissions. Replace resolved-string inputs and
+Sandbox credential attachments with scoped custody and authenticated installation evidence. Preserve
+Namespace isolation, provider type semantics, source APIs, IAM denial before existence disclosure,
+audit, console, setup and generated schemas.
 
-The request-path Resolver serves static and dynamic material through one
-contract. It accepts an admitted binding and operation context and returns a
-use-bound, single-use handle to trusted code, or `Denied`, `NotReady` or
-`Unavailable`. A handle conveys no authority to send. Material version can
-change independently of configuration generation. The implementation must
-provide nonsecret identity, version and expiry evidence for the final check and
-dispatch. [MaterialEvidence and handle validation](runtime-contracts.md#two-policy-checks-and-common-resolution)
-define required fields and associations; physical transport remains to be qualified.
-
-### Dynamic reuse
-
-Dynamic token reuse is confined behind the Resolver by source generation,
-normalized grant and isolation boundary. A narrower grant cannot borrow a
-broader token. Every credentialed Agent or bootstrap operation resolves again.
-There is no dynamic token push, reusable proxy-side cache or fallback, and static
-stale grace does not apply. A healthy Resolver may serve eligible unexpired
-material during an issuer outage; Resolver failure refuses use. For Agent and
-bootstrap requests, cold or expired dynamic material yields `NotReady` without
-request-time issuance, signing, refresh or scheduling. Separately authorized
-management preparation does not change that lookup contract or permit proxy
-fallback. Authenticated rejection feedback can prompt background recovery through
-the lifecycle owner; it does not make lookup schedule refresh or permit an
-automatic sender retry. See [withdrawal and recovery](lifecycle.md#4-withdraw-and-recover).
-
-### Custody
-
-Source policy must permit material at the trusted sender, and its implementation
-must qualify that custody. Registering a refresh source does not itself authorize
-delivery of signing or refresh inputs to the Egress Proxy or other
-consumers; those inputs remain confined to the roles that need them under the
-admitted custody policy. Keep provider credentials and resolver handles out of
-Agent workloads, files and diagnostics; strip Agent authentication before
-forwarding. Static freshness and typed failures are specified in
-[live Secret cutover](lifecycle.md#live-secret-cutover); rotating input custody,
-fencing and durable replacement are specified in
-[withdrawal and recovery](lifecycle.md#4-withdraw-and-recover).
-
-Admitted custody policy and runtime qualification are RFC requirements, not
-claims established by current adapters.
-
-## Protect responses
-
-A trusted provider-specific policy covers successes, errors and streams,
-including headers, bodies, trailers and encodings.
-
-| Result                       | Treatment                                                                                                                                                              |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Safe content                 | Pass the permitted response to the Agent.                                                                                                                              |
-| Content requiring protection | Redact or refuse it; unsafe forms cannot pass unchecked. The Agent receives a permitted response or placeholder, not provider material.                                |
-| Provider rejection           | Retain a policy-processed `SafeResponse` and typed exact-version feedback. Preserve the failure where safe; redact or refuse as configured. Never retry automatically. |
-
-A blocked response, provider rejection or local timeout after dispatch does not
-establish that the provider performed no action. Distinguish refusal before
-send from a known response and a possible dispatch. Preserve uncertain attempts
-for the [recovery owner](lifecycle.md#4-withdraw-and-recover).
-
-## Protocol and bypass boundaries
-
-Prevent unmediated Agent egress and bind the destination and protocol authority
-to the authorized operation.
-
-| Traffic or failure                     | Required boundary                                                 |
-| -------------------------------------- | ----------------------------------------------------------------- |
-| Opaque SSH, database and other traffic | Deny without individually authorizable operations.                |
-| UDP and QUIC                           | Prevent bypass of enforcement.                                    |
-| Additional protocols                   | Require explicit operation boundaries and evidence.               |
-| Enforcement or dependency failure      | Hardened deployments must not silently fall back to no-op egress. |
-
-## Withdrawal and owner loss
-
-A check that observes a committed reduction or hold denies the removed access. But in MVP a send can
-*start after withdrawal was acknowledged* if its final check raced the change. Work already in
-flight may continue to its original deadline. Cancellation is best effort and timeout proves neither
-remote cancellation nor absence of an effect. Ordered admission and renewable stream leases remain
-follow-ups.
-
-Report logical OCE denial, Egress detachment and provider-supported revocation separately. None can
-recall an exported bearer or undo a sent operation. Expanding scope requires any newly required warm
-material and a fresh check; authorized narrower access can continue.
-
-When an OCE operator disables or removes the *last* authorized owner, install a hold and fence new
-admissions, subject to the dispatch race above. A team Agent with another owner continues. Unknown
-owner or directory state is not confirmed loss. Report incomplete containment and `parking` until
-stop and preservation evidence justify `parked`.
-
-Deployment, restart, repair, deletion and garbage collection cannot bypass the hold or remove
-protected data. Platform cleanup of exact accepted work survives loss of requester access. Releasing
-the hold needs current authority and fresh execution admission. Synchronizing external
-identity-provider offboarding is later work.
-
-## Authorized forks
-
-An authorized reader can fork the declared readable artifact set from an
-immutable captured version. Recheck source-read and destination-create
-authority before visibility. The deep copy has independent application data and
-mutable references, a fresh stopped identity and runtime home, and no inherited
-credentials, grants, approvals or sessions. Copied schedules, hooks and pending
-work remain inert until admitted. The original remains available for authorized
-read-only review. Copy-on-write and deeper incident preservation require
-separate designs.
-
-## Accepted limits and open questions
-
-The check-to-send race and best-effort cancellation are accepted limits. These
-integration choices remain open:
-
-| Choice                         | Evidence or constraint                                                                                                                                    |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| First sender/custody transport | Qualify execution bearer issuance, delivery and lifetime, bootstrap delegation and management identity. Identity fields and audiences are specified.      |
-| GitHub issuer bridge           | OpenShell owns renewal; qualify source schema, issuer authentication and transport, preserving grant, owner epoch, attempt, material and expiry evidence. |
-| Provider/operation support     | Qualify GitHub, static inference and DNS enforcement. Qualify Codex WebSocket boundaries or an HTTP/SSE path.                                             |
-
-Engineering must choose concrete deadlines, clocks and alert thresholds within
-these contracts. External authorization integration, identity exchange, horizontal
-HA and proxy fallback need separate work. These choices do not weaken either
-check, the custody boundary or fail-closed behavior.
-
-## Required validation
-
-A hardened Egress Proxy MVP must qualify its declared provider slice with actual
-enforcement. Evidence must cover caller and tenant isolation; scope and grant
-checks; withdrawal and partitions; protocol bypass; safe response handling;
-cache and renewal bounds; bounded startup; and uncertain cleanup. Any slice
-using rotating inputs must prove concurrency fencing, durable replacement,
-restart and uncertain-effect recovery. OCE 1.0 must qualify the full static
-inference, GitHub preclone, Codex OAuth and custom dynamic paths.
-
-Migration proof must also exercise stale commands, conflicting request IDs,
-forged attachments/receipts, catalog removal cleanup, late attachment after
-withdrawal, family-wide rotating locks across distinct grants, and rejection of
-N after N+1. Duplicate authenticated receipt/version reports must survive restart
-without repeated recovery work. Exercise both static adoption modes, failed and
-authorized opt-in, unchanged approved material after a Secret-only update, known
-revocation, and mode/version isolation across caches. Cover mismatched version
-refs, foreign snapshot owners/scopes, unavailable provenance with an accessible
-approved snapshot, zero-retention snapshot reads, and rejection followed by
-cache eviction/reread. Confirm every legacy consumer has moved before removing
-old exports and persistence coupling.
-
-Check profile capabilities at startup and Agent admission against qualification
-evidence for the exact implementation versions, configuration, provider/protocol
-slice and custody. Self-declared capabilities are insufficient. Minimal CI and
-fixture/no-op adapters cannot prove enforcement or injection; deployment
-acceptance alone does not prove material or Agent readiness. Keep source,
-fixture, installed-runtime and live-provider evidence distinct. The
-[qualification plan](lifecycle.md#implementation-discovery-and-qualification)
-describes remaining integration and proof work.
+Keep Kubernetes, same-Backend and Repo guards until their replacements qualify. Move worker,
+Compute, maintenance, withdrawal and companion-revision consumers with their attempts and cleanup.
+A withdrawn required model binding blocks startup; an optional tool can be omitted. Transfer native
+OAuth input custody only after stopping the old refresher. Keep Repo discovery, profiles and sessions,
+and use separately authorized OCC preparation for management retrieval. Migrate repositories,
+constraints and source-copy utilities without rewriting historical migrations. Disable legacy
+reattachment and refresh before removing capability selection, registration, exports, package checks
+and persistence coupling. A temporary adapter is useful only while those obligations remain.
