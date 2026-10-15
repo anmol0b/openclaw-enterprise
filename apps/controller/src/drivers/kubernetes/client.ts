@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import type { AgentOptions } from "node:https";
 import type {
@@ -10,7 +9,10 @@ import type {
   ResponseContext,
 } from "@kubernetes/client-node";
 import { Agent, type buildConnector, type Dispatcher, fetch, ProxyAgent } from "undici";
-import { currentComputeAbortSignal } from "../compute/operation-context.ts";
+import {
+  currentComputeAbortSignal,
+  currentComputeOperationLifetime,
+} from "../compute/operation-context.ts";
 import type { KubernetesAuthentication } from "./authentication.ts";
 
 type KubernetesSdk = typeof import("@kubernetes/client-node");
@@ -20,16 +22,6 @@ type KubernetesClientConfiguration = ReturnType<
 >;
 
 type ValidationFailure = (message: string) => Error;
-
-const requestDeadlines = new AsyncLocalStorage<number>();
-
-/** Check an owner's absolute deadline at HTTP dispatch, even if its abort timer has not run yet. */
-export function withKubernetesRequestDeadline<T>(
-  deadline: number,
-  request: () => Promise<T>,
-): Promise<T> {
-  return requestDeadlines.run(Math.min(deadline, requestDeadlines.getStore() ?? Infinity), request);
-}
 
 export async function createKubernetesClientConfiguration(
   authentication: KubernetesAuthentication,
@@ -133,7 +125,7 @@ export async function createKubernetesClientConfiguration(
 export function nonRedirectingHttpLibrary(sdk: KubernetesSdk): HttpLibrary {
   return sdk.wrapHttpLibrary({
     async send(request) {
-      const deadline = requestDeadlines.getStore();
+      const deadline = currentComputeOperationLifetime()?.deadline;
       if (deadline !== undefined && Date.now() >= deadline) {
         throw new DOMException(
           "The Kubernetes request deadline elapsed before dispatch.",

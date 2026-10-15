@@ -57,11 +57,16 @@ export interface VersionedSecretValue {
   readonly expiresAt?: string;
 }
 
+/** Cancellation and the absolute bound for one credential read. */
+export interface CredentialReadLifetime {
+  readonly signal: AbortSignal;
+  readonly deadlineAt: string;
+}
+
 /** Trusted Resolver-only input; values never become workload projections. */
 export interface CredentialInputRead {
   readonly secret: Readonly<Secret>;
-  readonly deadlineAt: string;
-  readonly signal: AbortSignal;
+  readonly lifetime: CredentialReadLifetime;
   readonly retention: "none";
 }
 

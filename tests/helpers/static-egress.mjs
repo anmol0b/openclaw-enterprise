@@ -1093,7 +1093,8 @@ export async function syntheticDispatchFixture(t, receipts) {
   origin.listen(0, "127.0.0.1");
   await once(origin, "listening");
   t.after(() => new Promise((resolve) => origin.close(resolve)));
-  const acceptance = {
+  const exchangeOwner = {
+    verify: async () => peer,
     capture(use) {
       return current && use.request.id === request.id ? association : undefined;
     },
@@ -1107,10 +1108,9 @@ export async function syntheticDispatchFixture(t, receipts) {
     },
   };
   const ports = {
-    acceptance,
+    exchangeOwner,
     receipts,
     now: () => clock,
-    verifier: { verify: async () => peer },
     installation: async () => installation,
     provider: () => openAiStaticProvider,
     // Policy and Secret dependencies are synthetic; dispatch, persistence and sockets are real.

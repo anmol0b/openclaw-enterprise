@@ -95,7 +95,7 @@ test(
     const deadlineAt = () => new Date(Date.now() + 20_000).toISOString();
     const firstReads = f.secretReads;
     assert.equal(await lifecycle.ready(source, signal), false);
-    assert.equal(await lifecycle.readWarm(source, signal, deadlineAt()), undefined);
+    assert.equal(await lifecycle.readWarm(source, { signal, deadlineAt: deadlineAt() }), undefined);
     assert.equal(f.secretReads, firstReads, "cold request read the issuer Secret");
     assert.equal(
       gh.issuesOfTokens.length,
@@ -106,7 +106,7 @@ test(
     // Two workers race over a real family. Only the durable claim holder reaches the issuer.
     const results = await Promise.all([lifecycle.maintain(signal), lifecycle.maintain(signal)]);
     assert.deepEqual(results.sort(), ["committed", "idle"]);
-    const old = await lifecycle.readWarm(source, signal, deadlineAt());
+    const old = await lifecycle.readWarm(source, { signal, deadlineAt: deadlineAt() });
     assert.equal(old.ownerEpoch, 1);
     assert.deepEqual(gh.issuesOfTokens[0].permissions, { metadata: "read" });
     // Use OCE's actual signed exchange owner, not a second fixture acceptance or a unary sender.
@@ -173,7 +173,8 @@ test(
             assert.ok(result.ready && queryInTime && projected, "ordinary signed access must work");
             assert.equal(open.mock.callCount(), 1);
           } else {
-            assert.equal(result.refused?.code, 2, arm + ": not ready, no send handle");
+            // Once signed access expires, the request deadline wins over material readiness.
+            assert.equal(result.refused?.code, 5, arm + ": deadline exceeded, no send handle");
             const queried = arm !== "after metadata";
             assert.equal(
               queryInTime,
@@ -225,7 +226,7 @@ test(
     const beforeRestartRead = f.secretReads;
     assert.equal(await fresh.ready(source, signal), true);
     assert.equal(
-      (await fresh.readWarm(source, signal, deadlineAt())).materialVersion,
+      (await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() })).materialVersion,
       old.materialVersion,
     );
     assert.equal(f.secretReads, beforeRestartRead);
@@ -256,7 +257,7 @@ test(
     await fresh.close();
     await fresh.connect(f.pool);
     assert.deepEqual(reports, []);
-    const renewed = await fresh.readWarm(source, signal, deadlineAt());
+    const renewed = await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() });
     assert.notEqual(renewed.materialVersion, old.materialVersion);
     // B is reachable with the same trusted CA and would falsely acknowledge A's revocation.
     // Record only whether a credential arrived. A client must not rely on B rejecting A's token.
@@ -307,7 +308,10 @@ test(
           "custody or outcome changed under B",
         );
         assert.equal(await restartedAtB.ready(source, signal), false);
-        assert.equal(Boolean(await restartedAtB.readWarm(source, signal, deadlineAt())), false);
+        assert.equal(
+          Boolean(await restartedAtB.readWarm(source, { signal, deadlineAt: deadlineAt() })),
+          false,
+        );
         assert.equal(await status(old.value), 200, "A still accepts the displaced token");
       },
     );
@@ -322,7 +326,7 @@ test(
     assert.equal(changed.status, 200);
     await due();
     assert.equal(await fresh.maintain(signal), "committed");
-    const rotated = await fresh.readWarm(source, signal, deadlineAt());
+    const rotated = await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() });
     assert.equal(rotated.ownerEpoch, 2);
     assert.notEqual(rotated.inputVersion, old.inputVersion);
     assert.equal(await status(rotated.value), 200);
@@ -365,7 +369,7 @@ test(
     );
     assert.deepEqual(await pendingRetirements(), []);
     assert.equal(await fresh.ready(source, signal), false);
-    assert.equal(await fresh.readWarm(source, signal, deadlineAt()), undefined);
+    assert.equal(await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() }), undefined);
     assert.equal(
       await status(rotated.value),
       401,
@@ -399,7 +403,7 @@ test(
       "must not replay the uncertain issuance",
     );
     assert.equal(gh.issuesOfTokens.length, issuedBefore + 1);
-    assert.equal(await lifecycle.readWarm(lost, signal, deadlineAt()), undefined);
+    assert.equal(await lifecycle.readWarm(lost, { signal, deadlineAt: deadlineAt() }), undefined);
     await assert.rejects(lifecycle.withdraw(lost, signal), /unsettled provider attempt/);
     await t.test("a lost retirement commit receipt clears the unreceived candidate", async (t) => {
       // An out-of-scope issuance leaves a real cleanup candidate for the next worker pass.

@@ -21,17 +21,15 @@ import type {
 } from "@openclaw-enterprise/contracts";
 import {
   CredentialProxy,
-  type EgressPeerVerifier,
+  type EgressExchangeOwner,
   type CapturedEgressUse,
-  type TrustedEgressAcceptance,
 } from "./credential-proxy.ts";
 
 export type { AcceptedEgressAssociation, AuthorizedSend } from "./egress-send-receipts.ts";
 export { CredentialProxy } from "./credential-proxy.ts";
 export type {
   CapturedEgressUse,
-  EgressPeerVerifier,
-  TrustedEgressAcceptance,
+  EgressExchangeOwner,
   EgressPeer,
   EgressResolution,
   EgressSendDecision,
@@ -4608,13 +4606,9 @@ export class OpenClawController {
   }
 
   /** Trusted composition only: public workloads never supply an identity verifier. */
-  createCredentialProxy(
-    verifier: EgressPeerVerifier,
-    acceptance?: TrustedEgressAcceptance,
-  ): CredentialProxy {
+  createCredentialProxy(exchangeOwner: EgressExchangeOwner): CredentialProxy {
     return new CredentialProxy({
-      acceptance,
-      verifier,
+      exchangeOwner,
       now: () => this.clock().getTime(),
       installation: (peer) =>
         this.state.read((state) =>
@@ -4629,11 +4623,11 @@ export class OpenClawController {
           : undefined;
       },
       check: (use, material) => this.checkEgressUse(use, material),
-      read: async (source, signal, deadlineAt) => {
+      read: async (source, lifetime) => {
         const secret = await this.state.read((state) =>
           state.secrets.findSecret(source.secret.namespaceId, source.secret.id),
         );
-        if (signal.aborted || !secret || secret.driverId !== source.secretDriver.id) {
+        if (lifetime.signal.aborted || !secret || secret.driverId !== source.secretDriver.id) {
           throw new DependencyUnavailableError("Selected credential material is unavailable.");
         }
         const driver = this.secretDriver(secret.driverId);
@@ -4641,12 +4635,12 @@ export class OpenClawController {
           throw new DependencyUnavailableError("Versioned credential reading is unavailable.");
         }
         return {
-          ...(await driver.readCredentialInput({ secret, signal, deadlineAt, retention: "none" })),
+          ...(await driver.readCredentialInput({ secret, lifetime, retention: "none" })),
           materialId: secret.backendRef.uid,
         };
       },
-      readPreparedGitHub: (source, signal, deadlineAt) =>
-        this.preparedGitHubLifecycle().readWarm(source, signal, deadlineAt),
+      readPreparedGitHub: (source, lifetime) =>
+        this.preparedGitHubLifecycle().readWarm(source, lifetime),
       receipts: new EgressSendReceipts(this.state),
     });
   }
@@ -5023,9 +5017,11 @@ export class OpenClawController {
     await control.assertAvailable(signal);
     const material = await secretDriver.readCredentialInput({
       secret,
-      signal,
+      lifetime: {
+        signal,
+        deadlineAt: new Date(Date.now() + CREDENTIAL_GATEWAY_TIMEOUT_MS).toISOString(),
+      },
       retention: "none",
-      deadlineAt: new Date(Date.now() + CREDENTIAL_GATEWAY_TIMEOUT_MS).toISOString(),
     });
     // Validate format before committing the candidate, without retaining or exporting material.
     provider.inject(material.value);

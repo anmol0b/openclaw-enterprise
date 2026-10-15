@@ -1,6 +1,7 @@
 import type { Secret } from "./index.ts";
 import type {
   CredentialSourceControl,
+  CredentialReadLifetime,
   EgressRef,
   EgressRoute,
   EgressSourceKey,
@@ -67,8 +68,7 @@ export interface PreparedGitHubEgressLifecycle {
   /** Material access is bounded by both exchange cancellation and the signed operation deadline. */
   readWarm(
     source: PreparedGitHubEgressSource,
-    signal: AbortSignal,
-    deadlineAt: string,
+    lifetime: CredentialReadLifetime,
   ): Promise<PreparedGitHubSelection | undefined>;
   current(
     source: PreparedGitHubEgressSource,

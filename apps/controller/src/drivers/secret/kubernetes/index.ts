@@ -23,14 +23,8 @@ import {
   ScopeViolationError,
 } from "@openclaw-enterprise/occ";
 import { resolveKubernetesControlNamespace } from "../../compute/kubernetes/index.ts";
-import {
-  currentComputeAbortSignal,
-  withComputeAbortSignal,
-} from "../../compute/operation-context.ts";
-import {
-  createKubernetesClientConfiguration,
-  withKubernetesRequestDeadline,
-} from "../../kubernetes/client.ts";
+import { withComputeOperationDeadline } from "../../compute/operation-context.ts";
+import { createKubernetesClientConfiguration } from "../../kubernetes/client.ts";
 import { OAUTH_PHASE_ANNOTATION } from "../../kubernetes/oauth-seal.ts";
 import { kubernetesRequest } from "../../kubernetes/request.ts";
 import {
@@ -444,33 +438,23 @@ export class KubernetesSecretDriver implements SecretDriver {
   }
 
   async readCredentialInput(input: CredentialInputRead): Promise<VersionedSecretValue> {
-    input.signal.throwIfAborted();
-    const deadline = Date.parse(input.deadlineAt);
-    const remaining = deadline - Date.now();
-    if (!Number.isFinite(remaining) || remaining <= 0 || input.retention !== "none") {
-      throw new SecretOwnershipError("Credential read bounds are invalid.");
+    if (input.retention !== "none") {
+      throw new SecretOwnershipError("Credential read retention must be none.");
     }
-    // Namespace verification, the subsequent Secret GET and any read retries must all
-    // inherit the caller's lifetime. A check after readOwnedSecret alone is too late.
-    const owner = currentComputeAbortSignal();
-    const signal = AbortSignal.any([
-      input.signal,
-      AbortSignal.timeout(Math.min(remaining, 2_147_483_647)),
-      ...(owner ? [owner] : []),
-    ]);
-    const { observed } = await withKubernetesRequestDeadline(deadline, () =>
-      withComputeAbortSignal(signal, () => this.readOwnedSecret(input.secret)),
-    );
-    signal.throwIfAborted();
-    const version = observed.metadata?.resourceVersion;
-    if (!isNonEmptyString(version) || deadline <= Date.now()) {
-      throw new SecretOwnershipError("Versioned credential material is unavailable.");
-    }
-    return {
-      value: decodedValue(observed),
-      version,
-      authoritativeObservedAt: new Date().toISOString(),
-    };
+    // Namespace verification, Secret GET and retries share the effective enclosing lifetime.
+    return withComputeOperationDeadline(input.lifetime, async (lifetime) => {
+      const { observed } = await this.readOwnedSecret(input.secret);
+      lifetime.signal.throwIfAborted();
+      const version = observed.metadata?.resourceVersion;
+      if (!isNonEmptyString(version) || lifetime.deadline <= Date.now()) {
+        throw new SecretOwnershipError("Versioned credential material is unavailable.");
+      }
+      return {
+        value: decodedValue(observed),
+        version,
+        authoritativeObservedAt: new Date().toISOString(),
+      };
+    });
   }
 
   async withValue<T>(secret: Secret, use: (value: string) => Promise<T>): Promise<T> {

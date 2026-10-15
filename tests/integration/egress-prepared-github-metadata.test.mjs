@@ -74,7 +74,9 @@ test("consented protected repository read uses only exact, already prepared meta
           minimumValidityMs: 10000,
         });
       },
-      async readWarm(source) {
+      async readWarm(source, { signal, deadlineAt }) {
+        signal.throwIfAborted();
+        assert.ok(Date.parse(deadlineAt) > clock.wallNow());
         reads++;
         assert.equal(source.origin, gh.origin);
         const result = await reader.readWarm(admission);

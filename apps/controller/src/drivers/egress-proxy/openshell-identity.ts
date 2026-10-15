@@ -5,8 +5,7 @@ import type {
   AcceptedEgressAssociation,
   CapturedEgressUse,
   EgressPeer,
-  EgressPeerVerifier,
-  TrustedEgressAcceptance,
+  EgressExchangeOwner,
 } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 
@@ -38,7 +37,7 @@ interface AcceptedExchange {
 const commitment = (input: Buffer | string) => createHash("sha256").update(input).digest("hex");
 
 /** The enrolled supervisor pins the downstream; this owner pins its signed opening and duplex. */
-export class OpenShellEgressIdentity implements EgressPeerVerifier, TrustedEgressAcceptance {
+export class OpenShellEgressIdentity implements EgressExchangeOwner {
   readonly audience: string;
   private readonly options: OpenShellEgressIdentityOptions;
   private readonly key: KeyObject;

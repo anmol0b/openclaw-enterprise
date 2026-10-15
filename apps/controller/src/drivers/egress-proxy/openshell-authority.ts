@@ -80,7 +80,7 @@ export function createOpenShellEgressAuthority(
 ): Server {
   // The verifier owns acceptance on the actual stream. No separate synthetic owner,
   // bearer-only profile or caller-selected response destination can enter this composition.
-  const forwarder = controller.createCredentialProxy(identity, identity);
+  const forwarder = controller.createCredentialProxy(identity);
   const definition = loadSync(
     fileURLToPath(new URL("./proto/supervisor_middleware.proto", import.meta.url)),
     { keepCase: true, longs: String, enums: Number, defaults: false, oneofs: true },

@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   githubMetadataGrant,
   type PreparedGitHubEgressLifecycle,
+  type CredentialReadLifetime,
   type PreparedGitHubEgressSource as Source,
   type PreparedGitHubMaterialEvidence as Evidence,
   type PreparedGitHubSelection,
@@ -110,8 +111,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     const deadlineAt = new Date(start + 20_000).toISOString();
     const input = await this.secretDriver.readCredentialInput!({
       secret,
-      signal,
-      deadlineAt,
+      lifetime: { signal, deadlineAt },
       retention: "none",
     });
     const observed = Date.parse(input.authoritativeObservedAt);
@@ -171,9 +171,9 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
 
   async readWarm(
     source: Source,
-    signal: AbortSignal,
-    deadlineAt: string,
+    lifetime: CredentialReadLifetime,
   ): Promise<PreparedGitHubSelection | undefined> {
+    const { signal, deadlineAt } = lifetime;
     const deadline = Date.parse(deadlineAt);
     const active = () => !signal.aborted && Date.now() < deadline;
     if (!active()) {

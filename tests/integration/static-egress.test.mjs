@@ -973,6 +973,71 @@ test(
   },
 );
 
+for (const bodyType of ["Uint8Array", "Buffer"]) {
+  test(`credential proxy detaches ${bodyType} and request fields before identity verification`, async (t) => {
+    const f = await syntheticDispatchFixture(t);
+    const verification = Promise.withResolvers();
+    const entered = Promise.withResolvers();
+    const callerRequest = {
+      ...f.request,
+      headers: f.request.headers.map((pair) => [...pair]),
+      body: bodyType === "Buffer" ? Buffer.from(f.request.body) : new Uint8Array(f.request.body),
+    };
+    const proxy = new CredentialProxy({
+      ...f.ports,
+      exchangeOwner: {
+        ...f.ports.exchangeOwner,
+        async verify(authorization) {
+          entered.resolve();
+          await verification.promise;
+          return f.ports.exchangeOwner.verify(authorization);
+        },
+      },
+    });
+    const cancellation = new AbortController();
+    t.after(() => cancellation.abort());
+    const resolving = proxy.resolve(
+      "synthetic-peer",
+      f.association.installation.sandboxId,
+      callerRequest,
+      cancellation.signal,
+    );
+    await entered.promise;
+    // The caller reuses its buffers while authentication is pending. Classification and
+    // custody must still use the originally accepted request, including Buffer bytes.
+    callerRequest.body.fill(0);
+    callerRequest.headers[0][1] = "application/octet-stream";
+    callerRequest.headers.push(["authorization", "caller-controlled"]);
+    callerRequest.url = "https://changed.example.test/";
+    callerRequest.deadlineAt = "invalid";
+    verification.resolve();
+    assert.equal((await resolving).kind, "ready");
+    assert.equal(f.reads, 1);
+  });
+}
+
+test("credential proxy rejects an oversized body before copying request fields", async (t) => {
+  const f = await syntheticDispatchFixture(t);
+  const proxy = new CredentialProxy(f.ports);
+  const request = {
+    ...f.request,
+    body: new Uint8Array(1024 * 1024 + 1),
+    get headers() {
+      throw new Error("an oversized request must not be copied");
+    },
+  };
+  assert.deepEqual(
+    await proxy.resolve(
+      "synthetic-peer",
+      f.association.installation.sandboxId,
+      request,
+      new AbortController().signal,
+    ),
+    { kind: "refused", error: { kind: "denied", code: "unsupported_operation" } },
+  );
+  assert.equal(f.reads, 0);
+});
+
 test("in-flight Secret selection and outstanding handles consume the same bounded capacity", async (t) => {
   // Exercise the actual 1024-slot registry, not a race to finish 1024 TLS handshakes,
   // native IAM checks and Kubernetes reads inside their intentionally short deadlines.
@@ -983,7 +1048,8 @@ test("in-flight Secret selection and outstanding handles consume the same bounde
   const gate = Promise.withResolvers();
   const forwarder = new CredentialProxy({
     ...f.ports,
-    acceptance: {
+    exchangeOwner: {
+      verify: f.ports.exchangeOwner.verify,
       capture: (use) => {
         ids.add(use.id);
         return { ...f.association, responseId: use.id };
@@ -1014,6 +1080,20 @@ test("in-flight Secret selection and outstanding handles consume the same bounde
     await use(other),
     saturated,
     "pending selection is charged before material returns",
+  );
+  assert.deepEqual(
+    await forwarder.resolve(
+      "synthetic-peer",
+      f.association.installation.sandboxId,
+      {
+        ...f.request,
+        get headers() {
+          throw new Error("an exhausted registry must reject before copying request fields");
+        },
+      },
+      other,
+    ),
+    saturated,
   );
   assert.equal(reads, 1024, "the excess resolution never starts selection");
   gate.resolve();

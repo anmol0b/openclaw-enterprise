@@ -41,7 +41,12 @@ historical receipt cannot establish this authority.
 The supervisor accepts the downstream response recipient before resolving a
 credential. It signs the exact opening, including ephemeral response custody,
 on the bidirectional installation exchange. All subsequent decisions belong to that
-stream. Closing it cancels pending access. Both before material access and before
+stream. One required exchange owner verifies identity, captures the request origin
+and checks live response custody. Credential Proxy snapshots the bounded request
+before asynchronous verification. Credential reads share cancellation and an
+absolute deadline; nested Kubernetes reads cannot extend either bound, and an
+expired deadline prevents HTTP dispatch even before its timer fires.
+Closing the stream cancels pending access. Both before material access and before
 send, OCC checks the current installation, binding, withdrawal and native IAM
 permission. An acknowledged authorization of the exact dispatch releases one permit.
 If the COMMIT reply is lost, the origin might have been reachable, but no permit or

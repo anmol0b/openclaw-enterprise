@@ -13,6 +13,7 @@ export type {
   EgressSourceKey,
   ExecutionAdmission,
   StaticEgressSource,
+  CredentialReadLifetime,
   CredentialInputRead,
   VersionedSecretValue,
   EgressExecution,

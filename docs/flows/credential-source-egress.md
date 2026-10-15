@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-15"
-last_updated_session: authoring-run/77dbaecc-5f2b-4d7c-bd72-178b481d4feb
+last_updated_session: authoring-run/b34da698-7e69-4c1d-a28c-238ed9c7d1d4
 ---
 
 # Protected credential request flow
@@ -145,8 +145,12 @@ work, `OpenShellEgressIdentity.acceptExchange` verifies the gateway-signed
 request. Request JSON cannot introduce a key. Bearer-only legacy RPCs refuse.
 
 The adapter creates a private capability for this stream and copies the decoded
-request before asynchronous work. OCC captures the peer, including its exchange
-identity, installation and request. Both authorization and response claiming must
+request before asynchronous work. OCC requires one exchange owner for identity
+verification, origin capture and live response custody. Before its first await,
+Credential Proxy rejects oversized bodies and exhausted capacity, reserves a
+resolution slot, and detaches one private request snapshot, including body bytes
+and headers. It then captures the peer, exchange identity and installation.
+Both authorization and response claiming must
 match that identity. Another stream cannot claim the response even with the same
 bearer, key, request ID or handle. Closing the stream invalidates its capability
 and aborts its pending work. Pipelining is refused.
@@ -183,9 +187,14 @@ without material.
 `packages/occ/src/credential-proxy.ts:authorizeSend`
 
 The selected Secret Driver verifies ownership and reads UID/resourceVersion from
-the authoritative API. The registry retains material only for this bounded
-request. It returns credential headers, opaque handle and nonsecret material
-evidence to the authenticated supervisor.
+the authoritative API. Static and prepared GitHub read ports receive one lifetime,
+`{ signal, deadlineAt }`. The Kubernetes Secret reader carries that lifetime through
+namespace verification, Secret GET and retries in one operation context. Within
+that bounded read, child scopes inherit cancellation and the earliest absolute deadline.
+Each HTTP dispatch rechecks that deadline even when the timer has not fired;
+invalid deadlines fail closed. Per-attempt timeouts cannot extend the read lifetime.
+The registry retains material only for this bounded request. It returns credential
+headers, an opaque handle and nonsecret material evidence to the authenticated supervisor.
 
 The authorization frame on that same stream must echo the original deadline, evidence and injection digest.
 The registry reserves the handle, then uses
@@ -288,6 +297,8 @@ image compatibility.
 None.
 
 ## Changelog
+
+- 2026-10-15 19:23: Unify the read lifetime and exchange owner; detach one request snapshot before verification in the accompanying implementation. (authoring-run/b34da698-7e69-4c1d-a28c-238ed9c7d1d4 - adddcf2c0ce2429fb8fc7b9e503b01a74affdec8)
 
 - 2026-10-15 04:08: Add acknowledged exact dispatch and the pending trusted acceptance integration gate. (authoring-run/77dbaecc-5f2b-4d7c-bd72-178b481d4feb - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
 - 2026-10-15 04:09: Bind capture and response to a possession-authenticated exchange; refuse legacy peers and record the remaining supplier gate. (authoring-run/4ac4c430-12aa-4529-a02a-e1f26041eab4 - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)

@@ -9,6 +9,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
   CredentialProviderDefinition,
+  CredentialReadLifetime,
   EgressInstallation,
   EgressRef,
   EgressRefusal,
@@ -35,11 +36,6 @@ export interface EgressPeer {
   readonly peerKeyId?: string;
 }
 
-/** Only installed transport verifiers implement this interface, never workload input. */
-export interface EgressPeerVerifier {
-  verify(authorization: string): Promise<EgressPeer | undefined>;
-}
-
 export interface CapturedEgressUse {
   readonly id: string;
   readonly peer: EgressPeer;
@@ -49,16 +45,16 @@ export interface CapturedEgressUse {
   readonly operation: EgressOperation;
 }
 
-/** Installed acceptance owns the actual request, sender and response destination. */
-export interface TrustedEgressAcceptance {
+/** Installed transport owner authenticates and captures the live request and response destination. */
+export interface EgressExchangeOwner {
+  verify(authorization: string): Promise<EgressPeer | undefined>;
   capture(use: CapturedEgressUse): AcceptedEgressAssociation | undefined;
   /** Match the active transport sender and reply custody, not just stored IDs or liveness. */
   owns(association: AcceptedEgressAssociation, use: CapturedEgressUse): boolean;
 }
 
 export interface EgressAuthorityPorts {
-  readonly acceptance?: TrustedEgressAcceptance | undefined;
-  readonly verifier: EgressPeerVerifier;
+  readonly exchangeOwner: EgressExchangeOwner;
   readonly now: () => number;
   installation(peer: EgressPeer): Promise<EgressInstallation | undefined>;
   provider(route: EgressRoute): CredentialProviderDefinition | undefined;
@@ -69,8 +65,7 @@ export interface EgressAuthorityPorts {
   ): Promise<ProtectedEgressSource | EgressRefusal>;
   read(
     source: StaticEgressSource,
-    signal: AbortSignal,
-    deadlineAt: string,
+    lifetime: CredentialReadLifetime,
   ): Promise<VersionedSecretValue & { readonly materialId: string }>;
   readonly readPreparedGitHub?: PreparedGitHubEgressLifecycle["readWarm"];
   readonly receipts: Pick<EgressSendReceipts, "begin" | "authorize" | "record" | "observe">;
@@ -185,10 +180,9 @@ export class CredentialProxy {
     input: EgressRequest,
     signal: AbortSignal,
   ): Promise<EgressResolution> {
-    input = {
-      ...immutableCopy({ ...input, body: undefined }),
-      body: new Uint8Array(input.body),
-    } as EgressRequest;
+    if (input.body.byteLength > 1024 * 1024) {
+      return refuse("unsupported_operation");
+    }
     this.prune();
     // Reserve before authentication or any other await. Pending Secret/policy I/O
     // consumes the same capacity as an outstanding material handle.
@@ -197,7 +191,13 @@ export class CredentialProxy {
     }
     this.pendingResolutions += 1;
     try {
-      return await this.resolveReserved(authorization, sandboxId, input, signal);
+      // Copy body bytes separately without moving the field: the sender's request digest
+      // covers their original serialization order. Uint8Array also detaches a Node Buffer.
+      const request: EgressRequest = {
+        ...immutableCopy({ ...input, body: undefined }),
+        body: new Uint8Array(input.body),
+      };
+      return await this.resolveReserved(authorization, sandboxId, request, signal);
     } finally {
       this.pendingResolutions -= 1;
     }
@@ -206,19 +206,19 @@ export class CredentialProxy {
   private async resolveReserved(
     authorization: string,
     sandboxId: string,
-    input: EgressRequest,
+    request: EgressRequest,
     signal: AbortSignal,
   ): Promise<EgressResolution> {
     if (signal.aborted) {
       return { kind: "refused", error: { kind: "cancelled" } };
     }
-    const peer = await this.ports.verifier.verify(authorization);
+    const peer = await this.ports.exchangeOwner.verify(authorization);
     const now = this.ports.now();
     if (!peer || peer.sandboxId !== sandboxId || Date.parse(peer.expiresAt) <= now) {
       return refuse("identity");
     }
-    const deadline = Date.parse(input.deadlineAt);
-    const createdAt = operationCreatedAt(input.id);
+    const deadline = Date.parse(request.deadlineAt);
+    const createdAt = operationCreatedAt(request.id);
     if (
       createdAt === undefined ||
       createdAt > now + 1000 ||
@@ -230,22 +230,15 @@ export class CredentialProxy {
     ) {
       return { kind: "refused", error: { kind: "deadline_exceeded" } };
     }
-    if (input.body.byteLength > 1024 * 1024) {
-      return refuse("unsupported_operation");
-    }
-    const replayKey = JSON.stringify([peer.sender, sandboxId, peer.instanceId, input.id]);
+    const replayKey = JSON.stringify([peer.sender, sandboxId, peer.instanceId, request.id]);
     if (this.requests.has(replayKey)) {
       return refuse("invalid_handle");
     }
     if (this.requests.size >= 4096) {
       return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
     }
-    // Reserve before the first await. Failed attempts cannot reuse their transport request ID.
+    // Reserve before installation/policy I/O. Failed attempts cannot reuse their request ID.
     this.requests.set(replayKey, createdAt + 30_000);
-    const request = {
-      ...immutableCopy({ ...input, body: undefined }),
-      body: new Uint8Array(input.body),
-    } as EgressRequest;
     const installation = await this.ports.installation(peer);
     if (
       !installation ||
@@ -279,17 +272,17 @@ export class CredentialProxy {
     if (deadline > createdAt + route.deadlineMs) {
       return { kind: "refused", error: { kind: "deadline_exceeded" } };
     }
-    const use = immutableCopy({
-      id: input.id,
-      peer,
-      installation,
-      route,
-      request: { ...request, body: undefined },
-      operation,
-    }) as unknown as CapturedEgressUse;
-    // Keep captured bytes private and detached from the transport's mutable buffer.
-    const captured = { ...use, request };
-    const accepted = this.ports.acceptance?.capture(captured);
+    const captured: CapturedEgressUse = {
+      ...immutableCopy({
+        id: request.id,
+        peer,
+        installation,
+        route,
+        operation,
+      }),
+      request,
+    };
+    const accepted = this.ports.exchangeOwner.capture(captured);
     const association = accepted === undefined ? undefined : immutableCopy(accepted);
     if (!association || !this.owns(association, captured)) {
       return refuse("identity");
@@ -402,6 +395,14 @@ export class CredentialProxy {
         }),
       };
     }
+    const remaining = deadline - this.ports.now();
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      return { kind: "deadline_exceeded" };
+    }
+    const lifetime: CredentialReadLifetime = {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(remaining))]),
+      deadlineAt: request.deadlineAt,
+    };
     if (source.adoption === "prepared") {
       if (
         use.operation.kind !== "github_repository_metadata" ||
@@ -410,16 +411,8 @@ export class CredentialProxy {
       ) {
         return { kind: "denied", code: "scope_mismatch" };
       }
-      const remaining = deadline - this.ports.now();
-      if (!(remaining > 0)) {
-        return { kind: "deadline_exceeded" };
-      }
-      const accessSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(remaining))]);
-      const selected = await this.ports.readPreparedGitHub?.(
-        source,
-        accessSignal,
-        request.deadlineAt,
-      );
+
+      const selected = await this.ports.readPreparedGitHub?.(source, lifetime);
       if (!selected) {
         return { kind: "not_ready", code: "material_missing" };
       }
@@ -429,7 +422,7 @@ export class CredentialProxy {
         Date.parse(usableUntil),
         Date.parse(selection.providerExpiresAt),
       );
-      if (!Number.isFinite(until) || until <= this.ports.now() || accessSignal.aborted) {
+      if (!Number.isFinite(until) || until <= this.ports.now() || lifetime.signal.aborted) {
         return { kind: "not_ready", code: "expired" };
       }
       return {
@@ -454,7 +447,7 @@ export class CredentialProxy {
     if (use.operation.kind !== "inference") {
       return { kind: "denied", code: "scope_mismatch" };
     }
-    const material = await this.ports.read(source, signal, request.deadlineAt);
+    const material = await this.ports.read(source, lifetime);
     const observed = Date.parse(material.authoritativeObservedAt);
     const usableUntil = Math.min(
       deadline,
@@ -470,7 +463,7 @@ export class CredentialProxy {
     ) {
       return { kind: "not_ready", code: "expired" };
     }
-    if (signal.aborted) {
+    if (lifetime.signal.aborted) {
       return { kind: "cancelled" };
     }
     const evidence: EgressMaterialEvidence = immutableCopy({
@@ -502,7 +495,7 @@ export class CredentialProxy {
         ...use.installation.enforcement,
         plan: { id: use.installation.plan.id, generation: use.installation.plan.generation },
       }) &&
-      this.ports.acceptance?.owns(association, use) === true
+      this.ports.exchangeOwner.owns(association, use) === true
     );
   }
 
@@ -518,7 +511,7 @@ export class CredentialProxy {
   ): Promise<EgressSendDecision> {
     this.prune();
     const record = this.records.get(handle);
-    const peer = await this.ports.verifier.verify(authorization);
+    const peer = await this.ports.exchangeOwner.verify(authorization);
     if (
       !record ||
       this.records.get(handle) !== record ||
@@ -571,7 +564,7 @@ export class CredentialProxy {
     let decision: ProtectedEgressSource | EgressRefusal;
     let finalPeer: EgressPeer | undefined;
     try {
-      finalPeer = await this.ports.verifier.verify(authorization);
+      finalPeer = await this.ports.exchangeOwner.verify(authorization);
       if (!finalPeer || !isDeepStrictEqual(finalPeer, peer)) {
         return deny({ kind: "denied", code: "identity" });
       }
@@ -654,7 +647,7 @@ export class CredentialProxy {
     requestId: string,
   ): Promise<string | undefined> {
     this.prune();
-    const peer = await this.ports.verifier.verify(authorization);
+    const peer = await this.ports.exchangeOwner.verify(authorization);
     if (!peer || peer.sandboxId !== sandboxId || Date.parse(peer.expiresAt) <= this.ports.now()) {
       return undefined;
     }

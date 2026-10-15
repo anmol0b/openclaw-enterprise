@@ -427,11 +427,14 @@ test(
   },
 );
 
-test("legacy peer identity cannot substitute for trusted acceptance", async (t) => {
+test("verified peer identity cannot substitute for capture by the exchange owner", async (t) => {
   const { syntheticDispatchFixture } = await import("../helpers/static-egress.mjs");
   const { CredentialProxy } = await import("../../packages/occ/src/credential-proxy.ts");
   const f = await syntheticDispatchFixture(t, undefined);
-  const forwarder = new CredentialProxy({ ...f.ports, acceptance: undefined });
+  const forwarder = new CredentialProxy({
+    ...f.ports,
+    exchangeOwner: { ...f.ports.exchangeOwner, capture: () => undefined },
+  });
   const result = await forwarder.resolve(
     "synthetic-peer",
     f.association.installation.sandboxId,
