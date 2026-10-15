@@ -64,9 +64,11 @@ export interface PreparedGitHubEgressLifecycle {
   ): Promise<void>;
   withdraw(source: PreparedGitHubEgressSource, signal: AbortSignal): Promise<void>;
   ready(source: PreparedGitHubEgressSource, signal: AbortSignal): Promise<boolean>;
+  /** Material access is bounded by both exchange cancellation and the signed operation deadline. */
   readWarm(
     source: PreparedGitHubEgressSource,
     signal: AbortSignal,
+    deadlineAt: string,
   ): Promise<PreparedGitHubSelection | undefined>;
   current(
     source: PreparedGitHubEgressSource,

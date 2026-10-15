@@ -4642,8 +4642,8 @@ export class OpenClawController {
           materialId: secret.backendRef.uid,
         };
       },
-      readPreparedGitHub: (source, signal) =>
-        this.preparedGitHubLifecycle().readWarm(source, signal),
+      readPreparedGitHub: (source, signal, deadlineAt) =>
+        this.preparedGitHubLifecycle().readWarm(source, signal, deadlineAt),
       receipts: new EgressSendReceipts(this.state),
     });
   }

@@ -172,15 +172,18 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
   async readWarm(
     source: Source,
     signal: AbortSignal,
+    deadlineAt: string,
   ): Promise<PreparedGitHubSelection | undefined> {
-    if (signal.aborted) {
+    const deadline = Date.parse(deadlineAt);
+    const active = () => !signal.aborted && Date.now() < deadline;
+    if (!active()) {
       return;
     }
     const m = await this.db.metadata(source);
-    if (!m || signal.aborted) {
+    if (!m || !active()) {
       return;
     }
-    const reader = createGitHubWarmReader(this.db.store(source), Date.now);
+    const reader = createGitHubWarmReader(this.db.store(source, { deadlineAt, active }), Date.now);
     const warm = await reader.readWarm(m.admission);
     if (warm.kind !== "warm") {
       return;
@@ -192,7 +195,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
         attemptId === m.id &&
         materialVersion === m.material_version &&
         usableUntil > Date.now() &&
-        !signal.aborted
+        active()
       ) {
         return {
           ...evidence(m),
@@ -335,7 +338,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     try {
       const owner = createGitHubPreparationOwner({
         admission,
-        store: this.db.store(source),
+        store: this.db.store(source, null),
         clock,
         getKey: async () => key,
         apiOrigin: this.apiOrigin,

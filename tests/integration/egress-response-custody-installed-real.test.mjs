@@ -210,6 +210,7 @@ test(
         "loss of the exact authorized dispatch COMMIT acknowledgement and authority restart produce no send",
         async () => {
           const instanceId = installed.installation.enforcement.instanceId;
+          const preparse = provider.wireRequests;
           assert.equal((await fault("drop " + instanceId)).armed, true);
           const { id, receipt, sends } = await exchange(
             curl,
@@ -224,6 +225,11 @@ test(
             "real server COMMIT acknowledgement consumed, not an arbitrary disconnect",
           );
           assert.deepEqual(sends, []);
+          assert.equal(
+            provider.wireRequests,
+            preparse,
+            "no request reached the origin before parsing",
+          );
           assert.deepEqual(receipt.outcome, { kind: "uncertain", dispatch: "possible" });
           assert.equal(receipt.observation, null);
           assert.equal(receipt.settled, false);
@@ -242,9 +248,19 @@ test(
             "restart preserves uncertain dispatch, no repair/replay",
           );
           assert.deepEqual(await events(), transitions);
+          assert.equal(
+            provider.wireRequests,
+            preparse,
+            "no request reached the origin across restart",
+          );
           // A new operation after restart bounds the no-retry observation and proves the
           // actual transport recovered. Never submit the uncertain operation a second time.
           assert.notEqual(await verifyRead(curl), id);
+          assert.equal(
+            provider.wireRequests,
+            preparse + 1,
+            "only the fresh control reached the origin",
+          );
           assert.equal(
             provider.observations.length,
             before + 1,

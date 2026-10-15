@@ -5,10 +5,11 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { captureMetadata, dispatchMetadata } from "../helpers/github-metadata-exchange.mjs";
 import { postgresApp } from "../helpers/postgres-egress-app.mjs";
 import { requiresPostgres } from "../helpers/postgres-database.mjs";
-import { staticEgressFixture } from "../helpers/static-egress.mjs";
+import { staticEgressFixture, wireTime } from "../helpers/static-egress.mjs";
 import {
   startGitHubFixture,
   fixtureAppId,
@@ -91,9 +92,10 @@ test(
       await f.state.read((v) => v.credentialSources.findCredentialSource(f.namespace.id, source.id))
     ).egress;
     const signal = new AbortController().signal;
+    const deadlineAt = () => new Date(Date.now() + 20_000).toISOString();
     const firstReads = f.secretReads;
     assert.equal(await lifecycle.ready(source, signal), false);
-    assert.equal(await lifecycle.readWarm(source, signal), undefined);
+    assert.equal(await lifecycle.readWarm(source, signal, deadlineAt()), undefined);
     assert.equal(f.secretReads, firstReads, "cold request read the issuer Secret");
     assert.equal(
       gh.issuesOfTokens.length,
@@ -104,7 +106,7 @@ test(
     // Two workers race over a real family. Only the durable claim holder reaches the issuer.
     const results = await Promise.all([lifecycle.maintain(signal), lifecycle.maintain(signal)]);
     assert.deepEqual(results.sort(), ["committed", "idle"]);
-    const old = await lifecycle.readWarm(source, signal);
+    const old = await lifecycle.readWarm(source, signal, deadlineAt());
     assert.equal(old.ownerEpoch, 1);
     assert.deepEqual(gh.issuesOfTokens[0].permissions, { metadata: "read" });
     // Use OCE's actual signed exchange owner, not a second fixture acceptance or a unary sender.
@@ -121,6 +123,71 @@ test(
           safe.body.toString(),
           JSON.stringify({ id: Number(fixtureRepositoryId), full_name: fixtureRepository }),
         );
+      },
+    );
+    await t.test(
+      "signed access deadline bounds ciphertext selection, projection and decryption",
+      async (t) => {
+        const repo = lifecycle.repository;
+        const transaction = repo.transaction.bind(repo);
+        const open = t.mock.method(repo, "open");
+        let deadline;
+        let arm;
+        const pastDeadline = () => delay(Math.max(0, deadline - Date.now() + 100));
+        let projected;
+        let queryInTime;
+        // Delay real PostgreSQL at three distinct boundaries. Record presence, never the bytes.
+        t.mock.method(repo, "transaction", (work) =>
+          transaction((client) =>
+            work({
+              async query(sql, args) {
+                const material = sql.includes("END AS sealed");
+                if (material) {
+                  queryInTime = Date.now() < deadline;
+                  if (arm === "before projection") {
+                    await pastDeadline();
+                  }
+                }
+                const result = await client.query(sql, args);
+                if (material) {
+                  projected = result.rows.some((row) => row.sealed != null);
+                  if (arm === "after projection") {
+                    await pastDeadline();
+                  }
+                } else if (arm === "after metadata" && sql.startsWith("SELECT f.admission,id,")) {
+                  await pastDeadline();
+                }
+                return result;
+              },
+            }),
+          ),
+        );
+        for (arm of ["control", "after metadata", "before projection", "after projection"]) {
+          const request = captureMetadata(f);
+          deadline = Date.now() + 1300;
+          request.deadline = wireTime(deadline);
+          queryInTime = projected = undefined;
+          open.mock.resetCalls();
+          const result = await f.resolve(request);
+          if (arm === "control") {
+            assert.ok(result.ready && queryInTime && projected, "ordinary signed access must work");
+            assert.equal(open.mock.callCount(), 1);
+          } else {
+            assert.equal(result.refused?.code, 2, arm + ": not ready, no send handle");
+            const queried = arm !== "after metadata";
+            assert.equal(
+              queryInTime,
+              queried ? true : undefined,
+              arm + ": no late ciphertext query",
+            );
+            assert.equal(
+              projected,
+              queried ? arm === "after projection" : undefined,
+              arm + ": ciphertext projection",
+            );
+            assert.equal(open.mock.callCount(), 0, arm + ": must not decrypt");
+          }
+        }
       },
     );
     const status = (value) =>
@@ -157,7 +224,10 @@ test(
     t.after(() => fresh.close());
     const beforeRestartRead = f.secretReads;
     assert.equal(await fresh.ready(source, signal), true);
-    assert.equal((await fresh.readWarm(source, signal)).materialVersion, old.materialVersion);
+    assert.equal(
+      (await fresh.readWarm(source, signal, deadlineAt())).materialVersion,
+      old.materialVersion,
+    );
     assert.equal(f.secretReads, beforeRestartRead);
     assert.equal(gh.issuesOfTokens.length, 1);
     const due = () =>
@@ -186,7 +256,7 @@ test(
     await fresh.close();
     await fresh.connect(f.pool);
     assert.deepEqual(reports, []);
-    const renewed = await fresh.readWarm(source, signal);
+    const renewed = await fresh.readWarm(source, signal, deadlineAt());
     assert.notEqual(renewed.materialVersion, old.materialVersion);
     // B is reachable with the same trusted CA and would falsely acknowledge A's revocation.
     // Record only whether a credential arrived. A client must not rely on B rejecting A's token.
@@ -237,7 +307,7 @@ test(
           "custody or outcome changed under B",
         );
         assert.equal(await restartedAtB.ready(source, signal), false);
-        assert.equal(Boolean(await restartedAtB.readWarm(source, signal)), false);
+        assert.equal(Boolean(await restartedAtB.readWarm(source, signal, deadlineAt())), false);
         assert.equal(await status(old.value), 200, "A still accepts the displaced token");
       },
     );
@@ -252,7 +322,7 @@ test(
     assert.equal(changed.status, 200);
     await due();
     assert.equal(await fresh.maintain(signal), "committed");
-    const rotated = await fresh.readWarm(source, signal);
+    const rotated = await fresh.readWarm(source, signal, deadlineAt());
     assert.equal(rotated.ownerEpoch, 2);
     assert.notEqual(rotated.inputVersion, old.inputVersion);
     assert.equal(await status(rotated.value), 200);
@@ -295,7 +365,7 @@ test(
     );
     assert.deepEqual(await pendingRetirements(), []);
     assert.equal(await fresh.ready(source, signal), false);
-    assert.equal(await fresh.readWarm(source, signal), undefined);
+    assert.equal(await fresh.readWarm(source, signal, deadlineAt()), undefined);
     assert.equal(
       await status(rotated.value),
       401,
@@ -329,7 +399,7 @@ test(
       "must not replay the uncertain issuance",
     );
     assert.equal(gh.issuesOfTokens.length, issuedBefore + 1);
-    assert.equal(await lifecycle.readWarm(lost, signal), undefined);
+    assert.equal(await lifecycle.readWarm(lost, signal, deadlineAt()), undefined);
     await assert.rejects(lifecycle.withdraw(lost, signal), /unsettled provider attempt/);
     assert.deepEqual(gh.errors, []);
   },

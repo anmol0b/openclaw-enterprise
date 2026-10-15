@@ -205,7 +205,12 @@ export class PreparedGitHubPostgres {
     });
   }
 
-  store(source: Source): GitHubPreparationStore {
+  // Request access has an absolute deadline and follows exchange cancellation. Background
+  // preparation owns separate custody, including material that is no longer request-eligible.
+  store(
+    source: Source,
+    access: Readonly<{ deadlineAt: string; active: () => boolean }> | null,
+  ): GitHubPreparationStore {
     const key = source.key.source.id;
     const locked = <T>(
       familyId: string,
@@ -223,15 +228,18 @@ export class PreparedGitHubPostgres {
           [key, source, this.issuerAuthority],
         );
         const f = rows[0] as FamilyRow | undefined;
-        if (!f) {
+        if (!f || (access && (!f.enabled || !f.live || !access.active()))) {
           return update(undefined, randomUUID);
         }
+        // Check the absolute deadline at projection, not transaction or statement start: a
+        // query submitted in time may reach this row late. In-flight bytes cannot be recalled.
         const list = (
           await c.query(
             `SELECT id,admission,state,custody,material_version,provider_expires_at,
-          usable_until,CASE WHEN custody='current' AND admission->>'issuerAuthority'=$2 THEN sealed END AS sealed FROM ${attempts}
+          usable_until,CASE WHEN custody='current' AND admission->>'issuerAuthority'=$2
+            AND clock_timestamp() < $3::timestamptz THEN sealed END AS sealed FROM ${attempts}
           WHERE source_id=$1`,
-            [key, this.issuerAuthority],
+            [key, this.issuerAuthority, access?.deadlineAt ?? "infinity"],
           )
         ).rows as AttemptRow[];
         const current =
@@ -247,7 +255,7 @@ export class PreparedGitHubPostgres {
             ...(a.material_version ? { materialVersion: a.material_version } : {}),
           })),
         };
-        if (current) {
+        if (current && (!access || access.active())) {
           family.committed = {
             admission: current.admission,
             attemptId: current.id,

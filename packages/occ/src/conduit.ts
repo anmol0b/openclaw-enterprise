@@ -397,7 +397,16 @@ export class Conduit {
       ) {
         return { kind: "denied", code: "scope_mismatch" };
       }
-      const selected = await this.ports.readPreparedGitHub?.(source, signal);
+      const remaining = deadline - this.ports.now();
+      if (!(remaining > 0)) {
+        return { kind: "deadline_exceeded" };
+      }
+      const accessSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(remaining))]);
+      const selected = await this.ports.readPreparedGitHub?.(
+        source,
+        accessSignal,
+        request.deadlineAt,
+      );
       if (!selected) {
         return { kind: "not_ready", code: "material_missing" };
       }
@@ -407,7 +416,7 @@ export class Conduit {
         Date.parse(usableUntil),
         Date.parse(selection.providerExpiresAt),
       );
-      if (!Number.isFinite(until) || until <= this.ports.now() || signal.aborted) {
+      if (!Number.isFinite(until) || until <= this.ports.now() || accessSignal.aborted) {
         return { kind: "not_ready", code: "expired" };
       }
       return {
