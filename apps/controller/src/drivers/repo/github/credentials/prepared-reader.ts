@@ -23,6 +23,8 @@ export function createGitHubWarmReader(store: GitHubPreparedReadPort, wallNow: (
         const now = wallNow();
         return Number.isFinite(now) && usableUntil > now + minimumValidityMs;
       };
+      // Keep custody across the read: its receipt can be lost after select has run.
+      let owned: GitHubPreparedMaterial | undefined;
       try {
         const result = await store.readCurrent(admission.familyId, (row): GitHubWarmResult => {
           if (!preparationAdmitted(row, admission)) {
@@ -47,18 +49,21 @@ export function createGitHubWarmReader(store: GitHubPreparedReadPort, wallNow: (
           ) {
             return { kind: "not_ready" };
           }
-          return { kind: "warm", material: structuredClone(material) };
+          owned = structuredClone(material);
+          return { kind: "warm", material: owned };
         });
         // Expiry keeps advancing after linearization, e.g. while a database read is in transit.
         // The Resolver must still authorize use and check usability at the actual send.
-        if (result.kind === "warm" && !eligible(result.material.usableUntil)) {
-          result.material.bytes.fill(0);
-          return { kind: "not_ready" };
+        if (result.kind === "warm" && result.material === owned && eligible(owned.usableUntil)) {
+          owned = undefined; // The caller now owns these live bytes.
+          return result;
         }
-        return result;
       } catch {
-        return { kind: "not_ready" };
+        // An unavailable read receipt or clock cannot release a warm selection.
+      } finally {
+        owned?.bytes.fill(0);
       }
+      return { kind: "not_ready" };
     },
   });
 }

@@ -341,28 +341,60 @@ test("quarantining this attempt during key lookup prevents any GitHub issuance",
   assert.equal(await owner().run("replacement", bounds()), "blocked");
 });
 
-test("material that expires while the repository read returns never reaches the warm consumer", async (t) => {
-  const { admission, database, owner, github, clock, bounds, keyReads } = await setup(t);
-  const store = database.connect();
-  assert.equal(await owner().run("expire-during-read", bounds()), "committed");
-  let selected;
-  const lagged = createGitHubWarmReader(
-    {
-      async readCurrent(familyId, select) {
-        selected = await store.readCurrent(familyId, select);
-        await clock.advance(3600000);
-        return selected;
-      },
-    },
-    clock.wallNow,
-  );
-  const result = await lagged.readWarm(admission);
-  assert.equal(selected?.kind, "warm", "store selected eligible material before the delay");
-  assert.equal(result.kind, "not_ready", "reader must check remaining lifetime on return");
-  assert.ok(
-    selected.material.bytes.every((byte) => byte === 0),
-    "discarded material was wiped",
-  );
+test("warm reader wipes its detached selection when it cannot return it", async (t) => {
+  const { admission, store, owner, reader, github, clock, bounds, keyReads } = await setup(t);
+  assert.equal(await owner().run("reader-custody", bounds()), "committed");
+
+  for (const failure of [
+    "expired on return",
+    "read receipt lost",
+    "clock threw",
+    "invalid clock",
+  ]) {
+    await t.test(failure, async () => {
+      let selected;
+      let selectedLiveBytes;
+      const interrupted = createGitHubWarmReader(
+        {
+          async readCurrent(familyId, select) {
+            selected = await store.readCurrent(familyId, select);
+            selectedLiveBytes = selected.material.bytes.some((byte) => byte !== 0);
+            if (failure === "read receipt lost") {
+              throw new Error("fixture lost read receipt after selection");
+            }
+            return selected;
+          },
+        },
+        () => {
+          // Only the final validity check sees the clock failure or advanced time.
+          if (!selected) {
+            return clock.wallNow();
+          }
+          if (failure === "clock threw") {
+            throw new Error("fixture clock unavailable on return");
+          }
+          return failure === "invalid clock" ? NaN : selected.material.usableUntil;
+        },
+      );
+
+      const result = await interrupted.readWarm(admission);
+      assert.equal(selectedLiveBytes, true, "selection held live bytes before the failure");
+      assert.deepEqual(result, { kind: "not_ready" });
+      assert.ok(
+        selected.material.bytes.every((byte) => byte === 0),
+        "discarded selection was wiped",
+      );
+    });
+  }
+
+  // Discarding the detached selections must leave committed material usable by a later reader.
+  const warm = await reader.readWarm(admission);
+  assert.equal(warm.kind, "warm");
+  try {
+    assert.equal(await readRepository(github, warm.material), 200);
+  } finally {
+    warm.material.bytes.fill(0);
+  }
   assert.equal(github.issuesOfTokens.length, 1);
   assert.equal(keyReads(), 1);
   assert.equal(clock.pendingTimers(), 0);
