@@ -24,8 +24,11 @@ Kubernetes Compute waits for the authenticated current installation, records it 
 rechecks it before signing a fresh startup challenge with its control-plane Ed25519
 key. The workload gets only the verifier. If startup or the serving check cannot
 establish the admitted installation, the execution stays unavailable. For a prepared
-credential, Compute also needs bounded evidence that the exact family is already warm.
-Startup, readiness and a credential request cannot initiate preparation.
+credential, the source can be configured and a revision requested while the source's
+`status.state` is `pending`. Compute waits for the exact family to be warm before
+releasing the workload, then for the Harness to report `serving` before reporting ready.
+If the revision never becomes ready, deployment status reports the convergence timeout.
+Only the preparation worker can warm the family; startup, readiness and requests cannot.
 
 ## Loaded enforcement
 
@@ -64,7 +67,7 @@ after the origin acted. A positive credential rejection fences only that materia
 version. An observed response or a decision to release bytes does not prove delivery
 to the Agent and cannot authorize a replay.
 
-## Installation
+## Installation configuration
 
 Use the [protected local launch profile](../../guides/deploy/local-openshell-images.md#select-the-protected-profile)
 and the [OpenShell Backend and Sandbox configuration](../drivers/openshell-credential-gateway.md).

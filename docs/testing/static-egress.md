@@ -1,18 +1,17 @@
 # Verify protected static inference
 
-All shipped Compute Drivers currently refuse protected execution. Protocol fixtures
-can exercise valid protected v2 schemas without releasing a workload. Their
-admission and installation evidence does not satisfy the
-[production execution cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
+Bundled OpenShell cannot enforce this profile. Candidate Kubernetes Compute verifies
+the current installation before signing the workload release. Other Compute Drivers
+refuse protected admission. [Qualify the installed pair](#installed-runtime-and-provider-qualification)
+before relying on [this boundary](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
 
-Run these checks with installed workspace dependencies. OCE source and fixture
-coverage does not establish installed OpenShell or real-provider behavior.
+Run source checks with installed workspace dependencies.
 
 ## Authority and provider fixtures
 
-The authority fixtures use an explicitly synthetic trusted acceptance profile.
-They do not prove installation-bound exchange authentication or actual protected
-response custody; production integration remains gated on M2.
+The authority fixtures use a synthetic trusted acceptance profile. Test
+[installation-bound exchange and response custody](protected-repository-custody.md)
+on the candidate pair separately.
 
 `tests/integration/postgres-egress-send-receipts.test.mjs` runs the real Forwarder
 and PostgreSQL receipt transactions with a loopback byte-counting origin. With a
