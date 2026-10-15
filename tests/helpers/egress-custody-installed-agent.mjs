@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { sha256Hex } from "../../packages/utils/src/hashing.ts";
 import assert from "node:assert/strict";
 import { observeInstalledProtection } from "./egress-installed-agent.mjs";
 import { protectedConfigurationBody, sourceAccessBindingBody } from "./egress-connected-inputs.mjs";
@@ -5,6 +7,35 @@ import { repositoryPath } from "../fixtures/egress-custody-repository-origin.mjs
 
 export async function admitRepositoryAgent(setup, stack, evidence, owned) {
   const { create, provider } = owned;
+  // Prove the actual API and worker select this synthetic issuer before enrolling its App key.
+  // Inspect only nonsecret Installation routing. Missing selection must never fall back to GitHub.
+  const { controllerNamespace } = setup.input;
+  const inspectOrigin = [
+    'import { readFileSync } from "node:fs";',
+    'import { loadYaml } from "@kubernetes/client-node";',
+    'const startup = loadYaml(readFileSync(process.env.OCC_CONFIG_PATH, "utf8"));',
+    "const p = startup.drivers.conduit.configuration.preparedGitHub;",
+    "if (!p.apiOrigin || !p.issuerCaPath || !p.custodyKeyPath) process.exit(1);",
+    "process.stdout.write(p.apiOrigin);",
+  ].join("\n");
+  for (const pod of stack.controllerPods) {
+    const origin = await setup.f.kubectl(
+      "exec",
+      "-n",
+      controllerNamespace,
+      pod.metadata.name,
+      "--",
+      "node",
+      "--input-type=module",
+      "-e",
+      inspectOrigin,
+    );
+    assert.equal(
+      origin.trim(),
+      provider.businessOrigin,
+      "both control-plane Pods must select this private issuer",
+    );
+  }
   const name = "custody-" + evidence.runId;
   const configuration = await create(
     "configurations",
@@ -33,6 +64,15 @@ export async function admitRepositoryAgent(setup, stack, evidence, owned) {
     harnessAuth: { method: "runtime" },
     credentialSources: [{ sourceId: source.id }],
   });
+  // Preparation belongs to the worker. Do not race a deliberately cold Compute gate.
+  await setup.f.waitFor(
+    "proactive prepared repository credential",
+    async () => {
+      const status = await api("GET", stack.namespacePath + "/credential-sources/" + source.id);
+      return provider.issues > 0 && status.status.state === "ready";
+    },
+    120_000,
+  );
   const role = await create("iam/roles", {
     name,
     permissions: [{ action: "operate", resourceKind: "credential_source" }],
@@ -74,6 +114,7 @@ export async function activateRepositoryAgent(setup, stack, evidence, owned, adm
       grant.isolationId === agent.id &&
       grant.profile === "metadata-read",
   );
+  verifyWorkloadCannotObtainComputeSigner(setup, installed.harness, agent.id, revision.id);
   const [exactRoute, ...others] = installed.installation.plan.routes;
   assert.equal(others.length, 0);
   assert.equal(exactRoute.method, "GET");
@@ -89,6 +130,60 @@ export async function activateRepositoryAgent(setup, stack, evidence, owned, adm
     "provider must observe proactive scoped token issue before first workload read",
   );
   return { ...installed, revision };
+}
+
+// Exercise the real authorizer without getting, listing or projecting a Secret.
+function verifyWorkloadCannotObtainComputeSigner(setup, harness, agentId, revisionId) {
+  const namespace = harness.metadata.namespace;
+  const name = "compute-release-" + sha256Hex(agentId, 12) + "-rev-" + sha256Hex(revisionId, 12);
+  assert.ok(
+    !JSON.stringify(harness.spec).includes(name),
+    "Compute signer cannot be in the workload",
+  );
+  const account = harness.spec.serviceAccountName || "default";
+  const user = "system:serviceaccount:" + namespace + ":" + account;
+  const groups = [
+    "system:serviceaccounts",
+    "system:serviceaccounts:" + namespace,
+    "system:authenticated",
+  ];
+  const { kubeconfigPath, kubernetesContext } = setup.input;
+  for (const resourceAttributes of [
+    { namespace, resource: "secrets", verb: "get", name },
+    { namespace, resource: "secrets", verb: "list" },
+    { namespace, resource: "secrets", verb: "watch" },
+    { namespace, resource: "pods", verb: "create" },
+    { namespace, resource: "deployments", group: "apps", verb: "create" },
+    { namespace, resource: "deployments", group: "apps", verb: "patch" },
+  ]) {
+    const review = {
+      apiVersion: "authorization.k8s.io/v1",
+      kind: "SubjectAccessReview",
+      spec: { user, groups, resourceAttributes },
+    };
+    const raw = execFileSync(
+      "kubectl",
+      [
+        "--kubeconfig",
+        kubeconfigPath,
+        "--context",
+        kubernetesContext,
+        "create",
+        "-f",
+        "-",
+        "-o",
+        "json",
+      ],
+      { input: JSON.stringify(review), encoding: "utf8", timeout: 20_000 },
+    );
+    const { status } = JSON.parse(raw);
+    assert.equal(status.evaluationError, undefined, "authorizer must evaluate workload access");
+    assert.equal(
+      status.allowed,
+      false,
+      "workload must lack " + resourceAttributes.verb + " " + resourceAttributes.resource,
+    );
+  }
 }
 
 // Only a freshly prepared, expressly disposable single API Pod may be restarted.

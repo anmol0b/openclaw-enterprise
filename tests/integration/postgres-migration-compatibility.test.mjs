@@ -1639,6 +1639,8 @@ test(
       [53, "preCredentialSourcePat"],
       [54, "preStaticEgress"],
       [55, "preSendReceipts"],
+      [56, "prePreparedGitHubCustody"],
+      [57, "prePreparedGitHubEgress"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -1903,6 +1905,8 @@ test(
       [53, "preCredentialSourcePat"],
       [54, "preStaticEgress"],
       [55, "preSendReceipts"],
+      [56, "prePreparedGitHubCustody"],
+      [57, "prePreparedGitHubEgress"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -1987,6 +1991,8 @@ test(
       [53, "preCredentialSourcePat"],
       [54, "preStaticEgress"],
       [55, "preSendReceipts"],
+      [56, "prePreparedGitHubCustody"],
+      [57, "prePreparedGitHubEgress"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });

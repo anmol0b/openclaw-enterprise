@@ -1,6 +1,6 @@
 import {
   openShellEgressConfiguration,
-  type OpenShellEgressOptions,
+  type OpenShellConduitOptions,
 } from "../egress-proxy/openshell.ts";
 import { asRecord, immutableCopy, isNonEmptyString, sha256Hex } from "@openclaw-enterprise/utils";
 import { KubernetesObjectApi, type KubernetesObject, PatchStrategy } from "@kubernetes/client-node";
@@ -16,7 +16,7 @@ import type {
   AgentRevision,
   CredentialSourceLoginMode,
   EgressInstallation,
-  EgressPlan,
+  ConduitPlan,
   Backend,
   HarnessWorkloadRequirements,
   KubernetesNamespacedResource,
@@ -92,7 +92,7 @@ export interface OpenShellNetworkBinary {
 }
 
 export interface OpenShellSandboxDriverOptions {
-  readonly egress?: OpenShellEgressOptions;
+  readonly egress?: OpenShellConduitOptions;
   /** Workspace and readiness policy; the `openshell` Backend owns the gateway connection. */
   readonly gateway: {
     readonly workspaceMode: "managed" | "operator";
@@ -607,7 +607,7 @@ interface CodexRuntimeFiles {
 
 function codexRuntimeFiles(
   requirements: HarnessWorkloadRequirements,
-  plan?: EgressPlan,
+  plan?: ConduitPlan,
 ): CodexRuntimeFiles {
   const expected = new Map([
     ["runtime.json", PLUGIN_RUNTIME_MANIFEST_ENVIRONMENT],
@@ -1541,13 +1541,13 @@ function sandboxSpec(
         run_as_user: options.policy.process.runAsUser,
         run_as_group: options.policy.process.runAsGroup,
       },
-      ...(requirements.egressAttachment === undefined
+      ...(requirements.conduitWiring === undefined
         ? {}
         : {
             network_middlewares: protectedEgressPolicy(options, requirements).network_middlewares,
           }),
       network_policies: {
-        ...(requirements.egressAttachment === undefined
+        ...(requirements.conduitWiring === undefined
           ? networkPolicies(options)
           : asRecord(protectedEgressPolicy(options, requirements).network_policies)),
         ...(runtimeProvider === undefined || workspaceNodeBinding === undefined
@@ -1721,7 +1721,7 @@ function protectedEgressPolicy(
   options: OpenShellSandboxDriverOptions,
   requirements: HarnessWorkloadRequirements,
 ): Readonly<Record<string, unknown>> {
-  const attachment = requirements.egressAttachment;
+  const attachment = requirements.conduitWiring;
   if (
     !attachment ||
     !options.egress ||
@@ -2151,9 +2151,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
 
   async provisionHarness(context: SandboxHarnessContext): Promise<SandboxResourceRef> {
     this.requireOperatorWorkspaceMode("provision a Harness");
-    if (
-      !isDeepStrictEqual(context.requirements.egressAttachment?.plan, context.revision.egressPlan)
-    ) {
+    if (!isDeepStrictEqual(context.requirements.conduitWiring?.plan, context.revision.egressPlan)) {
       throw new OpenShellSandboxConfigurationFailure(
         "Protected egress attachment must match the admitted revision.",
       );
@@ -2247,13 +2245,13 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       ),
       serviceExposures,
     };
-    const prepared = context.requirements.egressAttachment;
+    const prepared = context.requirements.conduitWiring;
     const result = immutableCopy({
       ...sandbox,
       ...(prepared === undefined
         ? {}
         : {
-            egressAttachment: {
+            conduitWiring: {
               plan: prepared.plan,
               configuration: create.spec.policy,
             },

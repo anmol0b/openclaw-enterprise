@@ -175,7 +175,7 @@ A background worker can prepare one admitted GitHub App grant without traffic
 from an Agent. The owner commits an `issuing` attempt before retrieving the exact
 signing key version, then checks the family, owner epoch and that attempt again
 before calling GitHub. It reuses the existing signer and installation-token
-exchange. This is the [OCE-owned GitHub preparation option](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/contracts.md#credential-resolution).
+exchange. This is the [OCE-owned GitHub preparation option](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/protocol.md#prepare-and-renew-credentials).
 
 GitHub issuance cannot be atomic with local storage. The owner verifies the exact
 returned repository, rights and provider expiry. The publication transaction
@@ -189,12 +189,11 @@ committed material during renewal. Cold, expired or differently admitted materia
 returns `not_ready`, including when validity runs out during the read. The
 Resolver must authorize both access and the actual send.
 
-To connect this core, admission, takeover, preparation and reads must share a
-durable family transaction, encrypted custody and retained attempt history. The
-port currently accepts only one grant per family; its family ID must include the
-installation and namespace boundary. Connect a background worker with bounded
-attempts and an exact-version signing-key lookup, then give the Resolver only the
-read facet. Neither component is registered in production yet.
+The optional PostgreSQL lifecycle joins the family transaction, encrypted custody,
+and retained attempts. The API and worker need the same dedicated 32-byte custody
+key across restarts. Only the worker prepares material. The Installation owns the
+HTTPS issuer and its trust roots; a source cannot redirect the issuer. A cold or
+expired read cannot start an exchange, and uncertain issuance blocks another attempt.
 
 ## Debugging and Verification
 
@@ -205,7 +204,9 @@ read facet. Neither component is registered in production yet.
   scope/expiry, cancellation, and transaction failures before/after commit.
   Its serializable in-memory fixture reconnects owners to shared committed state;
   it is not production durability, process-crash, live-provider, installed-runtime,
-  cluster or regular Agent workflow proof. No production owner is registered.
+  cluster or regular Agent workflow proof.
+  `postgres-prepared-github-lifecycle.test.mjs` exercises the durable lifecycle,
+  signed protected exchange, issuer rotation, withdrawal and quarantine over loopback.
 
 - Read the source: `status.refresh.state`, `lastRefreshAt`, `failureCode`, and
   `recoveryAction` explain the last mint without exposing a token.

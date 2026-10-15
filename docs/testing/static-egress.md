@@ -333,8 +333,16 @@ Use the version 2 connected inputs above, with `authorityProfile` set to
 report, in order, credential access, installation exchange, response custody and
 execution authority. Configure its fixture bridge and valid TLS trust for both
 ordinary workload clients. Select the fixture HTTPS origin (without `/v1`) in
-the deployment's GitHub preparation worker and protected repository route. The
-test generates an App key, an explicitly consented Agent source and metadata-only
+`drivers.conduit.configuration.preparedGitHub.apiOrigin` in the Installation.
+Supply `issuerCaPath: /etc/openclaw/prepared-github-issuer/ca.crt` and
+`custodyKeyPath: /etc/openclaw/prepared-github/custody.key`. In the chart select
+`preparedGitHub.custodySecretName`, `issuerCaConfigMapName`, exact `issuerCidrs`
+IPv4 /32 and `issuerPort`. The API and worker need working DNS and verified
+TLS to that origin. The test checks the selected private origin in both Pods
+before enrollment; a credential source cannot redirect it. The test also checks
+the workload's effective authorization cannot retrieve or project the Compute signer.
+
+The test generates an App key, an explicitly consented Agent source and metadata-only
 installation token. It contacts neither GitHub nor a model provider.
 
 Before installing the disposable API controller, start the following observer on

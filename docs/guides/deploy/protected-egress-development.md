@@ -8,7 +8,8 @@ remains closed until the installed pair and its release authority are qualified.
 
 Use a disposable database for the first upgrade. The supported starting schema
 includes `0054_credential_source_pat`. Migrations `0055_static_egress` and
-`0056_egress_send_receipts` append to that exact history. Migration checks compare
+`0056_egress_send_receipts`, `0057_prepared_github_custody` and
+`0058_prepared_github_egress` append to that exact history. Migration checks compare
 the receipt ledger, catalog and effective grants. Do not renumber receipts or
 adopt a database created with an earlier private version of migration 0054.
 
@@ -21,7 +22,7 @@ A logical dump and restore can reparse CHECK expressions and fail that exact
 catalog check even when the restore command succeeds. Retain the matching
 controller, runtime, supplier and configuration revisions with the snapshot.
 Apply the normal migration once. Start the matching API and workers with
-`egress_proxy` unselected. Create a fresh, explicitly unprotected revision to
+`conduit` unselected. Create a fresh, explicitly unprotected revision to
 resume development. Existing credential sources keep their previous meaning;
 there is no automatic source adoption, credential copying or new access grant.
 Keep an installation on the previous release if it has running revisions the new
@@ -40,23 +41,23 @@ new admissions or a possible provider send, stop writers and reconcile those
 effects first. Never delete a dispatch receipt or replay an uncertain operation to
 make a rollback appear clean.
 
-## Earlier executable-scoped fixture
+## Select fresh whole-execution protection
 
-This configuration documents the earlier, narrower fixture. Its executable list
-is not whole-execution consent or evidence that a sibling shares the parent's
-authority. Preserve such a legacy restriction until an authorized binder admits
-the broader principal; do not use this example as a production launch procedure.
+This selection requires explicit whole-execution authority and the current paired
+Compute release and OpenShell custody profiles. An earlier executable-scoped
+selection cannot authorize this principal. Keep its existing restrictions until
+an authorized binder admits the broader access.
 
 Keep the existing [OpenShell Backend and Sandbox configuration](../../reference/drivers/openshell-credential-gateway.md).
-Add the same egress Driver ID to `backend[].drivers.egress_proxy` and select:
+Add the same egress Driver ID to `backend[].drivers.conduit` and select:
 
 ```yaml
 drivers:
-  egress_proxy:
+  conduit:
     id: openshell-egress
     configuration:
       middlewareName: oce-authority
-      binaries: [/usr/bin/model-client]
+      authorityScope: execution
       authority:
         host: 127.0.0.1
         port: 9444

@@ -118,6 +118,12 @@ function classifyReceipts(receipts, manifest) {
       if (receipts.length === 55) {
         return "preSendReceipts";
       }
+      if (receipts.length === 56) {
+        return "prePreparedGitHubCustody";
+      }
+      if (receipts.length === 57) {
+        return "prePreparedGitHubEgress";
+      }
       if (receipts.length === manifest.entries.length) {
         return "completed";
       }
@@ -209,6 +215,12 @@ function classifyReceipts(receipts, manifest) {
   }
   if (receipts.length === 55) {
     return "preSendReceipts";
+  }
+  if (receipts.length === 56) {
+    return "prePreparedGitHubCustody";
+  }
+  if (receipts.length === 57) {
+    return "prePreparedGitHubEgress";
   }
   if (receipts.length === manifest.entries.length) {
     return "completed";

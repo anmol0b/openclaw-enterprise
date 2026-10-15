@@ -94,7 +94,7 @@ export interface EgressRoute {
   readonly deadlineMs: number;
 }
 
-export interface EgressPlan {
+export interface ConduitPlan {
   readonly id: string;
   readonly generation: number;
   readonly execution: EgressExecution;
@@ -105,7 +105,7 @@ export interface EgressPlan {
 
 /** Recorded only from authenticated adapter observation of the exact installed policy. */
 export interface EgressInstallation {
-  readonly plan: EgressPlan;
+  readonly plan: ConduitPlan;
   readonly sandboxId: string;
   readonly sender: EgressRef;
   readonly installedAt: string;
@@ -186,8 +186,6 @@ export type EgressRefusal =
   | { readonly kind: "cancelled" | "deadline_exceeded" };
 
 export interface EgressResponse {
-  /** Present only when the trusted transport observed end-of-message, including actual last trailers. */
-  readonly trailers?: readonly (readonly [string, string])[];
   readonly status: number;
   readonly headers: readonly (readonly [string, string])[];
   readonly body: Uint8Array;
@@ -228,34 +226,34 @@ export interface CredentialSourceControl {
   assertAvailable(signal: AbortSignal): Promise<void>;
 }
 
-export interface EgressAttachment {
-  readonly plan: EgressPlan;
+export interface SandboxConduitWiring {
+  readonly plan: ConduitPlan;
   /** Nonsecret adapter-owned configuration; only the paired Sandbox interprets it. */
   readonly configuration: Readonly<Record<string, unknown>>;
 }
 
-export interface EgressRevisionContext {
+export interface ConduitRevisionContext {
   readonly namespace: Readonly<Namespace>;
   readonly revision: Readonly<AgentRevision>;
-  readonly plan: EgressPlan;
+  readonly plan: ConduitPlan;
   readonly signal: AbortSignal;
 }
 
-export interface EgressProxyDriver extends Driver {
-  readonly capability: "egress_proxy";
+export interface ConduitDriver extends Driver {
+  readonly capability: "conduit";
   readonly sourceControl: CredentialSourceControl;
-  configureRevision(context: EgressRevisionContext): Promise<EgressAttachment>;
-  attachmentStatus(
-    context: EgressRevisionContext,
-    prepared: EgressAttachment,
+  configureRevision(context: ConduitRevisionContext): Promise<SandboxConduitWiring>;
+  wiringStatus(
+    context: ConduitRevisionContext,
+    prepared: SandboxConduitWiring,
   ): Promise<EgressInstallation | undefined>;
   /** Query the counterpart again; persisted installation records are not readiness leases. */
   verifyInstallation(
-    context: EgressRevisionContext,
+    context: ConduitRevisionContext,
     installation: EgressInstallation,
   ): Promise<boolean>;
-  withdrawBinding(context: EgressRevisionContext, binding: EgressRef): Promise<boolean>;
-  removeRevision(context: EgressRevisionContext): Promise<boolean>;
+  withdrawBinding(context: ConduitRevisionContext, binding: EgressRef): Promise<boolean>;
+  removeRevision(context: ConduitRevisionContext): Promise<boolean>;
 }
 
 /** Durable admission semantics, independent of credential bindings and route count. */

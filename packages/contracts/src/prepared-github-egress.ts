@@ -1,5 +1,10 @@
 import type { Secret } from "./index.ts";
-import type { CredentialSourceControl, EgressRef, EgressRoute, EgressSourceKey } from "./egress.ts";
+import type {
+  CredentialSourceControl,
+  EgressRef,
+  EgressRoute,
+  EgressSourceKey,
+} from "./conduit.ts";
 
 export const preparedGitHubType = "github-app-metadata";
 export const preparedGitHubProviderRef = { id: preparedGitHubType, generation: 1 } as const;

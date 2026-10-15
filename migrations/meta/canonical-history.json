@@ -449,6 +449,22 @@
       "tag": "0056_egress_send_receipts",
       "breakpoints": true,
       "sha256": "193a18fe7ad88a7c6418749cdd52be0062267dcbed39d8286d540bd453d43cdf"
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1787000000057,
+      "tag": "0057_prepared_github_custody",
+      "breakpoints": true,
+      "sha256": "1d55d6eaac9106490a62a04efa1f8f2b7061d30c757c8c9b6f9f198494bfec96"
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1787000000058,
+      "tag": "0058_prepared_github_egress",
+      "breakpoints": true,
+      "sha256": "f5bb5376c052a250649f35e05938063051831ebfdd70cdd99f89504d4b4769df"
     }
   ],
   "initialSchemaStates": {
@@ -462,18 +478,8 @@
     "ownerOnly": {
       "owner": "occ_migrator",
       "privileges": [
-        [
-          "occ_migrator",
-          "occ_migrator",
-          "CREATE",
-          false
-        ],
-        [
-          "occ_migrator",
-          "occ_migrator",
-          "USAGE",
-          false
-        ]
+        ["occ_migrator", "occ_migrator", "CREATE", false],
+        ["occ_migrator", "occ_migrator", "USAGE", false]
       ],
       "objects": 0,
       "defaultPrivileges": 0,
@@ -486,7 +492,7 @@
     "main": "bd490d16dd23ec1ea722bb370155e9454fb52187bd2b16cd8a0fe277e3e41bde",
     "repositoryCredentials": "5f9359057412199ea7a5659bdedbef664fb6da7bcd99d7a552f01a5782b904ea",
     "workspaceSetup": "3d7801c345eea875fb79adba4e04a4e2b24bad49ffe6ada62cc58117c5cce134",
-    "completed": "dcb3cf807ea0fe46582ceb381db46dba48e7f6da88db1f3a84ed4c7f617d9a74",
+    "completed": "3db63ade9f9cef62be7222325190ca5d1c2797aa0711d41de171be282ae6ead7",
     "repositoryRetention": "a66448129d9ae2adf076f1d7887d3c7151cdc68f635c6fac7984d4254604d074",
     "agentProvisioning": "baac9e369ace8610f96948c1a930e6387431b1d0a33cefa3893765e52f8f7a52",
     "backendCompleted": "a2ba6fc82fbf0047cea491efad4a9e58eacaed7c29ce8528accff331569c51dd",
@@ -514,7 +520,9 @@
     "preComputePreparationFailureEvidence": "d04407ae6939193a1d9cb99e8fe6bf77d4cd1a2b38ff58650f1c4bd5034b18f9",
     "preCredentialSourcePat": "5aa1681236a41d763405d596daeed3921a2b8932090534f6dacf85c488279f34",
     "preStaticEgress": "52b65cf1a9e0539f3c133d9a25f0da0ee8b2ca51f981934bef44e670134d8083",
-    "preSendReceipts": "5b19a7bb32b7ecc5ad106950fc4014496524e2f22a039b54f4d41a1a92227552"
+    "preSendReceipts": "5b19a7bb32b7ecc5ad106950fc4014496524e2f22a039b54f4d41a1a92227552",
+    "prePreparedGitHubCustody": "dcb3cf807ea0fe46582ceb381db46dba48e7f6da88db1f3a84ed4c7f617d9a74",
+    "prePreparedGitHubEgress": "de72fac145059d988b9f029d13dd9e862dc711bf62483a11f51443dd3c3a7191"
   },
   "ledgerCatalogs": {
     "initialized": "62946da6b1fc2b06df09e97dda4cf1831f170a2f3d5ff35a9f107af206c425dc",

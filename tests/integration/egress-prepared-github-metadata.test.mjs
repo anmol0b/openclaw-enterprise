@@ -1,8 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { get } from "node:https";
-import { randomUUID } from "node:crypto";
-import { requestId, staticEgressFixture } from "../helpers/static-egress.mjs";
+import { captureMetadata, dispatchMetadata } from "../helpers/github-metadata-exchange.mjs";
+import { staticEgressFixture } from "../helpers/static-egress.mjs";
 import { createPreparedStore } from "../fixtures/repository-credentials/github/prepared-store.mjs";
 import {
   startGitHubFixture,
@@ -19,8 +18,8 @@ import {
 } from "../../apps/controller/src/drivers/repo/github/credentials/index.ts";
 
 // Real source/Agent/binding/deployment APIs, IAM, protected forwarder, preparation owner,
-// scoped GitHub issuance, HTTPS GET and actual last trailer. Store, installed observation
-// and accepted transport owner are fixtures; installed custody and durable recovery are separate tests.
+// scoped GitHub issuance, HTTPS GET and actual last trailer. The test plays the enrolled supervisor and the store is in-memory;
+// installed custody and PostgreSQL recovery have their own qualifications.
 test("consented protected repository read uses only exact, already prepared metadata grant", async (t) => {
   let forbiddenTrailer = false;
   const clock = createSystemClock();
@@ -139,83 +138,24 @@ test("consented protected repository read uses only exact, already prepared meta
   const { installation } = f;
   const [route] = installation.plan.routes;
   assert.equal(route.binding.grant.profile, "metadata-read");
-  assert.deepEqual(f.attachment.configuration.network_policies["oce-egress-0"].binaries, []);
-  const peer = {
-    ...installation.enforcement,
-    sender: installation.sender,
-    sandboxId: installation.sandboxId,
-    expiresAt: new Date(Date.now() + 120000).toISOString(),
-  };
-  const { plan, enforcement } = installation;
-  const associations = new Map();
-  const fixtureAcceptance = {
-    capture(use) {
-      const accepted = {
-        execution: plan.execution,
-        installation: {
-          sandboxId: peer.sandboxId,
-          ...enforcement,
-          plan: { id: plan.id, generation: plan.generation },
-        },
-        exchangeId: randomUUID(),
-        responseId: randomUUID(),
-        custodyId: randomUUID(),
-      };
-      associations.set(use.id, accepted);
-      return accepted;
-    },
-    owns(value, use) {
-      return JSON.stringify(value) === JSON.stringify(associations.get(use.id));
-    },
-  };
-  const forwarder = f.controller.createEgressForwarder(
-    { verify: async () => peer },
-    fixtureAcceptance,
-  );
+  assert.equal(f.attachment.configuration.network_policies["oce-egress-0"].binaries, undefined);
   const signal = new AbortController().signal;
-  async function resolve(overrides) {
-    const input = {
-      id: requestId(),
-      method: "GET",
-      url: route.origin + route.path,
-      headers: [],
-      body: new Uint8Array(),
-      deadlineAt: new Date(Date.now() + 20000).toISOString(),
-      ...overrides,
-    };
-    const ready = await forwarder.resolve("fixture peer", peer.sandboxId, input, signal);
-    return {
-      id: input.id,
-      ready,
-      authorize: () =>
-        forwarder.authorizeSend(
-          "fixture peer",
-          peer.sandboxId,
-          input.id,
-          ready.handle,
-          ready.evidence,
-          ready.injectionDigest,
-          input.deadlineAt,
-          signal,
-        ),
-    };
-  }
-
-  assert.equal((await resolve()).ready.error.kind, "not_ready");
+  const resolve = (changed) => f.resolve(captureMetadata(f, changed));
+  assert.equal((await resolve()).refused.code, 2, "cold material must return not ready");
   assert.equal(reads, 1);
   assert.equal(gh.issuesOfTokens.length, 0, "cold capture must not issue or schedule");
   for (const changed of [
     { body: Buffer.from("x") },
-    { method: "POST" },
-    { headers: [["transfer-encoding", "chunked"]] },
-    { url: route.origin + "/repos/other/repo" },
+    { target: { method: "POST" } },
+    { headers: [{ name: "transfer-encoding", value: "chunked" }] },
+    { target: { path: "/repos/other/repo" } },
     ...[
       "/fixture/repository.git/info/refs?service=git-upload-pack",
       "/fixture/repository.git/git-upload-pack",
       "/fixture/repository.git/git-receive-pack",
-    ].map((path) => ({ url: route.origin + path })),
+    ].map((path) => ({ target: { path } })),
   ]) {
-    assert.equal((await resolve(changed)).ready.error.code, "unsupported_operation");
+    assert.equal((await resolve(changed)).refused.code, 1);
   }
   assert.equal(reads, 1, "wrong body, target or method touched prepared material");
   assert.equal(
@@ -226,52 +166,23 @@ test("consented protected repository read uses only exact, already prepared meta
 
   for (const block of [false, true]) {
     forbiddenTrailer = block;
-    const { id, ready, authorize } = await resolve();
-    assert.equal(ready.kind, "ready");
-    const sent = await authorize();
-    assert.equal(sent.kind, "allow");
-    const { response, chunks } = await new Promise((resolve, reject) => {
-      get(
-        route.origin + route.path,
-        { ca: gh.tls.ca, headers: Object.fromEntries(ready.headers) },
-        async (response) => {
-          const chunks = [];
-          for await (const chunk of response) {
-            chunks.push(chunk);
-          }
-          resolve({ response, chunks });
-        },
-      ).on("error", reject);
-    });
-    assert.equal(response.statusCode, 200, "real provider must accept prepared credential");
-    assert.equal(response.trailers["x-forbidden-last"], block ? "last" : undefined);
-    const handle = await forwarder.beginResponse("fixture peer", peer.sandboxId, id);
-    const safe = await forwarder.protectResponse(
-      handle,
-      {
-        status: response.statusCode,
-        headers: Object.entries(response.headers),
-        body: Buffer.concat(chunks),
-        trailers: Object.entries(response.trailers),
-      },
-      signal,
-    );
-    if (block) {
-      assert.equal(safe, undefined);
-    } else {
+    const captured = captureMetadata(f);
+    const { ready } = await f.resolve(captured);
+    assert.ok(ready);
+    const safe = await dispatchMetadata(f, gh, captured, ready, block);
+    if (!block) {
       assert.equal(
         safe.body.toString(),
         JSON.stringify({ id: Number(fixtureRepositoryId), full_name: fixtureRepository }),
       );
     }
   }
-  const { authorize } = await resolve();
+  const captured = captureMetadata(f);
+  const { ready } = await f.resolve(captured);
   await store.transact(admission.familyId, (row) => {
     row.enabled = false;
   });
-  const withdrawn = await authorize();
-  assert.equal(withdrawn.kind, "refused");
-  assert.equal(withdrawn.error.code, "withdrawn");
+  assert.equal((await f.authorize(f.permitRequest(captured, ready))).refused.code, 1);
   assert.equal(sendChecks, 3);
   assert.equal(gh.issuesOfTokens.length, 1, "no request may renew or issue");
 });

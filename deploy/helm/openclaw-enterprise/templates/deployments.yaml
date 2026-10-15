@@ -166,6 +166,13 @@ spec:
             defaultMode: 288 # 0440, readable by the control-plane filesystem group
             items:
               - {key: custody.key, path: custody.key}
+        {{- if $.Values.preparedGitHub.issuerCaConfigMapName }}
+        - name: prepared-github-issuer-ca
+          configMap:
+            name: {{ $.Values.preparedGitHub.issuerCaConfigMapName | quote }}
+            items:
+              - {key: ca.crt, path: ca.crt}
+        {{- end }}
         {{- end }}
         - name: installation-startup
           secret:
@@ -464,6 +471,11 @@ spec:
             - name: prepared-github-custody
               mountPath: /etc/openclaw/prepared-github
               readOnly: true
+            {{- if $.Values.preparedGitHub.issuerCaConfigMapName }}
+            - name: prepared-github-issuer-ca
+              mountPath: /etc/openclaw/prepared-github-issuer
+              readOnly: true
+            {{- end }}
             {{- end }}
             - name: installation-startup
               mountPath: /etc/openclaw/installation

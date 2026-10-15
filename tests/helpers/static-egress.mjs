@@ -15,7 +15,7 @@ import { createOpenShellBackend } from "../../apps/controller/src/backends/opens
 import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
 import { OpenShellSandboxDriver } from "../../apps/controller/src/drivers/sandbox/openshell.ts";
 import { OpenShellCredentialGatewayDriver } from "../../apps/controller/src/drivers/credential-gateway/openshell.ts";
-import { OpenShellEgressProxyDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
+import { OpenShellConduitDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
 import {
   createOpenShellEgressAuthority,
@@ -356,7 +356,7 @@ export async function staticEgressFixture(
       drivers: {
         sandbox: "openshell-sandbox",
         credential_gateway: "openshell-credentials",
-        egress_proxy: "openshell-egress",
+        conduit: "openshell-egress",
       },
     },
     { gatewayClient },
@@ -389,7 +389,7 @@ export async function staticEgressFixture(
     },
     { id: "openshell-sandbox", backend },
   );
-  const egress = new OpenShellEgressProxyDriver(egressOptions, {
+  const egress = new OpenShellConduitDriver(egressOptions, {
     id: "openshell-egress",
     preparedGitHub: createPreparedGitHub
       ? await createPreparedGitHub({ secretDriver })
@@ -472,7 +472,7 @@ export async function staticEgressFixture(
     legacySource = legacy.data;
   }
   app.controller.registerDriver(egress);
-  app.controller.selectDriver("egress_proxy", egress.id);
+  app.controller.selectDriver("conduit", egress.id);
   const created = await app.request("POST", path, {
     body: {
       name: "inference",
@@ -575,7 +575,7 @@ export async function staticEgressFixture(
   };
   observed.policy = structuredClone({ version: 1, ...attachment.configuration });
   assert.equal(
-    await egress.attachmentStatus(context, attachment),
+    await egress.wiringStatus(context, attachment),
     undefined,
     "a loaded gateway policy without an applied-capability receipt must not become ready",
   );
@@ -609,7 +609,7 @@ export async function staticEgressFixture(
       "base64url",
     ),
   };
-  const installation = await egress.attachmentStatus(context, attachment);
+  const installation = await egress.wiringStatus(context, attachment);
   assert.ok(installation, "the adapter must validate the complete supplier observation");
   if (recordInstallation) {
     await app.controller.transact((unit) =>
@@ -630,8 +630,8 @@ export async function staticEgressFixture(
   // actual duplex was closed. It cannot substitute an identity, owner or result.
   const authorityController = resolutionFinished
     ? {
-        createEgressForwarder(...args) {
-          const forwarder = app.controller.createEgressForwarder(...args);
+        createConduit(...args) {
+          const forwarder = app.controller.createConduit(...args);
           const resolve = forwarder.resolve.bind(forwarder);
           forwarder.resolve = async (...input) => {
             const result = await resolve(...input);
@@ -956,7 +956,7 @@ export async function staticEgressFixture(
 export async function syntheticDispatchFixture(t, receipts) {
   const { createServer, connect } = await import("node:net");
   const { once } = await import("node:events");
-  const { EgressForwarder } = await import("../../packages/occ/src/egress.ts");
+  const { Conduit } = await import("../../packages/occ/src/conduit.ts");
   const { openAiStaticProvider } =
     await import("../../apps/controller/src/drivers/egress-proxy/openai-provider.ts");
   const ref = () => ({ id: randomUUID(), generation: 1 });
@@ -1092,7 +1092,7 @@ export async function syntheticDispatchFixture(t, receipts) {
       };
     },
   };
-  let forwarder = new EgressForwarder(ports);
+  let forwarder = new Conduit(ports);
   return {
     startedAt: new Date(now).toISOString(),
     get reads() {
@@ -1115,7 +1115,7 @@ export async function syntheticDispatchFixture(t, receipts) {
       current = false;
     },
     restart() {
-      forwarder = new EgressForwarder(ports);
+      forwarder = new Conduit(ports);
     },
     async resolve() {
       ready = await forwarder.resolve(

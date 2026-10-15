@@ -1,7 +1,7 @@
-import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
+import type { ConduitDriver } from "@openclaw-enterprise/contracts";
 import {
-  OpenShellEgressProxyDriver,
-  type OpenShellEgressOptions,
+  OpenShellConduitDriver,
+  type OpenShellConduitOptions,
 } from "../drivers/egress-proxy/openshell.ts";
 import {
   egressAuthorityConfiguration,
@@ -111,7 +111,7 @@ export interface InstallationStartupConfiguration {
     readonly sandbox?: SelectedDriverConfiguration;
     readonly credential_gateway?: SelectedDriverConfiguration;
     readonly credential_refresh?: SelectedDriverConfiguration;
-    readonly egress_proxy?: SelectedDriverConfiguration;
+    readonly conduit?: SelectedDriverConfiguration;
     readonly plugin?: SelectedDriverConfiguration;
     readonly service_account?: { readonly id: string };
     readonly repo?: SelectedDriverConfiguration;
@@ -136,7 +136,7 @@ export interface InstallationRuntimeDrivers {
   readonly sandboxDriver?: SandboxDriver;
   readonly credentialGatewayDriver?: CredentialGatewayDriver;
   readonly credentialRefreshDriver?: CredentialRefreshDriver;
-  readonly egressProxyDriver?: EgressProxyDriver;
+  readonly conduitDriver?: ConduitDriver;
   readonly egressAuthority?: EgressAuthorityConfiguration;
   readonly preparedGitHub?: PostgresPreparedGitHubLifecycle;
   readonly pluginDriver?: PluginDriver;
@@ -397,7 +397,7 @@ function selected(
     | "sandbox"
     | "credential_gateway"
     | "credential_refresh"
-    | "egress_proxy"
+    | "conduit"
     | "plugin"
     | "repo",
   implementation: string,
@@ -464,6 +464,10 @@ export async function readHarnessNodeCa(
   if (gatewayCaPath !== undefined && !isAbsolute(gatewayCaPath)) {
     throw new Error("OCC_GATEWAY_CA_PATH must identify an absolute mounted-file path.");
   }
+  return readPublicCaBundle(path);
+}
+
+async function readPublicCaBundle(path: string): Promise<string> {
   const bundle = await readFile(path, "utf8");
   const certificates = bundle.match(
     /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g,
@@ -472,7 +476,7 @@ export async function readHarnessNodeCa(
     certificates === null ||
     certificates.reduce((rest, certificate) => rest.replace(certificate, ""), bundle).trim()
   ) {
-    throw new Error("The Harness trust bundle must contain only public CA certificates.");
+    throw new Error("The trust bundle must contain only public CA certificates.");
   }
   return certificates.map((certificate) => new X509Certificate(certificate).toString()).join("\n");
 }
@@ -539,7 +543,7 @@ export async function loadInstallationConfiguration(options: {
       "sandbox",
       "credential_gateway",
       "credential_refresh",
-      "egress_proxy",
+      "conduit",
       "plugin",
       "service_account",
       "repo",
@@ -586,30 +590,46 @@ export async function loadInstallationConfiguration(options: {
       OpenShellCredentialRefreshDriver,
     );
   }
-  let egressProxy: SelectedDriverConfiguration | undefined;
+  let conduit: SelectedDriverConfiguration | undefined;
   let egressAuthority: EgressAuthorityConfiguration | undefined;
   let preparedGitHubKeyPath: string | undefined;
-  if (drivers.egress_proxy !== undefined) {
-    const selection = object(drivers.egress_proxy, "drivers.egress_proxy");
-    closed(selection, ["id", "configuration"], "drivers.egress_proxy");
-    const egress = object(selection.configuration, "drivers.egress_proxy.configuration");
+  let preparedGitHubOrigin: string | undefined;
+  let preparedGitHubCa: Buffer | undefined;
+  if (drivers.conduit !== undefined) {
+    const selection = object(drivers.conduit, "drivers.conduit");
+    closed(selection, ["id", "configuration"], "drivers.conduit");
+    const egress = object(selection.configuration, "drivers.conduit.configuration");
     closed(
       egress,
       ["middlewareName", "authorityScope", "authority", "preparedGitHub"],
-      "drivers.egress_proxy.configuration",
+      "drivers.conduit.configuration",
     );
     egressAuthority = egressAuthorityConfiguration(egress.authority, options.mode);
     const { authority: _authority, preparedGitHub, ...policy } = egress;
     if (preparedGitHub !== undefined) {
       const prepared = object(preparedGitHub, "preparedGitHub");
-      closed(prepared, ["custodyKeyPath"], "preparedGitHub");
+      closed(prepared, ["custodyKeyPath", "apiOrigin", "issuerCaPath"], "preparedGitHub");
       preparedGitHubKeyPath = nonempty(prepared.custodyKeyPath, "preparedGitHub.custodyKeyPath");
+      // Installation-owned trust, never source, request or Agent-controlled endpoints.
+      if (!isAbsolute(preparedGitHubKeyPath)) {
+        throw new Error("preparedGitHub.custodyKeyPath requires an absolute mounted-file path.");
+      }
+      if (prepared.apiOrigin !== undefined) {
+        preparedGitHubOrigin = nonempty(prepared.apiOrigin, "preparedGitHub.apiOrigin");
+      }
+      if (prepared.issuerCaPath !== undefined) {
+        const path = nonempty(prepared.issuerCaPath, "preparedGitHub.issuerCaPath");
+        if (!isAbsolute(path)) {
+          throw new Error("preparedGitHub.issuerCaPath requires an absolute mounted-file path.");
+        }
+        preparedGitHubCa = Buffer.from(await readPublicCaBundle(path));
+      }
     }
-    egressProxy = selected(
+    conduit = selected(
       { ...selection, configuration: policy },
-      "egress_proxy",
+      "conduit",
       "openshell",
-      OpenShellEgressProxyDriver,
+      OpenShellConduitDriver,
     );
   }
   const backends = backendConfiguration(
@@ -804,7 +824,7 @@ export async function loadInstallationConfiguration(options: {
       ...(sandbox === undefined ? {} : { sandbox }),
       ...(credentialGateway === undefined ? {} : { credential_gateway: credentialGateway }),
       ...(credentialRefresh === undefined ? {} : { credential_refresh: credentialRefresh }),
-      ...(egressProxy === undefined ? {} : { egress_proxy: egressProxy }),
+      ...(conduit === undefined ? {} : { conduit: conduit }),
       ...(plugin === undefined ? {} : { plugin }),
       ...(serviceAccount === undefined ? {} : { service_account: serviceAccount }),
       ...(repoSelection === undefined ? {} : { repo: repoSelection }),
@@ -836,7 +856,7 @@ export async function loadInstallationConfiguration(options: {
           ? new bundledSandboxPackage!.OpenShellSandboxDriver(
               {
                 ...sandbox.configuration,
-                ...(egressProxy === undefined ? {} : { egress: egressProxy.configuration }),
+                ...(conduit === undefined ? {} : { egress: conduit.configuration }),
               },
               {
                 id: sandbox.id,
@@ -857,11 +877,11 @@ export async function loadInstallationConfiguration(options: {
           },
         );
   if (
-    egressProxy !== undefined &&
+    conduit !== undefined &&
     (!openShell ||
       !sandboxDriver ||
       !kubernetesCompute ||
-      openShellBackend?.drivers.egress_proxy !== egressProxy.id ||
+      openShellBackend?.drivers.conduit !== conduit.id ||
       openShellBackend.configuration.endpoint === undefined ||
       !openShellBackend.configuration.endpoint.startsWith("https://") ||
       (openShellBackend.configuration.auth?.mode !== "bearerTokenFile" &&
@@ -878,19 +898,21 @@ export async function loadInstallationConfiguration(options: {
   const preparedGitHub =
     preparedGitHubKeyPath === undefined
       ? undefined
-      : new PostgresPreparedGitHubLifecycle(preparedGitHubKeyPath, secretDriver);
-  const egressProxyDriver =
-    egressProxy === undefined
-      ? undefined
-      : new OpenShellEgressProxyDriver(
-          egressProxy.configuration as unknown as OpenShellEgressOptions,
-          {
-            id: egressProxy.id,
-            backend: openShell!,
-            sandbox: sandboxDriver!,
-            ...(preparedGitHub ? { preparedGitHub } : {}),
-          },
+      : new PostgresPreparedGitHubLifecycle(
+          preparedGitHubKeyPath,
+          secretDriver,
+          preparedGitHubOrigin,
+          preparedGitHubCa,
         );
+  const conduitDriver =
+    conduit === undefined
+      ? undefined
+      : new OpenShellConduitDriver(conduit.configuration as unknown as OpenShellConduitOptions, {
+          id: conduit.id,
+          backend: openShell!,
+          sandbox: sandboxDriver!,
+          ...(preparedGitHub ? { preparedGitHub } : {}),
+        });
   const credentialRefreshDriver =
     credentialRefresh === undefined
       ? undefined
@@ -924,7 +946,7 @@ export async function loadInstallationConfiguration(options: {
         lifecycleDrivers: [configurationDriver],
         ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
         ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
-        ...(egressProxyDriver === undefined ? {} : { egressProxyDriver }),
+        ...(conduitDriver === undefined ? {} : { conduitDriver }),
         nodeEnrollment: createGatewayNodeEnrollment(() =>
           readWorkspaceFilesApiKey(
             nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
@@ -968,7 +990,7 @@ export async function loadInstallationConfiguration(options: {
     ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
     ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
     ...(credentialRefreshDriver === undefined ? {} : { credentialRefreshDriver }),
-    ...(egressProxyDriver === undefined ? {} : { egressProxyDriver }),
+    ...(conduitDriver === undefined ? {} : { conduitDriver }),
     ...(egressAuthority === undefined ? {} : { egressAuthority }),
     ...(preparedGitHub === undefined ? {} : { preparedGitHub }),
     createIAMDriver,

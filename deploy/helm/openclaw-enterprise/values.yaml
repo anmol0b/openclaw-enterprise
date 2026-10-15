@@ -313,7 +313,7 @@ worker:
   convergenceTimeoutMs: 900000
 
 # Optional credential authority listener owned by the single API process.
-# The Installation egress_proxy authority must use the same port and file paths.
+# The Installation conduit authority must use the same port and file paths.
 egressAuthority:
   enabled: false
   port: 9444
@@ -324,7 +324,7 @@ egressAuthority:
   clients: []
 
 # Optional OCE custody for explicitly enrolled, Agent-scoped GitHub metadata reads.
-# In the Installation's drivers.egress_proxy.configuration.preparedGitHub set
+# In the Installation's drivers.conduit.configuration.preparedGitHub set
 # custodyKeyPath: /etc/openclaw/prepared-github/custody.key. Supply a dedicated
 # Secret with exactly 32 random binary bytes at custody.key, keep it stable across
 # API and worker restarts, and protect its backup separately from the database.
@@ -333,3 +333,6 @@ preparedGitHub:
   custodySecretName: ""
   # Operator-maintained, exact api.github.com IPv4 destinations for issue/retire.
   issuerCidrs: []
+  issuerPort: 443
+  # Optional public ca.crt for an explicitly configured private HTTPS issuer.
+  issuerCaConfigMapName: ""

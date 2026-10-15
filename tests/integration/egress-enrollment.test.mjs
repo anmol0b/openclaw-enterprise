@@ -277,7 +277,7 @@ test(
         command: ["node", script],
         workspaceMounts: [],
         credentialAttachments: [],
-        egressAttachment: f.attachment,
+        conduitWiring: f.attachment,
         labels: { "openclaw.dev/revision": f.revision.id },
         files: [],
         environment: Object.entries(environment).map(([name, value]) => ({ name, value })),
@@ -294,7 +294,7 @@ test(
     );
     // Consume the same independently verified adapter observation that Compute
     // commits. State is real; this test does not manufacture an installation receipt.
-    const installed = await f.egress.attachmentStatus({ ...f.context, signal }, f.attachment);
+    const installed = await f.egress.wiringStatus({ ...f.context, signal }, f.attachment);
     assert.ok(installed);
     await f.controller.transact((unit) =>
       unit.credentialSources.recordEgressInstallation(installed),
@@ -385,14 +385,14 @@ test("zero-route admission has no business allow and an older supplier cannot cl
   const observed = f.observed;
   observed.policy = policy;
   observed.observation.effective_policy = policy;
-  const installed = await f.egress.attachmentStatus(context, attachment);
+  const installed = await f.egress.wiringStatus(context, attachment);
   assert.equal(installed?.enforcement.authorityScope, "execution");
   assert.ok(await f.egress.verifyInstallation(context, installed));
   const current = observed.evidence.enforced_capabilities;
   const old = current.filter((cap) => !cap.endsWith(".execution-authority.v1"));
   observed.evidence.enforced_capabilities = old;
   assert.equal(
-    await f.egress.attachmentStatus(context, attachment),
+    await f.egress.wiringStatus(context, attachment),
     undefined,
     "fresh gateway, old loaded supervisor",
   );
@@ -403,7 +403,7 @@ test("zero-route admission has no business allow and an older supplier cannot cl
     network_policies: { unexpected: { endpoints: [{ host: "deny-egress.invalid" }] } },
   };
   await assert.rejects(
-    f.egress.attachmentStatus(context, { plan, configuration: widened }),
+    f.egress.wiringStatus(context, { plan, configuration: widened }),
     /changed protected egress routes/,
   );
   observed.capabilities = old;

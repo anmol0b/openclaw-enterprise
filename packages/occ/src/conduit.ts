@@ -145,7 +145,7 @@ export function egressInjectionDigest(headers: readonly (readonly [string, strin
  * Trusted request registry shared by the transport's resolve, send and response phases.
  * Restart loses outstanding handles and fails closed. No permit or material is reusable.
  */
-export class EgressForwarder {
+export class Conduit {
   private readonly records = new Map<string, OperationRecord>();
   private readonly requests = new Map<string, number>();
   private pendingResolutions = 0;

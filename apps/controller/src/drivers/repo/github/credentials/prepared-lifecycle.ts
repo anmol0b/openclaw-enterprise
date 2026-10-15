@@ -1,3 +1,4 @@
+import { githubProviderOrigin } from "./factory.ts";
 import { createHash, createPrivateKey, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
@@ -72,7 +73,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
   ) {
     this.custodyKeyPath = custodyKeyPath;
     this.secretDriver = secretDriver;
-    this.apiOrigin = apiOrigin;
+    this.apiOrigin = githubProviderOrigin(apiOrigin);
     this.ca = ca;
     if (!isAbsolute(custodyKeyPath) || !secretDriver.readCredentialInput) {
       throw new Error(

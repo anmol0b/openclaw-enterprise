@@ -429,9 +429,9 @@ test(
 
 test("legacy peer identity cannot substitute for trusted acceptance", async (t) => {
   const { syntheticDispatchFixture } = await import("../helpers/static-egress.mjs");
-  const { EgressForwarder } = await import("../../packages/occ/src/egress.ts");
+  const { Conduit } = await import("../../packages/occ/src/conduit.ts");
   const f = await syntheticDispatchFixture(t, undefined);
-  const forwarder = new EgressForwarder({ ...f.ports, acceptance: undefined });
+  const forwarder = new Conduit({ ...f.ports, acceptance: undefined });
   const result = await forwarder.resolve(
     "synthetic-peer",
     f.association.installation.sandboxId,

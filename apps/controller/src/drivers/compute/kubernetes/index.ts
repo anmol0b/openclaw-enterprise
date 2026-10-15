@@ -9,7 +9,7 @@ import {
   computeReleasePublicKey,
   signComputeExecutionRelease,
 } from "../egress-enrollment.ts";
-import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
+import type { ConduitDriver } from "@openclaw-enterprise/contracts";
 import {
   normalizeOpenAiBaseUrl,
   openAiBaseUrlRewritesIpv4,
@@ -89,7 +89,7 @@ import type {
   ComputePrepareRevisionFailureDiagnostic,
   ComputeRevisionContext,
   EgressInstallation,
-  EgressRevisionContext,
+  ConduitRevisionContext,
   ConfigurationValidationOptions,
   CredentialAttachmentStatus,
   CredentialGatewayDriver,
@@ -3115,7 +3115,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private readonly options: KubernetesComputeDriverOptions;
   private readonly sandboxDriver: SandboxDriver | undefined;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
-  private readonly egressProxyDriver: EgressProxyDriver | undefined;
+  private readonly conduitDriver: ConduitDriver | undefined;
   private readonly nodeEnrollment: GatewayNodeEnrollment | undefined;
   // How long, in total across passes, preparation may wait for one setup's node to pair.
   private workspaceNodePairingWaitMs = WORKSPACE_NODE_PAIRING_WAIT_MS;
@@ -3480,7 +3480,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       readonly lifecycleDrivers?: readonly Driver[];
       readonly sandboxDriver?: SandboxDriver;
       readonly credentialGatewayDriver?: CredentialGatewayDriver;
-      readonly egressProxyDriver?: EgressProxyDriver;
+      readonly conduitDriver?: ConduitDriver;
       readonly nodeEnrollment?: GatewayNodeEnrollment;
       readonly readNodeCa?: () => Promise<string | undefined>;
     } = {},
@@ -3502,7 +3502,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
     }
     this.credentialGatewayDriver = selection.credentialGatewayDriver;
-    this.egressProxyDriver = selection.egressProxyDriver;
+    this.conduitDriver = selection.conduitDriver;
     this.nodeEnrollment = selection.nodeEnrollment;
     this.readNodeCa = selection.readNodeCa;
     const lifecycleDrivers = selection.lifecycleDrivers ?? [];
@@ -3863,7 +3863,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         ? "Dedicated OpenClaw"
         : "Dedicated Codex";
     const protectedWithoutCredential =
-      codex && auth.method === "runtime" && this.egressProxyDriver !== undefined;
+      codex && auth.method === "runtime" && this.conduitDriver !== undefined;
     if (!protectedWithoutCredential) {
       requireHarnessAuthMethod(kubernetesHarnessAuthMethods(topology), auth.method);
     }
@@ -5306,15 +5306,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
   ): void {
     assertExecutionAdmission(revision);
     const plan = revision.egressPlan;
-    if (plan === undefined && this.egressProxyDriver === undefined) {
+    if (plan === undefined && this.conduitDriver === undefined) {
       return;
     }
     const sandbox = this.sandboxDriver;
     if (
       plan === undefined ||
       this.options.runtime === undefined ||
-      this.egressProxyDriver?.implementation !== "openshell" ||
-      this.egressProxyDriver.id !== plan.egressDriverId ||
+      this.conduitDriver?.implementation !== "openshell" ||
+      this.conduitDriver.id !== plan.egressDriverId ||
       sandbox?.implementation !== "openshell" ||
       sandbox.id !== plan.sandboxDriverId ||
       !sandbox.provisionHarness ||
@@ -6145,7 +6145,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
               };
         if (
           egressContext !== undefined &&
-          (this.egressProxyDriver?.id !== revision.egressPlan!.egressDriverId ||
+          (this.conduitDriver?.id !== revision.egressPlan!.egressDriverId ||
             context?.recordEgressInstallation === undefined ||
             sandboxDriver.enrollHarness === undefined)
         ) {
@@ -6153,10 +6153,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
             "The admitted protected egress composition is unavailable.",
           );
         }
-        const egressAttachment =
+        const conduitWiring =
           egressContext === undefined
             ? undefined
-            : await this.egressProxyDriver!.configureRevision(egressContext);
+            : await this.conduitDriver!.configureRevision(egressContext);
         const harnessRequirements = this.harnessRequirementsFromDeployment(
           agentDeployment,
           harnessAuth.loginMode,
@@ -6164,7 +6164,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           this.sandboxWorkloadFiles(pluginRuntime),
         );
         const releaseKey =
-          egressAttachment === undefined
+          conduitWiring === undefined
             ? undefined
             : await this.executionReleaseKey(
                 revision,
@@ -6172,10 +6172,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
               );
         const requirements = {
           ...harnessRequirements,
-          ...(egressAttachment === undefined
+          ...(conduitWiring === undefined
             ? {}
             : {
-                egressAttachment,
+                conduitWiring,
                 // Bind enrollment to the immutable admitted revision without
                 // exposing Compute's private status identity to the provider.
                 environment: [
@@ -6194,20 +6194,20 @@ export class KubernetesComputeDriver implements ComputeDriver {
         );
         this.verifySandboxResourceRef(sandbox, revision, namespace);
         if (egressContext !== undefined) {
-          if (sandbox.egressAttachment === undefined) {
+          if (sandbox.conduitWiring === undefined) {
             throw new DependencyUnavailableError(
               "The paired Sandbox returned no exact protected egress configuration.",
             );
           }
-          const installed = await this.egressProxyDriver!.attachmentStatus(
+          const installed = await this.conduitDriver!.wiringStatus(
             egressContext,
-            sandbox.egressAttachment,
+            sandbox.conduitWiring,
           );
           if (installed === undefined || !(await this.preparedEgressReady(egressContext))) {
             return incomplete();
           }
           await context!.recordEgressInstallation!(installed);
-          if (!(await this.egressProxyDriver!.verifyInstallation(egressContext, installed))) {
+          if (!(await this.conduitDriver!.verifyInstallation(egressContext, installed))) {
             return incomplete();
           }
           const transportToken = await this.prepareRevisionStage("harness_auth", () =>
@@ -7111,7 +7111,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     );
     const sandboxNamespace = this.sandboxNamespaceForRevision(revision, namespace);
     if (revision.egressPlan !== undefined && source.egress !== undefined) {
-      const egress = this.egressProxyDriver;
+      const egress = this.conduitDriver;
       if (egress?.id !== revision.egressPlan.egressDriverId) {
         throw new DependencyUnavailableError("The protected egress cleanup owner is unavailable.");
       }
@@ -14065,12 +14065,12 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
   }
 
   /** Cold/expired is pending for an ordinary later observation, never a request to prepare material. */
-  private async preparedEgressReady(egress: EgressRevisionContext): Promise<boolean> {
+  private async preparedEgressReady(egress: ConduitRevisionContext): Promise<boolean> {
     for (const route of egress.plan.routes) {
       if (route.binding.grant.kind !== "github_repository_metadata") {
         continue;
       }
-      const control = this.egressProxyDriver!.sourceControl;
+      const control = this.conduitDriver!.sourceControl;
       const lifecycle = control.preparedGitHub;
       const source = preparedGitHubSourceFromRoute(route, control);
       if (
@@ -14084,9 +14084,11 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       }
       // Bound even an owner whose observation ignores cancellation. No retry in this pass.
       const signal = AbortSignal.any([egress.signal, AbortSignal.timeout(3_000)]);
-      const { promise, resolve } = Promise.withResolvers<boolean>();
-      const interrupted = () => resolve(false);
-      signal.addEventListener("abort", interrupted, { once: true });
+      let interrupted: () => void;
+      const promise = new Promise<boolean>((resolve) => {
+        interrupted = () => resolve(false);
+        signal.addEventListener("abort", interrupted, { once: true });
+      });
       try {
         egress.signal.throwIfAborted();
         const ready = await Promise.race([promise, lifecycle.ready(source, signal)]);
@@ -14095,14 +14097,14 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
           return false;
         }
       } finally {
-        signal.removeEventListener("abort", interrupted);
+        signal.removeEventListener("abort", interrupted!);
       }
     }
     return true;
   }
 
   private async verifiedReleaseInstallation(
-    egress: EgressRevisionContext,
+    egress: ConduitRevisionContext,
     context: ComputeRevisionContext,
     observed?: EgressInstallation,
   ): Promise<EgressInstallation> {
@@ -14114,7 +14116,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         (observed.sandboxId !== current.sandboxId ||
           !isDeepStrictEqual(current.sender, observed.sender) ||
           !isDeepStrictEqual(current.enforcement, observed.enforcement))) ||
-      !(await this.egressProxyDriver!.verifyInstallation(egress, current)) ||
+      !(await this.conduitDriver!.verifyInstallation(egress, current)) ||
       !(await this.preparedEgressReady(egress))
     ) {
       throw new DependencyUnavailableError(

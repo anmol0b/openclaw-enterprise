@@ -7176,6 +7176,7 @@ test("dedicated OpenClaw gateway receives Agent plugin approvers without plugin 
     namespaceId: tenant.id,
     agentId,
     revision: 1,
+    executionAdmission: { version: 2, mode: "unprotected" },
     configurationId: "cfg-native-approvers",
     configurationKind: "agent",
     configurationGeneration: 1,
@@ -7835,6 +7836,7 @@ test("native channel providers require Secret bindings and project them only to 
     namespaceId: tenant.id,
     agentId,
     revision: 1,
+    executionAdmission: { version: 2, mode: "unprotected" },
     configurationId: "cfg_00000000-0000-4000-8000-000000000001",
     configurationKind: "agent",
     configurationGeneration: 1,
@@ -8988,6 +8990,7 @@ async function exerciseEmbeddedReplacement({ providerId, model, environmentName,
     },
   };
   const replacement = {
+    executionAdmission: { version: 2, mode: "unprotected" },
     ...base,
     id: "revision-embedded-recovery-restored",
     revision: 8,
@@ -10824,6 +10827,7 @@ test("Kubernetes lifecycle hooks never run before cluster ownership and workload
     namespaceId: tenant.id,
     agentId: "agent-foreign",
     revision: 1,
+    executionAdmission: { version: 2, mode: "unprotected" },
     configurationId: "cfg_00000000-0000-4000-8000-000000000001",
     configurationKind: "agent",
     configurationGeneration: 1,
@@ -11828,10 +11832,10 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
         resourceName: "provider-sandbox",
         agentId: context.revision.agentId,
         revisionId: context.revision.id,
-        ...(context.requirements.egressAttachment === undefined
+        ...(context.requirements.conduitWiring === undefined
           ? {}
           : {
-              egressAttachment: context.requirements.egressAttachment,
+              conduitWiring: context.requirements.conduitWiring,
             }),
       };
     },
@@ -12678,13 +12682,13 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
     let observation = installed;
     let current = true;
     driver.credentialGatewayDriver.listSourceTypes = async () => [openAiStaticProvider.sourceType];
-    driver.egressProxyDriver = {
+    driver.conduitDriver = {
       id: plan.egressDriverId,
       implementation: "openshell",
       async configureRevision() {
         return attachment;
       },
-      async attachmentStatus() {
+      async wiringStatus() {
         events.push("observe");
         return observation;
       },
@@ -12960,7 +12964,7 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
         });
         const zeroInstalled = { ...installed, plan: zeroPlan };
         observation = zeroInstalled;
-        driver.egressProxyDriver.configureRevision = async ({ plan }) => ({ ...attachment, plan });
+        driver.conduitDriver.configureRevision = async ({ plan }) => ({ ...attachment, plan });
         let zeroRequirements;
         let authorizeZero;
         fixture.sandbox.enrollHarness = async ({ requirements }, receipt, release) => {
@@ -13098,7 +13102,7 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
             return warmth === "ignore-abort" ? new Promise(() => {}) : warmth;
           },
         };
-        driver.egressProxyDriver.sourceControl = {
+        driver.conduitDriver.sourceControl = {
           sender: installed.sender,
           resolver: { id: "resolver", generation: 1 },
           preparedGitHub: lifecycle,
@@ -13172,7 +13176,7 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
         core.listNamespacedPod = originalList;
       },
     );
-    driver.egressProxyDriver = undefined;
+    driver.conduitDriver = undefined;
   }
 
   // An unreachable Harness transport is a Sandbox provisioning failure in diagnostics.
@@ -13447,6 +13451,7 @@ test("revision lifecycle rejects another driver or missing identity before clust
     namespaceId: tenant.id,
     agentId: "agent-a",
     revision: 1,
+    executionAdmission: { version: 2, mode: "unprotected" },
     configurationId: "cfg_00000000-0000-4000-8000-000000000001",
     configurationKind: "agent",
     configurationGeneration: 1,

@@ -373,5 +373,5 @@ spec:
         - ipBlock: {cidr: {{ . | quote }}}
         {{- end }}
       ports:
-        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: {{ .Values.preparedGitHub.issuerPort }}}
 {{- end }}

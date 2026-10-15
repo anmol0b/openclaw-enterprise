@@ -31,6 +31,7 @@
     "tests/integration/postgres-controller-work-targets.test.mjs",
     "tests/integration/postgres-transaction-commit.test.mjs",
     "tests/integration/postgres-static-egress.test.mjs",
+    "tests/integration/postgres-prepared-github-lifecycle.test.mjs",
     "tests/integration/postgres-egress-send-receipts.test.mjs"
   ],
   "files": [
@@ -243,6 +244,13 @@
       "path": "tests/integration/postgres-github-recovery-replacement.test.mjs",
       "expectedTests": [
         "online recovery replacement moves the reserved lane and survives a restart with the original seed"
+      ]
+    },
+    {
+      "path": "tests/integration/postgres-prepared-github-lifecycle.test.mjs",
+      "expectedTests": [
+        "PostgreSQL prepared custody: source consent, proactive renewal, restart, issuer rotation and withdrawal",
+        "signed PostgreSQL dispatch permits exact prepared material on the accepted exchange"
       ]
     },
     {

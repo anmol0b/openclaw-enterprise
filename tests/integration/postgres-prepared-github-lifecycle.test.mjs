@@ -5,6 +5,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { captureMetadata, dispatchMetadata } from "../helpers/github-metadata-exchange.mjs";
 import { postgresApp } from "../helpers/postgres-egress-app.mjs";
 import { requiresPostgres } from "../helpers/postgres-database.mjs";
 import { staticEgressFixture } from "../helpers/static-egress.mjs";
@@ -103,80 +104,22 @@ test(
     const old = await lifecycle.readWarm(source, signal);
     assert.equal(old.ownerEpoch, 1);
     assert.deepEqual(gh.issuesOfTokens[0].permissions, { metadata: "read" });
-    // Execute the production protected resolve and exact authorization with the production
-    // PostgreSQL-backed lifecycle. Peer, acceptance and installed enforcement remain wire fixtures.
-    const install = f.installation;
-    const [route] = install.plan.routes;
-    const sandboxId = install.sandboxId;
-    const peer = {
-      ...install.enforcement,
-      sender: install.sender,
-      sandboxId,
-      expiresAt: new Date(Date.now() + 120_000).toISOString(),
-    };
-    const forwarder = f.controller.createEgressForwarder(
-      { verify: async () => peer },
-      f.acceptance,
-    );
-    const id = f.fixtureRequestId();
-    const deadlineAt = new Date(Date.now() + 20_000).toISOString();
-    const result = await forwarder.resolve(
-      "fixture peer",
-      sandboxId,
-      {
-        id,
-        method: "GET",
-        url: route.origin + route.path,
-        headers: [],
-        body: new Uint8Array(),
-        deadlineAt,
+    // Use OCE's actual signed exchange owner, not a second fixture acceptance or a unary sender.
+    const captured = captureMetadata(f);
+    const { ready } = await f.resolve(captured);
+    assert.ok(ready, "signed resolve must select the prepared family");
+    const evidence = JSON.parse(ready.evidence.authority_evidence);
+    assert.equal(await lifecycle.current(source, evidence, signal), true);
+    await t.test(
+      "signed PostgreSQL dispatch permits exact prepared material on the accepted exchange",
+      async () => {
+        const safe = await dispatchMetadata(f, gh, captured, ready);
+        assert.equal(
+          safe.body.toString(),
+          JSON.stringify({ id: Number(fixtureRepositoryId), full_name: fixtureRepository }),
+        );
       },
-      signal,
     );
-    assert.equal(result.kind, "ready");
-    assert.equal(
-      await lifecycle.current(source, result.evidence, signal),
-      true,
-      "selected, request-bounded evidence must be current",
-    );
-    await t.test("real PostgreSQL protected dispatch permits exact prepared material", async () => {
-      const permit = await forwarder.authorizeSend(
-        "fixture peer",
-        sandboxId,
-        id,
-        result.handle,
-        result.evidence,
-        result.injectionDigest,
-        deadlineAt,
-        signal,
-      );
-      assert.equal(permit.kind, "allow", permit.error?.code);
-      const accepted = await new Promise((resolve, reject) => {
-        get(
-          route.origin + route.path,
-          { ca: gh.tls.ca, headers: Object.fromEntries(result.headers) },
-          async (res) => {
-            const body = [];
-            for await (const bytes of res) {
-              body.push(bytes);
-            }
-            resolve({
-              status: res.statusCode,
-              headers: Object.entries(res.headers),
-              body: Buffer.concat(body),
-              trailers: Object.entries(res.trailers),
-            });
-          },
-        ).once("error", reject);
-      });
-      assert.equal(accepted.status, 200, "origin must accept the authorized provider credential");
-      const response = await forwarder.beginResponse("fixture peer", sandboxId, id);
-      const safe = await forwarder.protectResponse(response, accepted, signal);
-      assert.equal(
-        safe.body.toString(),
-        JSON.stringify({ id: Number(fixtureRepositoryId), full_name: fixtureRepository }),
-      );
-    });
     const status = (value) =>
       new Promise((resolve, reject) => {
         get(

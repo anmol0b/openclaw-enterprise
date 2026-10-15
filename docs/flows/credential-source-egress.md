@@ -14,15 +14,11 @@ response for protection. OCC owns identity mapping, current IAM decisions, versi
 Secret selection and response policy. The supervisor runs outside the Agent and
 owns injection and the business send.
 
-Protected revision admission and execution are blocked by all shipped Computes.
-The request flow below describes the retained OCE protocol implementation and its
-synthetic fixtures, not a currently deployable protected execution. See the
-[execution cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
-
-The dispatch path requires a trusted acceptance owner for the actual exchange,
-sender and response destination. Production composition does not yet supply that
-installation-bound owner (M2); without it, resolution refuses before reading material.
-Synthetic acceptance profiles exercise the OCE side only.
+Kubernetes Compute can release the fresh protected execution only after signing its
+startup challenge for the exact current installation. Other Computes refuse it.
+Production Conduit owns private response acceptance on the authenticated installation
+exchange. This requires a matching supervisor, not the bundled legacy release. See
+the [profile and release cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
 
 This flow describes the implemented OCE side and the required counterpart contract.
 It does not prove a deployed supervisor or no-bypass networking. The
@@ -34,7 +30,7 @@ supported operations and configuration.
 - Trigger: an installed supervisor sends `HttpCredentialAccess.Resolve`, followed
   by `AuthorizeSend` and `HttpResponsePreReturn.Evaluate` over authenticated TLS.
 - Source: `apps/controller/src/drivers/egress-proxy/openshell-authority.ts:createOpenShellEgressAuthority`
-- Source: `packages/occ/src/index.ts:createEgressForwarder`
+- Source: `packages/occ/src/index.ts:createConduit`
 - Assumptions: source admission and Agent deployment produced an exact plan;
   a current verified loaded-enforcement receipt permits installation; the Agent is
   running; its service principal holds exact source `operate` permission.
@@ -69,7 +65,7 @@ exercise that contract; deployed enforcement remains a separate qualification.
 ### 1. Admit source and install the revision plan
 
 `packages/occ/src/index.ts:admitStaticEgressSource`,
-`packages/occ/src/index.ts:admitEgressPlan`
+`packages/occ/src/index.ts:admitConduitPlan`
 
 New protected sources store a closed live/static descriptor after source/Secret
 permission checks and candidate validation. Existing sources require explicit
@@ -78,21 +74,13 @@ from the selected egress capability, independently of bindings. Protected plans
 freeze execution, source generation, grant and route identities. Empty routes
 retain protected semantics and require deny-all.
 
-`packages/contracts/src/egress.ts:assertExecutionReleaseAllowed`,
+`packages/contracts/src/conduit.ts:assertExecutionReleaseAllowed`,
 `apps/controller/src/worker.ts:resolveRevisionSecretContext`
 
-OCC calls Compute's admission validator before storing the revision. Every shipped
-Compute refuses protected mode. The worker refuses before resolving launch context;
-Compute prepare/activate also check before effects. Missing, unsupported and
-inconsistent decisions fail closed. PostgreSQL stores `execution_admission` inside
-`admitted_spec` and rejects old snapshots on read without relabeling them. The
-schema blocks old writes. Protected snapshots put a required reader version in
-Harness authentication, which the previous reader refuses before reaching Compute.
-Release still requires Compute-owned authority, an inventory of the readers in
-the installation, and evidence that an empty protected plan enforces deny-all.
-
-The remaining installation trace is retained protocol code, reached by synthetic
-fixtures only while that cutoff remains in place.
+OCC calls Compute's validator before admitting the revision. The worker and Compute
+check the admitted decision before launch. PostgreSQL refuses an unknown decision
+and rejects old writers; the protected Harness snapshot also fences the prior reader.
+Qualification must exercise both release and installed deny-all behavior.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:prepareRevision`,
 `apps/controller/src/drivers/egress-proxy/openshell.ts:attachmentStatus`
@@ -134,7 +122,7 @@ receives the transport verifier, not the raw transport token.
 The generated Harness waits on this listener before running the first model probe. Compute awaits the
 installation commit, requeries current evidence and calls the selected Sandbox
 Driver. The Driver checks the exact Sandbox and service, reads the execution/plan
-challenge and echoes its fresh process nonce using the existing transport token.
+challenge. Compute signs its fresh process nonce and current installation with a control-plane-only key.
 The Harness closes that listener before starting Codex. Restart creates a new
 challenge; a stale release cannot unlock the replacement. The 180-second wait
 fails closed with a held startup failure. Reconciliation can repeat readiness
@@ -147,7 +135,7 @@ see the [supported recovery boundary](../reference/credential-sources/protected-
 ### 2. Capture identity, operation and first authority decision
 
 `apps/controller/src/drivers/egress-proxy/openshell-identity.ts:verify`,
-`packages/occ/src/egress.ts:resolve`
+`packages/occ/src/conduit.ts:resolve`
 
 The TLS adapter accepts one operation on `HttpInstallationExchange.Exchange`.
 It issues a random 32-byte challenge on that actual stream. Before asynchronous
@@ -192,7 +180,7 @@ without material.
 ### 3. Resolve versioned material and authorize its sole send
 
 `apps/controller/src/drivers/secret/kubernetes/index.ts:readCredentialInput`,
-`packages/occ/src/egress.ts:authorizeSend`
+`packages/occ/src/conduit.ts:authorizeSend`
 
 The selected Secret Driver verifies ownership and reads UID/resourceVersion from
 the authoritative API. The registry retains material only for this bounded
@@ -225,7 +213,7 @@ to repeat the business request.
 
 ### 4. Protect response and finish
 
-`packages/occ/src/egress.ts:protectResponse`,
+`packages/occ/src/conduit.ts:protectResponse`,
 `apps/controller/src/drivers/egress-proxy/openai-provider.ts:protectedEvents`,
 `apps/controller/src/drivers/egress-proxy/openai-responses.ts:validResponsesEvent`
 
