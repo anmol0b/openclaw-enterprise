@@ -10,6 +10,7 @@ export const HARNESS_EGRESS_ENROLLMENT_PATH = "/openclaw/runtime/egress-enrollme
 
 export interface HarnessEgressEnrollment {
   readonly routeCount: number;
+  readonly inference: boolean;
   readonly plan: EgressRef;
   readonly execution: EgressExecution;
 }
@@ -20,6 +21,7 @@ export function harnessEgressEnrollment(plan: EgressPlan): HarnessEgressEnrollme
     plan.execution;
   return {
     routeCount: plan.routes.length,
+    inference: plan.routes.some((route) => route.binding.grant.kind === "inference"),
     plan: { id: plan.id, generation: plan.generation },
     execution: {
       installationId,
@@ -83,7 +85,7 @@ function waitForHarnessEgressEnrollment(enrollment) {
   const executionKeys = ["installationId", "namespaceId", "agentId", "servicePrincipalId", "revisionId", "executionId"];
   if (typeof verifier !== "string" || !/^[a-f0-9]{64}$/.test(verifier) ||
       !Number.isSafeInteger(port) || port < 1 || port > 65535 ||
-      !isPlainObject(enrollment) || Object.keys(enrollment).length !== 3 ||
+      !isPlainObject(enrollment) || Object.keys(enrollment).length !== 4 || typeof enrollment.inference !== "boolean" ||
       !Number.isSafeInteger(enrollment.routeCount) || enrollment.routeCount < 0 ||
       !isPlainObject(enrollment.plan) || Object.keys(enrollment.plan).length !== 2 ||
       typeof enrollment.plan.id !== "string" || !enrollment.plan.id || enrollment.plan.id.length > 256 ||

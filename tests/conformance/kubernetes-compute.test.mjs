@@ -12838,6 +12838,126 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
         assert.match(invocations[0], /app-server/);
       },
     );
+    await t.test(
+      "metadata-only Compute observes exact warm preparation before release and waits for serving",
+      async () => {
+        const id = "ar_00000000-0000-4000-8000-000000000549";
+        const execution = { ...plan.execution, revisionId: id };
+        const provider = { id: "github-app-metadata", generation: 1 };
+        const key = { ...sourceKey, provider };
+        const grant = {
+          kind: "github_repository_metadata",
+          appId: "7",
+          installationId: "9",
+          repositoryId: "11",
+          repository: "test/example",
+          isolationId: execution.agentId,
+          profile: "metadata-read",
+        };
+        const binding = { ...plan.routes[0].binding, execution, grant, source: key };
+        const route = { ...plan.routes[0], method: "GET", path: "/repos/test/example", binding };
+        const metadataPlan = { ...plan, execution, routes: [route] };
+        const metadata = {
+          ...protectedRevision,
+          id,
+          revision: protectedRevision.revision + 2,
+          harnessAuth: { method: "runtime" },
+          egressPlan: metadataPlan,
+        };
+        save({
+          ...setup,
+          metadata: {
+            ...setup.metadata,
+            name: driver.workspaceNodeName(metadata),
+            labels: { ...setup.metadata.labels, "openclaw.dev/revision": id },
+          },
+        });
+        const receipt = { ...installed, plan: metadataPlan };
+        const sequence = [];
+        let warmth;
+        const lifecycle = {
+          // This owner can only observe readiness. Access, issue and refresh are not wired.
+          async ready(source) {
+            assert.deepEqual(source.grant, grant);
+            assert.deepEqual(source.key, key);
+            sequence.push("observe-warmth");
+            return warmth === "ignore-abort" ? new Promise(() => {}) : warmth;
+          },
+        };
+        driver.egressProxyDriver.sourceControl = {
+          sender: installed.sender,
+          resolver: { id: "resolver", generation: 1 },
+          preparedGitHub: lifecycle,
+        };
+        observation = receipt;
+        let expireDuringRelease = false;
+        fixture.sandbox.enrollHarness = async (context, current, release) => {
+          assert.equal(current, receipt);
+          assert.ok(
+            context.requirements.environment.some(
+              (v) => v.name === "CODEX_LOGIN_MODE" && v.value === "protected-no-inference",
+            ),
+          );
+          if (expireDuringRelease) {
+            warmth = false;
+          }
+          const authorization = await release("00000000-0000-4000-8000-000000000549");
+          assert.equal(authorization.challenge.inference, false);
+          assert.equal(authorization.challenge.routeCount, 1);
+          sequence.push("signed");
+        };
+        const context = {
+          harnessAuth: metadata.harnessAuth,
+          recordEgressInstallation: async () => sequence.push("commit"),
+          currentEgressInstallation: async () => receipt,
+        };
+        for (const cold of [false, "ignore-abort"]) {
+          warmth = cold;
+          assert.equal(
+            (await driver.prepareRevision(metadata, context)).ready,
+            false,
+            String(cold),
+          );
+          assert.deepEqual(
+            sequence.splice(0),
+            ["observe-warmth"],
+            "cold and bounded-out observations release nothing",
+          );
+        }
+        warmth = true;
+        expireDuringRelease = true;
+        await assert.rejects(
+          driver.prepareRevision(metadata, context),
+          /exact current committed installation/,
+        );
+        assert.deepEqual(sequence.splice(0), ["observe-warmth", "commit", "observe-warmth"]);
+        warmth = true;
+        expireDuringRelease = false;
+        // Independently observe the metadata revision's Ready provider Pod, not the
+        // predecessor used by this fixture. Harness status still determines readiness.
+        const pod = fixture.pod("metadata-revision");
+        pod.metadata.labels["openclaw.dev/revision"] = id;
+        pod.metadata.labels["app.kubernetes.io/name"] =
+          "agent-" + digest(metadata.agentId) + "-rev-" + digest(id);
+        const originalList = core.listNamespacedPod;
+        core.listNamespacedPod = async (request) =>
+          request.labelSelector.includes("openclaw.dev/revision=" + id)
+            ? { items: [pod] }
+            : originalList(request);
+        for (const state of ["starting", "serving"]) {
+          harnessAnswer = { state };
+          const prepared = await driver.prepareRevision(metadata, context);
+          assert.equal(prepared.ready, state === "serving");
+          assert.deepEqual(sequence.splice(0), [
+            "observe-warmth",
+            "commit",
+            "observe-warmth",
+            "signed",
+          ]);
+        }
+        core.listNamespacedPod = originalList;
+      },
+    );
     driver.egressProxyDriver = undefined;
   }
 

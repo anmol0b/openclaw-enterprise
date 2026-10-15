@@ -1,5 +1,10 @@
-import { assertExecutionAdmission } from "@openclaw-enterprise/contracts";
 import {
+  assertExecutionAdmission,
+  preparedGitHubSourceFromRoute,
+  preparedGitHubProviderRef,
+} from "@openclaw-enterprise/contracts";
+import {
+  harnessEgressEnrollment,
   COMPUTE_RELEASE_PUBLIC_KEY,
   computeReleasePublicKey,
   signComputeExecutionRelease,
@@ -5144,7 +5149,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       execution.namespaceId !== revision.namespaceId ||
       execution.servicePrincipalId !== revision.servicePrincipalId ||
       plan.routes.some((route) => !isDeepStrictEqual(route.binding.execution, execution)) ||
-      (plan.routes.length === 0
+      (!harnessEgressEnrollment(plan).inference
         ? revision.harnessAuth.method !== "runtime"
         : revision.harnessAuth.method !== "credential_source")
     ) {
@@ -5999,7 +6004,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
             egressContext,
             sandbox.egressAttachment,
           );
-          if (installed === undefined) {
+          if (installed === undefined || !(await this.preparedEgressReady(egressContext))) {
             return incomplete();
           }
           await context!.recordEgressInstallation!(installed);
@@ -12997,7 +13002,11 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       ) {
         throw new OwnershipFailure("Harness credential source does not match the admitted source.");
       }
-    } else if (auth.method !== "runtime" || revision.egressPlan?.routes.length !== 0) {
+    } else if (
+      auth.method !== "runtime" ||
+      !revision.egressPlan ||
+      harnessEgressEnrollment(revision.egressPlan).inference
+    ) {
       if (
         !isServiceAccountHarnessAuth(auth) ||
         !isDeepStrictEqual(auth, revision.harnessAuth) ||
@@ -13009,7 +13018,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       }
     }
     const prepared: PreparedHarnessAuth =
-      auth.method === "runtime" && revision.egressPlan?.routes.length === 0
+      auth.method === "runtime" &&
+      revision.egressPlan &&
+      !harnessEgressEnrollment(revision.egressPlan).inference
         ? {
             loginMode: "runtime",
             environment: [{ name: "CODEX_LOGIN_MODE", value: "protected-no-inference" }],
@@ -13820,6 +13831,43 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     return `compute-release-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`;
   }
 
+  /** Cold/expired is pending for an ordinary later observation, never a request to prepare material. */
+  private async preparedEgressReady(egress: EgressRevisionContext): Promise<boolean> {
+    for (const route of egress.plan.routes) {
+      if (route.binding.grant.kind !== "github_repository_metadata") {
+        continue;
+      }
+      const control = this.egressProxyDriver!.sourceControl;
+      const lifecycle = control.preparedGitHub;
+      const source = preparedGitHubSourceFromRoute(route, control);
+      if (
+        !source ||
+        !lifecycle ||
+        !isDeepStrictEqual(source.key.provider, preparedGitHubProviderRef)
+      ) {
+        throw new DependencyUnavailableError(
+          "Compute requires the exact prepared GitHub metadata lifecycle owner.",
+        );
+      }
+      // Bound even an owner whose observation ignores cancellation. No retry in this pass.
+      const signal = AbortSignal.any([egress.signal, AbortSignal.timeout(3_000)]);
+      const { promise, resolve } = Promise.withResolvers<boolean>();
+      const interrupted = () => resolve(false);
+      signal.addEventListener("abort", interrupted, { once: true });
+      try {
+        egress.signal.throwIfAborted();
+        const ready = await Promise.race([promise, lifecycle.ready(source, signal)]);
+        egress.signal.throwIfAborted();
+        if (ready !== true || signal.aborted) {
+          return false;
+        }
+      } finally {
+        signal.removeEventListener("abort", interrupted);
+      }
+    }
+    return true;
+  }
+
   private async verifiedReleaseInstallation(
     egress: EgressRevisionContext,
     context: ComputeRevisionContext,
@@ -13833,7 +13881,8 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         (observed.sandboxId !== current.sandboxId ||
           !isDeepStrictEqual(current.sender, observed.sender) ||
           !isDeepStrictEqual(current.enforcement, observed.enforcement))) ||
-      !(await this.egressProxyDriver!.verifyInstallation(egress, current))
+      !(await this.egressProxyDriver!.verifyInstallation(egress, current)) ||
+      !(await this.preparedEgressReady(egress))
     ) {
       throw new DependencyUnavailableError(
         "Compute release requires the exact current committed installation.",
