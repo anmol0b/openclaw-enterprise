@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-15"
-last_updated_session: authoring-run/b34da698-7e69-4c1d-a28c-238ed9c7d1d4
+last_updated_session: authoring-run/a87e5b92-3e56-47e2-8112-82aa89ca28c4
 ---
 
 # Protected credential request flow
@@ -196,6 +196,16 @@ invalid deadlines fail closed. Per-attempt timeouts cannot extend the read lifet
 The registry retains material only for this bounded request. It returns credential
 headers, an opaque handle and nonsecret material evidence to the authenticated supervisor.
 
+`apps/controller/src/drivers/repo/github/credentials/prepared-lifecycle.ts:readWarm`
+pins the committed attempt ID, material version and earlier of material expiry or
+signed deadline. `apps/controller/src/drivers/repo/github/credentials/prepared-postgres.ts:store`
+projects ciphertext only for that eligible row and issuer, checking `clock_timestamp()`
+at projection. It rechecks expiry and cancellation immediately before decryption;
+the outer reader still verifies identity and expiry. An expired or replaced selection
+returns `not_ready` unless the signed deadline has elapsed. Bytes already projected
+cannot be recalled. Background preparation has separate custody,
+so rotation and cleanup can still handle material ineligible for requests.
+
 The authorization frame on that same stream must echo the original deadline, evidence and injection digest.
 The registry reserves the handle, then uses
 `packages/occ/src/egress-send-receipts.ts:EgressSendReceipts.begin` to commit
@@ -297,6 +307,8 @@ image compatibility.
 None.
 
 ## Changelog
+
+- 2026-10-15 20:14: Pin request ciphertext access to selected material and its expiry in the accompanying implementation. (authoring-run/a87e5b92-3e56-47e2-8112-82aa89ca28c4 - ab675985805a9d4a855f441a3ba91e836d42a532)
 
 - 2026-10-15 19:23: Unify the read lifetime and exchange owner; detach one request snapshot before verification in the accompanying implementation. (authoring-run/b34da698-7e69-4c1d-a28c-238ed9c7d1d4 - adddcf2c0ce2429fb8fc7b9e503b01a74affdec8)
 

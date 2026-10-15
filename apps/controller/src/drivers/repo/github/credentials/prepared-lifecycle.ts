@@ -175,15 +175,27 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
   ): Promise<PreparedGitHubSelection | undefined> {
     const { signal, deadlineAt } = lifetime;
     const deadline = Date.parse(deadlineAt);
-    const active = () => !signal.aborted && Date.now() < deadline;
+    const active = (until = deadline) => !signal.aborted && Date.now() < until;
     if (!active()) {
       return;
     }
     const m = await this.db.metadata(source);
-    if (!m || !active()) {
+    if (!m?.material_version) {
       return;
     }
-    const reader = createGitHubWarmReader(this.db.store(source, { deadlineAt, active }), Date.now);
+    const effectiveUntil = Math.min(deadline, m.usable_until.getTime());
+    if (!active(effectiveUntil)) {
+      return;
+    }
+    const reader = createGitHubWarmReader(
+      this.db.store(source, {
+        deadlineAt: new Date(effectiveUntil).toISOString(),
+        attemptId: m.id,
+        materialVersion: m.material_version,
+        active: () => active(effectiveUntil),
+      }),
+      Date.now,
+    );
     const warm = await reader.readWarm(m.admission);
     if (warm.kind !== "warm") {
       return;
@@ -195,7 +207,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
         attemptId === m.id &&
         materialVersion === m.material_version &&
         usableUntil > Date.now() &&
-        active()
+        active(effectiveUntil)
       ) {
         return {
           ...evidence(m),

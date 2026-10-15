@@ -126,7 +126,7 @@ test(
       },
     );
     await t.test(
-      "signed access deadline bounds ciphertext selection, projection and decryption",
+      "signed access and material expiry bound ciphertext selection, projection and decryption",
       async (t) => {
         const repo = lifecycle.repository;
         const transaction = repo.transaction.bind(repo);
@@ -162,35 +162,68 @@ test(
             }),
           ),
         );
-        for (arm of ["control", "after metadata", "before projection", "after projection"]) {
-          const request = captureMetadata(f);
-          deadline = Date.now() + 1300;
-          request.deadline = wireTime(deadline);
-          queryInTime = projected = undefined;
-          open.mock.resetCalls();
-          const result = await f.resolve(request);
-          if (arm === "control") {
-            assert.ok(result.ready && queryInTime && projected, "ordinary signed access must work");
-            assert.equal(open.mock.callCount(), 1);
-          } else {
-            // Once signed access expires, the request deadline wins over material readiness.
-            assert.equal(
-              result.refused?.code,
-              f.refusalCode("DEADLINE_EXCEEDED"),
-              arm + ": deadline exceeded, no send handle",
-            );
-            const queried = arm !== "after metadata";
-            assert.equal(
-              queryInTime,
-              queried ? true : undefined,
-              arm + ": no late ciphertext query",
-            );
-            assert.equal(
-              projected,
-              queried ? arm === "after projection" : undefined,
-              arm + ": ciphertext projection",
-            );
-            assert.equal(open.mock.callCount(), 0, arm + ": must not decrypt");
+        for (const bound of ["signed deadline", "material expiry"]) {
+          for (const boundary of [
+            "control",
+            "after metadata",
+            "before projection",
+            "after projection",
+          ]) {
+            await t.test(`${bound}: ${boundary}`, async () => {
+              arm = boundary;
+              const request = captureMetadata(f);
+              deadline = Date.now() + 1300;
+              request.deadline = wireTime(
+                bound === "signed deadline" ? deadline : Date.now() + 20_000,
+              );
+              queryInTime = projected = undefined;
+              open.mock.resetCalls();
+              const issues = gh.issuesOfTokens.length;
+              const reads = f.secretReads;
+              try {
+                if (bound === "material expiry") {
+                  // Shorten the real committed row before selection. Both reads see this same
+                  // bound; the gate then lets time expire on the designated side of projection.
+                  await f.pool.query(
+                    "UPDATE occ.prepared_github_attempts SET usable_until=$1 WHERE material_version=$2",
+                    [new Date(deadline), old.materialVersion],
+                  );
+                }
+                const result = await f.resolve(request);
+                if (arm === "control") {
+                  assert.ok(
+                    result.ready && queryInTime && projected,
+                    "ordinary signed access must work",
+                  );
+                  assert.equal(open.mock.callCount(), 1);
+                } else {
+                  assert.equal(
+                    result.refused?.code,
+                    f.refusalCode(bound === "signed deadline" ? "DEADLINE_EXCEEDED" : "NOT_READY"),
+                    arm + ": refusal follows the bound that expired",
+                  );
+                  const queried = arm !== "after metadata";
+                  assert.deepEqual(
+                    { queryInTime, projected, opens: open.mock.callCount() },
+                    {
+                      queryInTime: queried ? true : undefined,
+                      projected: queried ? arm === "after projection" : undefined,
+                      opens: 0,
+                    },
+                    arm + ": no late ciphertext access or decryption",
+                  );
+                }
+                assert.equal(gh.issuesOfTokens.length, issues, "request must not issue");
+                assert.equal(f.secretReads, reads, "request must not read issuer Secret");
+              } finally {
+                if (bound === "material expiry") {
+                  await f.pool.query(
+                    "UPDATE occ.prepared_github_attempts SET usable_until=$1 WHERE material_version=$2",
+                    [new Date(old.usableUntil), old.materialVersion],
+                  );
+                }
+              }
+            });
           }
         }
       },
@@ -240,29 +273,98 @@ test(
         "UPDATE occ.prepared_github_families SET next_check_at=now() WHERE source_id=$1",
         [source.key.source.id],
       );
-    await due(); // Only advance the periodic scan, not eligibility, owner or any token bytes.
-    const reports = [];
-    fresh.startWorker((code) => reports.push(code));
-    // Observe only the ledger. No request or readiness call drives this proactive renewal.
-    const pollDeadline = Date.now() + 15_000;
-    for (;;) {
-      const {
-        rows: [{ changed }],
-      } = await f.pool.query(
-        "SELECT count(*)=1 AS changed FROM occ.prepared_github_attempts WHERE custody='current' AND source_id=$1 AND material_version <> $2",
-        [source.key.source.id, old.materialVersion],
-      );
-      if (changed) {
-        break;
-      }
-      assert.ok(Date.now() < pollDeadline, "background loop did not proactively renew");
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    await fresh.close();
-    await fresh.connect(f.pool);
-    assert.deepEqual(reports, []);
-    const renewed = await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() });
-    assert.notEqual(renewed.materialVersion, old.materialVersion);
+    let renewed;
+    await t.test(
+      "renewal after committed metadata cannot open replacement for the old request",
+      async (t) => {
+        const repo = lifecycle.repository;
+        const metadata = repo.metadata.bind(repo);
+        const transaction = repo.transaction.bind(repo);
+        const selected = Promise.withResolvers();
+        const resume = Promise.withResolvers();
+        const open = t.mock.method(repo, "open");
+        let projected = false;
+        t.mock.method(
+          repo,
+          "metadata",
+          async (...args) => {
+            const result = await metadata(...args); // The real metadata transaction has committed.
+            selected.resolve(result);
+            await resume.promise;
+            return result;
+          },
+          { times: 1 },
+        );
+        t.mock.method(repo, "transaction", (work) =>
+          transaction((client) =>
+            work({
+              async query(sql, args) {
+                const result = await client.query(sql, args);
+                if (sql.includes("END AS sealed")) {
+                  projected ||= result.rows.some((row) => row.sealed != null);
+                }
+                return result;
+              },
+            }),
+          ),
+        );
+        const pending = f.resolve(captureMetadata(f));
+        try {
+          const selection = await Promise.race([
+            selected.promise,
+            pending.then(() => {
+              throw new Error("request ended before selecting metadata");
+            }),
+          ]);
+          assert.equal(selection.material_version, old.materialVersion);
+          await due(); // Only advance the periodic scan, not eligibility, owner or any token bytes.
+          const reports = [];
+          fresh.startWorker((code) => reports.push(code));
+          // Observe only the ledger. No request or readiness call drives this proactive renewal.
+          const pollDeadline = Date.now() + 15_000;
+          for (;;) {
+            const {
+              rows: [{ changed }],
+            } = await f.pool.query(
+              "SELECT count(*)=1 AS changed FROM occ.prepared_github_attempts WHERE custody='current' AND source_id=$1 AND material_version <> $2",
+              [source.key.source.id, old.materialVersion],
+            );
+            if (changed) {
+              break;
+            }
+            assert.ok(Date.now() < pollDeadline, "background loop did not proactively renew");
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          await fresh.close();
+          await fresh.connect(f.pool);
+          assert.deepEqual(reports, []);
+          renewed = await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() });
+          assert.notEqual(renewed.materialVersion, old.materialVersion);
+          const issues = gh.issuesOfTokens.length;
+          const reads = f.secretReads;
+          resume.resolve();
+          const result = await pending;
+          assert.equal(result.refused?.code, f.refusalCode("NOT_READY"));
+          assert.deepEqual(
+            { projected, opens: open.mock.callCount() },
+            { projected: false, opens: 0 },
+            "old selection must neither project nor open the replacement",
+          );
+          const next = await f.resolve(captureMetadata(f));
+          assert.ok(next.ready, "a new request can select the replacement");
+          assert.equal(
+            JSON.parse(next.ready.evidence.authority_evidence).materialVersion,
+            renewed.materialVersion,
+          );
+          assert.equal(open.mock.callCount(), 1);
+          assert.equal(gh.issuesOfTokens.length, issues, "requests must not issue");
+          assert.equal(f.secretReads, reads, "requests must not read issuer Secret");
+        } finally {
+          resume.resolve();
+          await pending;
+        }
+      },
+    );
     // B is reachable with the same trusted CA and would falsely acknowledge A's revocation.
     // Record only whether a credential arrived. A client must not rely on B rejecting A's token.
     let credentialRequestsAtB = 0;
@@ -448,6 +550,72 @@ test(
         "unreceived retirement bytes were not cleared",
       );
     });
+    for (const custody of ["current", "retire"]) {
+      await t.test(`publication rollback clears ${custody} bytes`, async (t) => {
+        const created = await f.request("POST", path, {
+          body: { ...registration, name: `prepared-rollback-${custody}` },
+        });
+        assert.equal(created.status, 201);
+        invalidScope = custody === "retire";
+        t.after(() => {
+          invalidScope = false;
+        });
+
+        const repo = fresh.repository;
+        const seal = repo.seal.bind(repo);
+        const transaction = repo.transaction.bind(repo);
+        let candidate;
+        let publication;
+        t.mock.method(repo, "seal", (bytes, ...args) => {
+          candidate = bytes; // Retain the repository-owned buffer, never a copy or diagnostic.
+          return seal(bytes, ...args);
+        });
+        t.mock.method(repo, "transaction", (work) =>
+          transaction((client) =>
+            work({
+              async query(sql, args) {
+                const result = await client.query(sql, args);
+                if (sql.includes("SET state=$2,custody=$3")) {
+                  // The real write succeeded. Abort PostgreSQL before COMMIT, then inspect
+                  // only metadata outside the transaction's sanitized error boundary.
+                  publication = {
+                    custody: args[2],
+                    sealed: args[3] != null,
+                    live: candidate?.some((byte) => byte !== 0),
+                    rows: result.rowCount,
+                  };
+                  await client.query("SELECT 1/0");
+                }
+                return result;
+              },
+            }),
+          ),
+        );
+        const issues = gh.issuesOfTokens.length;
+        assert.equal(await fresh.maintain(signal), "quarantined");
+        const clearedAtReturn = candidate?.every((byte) => byte === 0);
+        assert.deepEqual(publication, { custody, sealed: true, live: true, rows: 1 });
+        assert.equal(gh.issuesOfTokens.length, issues + 1);
+        const { rows } = await f.pool.query(
+          "SELECT state,custody,sealed IS NOT NULL AS sealed FROM occ.prepared_github_attempts WHERE source_id=$1",
+          [created.data.id],
+        );
+        assert.deepEqual(rows, [{ state: "issuing", custody: "intent", sealed: false }]);
+
+        // The durable intent blocks another issuance even after the family becomes due.
+        await f.pool.query(
+          "UPDATE occ.prepared_github_families SET next_check_at=now() WHERE source_id=$1",
+          [created.data.id],
+        );
+        assert.equal(await fresh.maintain(signal), "blocked");
+        assert.equal(gh.issuesOfTokens.length, issues + 1);
+        assert.equal(
+          clearedAtReturn,
+          true,
+          "publication returned without clearing its draft bytes",
+        );
+      });
+    }
     assert.deepEqual(gh.errors, []);
   },
 );

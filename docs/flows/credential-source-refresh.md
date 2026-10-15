@@ -1,7 +1,7 @@
 ---
 created: "2026-10-08"
-updated: "2026-10-14"
-last_updated_session: fix-1366
+updated: "2026-10-15"
+last_updated_session: authoring-run/2dd241b3-7f84-47ce-902b-82a2c5af66ac
 ---
 
 # Credential source refresh Flow
@@ -195,6 +195,11 @@ key across restarts. Only the worker prepares material. The Installation owns th
 HTTPS issuer and its trust roots; a source cannot redirect the issuer. A cold or
 expired read cannot start an exchange, and uncertain issuance blocks another attempt.
 
+`apps/controller/src/drivers/repo/github/credentials/prepared-postgres.ts:store`
+clears the previous committed buffer and token buffers still on the publication
+draft in `finally`, even if the callback, sealing or SQL publication fails. Callers
+own their detached warm reads. Clearing a local buffer does not revoke a provider token.
+
 ## Debugging and Verification
 
 - `node --test tests/integration/repository-credentials-github-prepared.test.mjs`
@@ -230,6 +235,8 @@ expired read cannot start an exchange, and uncertain issuance blocks another att
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 20:30: Document draft buffer cleanup on failed PostgreSQL publication. (authoring-run/2dd241b3-7f84-47ce-902b-82a2c5af66ac - 13a8d9bf7aca5402c822f0e1e2e6e1e98eb3e71b)
 
 - 2026-10-14 21:40: Refuse the three-label `<port>.<protocol>.<service>` short form of the gateway's Services. (fix-1366 - bc85338f2)
 - 2026-10-14 21:46: Document the GitHub preparation fence, warm reader and required production join. (authoring-run/bb74066d-9a10-4c10-932f-fb5843e85628 - fc20eb0174eaf8ae9d4ccb327ec65236c49ef4fb)
