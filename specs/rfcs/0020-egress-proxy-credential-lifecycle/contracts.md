@@ -93,6 +93,6 @@ Every mutating control facet supports `inspect(operationId, bounds)` and
 exact targets, owner, attempt, deadline and cleanup obligations. An identical request returns its
 recorded result, changed input conflicts, and a superseded generation cannot apply even on late
 completion. Distinguish refusal before acceptance, pending, applied, known failure with cleanup,
-and uncertain effect. OCC may renew cleanup authority for that exact accepted work after use rights
-expire. It permits no new use, issuance or broader deletion. Cancellation is local, not proof that
-a remote operation stopped.
+and uncertain effect. Accepted cleanup obligations survive loss of the requester's access. OCC can
+issue a cleanup permit for that exact work after use rights expire; it permits no new use, issuance
+or broader deletion. Local cancellation does not establish that a remote operation stopped.
