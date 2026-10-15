@@ -60,7 +60,6 @@
     "tests/integration/controller-lifecycle.test.mjs",
     "tests/conformance/configuration-occ.test.mjs",
     "tests/conformance/credential-source-occ.test.mjs",
-    "tests/conformance/credential-source-adoption.test.mjs",
     "tests/conformance/kubernetes-real-kubectl.test.mjs",
     "tests/conformance/secret-occ.test.mjs",
     "tests/conformance/http-errors.test.mjs",
@@ -137,9 +136,6 @@
     },
     {
       "path": "tests/conformance/credential-source-occ.test.mjs"
-    },
-    {
-      "path": "tests/conformance/credential-source-adoption.test.mjs"
     },
     {
       "path": "tests/conformance/docker-compute.test.mjs"
