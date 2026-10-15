@@ -205,11 +205,16 @@ export class PreparedGitHubPostgres {
     });
   }
 
-  // Request access has an absolute deadline and follows exchange cancellation. Background
-  // preparation owns separate custody, including material that is no longer request-eligible.
+  // Request access pins the selected material and the earlier material/request deadline.
+  // Null is background preparation: it may open material no longer eligible for requests.
   store(
     source: Source,
-    access: Readonly<{ deadlineAt: string; active: () => boolean }> | null,
+    access: Readonly<{
+      deadlineAt: string;
+      attemptId: string;
+      materialVersion: string;
+      active: () => boolean;
+    }> | null,
   ): GitHubPreparationStore {
     const key = source.key.source.id;
     const locked = <T>(
@@ -237,9 +242,20 @@ export class PreparedGitHubPostgres {
           await c.query(
             `SELECT id,admission,state,custody,material_version,provider_expires_at,
           usable_until,CASE WHEN custody='current' AND admission->>'issuerAuthority'=$2
-            AND clock_timestamp() < $3::timestamptz THEN sealed END AS sealed FROM ${attempts}
+            AND clock_timestamp() < $3::timestamptz
+            AND ($4::uuid IS NULL OR (id=$4 AND material_version=$5 AND state='committed'
+              AND admission=$6::jsonb AND usable_until > clock_timestamp()
+              AND usable_until < clock_timestamp() + interval '61 minutes'))
+            THEN sealed END AS sealed FROM ${attempts}
           WHERE source_id=$1`,
-            [key, this.issuerAuthority, access?.deadlineAt ?? "infinity"],
+            [
+              key,
+              this.issuerAuthority,
+              access?.deadlineAt ?? "infinity",
+              access?.attemptId ?? null,
+              access?.materialVersion ?? null,
+              f.admission,
+            ],
           )
         ).rows as AttemptRow[];
         const current =
@@ -255,7 +271,10 @@ export class PreparedGitHubPostgres {
             ...(a.material_version ? { materialVersion: a.material_version } : {}),
           })),
         };
-        if (current && (!access || access.active())) {
+        if (
+          current &&
+          (!access || (access.active() && current.usable_until.getTime() > Date.now()))
+        ) {
           family.committed = {
             admission: current.admission,
             attemptId: current.id,
