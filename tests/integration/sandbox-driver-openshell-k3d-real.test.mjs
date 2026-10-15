@@ -4162,6 +4162,65 @@ async function gatewayTurnFailureDiagnostic(topology, gatewayPassword) {
   } catch (error) {
     sections.push(`Harness Pod status unavailable: ${error?.message ?? String(error)}`);
   }
+  try {
+    // Diagnostic branch only: exercise the same remote filesystem with inert data.
+    const script = String.raw`
+      const { readFileSync } = require("node:fs");
+      const configuration = JSON.parse(readFileSync(process.env.OPENCLAW_CONFIG_PATH, "utf8"));
+      const directory = configuration.plugins.entries.codex.config.appServer.nativeHookRelay.credentialDirectory;
+      const path = directory + "/oce-filesystem-probe-" + require("node:crypto").randomUUID();
+      const pending = new Map();
+      let nextId = 1;
+      const socket = new WebSocket(process.env.APP_SERVER_URL, {
+        headers: { authorization: "Bearer " + process.env.APP_SERVER_TOKEN },
+      });
+      const request = (method, params) => new Promise((resolve) => {
+        const id = nextId++;
+        pending.set(id, resolve);
+        socket.send(JSON.stringify({ id, method, params }));
+      });
+      setTimeout(() => process.exit(2), 30000);
+      socket.addEventListener("message", ({ data }) => {
+        const message = JSON.parse(String(data));
+        if (pending.has(message.id)) {
+          pending.get(message.id)(message);
+          pending.delete(message.id);
+        }
+      });
+      socket.addEventListener("open", async () => {
+        const results = {};
+        results.initialize = await request("initialize", {
+          clientInfo: { name: "oce-filesystem-diagnostic", version: "1" },
+          capabilities: { experimentalApi: true },
+        });
+        socket.send(JSON.stringify({ method: "initialized", params: {} }));
+        results.directory = directory;
+        results.metadata = await request("fs/getMetadata", { path: directory });
+        results.write = await request("fs/writeFile", {
+          path, dataBase64: Buffer.from("inert filesystem diagnostic").toString("base64"),
+        });
+        results.remove = await request("fs/remove", { path, force: true, recursive: false });
+        process.stdout.write(JSON.stringify(results), () => process.exit(0));
+      });
+      socket.addEventListener("error", () => process.exit(3));
+    `;
+    let result = await kubectl(
+      "exec",
+      topology.gatewayPod.metadata.name,
+      "--namespace",
+      topology.gatewayPlacement,
+      "--",
+      "node",
+      "-e",
+      script,
+    );
+    for (const secret of redactions) {
+      result = result.replaceAll(secret, "[REDACTED]");
+    }
+    sections.push(`Native filesystem diagnostic: ${result}`);
+  } catch {
+    sections.push("Native filesystem diagnostic unavailable");
+  }
   return `\n${sections.join("\n")}`;
 }
 
