@@ -424,6 +424,9 @@ function backendMembers(backend: BackendDefinition): readonly string[] {
     ...(backend.drivers.credential_refresh === undefined
       ? []
       : [`credential_refresh:${backend.drivers.credential_refresh}`]),
+    ...(backend.drivers.credential_proxy === undefined
+      ? []
+      : [`credential_proxy:${backend.drivers.credential_proxy}`]),
   ];
 }
 
@@ -507,6 +510,9 @@ export function validateSelectedBackendDrivers(
           "Credential Refresh Driver",
         );
       }
+      if (backend.drivers.credential_proxy !== undefined) {
+        requires("credential_proxy", backend.drivers.credential_proxy, "Credential Proxy Driver");
+      }
     }
   }
   // Refresh state lives with the gateway's source record, so the two roles share one Backend.
@@ -519,6 +525,15 @@ export function validateSelectedBackendDrivers(
   ) {
     throw new DriverSelectionError(
       "The selected Credential Refresh Driver must belong to the Credential Gateway's Backend.",
+    );
+  }
+  const proxy = selected.credential_proxy;
+  if (
+    proxy !== undefined &&
+    !backends.some((backend) => backendMembers(backend).includes(`credential_proxy:${proxy.id}`))
+  ) {
+    throw new DriverSelectionError(
+      "The selected Credential Proxy Driver must belong to the OpenShell Backend.",
     );
   }
   const gateway = selected.credential_gateway;

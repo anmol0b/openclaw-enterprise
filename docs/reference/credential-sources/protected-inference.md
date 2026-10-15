@@ -72,7 +72,8 @@ to the Agent and cannot authorize a replay.
 Use the [protected local launch profile](../../guides/deploy/local-openshell-images.md#select-the-protected-profile)
 and the [OpenShell Backend and Sandbox configuration](../drivers/openshell-credential-gateway.md).
 Select the same Driver ID in `backend[].drivers.credential_proxy` and the
-Installation's `drivers.credential_proxy` selection. Startup rejects the retired
+Installation's `drivers.credential_proxy` selection. Configuring only one is an
+error, not a request to disable protection. Startup also rejects the retired
 `drivers.conduit` key at either boundary, including when both keys are present;
 use `drivers.credential_proxy` instead.
 Set its middleware name and `authorityScope: execution`. Provide an authenticated

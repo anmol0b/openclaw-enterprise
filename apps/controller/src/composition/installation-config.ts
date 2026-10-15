@@ -314,6 +314,7 @@ function backendConfiguration(
   repoSelection: InstallationStartupConfiguration["drivers"]["repo"],
   credentialGatewayId: string | undefined,
   credentialRefreshId: string | undefined,
+  credentialProxyId: string | undefined,
 ): readonly BackendDefinition[] {
   const backends = validateBackendDefinitions(value ?? []);
   if (serviceAccount !== undefined && !backends.some((backend) => backend.type === "chatgpt")) {
@@ -345,6 +346,11 @@ function backendConfiguration(
       if (backend.drivers.credential_refresh !== credentialRefreshId) {
         throw new Error(
           `backend[${backend.id}].drivers.credential_refresh must match the selected drivers.credential_refresh.id.`,
+        );
+      }
+      if (backend.drivers.credential_proxy !== credentialProxyId) {
+        throw new Error(
+          `backend[${backend.id}].drivers.credential_proxy must match the selected drivers.credential_proxy.id; configure both or omit both.`,
         );
       }
       continue;
@@ -641,6 +647,7 @@ export async function loadInstallationConfiguration(options: {
     repoSelection,
     credentialGateway?.id,
     credentialRefresh?.id,
+    proxySelection?.id,
   );
   const openShellBackend = backends.find(
     (backend): backend is OpenShellBackendDefinition => backend.type === "openshell",
@@ -884,8 +891,7 @@ export async function loadInstallationConfiguration(options: {
     (!openShell ||
       !sandboxDriver ||
       !kubernetesCompute ||
-      openShellBackend?.drivers.credential_proxy !== proxySelection.id ||
-      openShellBackend.configuration.endpoint === undefined ||
+      openShellBackend?.configuration.endpoint === undefined ||
       !openShellBackend.configuration.endpoint.startsWith("https://") ||
       (openShellBackend.configuration.auth?.mode !== "bearerTokenFile" &&
         openShellBackend.configuration.auth?.mode !== "mtls"))

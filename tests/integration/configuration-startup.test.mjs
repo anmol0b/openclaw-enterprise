@@ -18,6 +18,7 @@ import { DEVELOPMENT_HARNESS_DESCRIPTOR } from "../../apps/controller/src/compos
 import { kubernetesNamespaceName } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { createControllerWorker } from "../../apps/controller/src/worker.ts";
 import { admitLoggingConfiguration } from "../../packages/contracts/src/index.ts";
+import { validateSelectedBackendDrivers } from "../../packages/occ/src/index.ts";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 import { createInstallationDriverConfiguration as installation } from "../helpers/installation-driver-configuration.mjs";
 import { createTlsMaterial } from "../fixtures/repository-credentials/process.mjs";
@@ -122,6 +123,44 @@ test("Credential Proxy startup preserves the selection and refuses retired keys"
   assert.equal(loaded.installation.drivers.credential_proxy.id, loaded.proxyDriver.id);
   assert.equal(loaded.installation.backend[0].drivers.credential_proxy, loaded.proxyDriver.id);
   assert.equal(loaded.egressAuthority.port, 9444);
+
+  for (const [member, selected] of [
+    [true, false],
+    [false, true],
+    [false, false],
+    [true, true],
+  ]) {
+    await t.test(
+      `Credential Proxy: Backend member=${member}, Installation selection=${selected}`,
+      async () => {
+        const candidate = structuredClone(configuration);
+        if (!member) delete candidate.backend[0].drivers.credential_proxy;
+        if (!selected) delete candidate.drivers.credential_proxy;
+        await writeFile(path, JSON.stringify(candidate));
+
+        // Direct OCC composition must enforce the same membership rule as Installation startup.
+        const validateSelection = () =>
+          validateSelectedBackendDrivers(candidate.backend, {
+            sandbox: loaded.sandboxDriver,
+            credential_gateway: loaded.credentialGatewayDriver,
+            ...(selected ? { credential_proxy: loaded.proxyDriver } : {}),
+          });
+        if (member !== selected) {
+          await assert.rejects(
+            load(),
+            /credential_proxy must match the selected drivers\.credential_proxy\.id/,
+          );
+          assert.throws(validateSelection, /Credential Proxy Driver/i);
+        } else {
+          assert.equal(
+            (await load()).proxyDriver?.id,
+            selected ? loaded.proxyDriver.id : undefined,
+          );
+          validateSelection();
+        }
+      },
+    );
+  }
 
   for (const boundary of ["installation", "backend"]) {
     for (const scenario of ["retired only", "both", "null retired"]) {
