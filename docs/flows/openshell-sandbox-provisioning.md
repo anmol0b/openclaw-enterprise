@@ -91,7 +91,7 @@ graph TD
 `internal/occdev/kubernetes.go:writeInstallation`
 
 The Installation declares the OpenShell Backend, Gateway, Sandbox and Credential
-Gateway. Credential-source profiles list native Codex binaries for x64 and ARM64.
+Gateway. Its Credential Gateway configuration lists the native Codex binaries for x64 and ARM64.
 [Local development](../guides/deploy/local-kubernetes-development.md) describes the
 Compose and Kubernetes-only topologies; Kubernetes-only preflight rejects port collisions before recording state.
 
