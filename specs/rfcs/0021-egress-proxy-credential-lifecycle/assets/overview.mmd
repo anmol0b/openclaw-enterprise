@@ -1,5 +1,5 @@
 ---
-title: "Proposed Conduit responsibilities"
+title: "Proposed Credential Proxy responsibilities"
 config:
   theme: base
   htmlLabels: true
@@ -26,14 +26,14 @@ flowchart TB
   %% Proposed responsibilities, not necessarily separate processes.
   Agent["<b>Agent execution</b><br/>Processes share authority<br/>No provider credential"]
   Sandbox["<b>SandboxDriver</b><br/>Apply wiring, bind execution<br/>and prevent bypass"]
-  Driver["<b>ConduitDriver</b><br/>Configure and withdraw<br/>Management only"]
-  Sender["<b>Conduit</b><br/>Bind request and reply<br/>Inject, send, protect"]
+  Driver["<b>CredentialProxyDriver</b><br/>Configure and withdraw<br/>Management only"]
+  Sender["<b>Credential Proxy</b><br/>Bind request and reply<br/>Inject, send, protect"]
   OCC["<b>RequestAuthorizer</b><br/>Current execution,<br/>installation and policy"]
   Resolver["<b>CredentialResolver</b><br/>Admitted static key or<br/>prepared dynamic token"]
   Provider["<b>Provider</b><br/>GitHub / inference"]
   Agent -. request .-> Sandbox
   Sandbox -. authenticated exchange .-> Sender
-  Driver -. authenticated SandboxConduitWiring .-> Sandbox
+  Driver -. authenticated ProxyWiring .-> Sandbox
   Driver -. configuration .-> Sender
   Sender -. two fresh checks .-> OCC
   Sender -. resolve if needed .-> Resolver

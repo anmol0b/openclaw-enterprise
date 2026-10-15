@@ -128,8 +128,8 @@ defines snapshot ownership and zero-retention reads.
 | `updateSource` | `applySource` with admitted configuration and static adoption or approved replacement |
 | `sourceStatus` | Configuration status, distinct from per-grant `refreshStatus` |
 | `removeSource` | `removeSource`, `removeRefresh` and owned provider/profile cleanup |
-| `attachForRevision` | `configureRevision`, then Sandbox `applyConduit` |
-| `attachmentStatus` | Join Conduit `wiringStatus` to Sandbox `conduitStatus` for the exact installation |
+| `attachForRevision` | `configureRevision`, then Sandbox `applyCredentialProxy` |
+| `attachmentStatus` | Join Credential Proxy `wiringStatus` to Sandbox `credentialProxyStatus` for the exact installation |
 | `withdraw` | Durable withdrawal, `withdrawBinding` and late-installation rechecks |
 | Additional `validateSourceConfig` | OCC schema validation and provider `normalizeInput`, without I/O and before Secret access |
 

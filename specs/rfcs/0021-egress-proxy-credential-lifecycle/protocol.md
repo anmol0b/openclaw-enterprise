@@ -11,7 +11,7 @@ A configuration, a credential and an authorization are separate decisions.
 
 ## Establish protected execution
 
-An OpenShell composition may implement Conduit and Sandbox. One way to establish the
+An OpenShell composition may implement Credential Proxy and Sandbox. One way to establish the
 channel is for Sandbox to enroll a supervisor-generated public key over its authenticated
 installation control channel. Compute verifies the enrollment in the installation attestation before release. The supervisor
 keeps the private key outside the Agent, identifies the execution at the sandbox boundary,
@@ -33,7 +33,7 @@ needing no credential skips only the material requirement.
 
 ### Capture the exchange
 
-In `Conduit.capture(peer, exchange, bounds)`, trusted transport binds the immutable
+In `CredentialProxy.capture(peer, exchange, bounds)`, trusted transport binds the immutable
 request and response destination to the authenticated execution, supervisor installation,
 channel and stream **before** queuing or consulting current policy. Each multiplexed stream
 needs equivalent provenance. Replacing installation A with B invalidates A's open
@@ -50,7 +50,7 @@ a frame requiring a new decision is a new operation.
 
 ### Check access and resolve material
 
-`Conduit.forward(operation)` owns both authorization checks and the intervening
+`CredentialProxy.forward(operation)` owns both authorization checks and the intervening
 resolution. `RequestAuthorizer.check(before_access, operation)` asks OCC online to check
 current caller and applicable user rights, execution or delegation, installation and
 channel, applied policy, holds, withdrawals, generations, grant and the actual operation.
@@ -174,7 +174,7 @@ Return sanitized business data, never material or an injection callback.
 
 ## Withdraw and recover
 
-OCC commits denial and durable withdrawal intent. Conduit `withdrawBinding` advances the policy
+OCC commits denial and durable withdrawal intent. Credential Proxy `withdrawBinding` advances the policy
 generation, tombstones the removed binding and exposes the reducing successor wiring while
 pending. Sandbox installs it. Settle only on evidence of that exact generation and remaining route
 and binding sets. Keep tombstones past possible late installs. `removeRevision` needs confirmed

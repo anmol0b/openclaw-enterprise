@@ -11,7 +11,7 @@ behavioral contracts, not a prescribed wire format.
 
 ## Admission and configuration
 
-OpenClaw Control Plane (OCC) records `ConduitAdmission {contractVersion: 2, backend, protection}` in
+OpenClaw Control Plane (OCC) records the version 2 `ExecutionAdmission` decision in
 both the admitted revision and the execution. The deployment selects the composition, which establishes
 execution identity. Protection is explicit even with no plan or bindings. Fence readers that could
 ignore it, refuse missing or unsupported admission, and require a new execution to change protection.
@@ -19,7 +19,7 @@ ignore it, refuse missing or unsupported admission, and require a new execution 
 | Protection | What Compute may release |
 | --- | --- |
 | `unprotected` | An explicit no-op for local development or minimal CI. The Agent has a control-plane identity, but OCE does not govern its direct requests. Refuse managed routes, bindings, preparation or clone. Supply no managed or ambient substitute credential. |
-| `protected {authority: execution}` | Sandbox prevents bypass. Every process in the execution shares its egress authority. A route may require no provider credential. Zero effective routes means deny all. Carry forward narrower legacy authority only with evidence of equivalence or fresh consent to the wider boundary. |
+| `protected {authority: execution}` | Sandbox prevents bypass. Every process in the execution shares its egress authority. A route may explicitly require no provider credential. Zero allowed routes means deny all. Carry forward narrower legacy authority only with evidence of equivalence or fresh consent to the wider boundary. |
 
 OCC validates closed, versioned schemas before reading a Secret or causing effects. A reference is
 an immutable ID and configuration generation. Recreating an object gives it a new ID. Changing
@@ -46,20 +46,20 @@ action, exact target generations, audience, input digest and expiry.
 
 | Owner and methods | Required result |
 | --- | --- |
-| OCC via Backend `CredentialSourceControl.describeTypes`, `applySource`, `sourceStatus`, `removeSource` | Admit the schema, source and custody. Project schema identity, kind and nonsecret routing fields to Conduit, never a root or its Secret reference. Catalog withdrawal ends new admission, not responsibility for status, references or cleanup. |
-| Compute via `ConduitDriver.capabilities`, `configureRevision`, `wiringStatus` | Configure the whole `ConduitPlan` or make none of it usable. Return authenticated `SandboxConduitWiring` binding execution, plan, Sandbox, sender, audience, version 2, policy generation and exact route and binding sets. Qualify the actual composition at startup and admission. |
-| Sandbox via `applyConduit(wiring, command)`, `conduitStatus` | Verify and enforce that plan. Attest the wiring, execution, trusted gateway, immutable sandbox ID, runtime generation, supervisor installation, applied policy and effective sets. Reject a stale install. |
+| OCC via Backend `CredentialSourceControl.describeTypes`, `applySource`, `sourceStatus`, `removeSource` | Admit the schema, source and custody. Project schema identity, kind and nonsecret routing fields to Credential Proxy, never a root or its Secret reference. Catalog withdrawal ends new admission, not responsibility for status, references or cleanup. |
+| Compute via `CredentialProxyDriver.capabilities`, `configureRevision`, `wiringStatus` | Configure the whole `ProxyPlan` or make none of it usable. Return authenticated `ProxyWiring` binding execution, plan, Sandbox, sender, audience, version 2, policy generation and exact route and binding sets. Qualify the actual composition at startup and admission. |
+| Sandbox via `sandbox.applyCredentialProxy(wiring, command)`, `credentialProxyStatus` | Verify and enforce that plan. Attest the wiring, execution, trusted gateway, immutable sandbox ID, runtime generation, supervisor installation, applied policy and effective sets. Reject a stale install. |
 
 
-Compute builds the plan from admitted routes, bindings and source projections. A
-Sandbox receipt records what was applied; wiring and receipts do not authorize requests.
+Compute builds the `ProxyPlan` from admitted routes, bindings and source projections. A Sandbox receipt records what was applied;
+wiring and receipts do not authorize requests.
 
 ## Request authorization and forwarding
 
 | Interface | Responsibility |
 | --- | --- |
-| `Conduit.capture(peer, exchange, bounds)` | Bind and seal an exchange. |
-| `Conduit.forward(operation)` | Own authorization, resolution, send and response protection. |
+| `CredentialProxy.capture(peer, exchange, bounds)` | Bind and seal an exchange. |
+| `CredentialProxy.forward(operation)` | Own authorization, resolution, send and response protection. |
 | `RequestAuthorizer.check(before_access, operation)` | Authorize material access. |
 | `RequestAuthorizer.check(before_send, operation, evidence)` | Authorize the selected material or its absence; commit before releasing a send permit. |
 
