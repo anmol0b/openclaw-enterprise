@@ -182,7 +182,11 @@ function protectedProviderTools(revision: Readonly<AgentRevision>): "none" {
   const routes = revision.egressPlan?.routes;
   if (
     routes === undefined ||
-    routes.some((route) => route.binding.grant.providerTools !== "none")
+    routes.some(({ binding: { grant } }) =>
+      grant.kind === "inference"
+        ? grant.providerTools !== "none"
+        : grant.kind !== "github_repository_metadata",
+    )
   ) {
     throw new Error("Unsupported protected inference tool grant.");
   }
@@ -215,7 +219,7 @@ function codexToml(
   const endpoint = runtime.modelEndpoint;
   if (
     runtime.providerTools === "none" &&
-    runtime.egressEnrollment?.routeCount !== 0 &&
+    runtime.egressEnrollment?.inference !== false &&
     endpoint === undefined
   ) {
     throw new Error("Protected inference requires an explicit normalized model endpoint.");

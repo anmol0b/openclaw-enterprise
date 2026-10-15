@@ -1211,7 +1211,7 @@ function assertCodexPluginRuntime(runtime) {
   if ((runtime.manifest.providerTools !== undefined || runtime.manifest.egressEnrollment !== undefined) &&
       (runtime.manifest.providerTools !== "none" ||
        !isPlainObject(runtime.manifest.egressEnrollment) ||
-       (runtime.manifest.egressEnrollment.routeCount !== 0 &&
+       (runtime.manifest.egressEnrollment.inference !== false &&
         (runtime.manifest.modelEndpoint?.modelProvider !== "openai-compatible" ||
          typeof runtime.manifest.modelEndpoint.baseUrl !== "string")))) {
     throw new Error("Codex protected inference profile is invalid.");
@@ -3457,8 +3457,8 @@ function codexAuthenticationRejected(message) {
 }
 const enrollment = pluginRuntime?.manifest.egressEnrollment;
 const noInference = loginMode === "protected-no-inference";
-if (noInference && (enrollment?.routeCount !== 0 || apiKey !== undefined || accessToken !== undefined)) {
-  throw new Error("Protected execution without inference requires its exact zero-route plan.");
+if (noInference && (enrollment?.inference !== false || apiKey !== undefined || accessToken !== undefined)) {
+  throw new Error("Protected execution without inference requires its exact non-inference plan.");
 }
 // Protected startup runs no Codex process, login or model probe until Compute releases it.
 const startReleasedCodex = () => {
@@ -3658,7 +3658,7 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     holdFailedAuthentication("model-probe", "MODEL_PROBE_TIMEOUT");
     return;
   }
-  // A zero-route execution may serve its local app protocol, but never probes a provider.
+  // An execution without an inference route may serve its local app protocol, but never probes a model.
   const result = noInference ? {} : probeCodexAuthentication(timeout);
   if (!noInference) console.error(JSON.stringify({
     event: "codex.model_probe",
