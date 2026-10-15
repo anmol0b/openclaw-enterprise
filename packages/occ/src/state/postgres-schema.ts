@@ -1776,3 +1776,69 @@ export const egressSendReceipts = occSchema.table(
     ),
   ],
 );
+
+/** Lifecycle custody, never an Agent-readable Secret or a substitute for live source authority. */
+export const preparedGitHubFamilies = occSchema.table(
+  "prepared_github_families",
+  {
+    sourceId: text("source_id").primaryKey(),
+    source: jsonb("source").notNull(),
+    issuer: jsonb("issuer").notNull(),
+    admission: jsonb("admission").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull().defaultNow(),
+    workerClaim: uuid("worker_claim"),
+  },
+  (t) => [
+    check(
+      "prepared_github_families_check",
+      sql`(source #>> '{key,source,id}' = source_id AND source->>'adoption' = 'prepared'
+    AND source #>> '{grant,profile}' = 'metadata-read' AND admission->>'familyId' = source_id
+    AND jsonb_typeof(issuer->'backendRef') = 'object') IS TRUE`,
+    ),
+    index("prepared_github_families_due")
+      .on(t.nextCheckAt)
+      .where(sql`enabled`),
+  ],
+);
+
+export const preparedGitHubAttempts = occSchema.table(
+  "prepared_github_attempts",
+  {
+    id: uuid("id").primaryKey(),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => preparedGitHubFamilies.sourceId),
+    admission: jsonb("admission").notNull(),
+    state: text("state").notNull(),
+    custody: text("custody").notNull().default("intent"),
+    materialVersion: uuid("material_version").unique(),
+    providerExpiresAt: timestamp("provider_expires_at", { withTimezone: true }),
+    usableUntil: timestamp("usable_until", { withTimezone: true }),
+    sealed: customType<{ data: Buffer }>({ dataType: () => "bytea" })("sealed"),
+  },
+  (t) => [
+    check(
+      "prepared_github_attempts_state_check",
+      sql`state IN ('issuing', 'committed', 'quarantined')`,
+    ),
+    check(
+      "prepared_github_attempts_custody_check",
+      sql`custody IN ('intent', 'current', 'retire', 'revoking', 'revoked', 'unknown')`,
+    ),
+    check(
+      "prepared_github_attempts_check",
+      sql`custody <> 'current' OR (state = 'committed' AND sealed IS NOT NULL
+    AND material_version IS NOT NULL AND usable_until IS NOT NULL
+    AND provider_expires_at IS NOT NULL AND usable_until <= provider_expires_at)`,
+    ),
+    check(
+      "prepared_github_attempts_check1",
+      sql`(sealed IS NOT NULL) = (custody IN ('current','retire','revoking','unknown'))`,
+    ),
+    uniqueIndex("prepared_github_current")
+      .on(t.sourceId)
+      .where(sql`custody='current'`),
+    index("prepared_github_attempts_family").on(t.sourceId),
+  ],
+);

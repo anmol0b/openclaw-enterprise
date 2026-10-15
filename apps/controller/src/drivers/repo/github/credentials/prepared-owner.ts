@@ -23,8 +23,6 @@ interface PreparationOptions {
 
 /**
  * One background worker owner, invoked independently of requests/provisioning.
- * TODO(RFC 0020): join the durable repository and worker scheduler in composition.
- * No production owner is registered by this module.
  */
 export function createGitHubPreparationOwner(options: PreparationOptions) {
   const { store, clock, getKey, renewBeforeMs, minimumValidityMs } = options;
