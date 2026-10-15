@@ -162,6 +162,11 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 			return fmt.Errorf("%s is required on PATH", name)
 		}
 	}
+	if state.ProtectedEgress {
+		if err := r.checkProtectedOpenShellChart(ctx, state, openShellImages); err != nil {
+			return err
+		}
+	}
 	if err := r.selectImageEngine(ctx, r.setting("OCC_DEVELOPMENT_CONTAINER_ENGINE", "auto")); err != nil {
 		return err
 	}

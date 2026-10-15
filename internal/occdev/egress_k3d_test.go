@@ -242,6 +242,12 @@ assert.equal(loaded.installation.backend[0].drivers.conduit,loaded.conduitDriver
 		if err != nil {
 			t.Fatalf("%s chart refused launch values: %v\n%s", selected.name, err, out)
 		}
+		if selected.name == openShellGatewayService {
+			if err := verifyProtectedOpenShellChart(out, state); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		decoder := yaml.NewDecoder(strings.NewReader(string(out)))
 		count := 0
 		for {

@@ -70,11 +70,12 @@ export OCC_DEVELOPMENT_DATABASE_NAME=openclaw_k8s_connected
 ./scripts/dev-up
 ```
 
-The Gateway chart must support the secure `supervisor.middleware` registry. The
-controller and runtime must include the reviewed protected-inference implementation;
-normal version and image-revision checks remain mandatory. The launcher keeps
-the runtime's ordinary components and selects its approved Codex binary paths.
-It does not build images or install missing capabilities.
+OpenShell can version its runtime and Gateway chart separately. Pin both reviewed
+revisions. A chart can accept `supervisor.middleware` values and silently ignore them.
+Before creating the cluster, the launcher renders the selected chart and checks that
+the Gateway configuration registers only `oce-authority`, uses the expected HTTPS
+endpoint and audience, and mounts the authority's public CA read-only.
+Compute still verifies the installed capabilities before releasing a workload.
 
 The profile registers the authority, generates its server certificate, and uses
 OpenShell's native PKI hook for Gateway server/client certificates and extension
