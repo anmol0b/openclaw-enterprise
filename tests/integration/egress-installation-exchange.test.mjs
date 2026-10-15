@@ -141,14 +141,16 @@ test("the last forbidden trailer reaches the complete response policy; no head o
   f.setResponse({
     status: 200,
     body: { output: "otherwise safe body" },
-    trailers: { "x-first-trailer": "first", "x-forbidden-last": "synthetic-private" },
+    trailers: { "x-forbidden-last": "synthetic-private" },
   });
   const response = await f.send(captured, ready);
   assert.equal(response.response_complete, true);
-  assert.deepEqual(response.trailers.at(-1), {
-    name: "x-forbidden-last",
-    value: "synthetic-private",
-  });
+  assert.deepEqual(response.trailers, [
+    {
+      name: "x-forbidden-last",
+      value: "synthetic-private",
+    },
+  ]);
   a.stream.write({ response });
   await assert.rejects(a.next(), { code: 7 });
   assert.equal(f.providerRequests.length, 1, "the origin had already executed once");

@@ -150,7 +150,39 @@ export function agentClients(setup, stack, harness, origin, path = repositoryPat
   `,
       target,
     );
-  return { curl, node, inAgent };
+  // Observe the TLS socket through FIN, including bytes beyond Content-Length.
+  // No caller pin, proof, private trust override, or HTTP parser stopping at the head.
+  const throughFin = () =>
+    inAgent("node", "-e", "(" + readTlsThroughFin.toString() + ")(process.argv[1])", target);
+  return { curl, node, throughFin, inAgent };
+}
+
+function readTlsThroughFin(target) {
+  const url = new URL(target);
+  const { connect } = require("node:tls");
+  const socket = connect({
+    host: url.hostname,
+    port: url.port || 443,
+    servername: url.hostname,
+    rejectUnauthorized: true,
+  });
+  const received = [];
+  let fin = false;
+  socket.once("secureConnect", () => {
+    const lines = ["GET " + url.pathname + " HTTP/1.1", "Host: " + url.host, "Connection: close"];
+    socket.write([...lines, "", ""].join("\r\n"));
+  });
+  socket.on("data", (chunk) => received.push(chunk));
+  socket.once("end", () => (fin = true));
+  socket.setTimeout(90000, () => socket.destroy(new Error("no recipient FIN")));
+  socket.once("error", () => (process.exitCode = 2));
+  socket.once("close", () => {
+    if (!fin || !socket.authorized || process.exitCode) {
+      process.exitCode = 3;
+    } else {
+      process.stdout.write(Buffer.concat(received));
+    }
+  });
 }
 
 export function assertIdentityResponse(raw, expected = repository) {

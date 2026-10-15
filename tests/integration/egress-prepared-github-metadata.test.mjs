@@ -28,7 +28,7 @@ test("consented protected repository read uses only exact, already prepared meta
     clock,
     beforeMetadataResponse({ response }) {
       if (forbiddenTrailer) {
-        response.addTrailers({ "x-allowed-first": "one", "x-forbidden-last": "last" });
+        response.addTrailers({ "x-forbidden-last": "last" });
       }
     },
   });

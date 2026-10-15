@@ -41,8 +41,8 @@ export async function registerCleanupAndStartProvider(
   const { ledger, directory, credentials, request, api, checkpoint } = evidence;
   const providerCleanup = [];
   let provider;
-  let ownedSandbox;
-  let ownedSandboxId;
+  const ownedSandboxes = [];
+  const podUids = new Set();
   // Register cleanup before the first creation request. An unknown create outcome
   // remains in the ledger for the parent; never replay a mutation to hide it.
   t.after(async () => {
@@ -54,9 +54,9 @@ export async function registerCleanupAndStartProvider(
         failures.push(name);
       }
     };
-    const ownedAgent = ledger.resources.find(({ kind }) => kind === "agents");
-    if (ownedAgent) {
-      await clean("Agent", async () => {
+    const ownedAgents = ledger.resources.filter(({ kind }) => kind === "agents");
+    for (const ownedAgent of ownedAgents) {
+      await clean("Agent/" + ownedAgent.id, async () => {
         const deleted = await request(
           "DELETE",
           `${namespacePath}/agents/${ownedAgent.id}`,
@@ -83,36 +83,38 @@ export async function registerCleanupAndStartProvider(
           },
           180_000,
         );
-        // API row deletion alone cannot prove that provider-owned workloads
-        // disappeared. Cleanup gets its own bounded reads after test abort.
-        const cleanupFixture = createOpenShellKubernetesFixture({
+      });
+    }
+    // Check every observed identity after deleting only Agents we created. Earlier
+    // revisions and both simultaneous executions count even if their API rows are gone.
+    if (ownedAgents.length) {
+      await clean("owned Kubernetes workloads", async () => {
+        const agentIds = ownedAgents.map(({ id }) => id);
+        const cleanup = createOpenShellKubernetesFixture({
           ...selection,
           commandTimeoutMs: 20_000,
         });
-        await cleanupFixture.waitFor(
-          "owned Kubernetes workload deletion",
+        await cleanup.waitFor(
+          "all observed owned Sandbox and Pod identities gone",
           async () => {
-            const pods = await cleanupFixture.resources("pods", placement);
-            const sandboxes = await cleanupFixture.customResources(
-              "sandboxes.agents.x-k8s.io",
-              placement,
-            );
-            return (
-              !pods.some(
-                ({ metadata }) =>
-                  metadata.labels?.["openclaw.dev/agent"] === ownedAgent.id ||
-                  (ownedSandboxId !== undefined &&
-                    metadata.labels?.["openshell.ai/sandbox-id"] === ownedSandboxId),
-              ) && !sandboxes.some(({ metadata }) => metadata.name === ownedSandbox)
-            );
+            const pods = await cleanup.resources("pods", placement);
+            const sandboxes = await cleanup.customResources("sandboxes.agents.x-k8s.io", placement);
+            const owned = ({ metadata: m }) =>
+              podUids.has(m.uid) ||
+              agentIds.includes(m.labels?.["openclaw.dev/agent"]) ||
+              ownedSandboxes.some(
+                ({ name, uid, id }) =>
+                  m.uid === uid || m.name === name || m.labels?.["openshell.ai/sandbox-id"] === id,
+              );
+            return !pods.some(owned) && !sandboxes.some(owned);
           },
           180_000,
         );
-        if (
-          ledger.phases.some(({ phase }) => phase === "deploy-request") &&
-          (ownedSandbox === undefined || ownedSandboxId === undefined)
-        ) {
-          failures.push("Sandbox identity not observed; parent reconciliation required");
+        const deployments = ledger.phases.filter(({ phase }) => phase === "deploy-request");
+        if (ownedSandboxes.length < deployments.length) {
+          failures.push(
+            "Sandbox identity not observed for every deploy; parent reconciliation required",
+          );
         }
       });
     }
@@ -175,20 +177,23 @@ export async function registerCleanupAndStartProvider(
     controllerPods: controllerPods.map(({ metadata }) => metadata.uid),
   });
   const recordSandbox = async (sandbox) => {
-    ownedSandbox = sandbox.metadata.name;
-    ownedSandboxId = sandbox.metadata.labels?.["openshell.ai/sandbox-id"];
-    assert.equal(
-      typeof ownedSandboxId,
-      "string",
-      "the real Sandbox must identify its supplier owner",
-    );
-    await checkpoint("sandbox-observed", {
-      sandboxName: ownedSandbox,
-      sandboxId: ownedSandboxId,
-    });
-    return ownedSandboxId;
+    const { name, uid, labels } = sandbox.metadata;
+    const id = labels?.["openshell.ai/sandbox-id"];
+    assert.ok(uid && id, "the Sandbox must identify its Kubernetes UID and supplier owner");
+    assert.ok(!ownedSandboxes.some((entry) => entry.uid === uid), "fresh owned Sandbox identity");
+    ownedSandboxes.push({ name, uid, id });
+    await checkpoint("sandbox-observed", { sandboxName: name, sandboxUid: uid, sandboxId: id });
+    return id;
   };
-  return { provider, create, recordSandbox };
+  const recordPods = async (...pods) => {
+    const uids = pods.map(({ metadata }) => metadata.uid);
+    assert.ok(uids.every(Boolean));
+    for (const uid of uids) {
+      podUids.add(uid);
+    }
+    await checkpoint("pods-observed", { uids });
+  };
+  return { provider, create, recordSandbox, recordPods };
 }
 
 export async function observeInstalledProtection(

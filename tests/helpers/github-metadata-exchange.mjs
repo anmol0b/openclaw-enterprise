@@ -45,7 +45,7 @@ export async function dispatchMetadata(f, gh, captured, ready, forbiddenTrailer 
           200,
           "synthetic issuer must accept the real prepared credential",
         );
-        assert.equal(res.trailers["x-forbidden-last"], forbiddenTrailer ? "last" : undefined);
+        assert.deepEqual(res.rawTrailers, forbiddenTrailer ? ["x-forbidden-last", "last"] : []);
         resolve({
           status: res.statusCode,
           headers: [{ name: "content-type", value: res.headers["content-type"] }],

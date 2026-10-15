@@ -69,6 +69,7 @@ export async function staticEgressFixture(
     createPreparedGitHub,
     secretValue,
     admitSource,
+    providerServer = createHttpsServer,
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "oce-egress-wire-"));
@@ -438,7 +439,7 @@ export async function staticEgressFixture(
   const path = `/namespaces/${namespace.id}/credential-sources`;
   const providerRequests = [];
   let providerResponse = { status: 200, body: { output: "fixture answer" } };
-  const provider = createHttpsServer({ key, cert }, async (request, response) => {
+  const provider = providerServer({ key, cert }, async (request, response) => {
     const body = [];
     for await (const part of request) {
       body.push(part);
@@ -939,6 +940,7 @@ export async function staticEgressFixture(
       }
     },
     providerRequests,
+    provider,
     setResponse(value) {
       providerResponse = value;
     },
