@@ -1,7 +1,7 @@
-import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
+import type { ConduitDriver } from "@openclaw-enterprise/contracts";
 import {
-  OpenShellEgressProxyDriver,
-  type OpenShellEgressOptions,
+  OpenShellConduitDriver,
+  type OpenShellConduitOptions,
 } from "../drivers/egress-proxy/openshell.ts";
 import {
   egressAuthorityConfiguration,
@@ -110,7 +110,7 @@ export interface InstallationStartupConfiguration {
     readonly sandbox?: SelectedDriverConfiguration;
     readonly credential_gateway?: SelectedDriverConfiguration;
     readonly credential_refresh?: SelectedDriverConfiguration;
-    readonly egress_proxy?: SelectedDriverConfiguration;
+    readonly conduit?: SelectedDriverConfiguration;
     readonly plugin?: SelectedDriverConfiguration;
     readonly service_account?: { readonly id: string };
     readonly repo?: SelectedDriverConfiguration;
@@ -135,7 +135,7 @@ export interface InstallationRuntimeDrivers {
   readonly sandboxDriver?: SandboxDriver;
   readonly credentialGatewayDriver?: CredentialGatewayDriver;
   readonly credentialRefreshDriver?: CredentialRefreshDriver;
-  readonly egressProxyDriver?: EgressProxyDriver;
+  readonly conduitDriver?: ConduitDriver;
   readonly egressAuthority?: EgressAuthorityConfiguration;
   readonly pluginDriver?: PluginDriver;
   readonly repoDriver?: RepoDriver;
@@ -395,7 +395,7 @@ function selected(
     | "sandbox"
     | "credential_gateway"
     | "credential_refresh"
-    | "egress_proxy"
+    | "conduit"
     | "plugin"
     | "repo",
   implementation: string,
@@ -537,7 +537,7 @@ export async function loadInstallationConfiguration(options: {
       "sandbox",
       "credential_gateway",
       "credential_refresh",
-      "egress_proxy",
+      "conduit",
       "plugin",
       "service_account",
       "repo",
@@ -584,24 +584,20 @@ export async function loadInstallationConfiguration(options: {
       OpenShellCredentialRefreshDriver,
     );
   }
-  let egressProxy: SelectedDriverConfiguration | undefined;
+  let conduit: SelectedDriverConfiguration | undefined;
   let egressAuthority: EgressAuthorityConfiguration | undefined;
-  if (drivers.egress_proxy !== undefined) {
-    const selection = object(drivers.egress_proxy, "drivers.egress_proxy");
-    closed(selection, ["id", "configuration"], "drivers.egress_proxy");
-    const egress = object(selection.configuration, "drivers.egress_proxy.configuration");
-    closed(
-      egress,
-      ["middlewareName", "binaries", "authority"],
-      "drivers.egress_proxy.configuration",
-    );
+  if (drivers.conduit !== undefined) {
+    const selection = object(drivers.conduit, "drivers.conduit");
+    closed(selection, ["id", "configuration"], "drivers.conduit");
+    const egress = object(selection.configuration, "drivers.conduit.configuration");
+    closed(egress, ["middlewareName", "binaries", "authority"], "drivers.conduit.configuration");
     egressAuthority = egressAuthorityConfiguration(egress.authority, options.mode);
     const { authority: _authority, ...policy } = egress;
-    egressProxy = selected(
+    conduit = selected(
       { ...selection, configuration: policy },
-      "egress_proxy",
+      "conduit",
       "openshell",
-      OpenShellEgressProxyDriver,
+      OpenShellConduitDriver,
     );
   }
   const backends = backendConfiguration(
@@ -796,7 +792,7 @@ export async function loadInstallationConfiguration(options: {
       ...(sandbox === undefined ? {} : { sandbox }),
       ...(credentialGateway === undefined ? {} : { credential_gateway: credentialGateway }),
       ...(credentialRefresh === undefined ? {} : { credential_refresh: credentialRefresh }),
-      ...(egressProxy === undefined ? {} : { egress_proxy: egressProxy }),
+      ...(conduit === undefined ? {} : { conduit }),
       ...(plugin === undefined ? {} : { plugin }),
       ...(serviceAccount === undefined ? {} : { service_account: serviceAccount }),
       ...(repoSelection === undefined ? {} : { repo: repoSelection }),
@@ -828,7 +824,7 @@ export async function loadInstallationConfiguration(options: {
           ? new bundledSandboxPackage!.OpenShellSandboxDriver(
               {
                 ...sandbox.configuration,
-                ...(egressProxy === undefined ? {} : { egress: egressProxy.configuration }),
+                ...(conduit === undefined ? {} : { egress: conduit.configuration }),
               },
               {
                 id: sandbox.id,
@@ -849,11 +845,11 @@ export async function loadInstallationConfiguration(options: {
           },
         );
   if (
-    egressProxy !== undefined &&
+    conduit !== undefined &&
     (!openShell ||
       !sandboxDriver ||
       !kubernetesCompute ||
-      openShellBackend?.drivers.egress_proxy !== egressProxy.id ||
+      openShellBackend?.drivers.conduit !== conduit.id ||
       openShellBackend.configuration.endpoint === undefined ||
       !openShellBackend.configuration.endpoint.startsWith("https://") ||
       (openShellBackend.configuration.auth?.mode !== "bearerTokenFile" &&
@@ -863,13 +859,14 @@ export async function loadInstallationConfiguration(options: {
       "Protected egress requires paired Kubernetes/OpenShell Drivers and an authenticated TLS gateway endpoint.",
     );
   }
-  const egressProxyDriver =
-    egressProxy === undefined
+  const conduitDriver =
+    conduit === undefined
       ? undefined
-      : new OpenShellEgressProxyDriver(
-          egressProxy.configuration as unknown as OpenShellEgressOptions,
-          { id: egressProxy.id, backend: openShell!, sandbox: sandboxDriver! },
-        );
+      : new OpenShellConduitDriver(conduit.configuration as unknown as OpenShellConduitOptions, {
+          id: conduit.id,
+          backend: openShell!,
+          sandbox: sandboxDriver!,
+        });
   const credentialRefreshDriver =
     credentialRefresh === undefined
       ? undefined
@@ -903,7 +900,7 @@ export async function loadInstallationConfiguration(options: {
         lifecycleDrivers: [configurationDriver],
         ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
         ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
-        ...(egressProxyDriver === undefined ? {} : { egressProxyDriver }),
+        ...(conduitDriver === undefined ? {} : { conduitDriver }),
         nodeEnrollment: createGatewayNodeEnrollment(() =>
           readWorkspaceFilesApiKey(
             nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
@@ -951,7 +948,7 @@ export async function loadInstallationConfiguration(options: {
     ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
     ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
     ...(credentialRefreshDriver === undefined ? {} : { credentialRefreshDriver }),
-    ...(egressProxyDriver === undefined ? {} : { egressProxyDriver }),
+    ...(conduitDriver === undefined ? {} : { conduitDriver }),
     ...(egressAuthority === undefined ? {} : { egressAuthority }),
     createIAMDriver,
     ...(pluginDriver === undefined ? {} : { pluginDriver }),

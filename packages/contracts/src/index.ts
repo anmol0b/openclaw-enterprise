@@ -2,10 +2,10 @@ import type {
   StaticEgressSource,
   CredentialInputRead,
   VersionedSecretValue,
-  EgressPlan,
-  EgressAttachment,
+  ConduitPlan,
+  SandboxConduitWiring,
   EgressInstallation,
-} from "./egress.ts";
+} from "./conduit.ts";
 
 export type {
   EgressRef,
@@ -17,19 +17,19 @@ export type {
   InferenceGrant,
   EgressBinding,
   EgressRoute,
-  EgressPlan,
+  ConduitPlan,
   EgressInstallation,
   EgressRequest,
   InferenceOperation,
   StaticMaterialEvidence,
   EgressRefusal,
   EgressResponse,
-  EgressAttachment,
-  EgressRevisionContext,
+  SandboxConduitWiring,
+  ConduitRevisionContext,
   CredentialProviderDefinition,
   CredentialSourceControl,
-  EgressProxyDriver,
-} from "./egress.ts";
+  ConduitDriver,
+} from "./conduit.ts";
 import type { WorkspaceSetup } from "./workspace-setup.ts";
 
 export type { ComputePreparationFailureEvidence } from "./compute-preparation.ts";
@@ -125,7 +125,7 @@ export const DRIVER_CAPABILITIES = Object.freeze([
   "repo",
   "credential_gateway",
   "credential_refresh",
-  "egress_proxy",
+  "conduit",
 ] as const);
 
 export type DriverCapability = (typeof DRIVER_CAPABILITIES)[number];
@@ -187,7 +187,7 @@ export interface OpenShellBackendDefinition {
   readonly drivers: {
     readonly sandbox: string;
     readonly credential_gateway: string;
-    readonly egress_proxy?: string;
+    readonly conduit?: string;
     /** Refreshes the gateway's refresh-type sources; absent when none are offered. */
     readonly credential_refresh?: string;
   };
@@ -825,7 +825,7 @@ export interface RevisionHarnessDescriptor extends HarnessDescriptor {
 }
 
 export interface AgentRevision extends Scope {
-  readonly egressPlan?: EgressPlan;
+  readonly egressPlan?: ConduitPlan;
   readonly id: string;
   readonly namespaceId: string;
   readonly agentId: string;
@@ -1128,13 +1128,13 @@ export interface HarnessWorkloadRequirements {
   readonly files: readonly SandboxWorkloadFile[];
   /** Credential Gateway attachments the paired Sandbox must consume in full. */
   readonly credentialAttachments: readonly CredentialSourceAttachment[];
-  readonly egressAttachment?: EgressAttachment;
+  readonly conduitWiring?: SandboxConduitWiring;
   readonly labels: Readonly<Record<string, string>>;
 }
 
 export interface SandboxResourceRef {
   /** Trusted Sandbox output, including its exact auxiliary rules, for independent observation. */
-  readonly egressAttachment?: EgressAttachment;
+  readonly conduitWiring?: SandboxConduitWiring;
   readonly namespaceName: string;
   readonly resourceName: string;
   readonly agentId: string;

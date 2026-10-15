@@ -3,12 +3,12 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   Backend,
   CredentialSourceControl,
-  EgressAttachment,
+  SandboxConduitWiring,
   EgressInstallation,
-  EgressPlan,
-  EgressProxyDriver,
+  ConduitPlan,
+  ConduitDriver,
   EgressRef,
-  EgressRevisionContext,
+  ConduitRevisionContext,
   SandboxDriver,
 } from "@openclaw-enterprise/contracts";
 import { DependencyUnavailableError } from "@openclaw-enterprise/occ";
@@ -16,7 +16,7 @@ import { asRecord, immutableCopy, sha256Hex } from "@openclaw-enterprise/utils";
 import { type OpenShellGateway, openShellWorkspaceName } from "../../backends/openshell.ts";
 import { openAiStaticProvider } from "./openai-provider.ts";
 
-export interface OpenShellEgressOptions {
+export interface OpenShellConduitOptions {
   readonly middlewareName: string;
   readonly binaries: readonly string[];
 }
@@ -172,8 +172,8 @@ function enforcementEvidence(
 
 /** Nonsecret, exact routing consumed and independently checked by the paired Sandbox. */
 export function openShellEgressConfiguration(
-  plan: EgressPlan,
-  options: OpenShellEgressOptions,
+  plan: ConduitPlan,
+  options: OpenShellConduitOptions,
 ): Readonly<Record<string, unknown>> {
   if (
     new Set(plan.routes.map((route) => route.binding.binding.id)).size !== 1 ||
@@ -217,14 +217,14 @@ export function openShellEgressConfiguration(
   });
 }
 
-export class OpenShellEgressProxyDriver implements EgressProxyDriver {
-  readonly capability = "egress_proxy" as const;
+export class OpenShellConduitDriver implements ConduitDriver {
+  readonly capability = "conduit" as const;
   readonly implementation = "openshell";
   readonly id: string;
   readonly sourceControl: CredentialSourceControl;
   private readonly backend: Backend<OpenShellGateway>;
   private readonly sandbox: SandboxDriver;
-  private readonly options: OpenShellEgressOptions;
+  private readonly options: OpenShellConduitOptions;
 
   static readonly configurationSchema = {
     type: "object",
@@ -254,14 +254,14 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
   }
 
   constructor(
-    options: OpenShellEgressOptions,
+    options: OpenShellConduitOptions,
     selection: {
       readonly id: string;
       readonly backend: Backend<OpenShellGateway>;
       readonly sandbox: SandboxDriver;
     },
   ) {
-    OpenShellEgressProxyDriver.validateConfiguration(options);
+    OpenShellConduitDriver.validateConfiguration(options);
     if (
       !options.middlewareName ||
       options.binaries.length === 0 ||
@@ -311,7 +311,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     });
   }
 
-  async configureRevision(context: EgressRevisionContext): Promise<EgressAttachment> {
+  async configureRevision(context: ConduitRevisionContext): Promise<SandboxConduitWiring> {
     this.assertPlan(context);
     await this.sourceControl.assertAvailable(context.signal);
     return immutableCopy({
@@ -320,9 +320,9 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     });
   }
 
-  async attachmentStatus(
-    context: EgressRevisionContext,
-    prepared: EgressAttachment,
+  async wiringStatus(
+    context: ConduitRevisionContext,
+    prepared: SandboxConduitWiring,
   ): Promise<EgressInstallation | undefined> {
     this.assertPlan(context);
     if (!isDeepStrictEqual(prepared.plan, context.plan)) {
@@ -411,7 +411,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
   }
 
   async verifyInstallation(
-    context: EgressRevisionContext,
+    context: ConduitRevisionContext,
     installation: EgressInstallation,
   ): Promise<boolean> {
     this.assertPlan(context);
@@ -446,7 +446,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     );
   }
 
-  async withdrawBinding(context: EgressRevisionContext, binding: EgressRef): Promise<boolean> {
+  async withdrawBinding(context: ConduitRevisionContext, binding: EgressRef): Promise<boolean> {
     if (!context.plan.routes.some((route) => isDeepStrictEqual(route.binding.binding, binding))) {
       throw new Error("Unknown egress withdrawal binding.");
     }
@@ -455,7 +455,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     return this.removeRevision(context);
   }
 
-  async removeRevision(context: EgressRevisionContext): Promise<boolean> {
+  async removeRevision(context: ConduitRevisionContext): Promise<boolean> {
     this.assertPlan(context);
     const ref = this.sandbox.harnessResource!(context);
     const client = this.backend.client.clientForNamespace(ref.namespaceName);
@@ -472,7 +472,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     return (await client.getSandbox(selector, context.signal)) === undefined;
   }
 
-  private assertPlan(context: EgressRevisionContext): void {
+  private assertPlan(context: ConduitRevisionContext): void {
     if (
       !isDeepStrictEqual(context.plan, context.revision.egressPlan) ||
       context.plan.egressDriverId !== this.id ||
@@ -486,7 +486,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
 
   private assertOwned(
     annotations: Readonly<Record<string, string>>,
-    context: EgressRevisionContext,
+    context: ConduitRevisionContext,
   ): void {
     if (
       annotations["openclaw.dev/namespace-id"] !== context.namespace.id ||

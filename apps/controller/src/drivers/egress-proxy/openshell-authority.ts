@@ -12,7 +12,7 @@ import {
   type ServerDuplexStream,
 } from "@grpc/grpc-js";
 import type { EgressResponse, StaticMaterialEvidence } from "@openclaw-enterprise/contracts";
-import type { EgressForwarder } from "@openclaw-enterprise/occ";
+import type { Conduit } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 import { OpenShellEgressIdentity } from "./openshell-identity.ts";
 
@@ -66,7 +66,7 @@ function refused(kind: string): Wire {
 /** Actual gRPC adapter for the supervisor's exclusive static-credential authority. */
 export function createOpenShellEgressAuthority(
   identity: OpenShellEgressIdentity,
-  forwarder: EgressForwarder,
+  conduit: Conduit,
 ): Server {
   const definition = loadSync(
     fileURLToPath(new URL("./proto/supervisor_middleware.proto", import.meta.url)),
@@ -157,7 +157,7 @@ export function createOpenShellEgressAuthority(
       }
       const signal = new AbortController();
       call.once("cancelled", () => signal.abort());
-      const result = await forwarder.resolve(
+      const result = await conduit.resolve(
         authorization(call.metadata),
         string(context.sandbox_id),
         {
@@ -210,7 +210,7 @@ export function createOpenShellEgressAuthority(
       ) {
         return refused("denied");
       }
-      const result = await forwarder.authorizeSend(
+      const result = await conduit.authorizeSend(
         authorization(call.metadata),
         string(context.sandbox_id),
         string(context.request_id),
@@ -294,7 +294,7 @@ export function createOpenShellEgressAuthority(
               phase = "trailers";
               const safe =
                 body.end_of_stream === true && Number(body.sequence) === 1
-                  ? await forwarder.protectResponse(
+                  ? await conduit.protectResponse(
                       authorization(call.metadata),
                       string(head.context.sandbox_id),
                       string(head.context.request_id),

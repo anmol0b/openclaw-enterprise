@@ -11613,10 +11613,10 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
         resourceName: "provider-sandbox",
         agentId: context.revision.agentId,
         revisionId: context.revision.id,
-        ...(context.requirements.egressAttachment === undefined
+        ...(context.requirements.conduitWiring === undefined
           ? {}
           : {
-              egressAttachment: context.requirements.egressAttachment,
+              conduitWiring: context.requirements.conduitWiring,
             }),
       };
     },
@@ -12458,12 +12458,12 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
     let observation = installed;
     let current = true;
     driver.credentialGatewayDriver.listSourceTypes = async () => [openAiStaticProvider.sourceType];
-    driver.egressProxyDriver = {
+    driver.conduitDriver = {
       id: plan.egressDriverId,
       async configureRevision() {
         return attachment;
       },
-      async attachmentStatus() {
+      async wiringStatus() {
         events.push("observe");
         return observation;
       },

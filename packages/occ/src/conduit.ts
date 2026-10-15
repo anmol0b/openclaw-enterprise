@@ -36,16 +36,19 @@ export interface CapturedEgressUse {
   readonly operation: InferenceOperation;
 }
 
-export interface EgressAuthorityPorts {
-  readonly verifier: EgressPeerVerifier;
-  readonly now: () => number;
-  installation(peer: EgressPeer): Promise<EgressInstallation | undefined>;
-  provider(route: EgressRoute): CredentialProviderDefinition | undefined;
+export interface RequestAuthorizer {
   /** Each call must open a new policy unit, independent of the capture and Secret read. */
   check(
     use: CapturedEgressUse,
     material?: StaticMaterialEvidence,
   ): Promise<StaticEgressSource | EgressRefusal>;
+}
+
+export interface EgressAuthorityPorts extends RequestAuthorizer {
+  readonly verifier: EgressPeerVerifier;
+  readonly now: () => number;
+  installation(peer: EgressPeer): Promise<EgressInstallation | undefined>;
+  provider(route: EgressRoute): CredentialProviderDefinition | undefined;
   read(
     source: StaticEgressSource,
     signal: AbortSignal,
@@ -116,7 +119,7 @@ export function egressInjectionDigest(headers: readonly (readonly [string, strin
  * Trusted request registry shared by the transport's resolve, send and response phases.
  * Restart loses outstanding handles and fails closed. No permit or material is reusable.
  */
-export class EgressForwarder {
+export class Conduit {
   private readonly records = new Map<string, OperationRecord>();
   private readonly requests = new Map<string, number>();
   private pendingResolutions = 0;

@@ -1,19 +1,21 @@
 import type {
   StaticEgressSource,
-  EgressPlan,
+  ConduitPlan,
   EgressRefusal,
   StaticMaterialEvidence,
 } from "@openclaw-enterprise/contracts";
-import { EgressForwarder, type EgressPeerVerifier, type CapturedEgressUse } from "./egress.ts";
+import { Conduit, type EgressPeerVerifier, type CapturedEgressUse } from "./conduit.ts";
 
-export { EgressForwarder } from "./egress.ts";
+export { Conduit } from "./conduit.ts";
 export type {
+  CapturedEgressUse,
   EgressPeerVerifier,
   EgressPeer,
   EgressResolution,
   EgressSendDecision,
-} from "./egress.ts";
-import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
+  RequestAuthorizer,
+} from "./conduit.ts";
+import type { ConduitDriver } from "@openclaw-enterprise/contracts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -838,7 +840,7 @@ type DriverByCapability = {
   repo: RepoDriver;
   credential_gateway: CredentialGatewayDriver;
   credential_refresh: CredentialRefreshDriver;
-  egress_proxy: EgressProxyDriver;
+  conduit: ConduitDriver;
 };
 type DriverFor<Capability extends DriverCapability> = DriverByCapability[Capability];
 
@@ -4482,8 +4484,8 @@ export class OpenClawController {
   }
 
   /** Trusted composition only: public workloads never supply an identity verifier. */
-  createEgressForwarder(verifier: EgressPeerVerifier): EgressForwarder {
-    return new EgressForwarder({
+  createConduit(verifier: EgressPeerVerifier): Conduit {
+    return new Conduit({
       verifier,
       now: () => this.clock().getTime(),
       installation: (peer) =>
@@ -4491,7 +4493,7 @@ export class OpenClawController {
           state.credentialSources.findEgressInstallation(peer.sender.id, peer.sandboxId),
         ),
       provider: (route) => {
-        const control = this.selectedDriver("egress_proxy").sourceControl;
+        const control = this.selectedDriver("conduit").sourceControl;
         return isDeepStrictEqual(control.backend, route.binding.source.backend)
           ? control.providers.find((provider) =>
               isDeepStrictEqual(provider.ref, route.binding.source.provider),
@@ -4614,7 +4616,7 @@ export class OpenClawController {
         return deny("withdrawn");
       }
       const admitted = source.egress;
-      const driver = this.selectedDriver("egress_proxy");
+      const driver = this.selectedDriver("conduit");
       const control = driver.sourceControl;
       if (
         !admitted ||
@@ -4702,7 +4704,7 @@ export class OpenClawController {
     references: Readonly<Record<string, SecretReference>>,
     generation: number,
   ): Promise<StaticEgressSource> {
-    const driver = this.selectedDriver("egress_proxy");
+    const driver = this.selectedDriver("conduit");
     const control = driver.sourceControl;
     const provider = control.providers.find((entry) => entry.sourceType.type === type);
     if (
@@ -4762,13 +4764,13 @@ export class OpenClawController {
     });
   }
 
-  private async admitEgressPlan(
+  private async admitConduitPlan(
     state: PlatformUnitOfWork,
     agent: Readonly<Agent>,
     revisionId: string,
     configuration: OpenClawConfigurationDocument,
     sandboxDriverId?: string,
-  ): Promise<EgressPlan | undefined> {
+  ): Promise<ConduitPlan | undefined> {
     const sources: CredentialSource[] = [];
     for (const binding of agent.credentialSources ?? []) {
       const source = await state.credentialSources.findCredentialSource(
@@ -4790,7 +4792,7 @@ export class OpenClawController {
     if (!sandboxDriverId || agent.executionMode !== "dedicated") {
       throw new ScopeViolationError("Protected egress requires a dedicated enforcing Sandbox.");
     }
-    const driver = this.selectedDriver("egress_proxy");
+    const driver = this.selectedDriver("conduit");
     await driver.sourceControl.assertAvailable(AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS));
     const selection = asRecord(asRecord(configuration.agents)?.defaults)?.model;
     const model = typeof selection === "string" ? selection : asRecord(selection)?.primary;
@@ -4878,7 +4880,7 @@ export class OpenClawController {
       const refreshDriver =
         type.rotation === "refresh" ? this.credentialRefreshDriver() : undefined;
       const sourceId = this.nextIdentifier("credential_source");
-      const egress = this.selections.has("egress_proxy")
+      const egress = this.selections.has("conduit")
         ? await this.admitStaticEgressSource(
             state,
             principalId,
@@ -7448,7 +7450,7 @@ export class OpenClawController {
       // PostgreSQL restamps createdAt on its own clock; the response carries the stored value.
       // The repository credential deadline above stays on this controller's clock.
       const revisionId = this.nextIdentifier("agent_revision");
-      const egressPlan = await this.admitEgressPlan(
+      const egressPlan = await this.admitConduitPlan(
         state,
         lockedAgent,
         revisionId,

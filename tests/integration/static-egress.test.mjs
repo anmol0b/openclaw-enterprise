@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { createRequire } from "node:module";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
-import { egressInjectionDigest } from "../../packages/occ/src/egress.ts";
+import { egressInjectionDigest } from "../../packages/occ/src/conduit.ts";
 import {
   pluginRuntimeSpecForRevision,
   pluginRuntimeConfigMapData,
@@ -429,23 +429,23 @@ test("protected admission requires the actual counterpart and exact loaded polic
   // A reported TLS bypass must fail both initial installation and receipt revalidation,
   // even when the supplier still reports the original loaded-enforcement evidence.
   f.observed.policy.network_policies["oce-egress-0"].endpoints[0].tls = "NETWORK_TLS_MODE_SKIP";
-  await assert.rejects(f.egress.attachmentStatus(f.context, f.attachment), /differs/);
+  await assert.rejects(f.egress.wiringStatus(f.context, f.attachment), /differs/);
   assert.equal(await f.egress.verifyInstallation(f.context, f.installation), false);
   f.observed.policy = structuredClone(expectedPolicy);
   assert.equal(await f.egress.verifyInstallation(f.context, f.installation), true);
   f.observed.policy.network_middlewares["oce-egress"].credential_authority = false;
-  assert.equal(await f.egress.attachmentStatus(f.context, f.attachment), undefined);
+  assert.equal(await f.egress.wiringStatus(f.context, f.attachment), undefined);
   f.observed.policy = structuredClone(expectedPolicy);
   f.observed.policy.network_policies["oce-egress-0"].endpoints[0].allow_uninspected_credentials =
     true;
-  await assert.rejects(f.egress.attachmentStatus(f.context, f.attachment), /differs/);
+  await assert.rejects(f.egress.wiringStatus(f.context, f.attachment), /differs/);
   f.observed.policy = structuredClone(expectedPolicy);
   f.observed.policy.network_policies["workspace-node-enrollment"] = {
     name: "workspace-node-enrollment",
     binaries: [{ path: "/usr/local/bin/node" }],
     endpoints: [{ host: "unexpected.example.test", ports: [443] }],
   };
-  await assert.rejects(f.egress.attachmentStatus(f.context, f.attachment), /differs/);
+  await assert.rejects(f.egress.wiringStatus(f.context, f.attachment), /differs/);
   f.observed.policy = expectedPolicy;
   // Matching network maps cannot hide a change to the admitted process/filesystem.
   for (const change of [
@@ -455,7 +455,7 @@ test("protected admission requires the actual counterpart and exact loaded polic
     { version: 2 },
   ]) {
     f.observed.policy = { ...structuredClone(expectedPolicy), ...change };
-    await assert.rejects(f.egress.attachmentStatus(f.context, f.attachment), /differs/);
+    await assert.rejects(f.egress.wiringStatus(f.context, f.attachment), /differs/);
     assert.equal(await f.egress.verifyInstallation(f.context, f.installation), false);
   }
   f.observed.policy = expectedPolicy;
@@ -523,7 +523,7 @@ test("current supplier evidence is required at access and send; stored receipts 
   const beforeLegacy = f.secretReads;
   delete f.observed.observation;
   // LOADED and valid legacy field 3 remain present; neither substitutes for V1.
-  assert.equal(await f.egress.attachmentStatus(f.context, f.attachment), undefined);
+  assert.equal(await f.egress.wiringStatus(f.context, f.attachment), undefined);
   assert.ok(
     (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
   );
@@ -531,12 +531,12 @@ test("current supplier evidence is required at access and send; stored receipts 
   f.observed.observation = observation;
   // Proto3 scalar zeros can be omitted on the wire; both encodings have one fingerprint.
   f.observed.evidence = { ...original, config_revision: "0", provider_env_revision: "0" };
-  const zero = await f.egress.attachmentStatus(f.context, f.attachment);
+  const zero = await f.egress.wiringStatus(f.context, f.attachment);
   assert.ok(zero);
   delete f.observed.evidence.config_revision;
   delete f.observed.evidence.provider_env_revision;
   assert.deepEqual(
-    (await f.egress.attachmentStatus(f.context, f.attachment)).enforcement,
+    (await f.egress.wiringStatus(f.context, f.attachment)).enforcement,
     zero.enforcement,
   );
   const reads = f.secretReads;
@@ -575,7 +575,7 @@ test("current supplier evidence is required at access and send; stored receipts 
     ).refused,
   );
   assert.equal(f.providerRequests.length, 0);
-  const replacement = await f.egress.attachmentStatus(f.context, f.attachment);
+  const replacement = await f.egress.wiringStatus(f.context, f.attachment);
   assert.ok(replacement);
   await assert.rejects(
     f.controller.transact((unit) => unit.credentialSources.recordEgressInstallation(replacement)),
@@ -675,7 +675,7 @@ test("V1 permits only the exact inert runtime rule and fences both policies befo
   ]) {
     f.observed.observation = structuredClone(observation);
     change(f.observed.observation);
-    assert.equal(await f.egress.attachmentStatus(f.context, f.attachment), undefined);
+    assert.equal(await f.egress.wiringStatus(f.context, f.attachment), undefined);
     assert.ok(
       (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
     );

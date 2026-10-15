@@ -313,7 +313,7 @@ worker:
   convergenceTimeoutMs: 900000
 
 # Optional credential authority listener owned by the single API process.
-# The Installation egress_proxy authority must use the same port and file paths.
+# The Installation conduit authority must use the same port and file paths.
 egressAuthority:
   enabled: false
   port: 9444
