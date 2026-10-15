@@ -633,6 +633,10 @@ test("refused and cancelled observations remain independently captured and token
         const { expires_at: _expiresAt, ...unverifiable } = body;
         return { status, body: unverifiable };
       }
+      if (mode === "offset-expiry") {
+        // Equivalent instant, but not the UTC Z form the classifier requires.
+        return { status, body: { ...body, expires_at: body.expires_at.replace(/Z$/, "+00:00") } };
+      }
       if (mode === "missing-checks") {
         const { checks: _checks, ...permissions } = body.permissions;
         return { status, body: { ...body, permissions } };
@@ -671,6 +675,7 @@ test("refused and cancelled observations remain independently captured and token
     { name: "surplus permissions", selected: "surplus", expected: "rejected" },
     { name: "widened repository scope", selected: "surplus-repository", expected: "rejected" },
     { name: "absent provider expiry", selected: "absent-expiry", expected: "rejected" },
+    { name: "offset-form provider expiry", selected: "offset-expiry", expected: "rejected" },
     { name: "missing checks permission", selected: "missing-checks", expected: "rejected" },
     { name: "provider refusal", selected: "refused", expected: "reauthorization-required" },
     { name: "insufficient lifetime", selected: "short", expected: "rejected" },
@@ -695,7 +700,7 @@ test("refused and cancelled observations remain independently captured and token
       assert.equal(result.kind, expected);
       if (selected === "surplus-repository") {
         assert.equal(result.code, "scope-mismatch");
-      } else if (selected === "absent-expiry") {
+      } else if (selected === "absent-expiry" || selected === "offset-expiry") {
         assert.equal(result.code, "invalid-response");
       }
       assert.equal(owned.records.size, 1);
