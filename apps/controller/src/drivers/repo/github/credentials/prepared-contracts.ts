@@ -3,6 +3,7 @@ import type { GitHubTokenProfile } from "./types.ts";
 /** Trusted admission, never constructed from a request's repository or rights. */
 export interface GitHubPreparationAdmission {
   readonly familyId: string;
+  readonly issuerAuthority: string;
   readonly generation: number;
   readonly ownerEpoch: number;
   readonly inputVersion: string;
@@ -82,6 +83,7 @@ export function samePreparationAdmission(
 ): boolean {
   return (
     a.familyId === b.familyId &&
+    a.issuerAuthority === b.issuerAuthority &&
     a.generation === b.generation &&
     a.ownerEpoch === b.ownerEpoch &&
     a.inputVersion === b.inputVersion &&

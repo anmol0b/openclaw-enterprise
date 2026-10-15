@@ -43,26 +43,28 @@ const live = (states: string) => `EXISTS (
 const active = live("'ready'");
 const enrolling = live("'registering','ready'");
 const matching = "f.source_id = $1 AND f.source = $2::jsonb";
-const aad = (family: string, id: string) =>
-  Buffer.from("occ:prepared-github:v1:" + family + ":" + id);
+const aad = (a: Admission, id: string) =>
+  Buffer.from(JSON.stringify(["occ:prepared-github:v2", a.issuerAuthority, a.familyId, id]));
 
 export class PreparedGitHubPostgres {
   private readonly pool: PostgresPool;
   private readonly custodyKey: Buffer;
-  constructor(pool: PostgresPool, custodyKey: Buffer) {
+  private readonly issuerAuthority: string;
+  constructor(pool: PostgresPool, custodyKey: Buffer, issuerAuthority: string) {
     this.pool = pool;
     this.custodyKey = custodyKey;
+    this.issuerAuthority = issuerAuthority;
   }
 
-  private seal(bytes: Uint8Array, family: string, id: string) {
+  private seal(bytes: Uint8Array, a: Admission, id: string) {
     const nonce = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", this.custodyKey, nonce);
-    cipher.setAAD(aad(family, id));
+    cipher.setAAD(aad(a, id));
     return Buffer.concat([nonce, cipher.update(bytes), cipher.final(), cipher.getAuthTag()]);
   }
-  private open(b: Buffer, family: string, id: string) {
+  private open(b: Buffer, a: Admission, id: string) {
     const cipher = createDecipheriv("aes-256-gcm", this.custodyKey, b.subarray(0, 12));
-    cipher.setAAD(aad(family, id));
+    cipher.setAAD(aad(a, id));
     cipher.setAuthTag(b.subarray(-16));
     return Buffer.concat([cipher.update(b.subarray(12, -16)), cipher.final()]);
   }
@@ -110,8 +112,8 @@ export class PreparedGitHubPostgres {
       );
       const { rows } = await c.query(
         `SELECT 1 FROM ${families} f WHERE ${matching}
-        AND f.issuer=$3::jsonb AND enabled AND ${enrolling} FOR UPDATE OF f`,
-        [key, source, issuer],
+        AND f.issuer=$3::jsonb AND admission->>'issuerAuthority'=$4 AND enabled AND ${enrolling} FOR UPDATE OF f`,
+        [key, source, issuer, this.issuerAuthority],
       );
       if (!rows.length) {
         throw new Error("Source or issuer changed during enrollment.");
@@ -149,11 +151,11 @@ export class PreparedGitHubPostgres {
     return this.transaction(async (c) => {
       const { rows } = await c.query(
         `WITH due AS (SELECT source_id FROM ${families} f
-        WHERE enabled AND next_check_at <= clock_timestamp() AND ${active}
+        WHERE enabled AND admission->>'issuerAuthority'=$2 AND next_check_at <= clock_timestamp() AND ${active}
         ORDER BY next_check_at LIMIT 1 FOR UPDATE SKIP LOCKED)
         UPDATE ${families} f SET next_check_at=clock_timestamp() + interval '60 seconds',worker_claim=$1
         FROM due WHERE f.source_id=due.source_id RETURNING f.source, f.issuer`,
-        [claim],
+        [claim, this.issuerAuthority],
       );
       return rows[0] as Pick<FamilyRow, "source" | "issuer"> | undefined;
     });
@@ -166,8 +168,8 @@ export class PreparedGitHubPostgres {
     return this.transaction(async (c) => {
       const { rows } = await c.query(
         `SELECT admission FROM ${families} f WHERE ${matching}
-        AND enabled AND worker_claim=$3 AND ${active} FOR UPDATE OF f`,
-        [key, source, claim],
+        AND enabled AND worker_claim=$3 AND admission->>'issuerAuthority'=$4 AND ${active} FOR UPDATE OF f`,
+        [key, source, claim, this.issuerAuthority],
       );
       const old = (rows[0] as { admission: Admission } | undefined)?.admission;
       if (!old || old.inputVersion === version) {
@@ -194,9 +196,10 @@ export class PreparedGitHubPostgres {
         `SELECT f.admission,id,material_version,provider_expires_at,usable_until
         FROM ${families} f JOIN ${attempts} a USING(source_id)
         WHERE ${matching} AND enabled AND ${active} AND custody='current' AND a.admission=f.admission
+        AND a.admission->>'issuerAuthority'=$3
         AND usable_until > clock_timestamp()
         AND usable_until < clock_timestamp() + interval '61 minutes'`,
-        [source.key.source.id, source],
+        [source.key.source.id, source, this.issuerAuthority],
       );
       return rows[0] as Omit<AttemptRow, "sealed"> | undefined;
     });
@@ -215,8 +218,9 @@ export class PreparedGitHubPostgres {
         }
         const { rows } = await c.query(
           `SELECT admission, enabled, ${active} AS live
-          FROM ${families} f WHERE ${matching} FOR ${change ? "UPDATE" : "SHARE"} OF f`,
-          [key, source],
+          FROM ${families} f WHERE ${matching}
+          AND admission->>'issuerAuthority'=$3 FOR ${change ? "UPDATE" : "SHARE"} OF f`,
+          [key, source, this.issuerAuthority],
         );
         const f = rows[0] as FamilyRow | undefined;
         if (!f) {
@@ -225,12 +229,13 @@ export class PreparedGitHubPostgres {
         const list = (
           await c.query(
             `SELECT id,admission,state,custody,material_version,provider_expires_at,
-          usable_until,CASE WHEN custody='current' THEN sealed END AS sealed FROM ${attempts}
+          usable_until,CASE WHEN custody='current' AND admission->>'issuerAuthority'=$2 THEN sealed END AS sealed FROM ${attempts}
           WHERE source_id=$1`,
-            [key],
+            [key, this.issuerAuthority],
           )
         ).rows as AttemptRow[];
-        const current = f.enabled && f.live ? list.find((a) => a.custody === "current") : undefined;
+        const current =
+          f.enabled && f.live ? list.find((a) => a.custody === "current" && a.sealed) : undefined;
         const family: Family = {
           admission: f.admission,
           enabled: f.enabled && f.live,
@@ -249,7 +254,7 @@ export class PreparedGitHubPostgres {
             materialVersion: current.material_version!,
             providerExpiresAt: current.provider_expires_at.getTime(),
             usableUntil: current.usable_until.getTime(),
-            bytes: this.open(current.sealed, key, current.id),
+            bytes: this.open(current.sealed, current.admission, current.id),
           };
         }
         const previous = family.committed;
@@ -288,7 +293,7 @@ export class PreparedGitHubPostgres {
                     a.id,
                     a.state,
                     m ? "current" : bytes ? "retire" : "intent",
-                    bytes && this.seal(bytes, key, a.id),
+                    bytes && this.seal(bytes, a.admission, a.id),
                     m?.materialVersion,
                     m && new Date(m.providerExpiresAt),
                     m && new Date(m.usableUntil),
@@ -314,21 +319,25 @@ export class PreparedGitHubPostgres {
   // or 'unknown' and encrypted cleanup custody, never an automatic replay or a claim of revocation.
   async takeRetirement(key: string | null) {
     return this.transaction(async (c) => {
+      // A foreign or absent issuance authority leaves the original custody and outcome intact.
+      // Only a matching claim returns ciphertext; this also works after source withdrawal.
       const { rows } = await c.query(
-        `WITH due AS (SELECT id FROM ${attempts} WHERE custody='retire'
-        AND (source_id=$1 OR $1 IS NULL) LIMIT 1 FOR UPDATE SKIP LOCKED)
-        UPDATE ${attempts} a SET custody='revoking' FROM due WHERE a.id=due.id
-        RETURNING a.id, admission, sealed`,
-        [key],
+        `WITH due AS (
+           SELECT id, (admission->>'issuerAuthority' = $2) IS TRUE AS authorized
+           FROM ${attempts} WHERE custody='retire' AND (source_id=$1 OR $1 IS NULL)
+           ORDER BY authorized DESC LIMIT 1 FOR UPDATE SKIP LOCKED
+         ), claimed AS (
+           UPDATE ${attempts} a SET custody='revoking' FROM due d WHERE a.id=d.id AND d.authorized
+           RETURNING a.id, a.admission, a.sealed
+         )
+         SELECT d.authorized, c.id, c.admission, c.sealed FROM due d LEFT JOIN claimed c USING (id)`,
+        [key, this.issuerAuthority],
       );
-      const a = rows[0] as AttemptRow | undefined;
-      return (
-        a && {
-          id: a.id,
-          admission: a.admission,
-          bytes: this.open(a.sealed, a.admission.familyId, a.id),
-        }
-      );
+      const a = rows[0] as (AttemptRow & { authorized: boolean }) | undefined;
+      if (!a || !a.authorized) {
+        return a && "issuer-mismatch";
+      }
+      return { id: a.id, admission: a.admission, bytes: this.open(a.sealed, a.admission, a.id) };
     });
   }
 
