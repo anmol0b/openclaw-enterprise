@@ -11,15 +11,13 @@ A configuration, a credential and an authorization are separate decisions.
 
 ## Establish protected execution
 
-`conduit` is the one new registered capability. An OpenShell composition may implement both
-Conduit and Sandbox. To establish the live channel, Sandbox can enroll a supervisor-generated public
-key over its *already authenticated* installation control channel. Compute verifies that enrollment
-in the installation attestation before release. The supervisor keeps the private key outside the
-Agent, identifies the execution at the enforced sandbox boundary, and connects to the sender on a
-dedicated channel proving possession of the enrolled key. The sender verifies the exact installation
-and channel. A copied receipt or a bearer identifying only the sandbox cannot prove this.
-A future composition could use an execution-scoped bearer or SPIFFE workload identity; it must
-establish the same execution and exchange association, not merely authenticate a long-lived Agent.
+An OpenShell composition may implement Conduit and Sandbox. One way to establish the
+channel is for Sandbox to enroll a supervisor-generated public key over its authenticated
+installation control channel. Compute verifies the enrollment in the installation attestation before release. The supervisor
+keeps the private key outside the Agent, identifies the execution at the sandbox boundary,
+and proves possession on a dedicated request channel. The sender verifies that installation and
+channel. A copied receipt or sandbox-only bearer is insufficient. Alternatives such as an
+execution-scoped bearer or SPIFFE identity must establish the same exchange association.
 
 Before releasing the workload, Compute bounds the wait for applied configuration, eligible material
 for each required dynamic grant, and enforcement of the exact wiring. After release, require
@@ -28,9 +26,6 @@ egress credential or provider secret. Check static material by authorized resolu
 needing no credential skips only the material requirement.
 
 ## Capture and authorize a request
-
-For the first protected operation, use a bodyless metadata read for one admitted
-GitHub repository. Withhold its entire bounded response until response policy accepts it.
 
 ![A protected repository read, from installation to delivery of the response](assets/request-lifecycle.svg)
 
@@ -111,22 +106,19 @@ this check does not establish pack or branch safety.
 
 ## Resolve credentials
 
-A `CredentialResolver` returns a single-use custody handle and nonsecret evidence, or a
-refusal. Its full interface and evidence associations are in [contracts](contracts.md#credential-access-and-lifecycle).
-Resolution never contacts the provider or signs, issues, refreshes or schedules work.
+The [resolver contract](contracts.md#credential-access-and-lifecycle) defines the
+handle and evidence returned for an authorized read.
 
 ### Static material
 
-Retain `SecretDriver.readCredentialInput(secret, material, permit, retention, bounds)`.
-It returns an authorized custody handle, immutable version, authoritative observation time and any
-expiry. New sources default to `live`. Migrated `explicit_update` sources select an exact approved
+New sources default to `live`. Migrated `explicit_update` sources select an exact approved
 version or immutable snapshot in the same OCE installation and namespace. The read permit binds
 the adoption mode, exact selected store and target version, consumer and `static_read` purpose.
 Lifecycle input reads require separate `issuer_input` authority. In snapshot mode, the
 admitted snapshot owner serves that version. The original Secret is provenance and need not still
 exist. Evidence and reuse keys retain adoption, selected store, target, version and revocation
 association. Only exact source-update authority and access to the selected target may change that
-approval. A failed opt-in leaves it intact, subject to current denial or known revocation.
+approval; [migration](security.md#approved-static-material) defines the opt-in.
 
 Default freshness is ten minutes. The default four-hour limit is *total age from authoritative
 read*, usable after freshness only on positively classified transport, timeout or throttling failure.
@@ -140,7 +132,7 @@ layer, and use bounded by deadline and expiry. Zero means read again, not expire
 `WarmCredentialReader.readWarm` reads only eligible committed material for
 `WarmKey = (SourceKey, exact normalized grant, grant hash, isolation ID)`. Add family generation,
 owner epoch, preparation attempt, actual grant and provider expiry to the evidence. Cold, expired
-or insufficient validity returns `not_ready` and starts no work. Eligible material can outlast an
+or insufficient validity returns `not_ready` without starting work. Eligible material can outlast an
 issuer outage. An unavailable resolver permits no proxy cache, token push or fallback.
 
 ## Prepare and renew credentials

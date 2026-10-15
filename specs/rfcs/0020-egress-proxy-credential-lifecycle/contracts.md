@@ -51,21 +51,17 @@ action, exact target generations, audience, input digest and expiry.
 | Sandbox via `applyConduit(wiring, command)`, `conduitStatus` | Verify and enforce that plan. Attest the wiring, execution, trusted gateway, immutable sandbox ID, runtime generation, supervisor installation, applied policy and effective sets. Reject a stale install. |
 
 
-Compute builds a `ConduitPlan` from admitted routes, bindings and source projections.
-`ConduitDriver` configures it and issues `SandboxConduitWiring` for one execution and
-policy generation. Sandbox verifies and applies that wiring and reports the exact
-sets it enforced. A receipt is evidence of what was applied; neither wiring nor a
-receipt authorizes an individual request. An empty route set still requires protected
-wiring and enforcement of deny-all.
+Compute builds the plan from admitted routes, bindings and source projections. A
+Sandbox receipt records what was applied; wiring and receipts do not authorize requests.
 
 ## Request authorization and forwarding
 
 | Interface | Responsibility |
 | --- | --- |
-| `Conduit.capture(peer, exchange, bounds)` | Bind the immutable request and reply destination to the authenticated execution and installation, then seal one matched operation. |
-| `Conduit.forward(operation)` | Own both fresh checks, material resolution if needed, the single send and response protection. |
-| `RequestAuthorizer.check(before_access, operation)` | Check current authority and permit one material resolution, not a send. |
-| `RequestAuthorizer.check(before_send, operation, evidence)` | Check current authority and selected material or its absence. Commit the exact attempt before releasing a send permit. |
+| `Conduit.capture(peer, exchange, bounds)` | Bind and seal an exchange. |
+| `Conduit.forward(operation)` | Own authorization, resolution, send and response protection. |
+| `RequestAuthorizer.check(before_access, operation)` | Authorize material access. |
+| `RequestAuthorizer.check(before_send, operation, evidence)` | Authorize the selected material or its absence; commit before releasing a send permit. |
 
 The [request protocol](protocol.md#capture-and-authorize-a-request) defines the
 ordering, bound fields and refusal or uncertainty outcomes.
@@ -81,7 +77,7 @@ Resolve neither contacts the provider nor signs, issues, refreshes or schedules 
 
 | Interface | Responsibility |
 | --- | --- |
-| `SecretDriver.readCredentialInput(secret, material, permit, retention, bounds)` | Read the authorized static target with an immutable version, observation time and expiry where present. |
+| `SecretDriver.readCredentialInput(secret, material, permit, retention, bounds)` | Read the authorized static target with an immutable version, authoritative observation time and expiry where present. |
 | `WarmCredentialReader.readWarm` | Read eligible committed dynamic material for the exact grant and isolation; a cold or expired read starts no preparation. |
 
 | Lifecycle owner interface | Responsibility |

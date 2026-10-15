@@ -27,10 +27,10 @@ The deployment selects an egress implementation; it does not separately select a
 | **Unprotected** · minimal CI or simple local development | OCE knows the Agent exists but does not authenticate or govern its direct requests. No managed route, clone, or provider credential. Asking for one fails admission, rather than silently using ambient credentials. |
 | **Protected** · OpenShell, in production or locally | Authenticate the whole Agent execution, prevent direct egress, and authorize each operation. A route may need no provider credential; no effective routes means deny all. Failure to establish protection never selects unprotected mode. |
 
-## From Agent startup to one repository read
+## From startup to one repository read
 
-1. **Establish the execution.** The OpenClaw Control Plane (OCC) admits the execution, routes, and grants. Before allowing protected traffic, bind the execution to the authenticated sandbox, the specific supervisor installation, and its enforced policy. One design enrolls a supervisor-held key on the installation channel, then proves possession on the request channel. The Agent needs neither a proxy bearer nor a GitHub token. This is a [property the installation must demonstrate](security.md), not a claim about stock OpenShell.
-2. **Prepare the GitHub credential in the background.** OCE owns the GitHub App key, obtains an installation token for the admitted repositories and permissions, verifies the actual grant and expiry, and commits the token in encrypted custody. The request path can use eligible committed material; it cannot mint a token or schedule renewal.
-3. **Authorize the actual read, then send once.** At acceptance, bind the request *and its reply path* to the originating execution. Check current authority before reading the prepared token, then check the same operation and the actual token version before sending. If access was removed between checks, refuse. If removal races the final check, the read can still reach GitHub. Replacing execution A with B can invalidate A’s request; it can never turn it into B’s request or deliver A’s reply to B.
+1. **Admit the execution.** The OpenClaw Control Plane (OCC) admits the routes and grants. Sandbox enforces the plan and authenticates the execution and supervisor installation.
+2. **Prepare the credential.** OCE obtains and stores a scoped GitHub installation token in the background. The request path never issues or renews it.
+3. **Send the read.** Conduit binds the request and reply to their origin, checks current authority before material access and again before sending, and protects the response. Withdrawal racing the final check may not stop that send.
 
 [Request protocol and failure semantics](protocol.md#capture-and-authorize-a-request) · [Verification and migration](security.md)
