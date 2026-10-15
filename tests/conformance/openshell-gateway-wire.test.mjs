@@ -1697,7 +1697,11 @@ test("installed custody observer follows the supplier's structured push shape th
         workspace_scope: { workspace, selection: "workspace" },
         lines: 2000,
       });
-      const [logs, buffer_total = logs.length] = reply();
+      const response = reply();
+      if (response === undefined) {
+        return; // Deliberately leave this read pending until the observer cancels it.
+      }
+      const [logs, buffer_total = logs.length] = response;
       callback(null, { logs, buffer_total });
     },
   });
@@ -1750,6 +1754,21 @@ test("installed custody observer follows the supplier's structured push shape th
       const fresh = await start();
       reply = () => [[initial, ...lines]];
       assert.equal(await fresh.custody.expectAfter(fresh.before, denied), id);
+    },
+  );
+  await t.test(
+    "delivery deadline during an in-flight log read is explicitly unobservable",
+    async () => {
+      const { custody, before } = await start(150);
+      reply = () => undefined;
+      await assert.rejects(custody.expectAfter(before, denied), (error) => {
+        assert.match(
+          error.message,
+          /unobservable before delivery deadline.*GetSandboxLogs read timed out/,
+        );
+        assert.equal(error.cause.name, "TimeoutError");
+        return true;
+      });
     },
   );
   for (const [name, logs, error, bufferTotal] of [

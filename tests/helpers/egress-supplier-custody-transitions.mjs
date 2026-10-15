@@ -51,10 +51,20 @@ export function createCustodyTransitions(
   }
 
   async function read(timeoutMs) {
-    const { lines, bufferTotal } = await reader.getSandboxLogs(
-      { workspace, sandbox, lines: ringSize },
-      AbortSignal.timeout(Math.min(timeoutMs, 5000)),
-    );
+    const signal = AbortSignal.timeout(Math.min(timeoutMs, 5000));
+    const { lines, bufferTotal } = await reader
+      .getSandboxLogs({ workspace, sandbox, lines: ringSize }, signal)
+      .catch((error) => {
+        // The final in-flight read can reach our deadline before the poll loop does.
+        // Preserve the actual read timeout; neither deadline path means no_permit.
+        if (signal.aborted && error === signal.reason) {
+          throw new Error(
+            "supplier custody transitions unobservable before delivery deadline (GetSandboxLogs read timed out)",
+            { cause: error },
+          );
+        }
+        throw error;
+      });
     // No filter or time cursor. A full ring could have lost a prefix. Keep only
     // fingerprints of other lines so a rewrite or reset cannot silently move our baseline.
     assert.ok(
