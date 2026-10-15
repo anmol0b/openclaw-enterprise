@@ -4527,6 +4527,12 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
     );
     assert.notEqual(deniedConfigRequest.exitCode, 0);
     const diagnosticOutput = String(deniedConfigRequest.aggregatedOutput ?? "");
+    const diagnosticSecrets = failureSecrets([process.env]);
+    process.stderr.write(
+      `OpenShell native configuration error: ${redactLogLine(diagnosticOutput, diagnosticSecrets, 4000)}\n`,
+    );
+    let reportedProxyLogs = false;
+
     process.stderr.write(
       `OpenShell forbidden-backend diagnostic: ${JSON.stringify({
         status: deniedConfigRequest.status,
@@ -4557,6 +4563,17 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
           "--all-containers=true",
           "--tail=500",
         );
+        if (!reportedProxyLogs) {
+          reportedProxyLogs = true;
+          for (const line of logs
+            .split("\n")
+            .filter((line) => /L7_REQUEST|NET:|error|fail/iu.test(line))
+            .slice(-20)) {
+            process.stderr.write(
+              `OpenShell boundary log: ${redactLogLine(line, diagnosticSecrets, 1800)}\n`,
+            );
+          }
+        }
         return logs
           .split("\n")
           .some(
@@ -5198,7 +5215,7 @@ if (demoStatePath !== undefined) {
 }
 
 test(
-  "OpenShell executes Gateway shell turns and enforces filesystem and network boundaries",
+  "OpenShell enforces native filesystem and network boundaries",
   {
     ...requiresOpenShellK3d,
     ...(demoStatePath === undefined ? { timeout: 1_800_000 } : {}),
@@ -5281,11 +5298,10 @@ test(
         );
       }
       process.stderr.write(
-        "OpenShell integration: create-time route reached protected Harness; starting real shell turns through the Agent Gateway.\n",
+        "OpenShell integration: create-time route reached protected Harness; starting the focused boundary probe.\n",
       );
-      await requestGatewayTurns(context, topology, "codex");
       process.stderr.write(
-        "OpenShell integration: regular Gateway shell turns passed; testing actual filesystem and network enforcement.\n",
+        "OpenShell integration: testing actual filesystem and network enforcement.\n",
       );
       await assertOpenShellToolFilesystemAndNetworkEnforcement(topology);
       // Temporary diagnostic selector: retain the PR's full scenario on its owning branch.
