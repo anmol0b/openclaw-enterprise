@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes, verify } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createServer } from "node:https";
+import { custodyOriginWire } from "./egress-custody-origin-wire.mjs";
 
 export const repository = { id: 7301, full_name: "fixture/repository" };
 export const repositoryPath = "/repos/" + repository.full_name;
@@ -20,12 +20,11 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
   const issuerKey = privateKey.export({ format: "pem", type: "pkcs8" }).toString();
   configuration.protect?.(token, issuerKey);
   const observations = [];
-  let mode = "normal";
+  const gates = [];
+  const releases = new Set();
+  let nextResponse;
   let issues = 0;
-  let tcp = 0;
-  let hold;
-  let release;
-  const server = createServer(
+  const server = custodyOriginWire(
     {
       cert: await readFile(configuration.certificatePath),
       key: await readFile(configuration.privateKeyPath),
@@ -77,10 +76,13 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
         res.writeHead(204).end();
         return;
       }
-      const selected = mode;
+      const gate = gates.shift();
+      const selected = gate?.response ?? nextResponse ?? "normal";
+      nextResponse = undefined;
       const entry = {
         number: observations.length + 1,
         mode: selected,
+        wireRequest: server.requestOnWire(req.socket),
         exactRead:
           issues > 0 &&
           req.method === "GET" &&
@@ -98,54 +100,52 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
         res.writeHead(403).end();
         return;
       }
-      if (selected === "hold") {
-        await new Promise((resolve) => {
-          release = resolve;
-          hold();
-        });
+      assert.ok(entry.wireRequest, "observe request on the TLS socket before parsing it");
+      if (gate) {
+        gate.arrived.resolve(entry);
+        await gate.send.promise;
       }
-      // Body and unapproved header precede the *last actual* forbidden trailer.
-      // Record finish after both went to the TLS socket, never infer application.
+      // Identical status, headers, valid body and chunk framing. Only the last
+      // actual trailer differs. No Trailer declaration or earlier trailer can block it.
       const responseBody = JSON.stringify({ ...repository, description: "omit-from-response" });
-      if (selected === "forbidden-final") {
-        const finalName = "x-fixture-forbidden-last";
-        const wire = [
-          "HTTP/1.1 200 OK",
-          "Content-Type: application/json",
-          "Connection: close",
-          "Transfer-Encoding: chunked",
-          "",
-          responseBody.length.toString(16),
-          responseBody,
-          "0",
-          "x-fixture-first: allowed-shape",
-          finalName + ": " + token,
-          "",
-          "",
-        ].join("\r\n");
-        res.socket.end(wire, () => {
-          entry.actualLastTrailer = finalName;
-          entry.finished = true;
+      const finalName = selected === "forbidden-final" ? "x-fixture-forbidden-last" : null;
+      const wire = [
+        "HTTP/1.1 200 OK",
+        "Content-Type: application/json",
+        "Connection: close",
+        "Transfer-Encoding: chunked",
+        "",
+        responseBody.length.toString(16),
+        responseBody,
+        "0",
+        ...(finalName ? [finalName + ": synthetic-forbidden-value"] : []),
+        "",
+        "",
+      ].join("\r\n");
+      const socket = res.socket;
+      const submitted = Boolean(socket && !socket.destroyed);
+      if (submitted) {
+        socket.end(wire, (error) => {
+          if (!error) {
+            entry.actualLastTrailer = finalName;
+            entry.finished = true;
+          }
         });
-        return;
       }
-      res.once("finish", () => {
-        entry.finished = true;
-      });
-      res.writeHead(200, {
-        "content-type": "application/json",
-        "x-fixture-private": "omit-from-response",
-      });
-      res.end(responseBody);
+      // A replaced workload can already have lost its provider socket. Record
+      // that separately from a submitted late reply; neither proves delivery at A.
+      gate?.released.resolve(
+        submitted ? "submitted-to-origin-socket" : "origin-socket-already-closed",
+      );
     },
   );
-  server.on("connection", () => {
-    tcp++;
-  });
+
   t.after(
     () =>
       new Promise((resolve) => {
-        release?.();
+        for (const release of releases) {
+          release();
+        }
         server.close(resolve);
         server.closeAllConnections();
       }),
@@ -160,26 +160,29 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
     businessOrigin: new URL(configuration.origin).origin,
     privateKey: issuerKey,
     forbiddenFinal() {
-      mode = "forbidden-final";
+      nextResponse = "forbidden-final";
     },
-    normal() {
-      mode = "normal";
+    get wireRequests() {
+      return server.wireCount();
     },
-    holdNext() {
-      mode = "hold";
-      return new Promise((resolve) => {
-        hold = resolve;
-      });
-    },
-    release() {
-      release();
-      mode = "normal";
+    holdNext(response = "normal") {
+      const send = Promise.withResolvers();
+      const arrived = Promise.withResolvers();
+      const released = Promise.withResolvers();
+      const release = () => {
+        releases.delete(release);
+        send.resolve();
+        return released.promise;
+      };
+      releases.add(release);
+      gates.push({ response, arrived, send, released });
+      return { arrived: arrived.promise, release };
     },
     get issues() {
       return issues;
     },
     get tcpConnections() {
-      return tcp;
+      return server.tcpCount();
     },
   };
 }

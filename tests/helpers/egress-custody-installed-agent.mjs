@@ -5,7 +5,13 @@ import { observeInstalledProtection } from "./egress-installed-agent.mjs";
 import { protectedConfigurationBody, sourceAccessBindingBody } from "./egress-connected-inputs.mjs";
 import { repositoryPath } from "../fixtures/egress-custody-repository-origin.mjs";
 
-export async function admitRepositoryAgent(setup, stack, evidence, owned) {
+export async function admitRepositoryAgent(
+  setup,
+  stack,
+  evidence,
+  owned,
+  name = "custody-" + evidence.runId,
+) {
   const { create, provider } = owned;
   // Prove the actual API and worker select this synthetic issuer before enrolling its App key.
   // Inspect only nonsecret Installation routing. Missing selection must never fall back to GitHub.
@@ -36,7 +42,6 @@ export async function admitRepositoryAgent(setup, stack, evidence, owned) {
       "both control-plane Pods must select this private issuer",
     );
   }
-  const name = "custody-" + evidence.runId;
   const configuration = await create(
     "configurations",
     protectedConfigurationBody(setup.controller.model),
@@ -114,6 +119,7 @@ export async function activateRepositoryAgent(setup, stack, evidence, owned, adm
       grant.isolationId === agent.id &&
       grant.profile === "metadata-read",
   );
+  await owned.recordPods(installed.harness, installed.supervisor, ...installed.gatewayPods);
   verifyWorkloadCannotObtainComputeSigner(setup, installed.harness, agent.id, revision.id);
   const [exactRoute, ...others] = installed.installation.plan.routes;
   assert.equal(others.length, 0);

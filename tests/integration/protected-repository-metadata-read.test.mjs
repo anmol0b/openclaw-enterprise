@@ -78,7 +78,7 @@ test(
         res.addTrailers({ "x-declared": "benign" });
       }
       if (scenario.trailer) {
-        res.addTrailers({ "x-declared": "first", "x-forbidden-last": credential });
+        res.addTrailers({ "x-forbidden-last": credential });
       }
       res.end();
     });
@@ -195,6 +195,15 @@ test(
       assert.equal(observed.connections.length, before);
       assert.equal(parsedRequests.length, before);
     });
+    await t.test("valid body and zero actual trailers: exact identity through FIN", async () => {
+      scenario = { body: JSON.stringify(identity) };
+      const index = observed.connections.length;
+      const raw = await receiveThroughFin(port, request());
+      const wire = await verifyOrigin(index);
+      assert.equal(observed.connections.length, index + 1);
+      assert.ok(wire.response.endsWith("0\r\n\r\n"), "no actual trailers on the origin socket");
+      assertFixedResponse(raw, "200 OK", JSON.stringify(identity));
+    });
     for (const [name, value] of [
       ["undeclared last actual trailer", { trailer: true, body: JSON.stringify(identity) }],
       [
@@ -218,11 +227,10 @@ test(
         const wire = await verifyOrigin(index);
         if (value.trailer) {
           assert.ok(
-            wire.response.endsWith(
-              `0\r\nx-declared: first\r\nx-forbidden-last: ${credential}\r\n\r\n`,
-            ),
-            "independent origin socket observer reached the last actual trailer",
+            wire.response.endsWith(`0\r\nx-forbidden-last: ${credential}\r\n\r\n`),
+            "independent origin socket observer reached the only actual trailer",
           );
+          assert.equal(observed.connections.length, index + 1, "exactly one origin connection");
           assert.equal(/\r\ntrailer: /i.test(wire.response), Boolean(value.declaration));
         }
         // Exact local error bytes distinguish a safe error from leaked provider headers/body.

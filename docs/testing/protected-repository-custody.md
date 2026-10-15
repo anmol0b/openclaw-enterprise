@@ -21,8 +21,8 @@ TLS to that origin. The test checks the selected private origin in both Pods
 before enrollment; a credential source cannot redirect it. The test also checks
 the workload's effective authorization cannot retrieve or project the Compute signer.
 
-The test generates an App key, an explicitly consented Agent source and metadata-only
-installation token. It contacts neither GitHub nor a model provider.
+The test generates an App key, separately consented dedicated Agents and metadata-only
+installation credentials. It contacts neither GitHub nor a model provider.
 
 Before installing the disposable API controller, start the following observer on
 its owner host. Use the same limited disposable database selected for the test.
@@ -45,14 +45,28 @@ then select the actual lane. The state and results paths must belong to this att
 
 ```sh
 export OCC_TEST_EGRESS_DISPATCH_OBSERVER_SOCKET="$new_observer_dir/control.sock"
-node scripts/ci/run-tests.mjs run egress-custody-installed \
+CI_RUNNER_TEST_TIMEOUT_MS=5100000 node scripts/ci/run-tests.mjs run egress-custody-installed \
   --state "$attempt/state.json" --results "$attempt/results.json"
 ```
 
-Require passed results for the two different workload clients, independently
-observed direct TCP bypass attempt, actual forbidden final trailer, specific
-authorization update and lost commit acknowledgment across API restart, and
-the replaced execution with no inherited request or response. The diagnostic
+Reserve 90 minutes for the lane after setup, plus time for collection and disposal.
+The installed test has a 67-minute execution budget. The 85-minute file timeout above
+also covers owned-resource cleanup. If set, the runner's absolute `CI_RUNNER_DEADLINE_MS`
+must allow that full window.
+
+Require both files in the manifest to pass. At the real TLS gRPC authority, a synthetic
+enrolled peer presents the copied opening first on the wrong sink, crosses two signed
+openings and two live dispatch handles, and attempts to splice an actual pending reply.
+The installed test cannot extract a supervisor's possession key to repeat that injection.
+Instead it holds two separately authorized executions' actual replies, makes B finish
+first with only the final forbidden trailer, checks B's exact refusal and A's exact approved
+identity through TLS FIN, then checks B's own fresh authorized read. The separate trailer
+control has identical chunk framing and no trailers. For replacement, B remains authorized
+with its own accepted read pending while A's late valid response is released. It must receive
+only its expected refusal through FIN, then its own fresh successful read. The subsequent IAM denial is a withdrawal control.
+
+Require the ordinary curl and Node workload reads, observed direct TCP attempt, and
+specific dispatch acknowledgment loss and API restart as well. The diagnostic
 names the private `.build/egress-connected/runtime-<uuid>/` directory. Retain its
 `observations.json` through cleanup and `upstream.json` with the result. The
 post-restart read is a new positive control, never a replay of the uncertain

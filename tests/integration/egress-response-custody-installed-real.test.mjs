@@ -11,6 +11,7 @@ import {
   createRunEvidence,
   observePreparedStack,
 } from "../helpers/egress-installed-stack.mjs";
+import { verifyLiveRecipients } from "../helpers/egress-custody-live-recipients.mjs";
 import { registerCleanupAndStartProvider } from "../helpers/egress-installed-agent.mjs";
 import {
   admitRepositoryAgent,
@@ -33,7 +34,7 @@ test(
   "installed protected repository read binds execution, exact dispatch and final response",
   {
     skip: selected ? false : "Dedicated installed-custody lane requires a fresh disposable pair.",
-    timeout: 36 * 60_000,
+    timeout: 67 * 60_000,
   },
   async (t) => {
     const progress = { stage: "input-preflight" };
@@ -171,9 +172,15 @@ test(
       await stage(
         "a forbidden final actual trailer reaches origin once and releases zero provider bytes",
         async () => {
+          const preparse = provider.wireRequests;
+          const throughFin = clientFor(installed).throughFin;
+          const positive = await exchange(throughFin, accepted, assertIdentityResponse);
+          assert.equal(positive.sends.length, 1);
+          assert.ok(positive.sends[0].finished && positive.sends[0].exactRead);
+          assert.equal(positive.sends[0].actualLastTrailer, null);
           provider.forbiddenFinal();
           const expected = ["resolve_accepted", "permit_accepted", "response_blocked"];
-          const { id, receipt, sends } = await exchange(curl, expected, (raw) =>
+          const { id, receipt, sends } = await exchange(throughFin, expected, (raw) =>
             assert.ok(raw === refusal, "complete fixed local error only"),
           );
           assert.equal(sends.length, 1, "one origin send, no retries");
@@ -188,10 +195,11 @@ test(
             dispatch: "confirmed",
             code: "response_policy",
           });
-          provider.normal();
+          assert.equal(provider.wireRequests, preparse + 2, "one pre-parse request for each arm");
           await checkpoint("forbidden-final-actual-trailer", {
             requestId: id,
-            authenticatedOriginReads: 1,
+            positiveRequestId: positive.id,
+            authenticatedOriginReadsPerArm: 1,
             providerBytesAtClient: 0,
           });
         },
@@ -256,6 +264,21 @@ test(
       );
 
       await stage(
+        "two simultaneously authorized installed executions receive only their own interleaved replies",
+        () =>
+          verifyLiveRecipients({
+            setup,
+            stack,
+            evidence,
+            owned,
+            installed,
+            clientFor,
+            rows,
+            events,
+          }),
+      );
+
+      await stage(
         "a replacement execution cannot inherit the old pending request or receive its late response",
         async () => {
           await verifyReplacement({
@@ -274,7 +297,7 @@ test(
           });
         },
       );
-      await checkpoint("installed-custody-observations-complete", { requiredObservations: 5 });
+      await checkpoint("installed-custody-observations-complete", { requiredObservations: 6 });
     } catch (error) {
       throw safeError(error);
     }
@@ -312,7 +335,7 @@ async function verifyReplacement({
     },
     () => "old-client-transport-closed",
   );
-  await held;
+  await held.arrived;
   const [atOrigin] = provider.observations.slice(count);
   assert.ok(
     atOrigin?.exactRead && !atOrigin.finished,
@@ -336,8 +359,62 @@ async function verifyReplacement({
     "old workload gone, not merely another sibling",
   );
   const oldClient = await original;
-  // A legitimate replacement with its own live installation. Remove the exact
-  // grant to make inheriting the old operation distinguishable from fresh authorization.
+  // B stays authorized *through A's late release*. B's own accepted, pending read will
+  // have a single forbidden trailer. If A's valid late response is delivered to B, the
+  // exact refusal through FIN below fails. A's destroyed sink need not receive anything.
+  const beforeB = await events(replacement);
+  const gateB = provider.holdNext("forbidden-final");
+  const { throughFin } = clientFor(replacement);
+  const pendingB = throughFin();
+  const atB = await Promise.race([
+    gateB.arrived,
+    pendingB.then(() => assert.fail("B ended before origin hold")),
+  ]);
+  assert.ok(atB.exactRead && !atB.finished && !atOrigin.finished);
+  const authorized = ["resolve_accepted", "permit_accepted"];
+  const crossed = exactTransitions(await events(replacement), beforeB, authorized);
+  const pendingReceipt = (await rows(replacement)).find((r) => r.id === crossed);
+  assert.ok(
+    pendingReceipt?.exact && pendingReceipt.observation === null,
+    "B accepted with a real pending dispatch",
+  );
+
+  const oldOriginRelease = await held.release();
+  assert.equal(atB.finished, false, "authorized B pending through the old origin release");
+  await gateB.release();
+  assert.ok(
+    (await pendingB) === refusal,
+    "authorized B sees only local refusal through FIN, never A's late bytes",
+  );
+  assert.equal(
+    exactTransitions(await events(replacement), beforeB, [...authorized, "response_blocked"]),
+    crossed,
+  );
+  const blocked = (await rows(replacement)).find((r) => r.id === crossed);
+  assert.ok(atB.finished && blocked?.exact && blocked.observation?.code === "response_policy");
+
+  const priorB = await events(replacement);
+  assertIdentityResponse(await throughFin());
+  const own = exactTransitions(await events(replacement), priorB, [
+    ...authorized,
+    "response_released",
+  ]);
+  assert.ok(own !== crossed && own !== old);
+  const reads = provider.observations.slice(count);
+  assert.equal(reads.length, 3);
+  assert.ok(reads[2].exactRead && reads[2].finished, "fresh own B read follows A's late release");
+  const ownReceipt = (await rows(replacement)).find((r) => r.id === own);
+  assert.ok(ownReceipt?.exact && ownReceipt.observation?.kind === "response");
+  await checkpoint("authorized-replacement-pending-through-old-release-then-fresh-success", {
+    oldRequestId: old,
+    oldOriginRelease,
+    authorizedPendingAtB: crossed,
+    oldProviderBytesAtB: 0,
+    ownFreshAtB: own,
+  });
+
+  // Separately retain the IAM withdrawal control, without crediting it as a
+  // copied-opening attack. The lane runs that attack at the actual TLS gRPC authority.
   await evidence.api(
     "DELETE",
     stack.namespacePath + "/iam/access-bindings/" + admitted.binding.id,
@@ -346,9 +423,7 @@ async function verifyReplacement({
   );
   const first = await events(replacement);
   const prior = await rows(replacement);
-  const attempt = clientFor(replacement).curl();
-  provider.release();
-  const raw = await attempt;
+  const raw = await throughFin();
   assert.ok(
     raw === refusal,
     "replacement client receives complete fixed local error and zero old provider bytes",
@@ -361,8 +436,8 @@ async function verifyReplacement({
   assert.notEqual(id, old);
   assert.equal(
     provider.observations.length,
-    count + 1,
-    "only the old read reached origin; no inherited request or autonomous retry",
+    count + 3,
+    "only old read and two authorized B controls reached origin; no inherited request or retry",
   );
   assert.deepEqual(
     await rows(replacement),
