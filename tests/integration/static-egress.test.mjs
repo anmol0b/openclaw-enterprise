@@ -772,6 +772,8 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
   const delivered = await exchange(body);
   assert.equal(delivered.body_result.transform.data.toString(), body);
   assert.deepEqual(f.providerRequests[0].body, wire.request);
+  const crlf = body.replaceAll("\n", "\r\n");
+  assert.equal((await exchange(crlf)).body_result.transform.data.toString(), crlf);
   const beforeReads = f.secretReads;
   for (const body of [
     { ...wire.request, tools: [...wire.request.tools, ...wire.refusedTools] },
@@ -871,6 +873,16 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
     (await exchange(encode(safeFunction))).body_result.transform,
     "ordinary Harness-local function tools remain supported",
   );
+  // Providers can omit argument deltas. The two completion events must still agree
+  // on which arguments the Harness would execute.
+  const withoutDeltas = structuredClone(safeFunction);
+  withoutDeltas.splice(2, 2);
+  assert.ok((await exchange(encode(withoutDeltas))).body_result.transform);
+  withoutDeltas[2].arguments = '{"cmd":"different arguments"}';
+  assert.ok(
+    (await exchange(encode(withoutDeltas))).body_result.block_delivery,
+    "function_call_arguments.done and output_item.done cannot disagree about the arguments",
+  );
   const escapedCredential = [..."synthetic-key-initial"]
     .map((character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0"))
     .join("");
@@ -907,6 +919,9 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
     encode(wrongModel),
     body + 'event: response.future_event\ndata: {"type":"response.future_event"}\n\n',
     body.replace('"delta":"READY"', '"delta":"synthetic-key-initial","delta":"READY"'),
+    body.replace("event: response.created", "event: response.completed"),
+    ":ignored\rcomment\n" + body,
+    body.replace("\n\n", "\n\n\n"),
     body.replace(/\n\n$/, "\n"),
   ]) {
     assert.ok(

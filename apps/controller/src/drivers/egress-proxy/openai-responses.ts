@@ -378,8 +378,30 @@ const response = object(
   ["id", "status", "output"],
 );
 
-/** Each event has a known closed shape; completion is checked separately by the SSE parser. */
-export function validResponsesEvent(value: unknown, model: string): boolean {
+// The stream needs only this projection of the closed wire shapes checked below.
+type ResponseOutputItem =
+  | { type: "message" | "reasoning" | "custom_tool_call" }
+  | { type: "function_call"; arguments: string };
+export type ItemEvent = {
+  type: "response.output_item.added" | "response.output_item.done";
+  output_index: number;
+  item: ResponseOutputItem & { id: string };
+};
+export type ItemContentEvent = {
+  type: string;
+  output_index: number;
+  item_id: string;
+  delta?: string;
+  arguments?: string;
+};
+export type ResponsesEvent = { type: string; sequence_number?: number } & (
+  | { response: { id: string; status: string; output: ResponseOutputItem[] } }
+  | ItemEvent
+  | ItemContentEvent
+);
+
+/** Check an individual wire event. Order and completion belong to the stream. */
+export function isResponsesEvent(value: unknown, model: string): value is ResponsesEvent {
   const event = asRecord(value);
   if (!event || typeof event.type !== "string") {
     return false;
@@ -402,11 +424,14 @@ export function validResponsesEvent(value: unknown, model: string): boolean {
     );
   }
   if (["response.output_item.added", "response.output_item.done"].includes(event.type)) {
-    return object({ ...base, output_index: integer, item: outputItem }, [
-      "type",
-      "output_index",
-      "item",
-    ])(event);
+    return (
+      typeof asRecord(event.item)?.id === "string" &&
+      object({ ...base, output_index: integer, item: outputItem }, [
+        "type",
+        "output_index",
+        "item",
+      ])(event)
+    );
   }
   const indexed = { ...base, item_id: text, output_index: integer };
   if (["response.content_part.added", "response.content_part.done"].includes(event.type)) {
