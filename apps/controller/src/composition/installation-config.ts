@@ -67,6 +67,7 @@ import {
 import { OCCPluginDriver, CodexPluginDriver } from "../drivers/plugin/index.ts";
 import { createGatewayNodeEnrollment } from "../gateway/node-enrollment-client.ts";
 import { readWorkspaceFilesApiKey } from "./workspace-files.ts";
+import { PostgresPreparedGitHubLifecycle } from "../drivers/repo/github/credentials/prepared-lifecycle.ts";
 import { GitHubRepoDriver } from "../drivers/repo/github/driver.ts";
 import { composeRepoDriver } from "./repository-credentials/platform.ts";
 import { createOpenShellBackend, type OpenShellGateway } from "../backends/openshell.ts";
@@ -137,6 +138,7 @@ export interface InstallationRuntimeDrivers {
   readonly credentialRefreshDriver?: CredentialRefreshDriver;
   readonly egressProxyDriver?: EgressProxyDriver;
   readonly egressAuthority?: EgressAuthorityConfiguration;
+  readonly preparedGitHub?: PostgresPreparedGitHubLifecycle;
   readonly pluginDriver?: PluginDriver;
   readonly repoDriver?: RepoDriver;
   readonly repositoryReceipt?: Readonly<{
@@ -586,17 +588,23 @@ export async function loadInstallationConfiguration(options: {
   }
   let egressProxy: SelectedDriverConfiguration | undefined;
   let egressAuthority: EgressAuthorityConfiguration | undefined;
+  let preparedGitHubKeyPath: string | undefined;
   if (drivers.egress_proxy !== undefined) {
     const selection = object(drivers.egress_proxy, "drivers.egress_proxy");
     closed(selection, ["id", "configuration"], "drivers.egress_proxy");
     const egress = object(selection.configuration, "drivers.egress_proxy.configuration");
     closed(
       egress,
-      ["middlewareName", "binaries", "authority"],
+      ["middlewareName", "binaries", "authority", "preparedGitHub"],
       "drivers.egress_proxy.configuration",
     );
     egressAuthority = egressAuthorityConfiguration(egress.authority, options.mode);
-    const { authority: _authority, ...policy } = egress;
+    const { authority: _authority, preparedGitHub, ...policy } = egress;
+    if (preparedGitHub !== undefined) {
+      const prepared = object(preparedGitHub, "preparedGitHub");
+      closed(prepared, ["custodyKeyPath"], "preparedGitHub");
+      preparedGitHubKeyPath = nonempty(prepared.custodyKeyPath, "preparedGitHub.custodyKeyPath");
+    }
     egressProxy = selected(
       { ...selection, configuration: policy },
       "egress_proxy",
@@ -863,12 +871,25 @@ export async function loadInstallationConfiguration(options: {
       "Protected egress requires paired Kubernetes/OpenShell Drivers and an authenticated TLS gateway endpoint.",
     );
   }
+  const secretDriver = new KubernetesSecretDriver(
+    secret.configuration as unknown as KubernetesSecretDriverOptions,
+    { id: secret.id, implementation: secret.implementation },
+  );
+  const preparedGitHub =
+    preparedGitHubKeyPath === undefined
+      ? undefined
+      : new PostgresPreparedGitHubLifecycle(preparedGitHubKeyPath, secretDriver);
   const egressProxyDriver =
     egressProxy === undefined
       ? undefined
       : new OpenShellEgressProxyDriver(
           egressProxy.configuration as unknown as OpenShellEgressOptions,
-          { id: egressProxy.id, backend: openShell!, sandbox: sandboxDriver! },
+          {
+            id: egressProxy.id,
+            backend: openShell!,
+            sandbox: sandboxDriver!,
+            ...(preparedGitHub ? { preparedGitHub } : {}),
+          },
         );
   const credentialRefreshDriver =
     credentialRefresh === undefined
@@ -913,10 +934,6 @@ export async function loadInstallationConfiguration(options: {
       },
     );
   }
-  const secretDriver = new KubernetesSecretDriver(
-    secret.configuration as unknown as KubernetesSecretDriverOptions,
-    { id: secret.id, implementation: secret.implementation },
-  );
   const createIAMDriver = (state: NativeIAMStateStore): IAMDriver => {
     return iamPackage === undefined
       ? new NativeIAMDriver(state, { id: iam.id, implementation: iam.implementation })
@@ -953,6 +970,7 @@ export async function loadInstallationConfiguration(options: {
     ...(credentialRefreshDriver === undefined ? {} : { credentialRefreshDriver }),
     ...(egressProxyDriver === undefined ? {} : { egressProxyDriver }),
     ...(egressAuthority === undefined ? {} : { egressAuthority }),
+    ...(preparedGitHub === undefined ? {} : { preparedGitHub }),
     createIAMDriver,
     ...(pluginDriver === undefined ? {} : { pluginDriver }),
     ...(repositoryRuntime ?? {}),

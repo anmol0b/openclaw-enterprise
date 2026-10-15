@@ -88,6 +88,7 @@ export async function composeProduction(config: ProductionConfig) {
     credentialRefreshDriver,
     egressProxyDriver,
     egressAuthority,
+    preparedGitHub,
     pluginDriver,
     repoDriver,
     createIAMDriver,
@@ -371,6 +372,7 @@ export async function composeProduction(config: ProductionConfig) {
       ...(config.clientAddress === undefined ? {} : { trustedProxies: config.clientAddress }),
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });
+    await preparedGitHub?.connect(pool);
     if (egressProxyDriver !== undefined && egressAuthority !== undefined) {
       await installEgressAuthority(app, controller, egressProxyDriver, egressAuthority);
     }
@@ -379,10 +381,14 @@ export async function composeProduction(config: ProductionConfig) {
       await pool.query("SELECT 1");
       return { status: "ready" };
     });
-    app.addHook("onClose", async () => state.close());
+    app.addHook("onClose", async () => {
+      await preparedGitHub?.close();
+      await state.close();
+    });
     phaseCompleted("routes");
     return app;
   } catch (error) {
+    await preparedGitHub?.close();
     await pool.end();
     throw error;
   }

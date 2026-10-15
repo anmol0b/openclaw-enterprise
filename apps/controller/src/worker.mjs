@@ -96,6 +96,7 @@ let metricsPool;
 let metricsListener;
 let metricsClosing;
 let receiptServer;
+let preparedGitHub;
 async function closeMetrics() {
   metricsClosing ??= (async () => {
     try {
@@ -190,7 +191,10 @@ try {
             writeFile(livenessPath, `${Date.now()}\n`, { encoding: "utf8", mode: 0o600 }),
         }),
   });
+  preparedGitHub = drivers?.preparedGitHub;
+  await preparedGitHub?.connect(pool);
   await worker.start();
+  preparedGitHub?.startWorker((code) => emitOccLogEvent(logger, { event: "worker.error", code }));
 
   let closing = false;
   async function shutdown() {
@@ -209,6 +213,7 @@ try {
           await closeMetrics();
         }
       } finally {
+        await preparedGitHub?.close();
         await worker.stop();
       }
       process.exitCode = 0;
@@ -220,6 +225,7 @@ try {
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
 } catch (error) {
+  await preparedGitHub?.close().catch(() => {});
   await receiptServer?.close().catch(() => {});
   await closeMetrics().catch(() => {});
   if (readinessPath !== undefined) {

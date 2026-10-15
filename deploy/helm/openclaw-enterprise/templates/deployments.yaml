@@ -159,6 +159,14 @@ spec:
             sizeLimit: 1Mi
         {{- end }}
         {{- end }}
+        {{- if $.Values.preparedGitHub.custodySecretName }}
+        - name: prepared-github-custody
+          secret:
+            secretName: {{ $.Values.preparedGitHub.custodySecretName | quote }}
+            defaultMode: 288 # 0440, readable by the control-plane filesystem group
+            items:
+              - {key: custody.key, path: custody.key}
+        {{- end }}
         - name: installation-startup
           secret:
             secretName: {{ $.Values.installation.secretName | quote }}
@@ -451,6 +459,11 @@ spec:
             - name: repository-control
               mountPath: /run/openclaw/repository-control
             {{- end }}
+            {{- end }}
+            {{- if $.Values.preparedGitHub.custodySecretName }}
+            - name: prepared-github-custody
+              mountPath: /etc/openclaw/prepared-github
+              readOnly: true
             {{- end }}
             - name: installation-startup
               mountPath: /etc/openclaw/installation
