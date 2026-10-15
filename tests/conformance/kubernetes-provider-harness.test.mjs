@@ -1,0 +1,1310 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpsServer } from "node:https";
+import { createServer } from "node:http";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { harnessTlsFixture } from "../helpers/harness-tls.mjs";
+import { openAiStaticProvider } from "../../apps/controller/src/drivers/egress-proxy/openai-provider.ts";
+import {
+  HARNESS_EGRESS_ENROLLMENT_HELPER,
+  HARNESS_EGRESS_ENROLLMENT_PATH,
+} from "../../apps/controller/src/drivers/compute/egress-enrollment.ts";
+import { AGENT_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
+import test from "node:test";
+import { DependencyUnavailableError } from "../../packages/occ/src/index.ts";
+import { providerEndpointFixture } from "../fixtures/kubernetes-provider-endpoint.mjs";
+import { supervisorPeerLabels } from "../fixtures/kubernetes-provider-readiness.mjs";
+import {
+  tenant,
+  authContext,
+  digest,
+  selectorMatches,
+} from "../helpers/kubernetes-routed-scenarios.mjs";
+
+const providerUrl = "ws://tenant--sandbox.openshell.localhost:8080/";
+const providerWorkspaceRoot = "/sandbox/enterprise";
+const heldFailure = {
+  component: "agent",
+  check: "model-probe",
+  checkedAt: "2026-10-08T13:00:00.000Z",
+  code: "MODEL_PROBE_FAILED",
+  cause: { kind: "PROBE_STATUS", detail: "turn-failed" },
+};
+const { cause: _cause, ...withoutCause } = heldFailure;
+const expectedRevision = ({ revision }) => ({
+  namespaceId: tenant.id,
+  agentId: revision.agentId,
+  revisionId: revision.id,
+});
+
+// Advance only the prerequisite Gateway. Each scenario gets fresh API and Sandbox state.
+async function endpointWithGateway() {
+  const fixture = providerEndpointFixture();
+  await fixture.prepare();
+  fixture.setGatewayServing();
+  fixture.setSetupAvailable(true);
+  return fixture;
+}
+
+async function preparedEndpoint() {
+  const fixture = await endpointWithGateway();
+  fixture.observePods([fixture.pod("ready")]);
+  assert.deepEqual(await fixture.prepare(), {
+    ...expectedRevision(fixture),
+    ready: true,
+  });
+  return fixture;
+}
+
+test("provider Harness endpoint bootstraps Gateway before provisioning and requests node setup", async () => {
+  const fixture = providerEndpointFixture();
+  const {
+    driver,
+    revision,
+    read,
+    gatewayName,
+    gatewayNamespace,
+    provisions,
+    endpoints,
+    setupRequests,
+  } = fixture;
+  const expected = expectedRevision(fixture);
+  // The Agent Gateway must be available to mint node setup material. Its first
+  // fail-closed template cannot justify creating the provider-owned Harness.
+  fixture.observePods([]);
+  assert.deepEqual(await fixture.prepare(), {
+    ...expected,
+    ready: false,
+  });
+  assert.equal(provisions.length, 0);
+  assert.equal(endpoints.length, 0);
+  const bootstrapGateway = read("Deployment", gatewayName, gatewayNamespace);
+  assert.ok(bootstrapGateway);
+  assert.notEqual(
+    bootstrapGateway.spec.template.spec.containers[0].env.find(
+      ({ name }) => name === "APP_SERVER_URL",
+    ).value,
+    providerUrl,
+  );
+
+  // Once the Gateway is serving, its Agent-owned setup Secret lets Compute
+  // render the final provider request and transition to the OpenShell endpoint.
+  fixture.setGatewayServing();
+  fixture.observePods([]);
+  assert.deepEqual(await fixture.prepare(), {
+    ...expected,
+    ready: false,
+  });
+  assert.deepEqual(setupRequests, [
+    {
+      url: driver.getGatewayEndpoint(revision),
+      nodeUrl: `ws://${gatewayName}.${gatewayNamespace}.svc.cluster.local:8080/node`,
+    },
+  ]);
+  assert.equal(provisions.length, 1);
+  assert.equal(endpoints.length, 1);
+});
+
+test("provider Harness endpoint preparation re-observes the same revision across Pod transitions", async (t) => {
+  const fixture = await endpointWithGateway();
+  const starting = fixture.pod("starting", "False");
+  const ready = fixture.pod("ready");
+  const stages = [
+    { name: "starting Pod is not ready", pods: [starting], ready: false },
+    { name: "ambiguous Pods are not ready", pods: [ready, starting], ready: false },
+    { name: "unique ready Pod becomes ready", pods: [ready], ready: true },
+    { name: "Ready back to Starting clears readiness", pods: [starting], ready: false },
+  ];
+  // Keep the same Driver and revision: reconciliation must neither cache a false
+  // result forever nor retain true after the workload becomes unready again.
+  for (const stage of stages) {
+    await t.test(stage.name, async () => {
+      const provisionsBefore = fixture.provisions.length;
+      const endpointsBefore = fixture.endpoints.length;
+      const hooksBefore = fixture.hooks.length;
+      fixture.observePods(stage.pods);
+      assert.deepEqual(await fixture.prepare(), {
+        ...expectedRevision(fixture),
+        ready: stage.ready,
+      });
+      assert.deepEqual(fixture.hooks.slice(hooksBefore), ["start"]);
+      assert.equal(fixture.provisions.length, provisionsBefore + 1);
+      assert.equal(fixture.endpoints.length, endpointsBefore + 1);
+    });
+  }
+});
+
+test("provider Harness endpoint writes transport and runtime requirements", async () => {
+  const fixture = await preparedEndpoint();
+  const { driver, revision, provisions } = fixture;
+  const { requirements } = provisions[0];
+  assert.deepEqual(requirements.labels, fixture.labels);
+  assert.deepEqual(
+    requirements.environment.find(({ name }) => name === "APP_TOKEN_SHA"),
+    {
+      name: "APP_TOKEN_SHA",
+      value: createHash("sha256").update("test-transport").digest("hex"),
+    },
+  );
+  assert.equal(
+    requirements.environment.some(({ name }) => name === "APP_SERVER_TOKEN"),
+    false,
+  );
+  assert.equal(JSON.stringify(requirements).includes("test-transport"), false);
+  assert.deepEqual(
+    requirements.environment.find(({ name }) => name === "OPENCLAW_NODE_SETUP_CODE"),
+    {
+      name: "OPENCLAW_NODE_SETUP_CODE",
+      valueFrom: {
+        secretKeyRef: {
+          name: driver.workspaceNodeName(revision),
+          key: "setupCode",
+        },
+      },
+    },
+  );
+  const gatewayPod = fixture.gateway().spec.template.spec;
+  const gatewayContainer = gatewayPod.containers[0];
+  assert.equal(
+    gatewayContainer.env.find(({ name }) => name === "APP_SERVER_URL").value,
+    providerUrl,
+  );
+  assert.equal(
+    gatewayContainer.env.find(({ name }) => name === "OPENCLAW_REMOTE_WORKSPACE_ROOT").value,
+    providerWorkspaceRoot,
+  );
+  assert.deepEqual(gatewayPod.hostAliases, [
+    { ip: "10.43.0.50", hostnames: ["tenant--sandbox.openshell.localhost"] },
+  ]);
+  assert.deepEqual(
+    requirements.files.map(({ name, environmentVariable }) => ({
+      name,
+      environmentVariable,
+    })),
+    [
+      {
+        name: "runtime.json",
+        environmentVariable: "OPENCLAW_PLUGIN_RUNTIME_MANIFEST",
+      },
+      {
+        name: "config.toml",
+        environmentVariable: "OPENCLAW_PLUGIN_CODEX_CONFIG_TOML",
+      },
+    ],
+  );
+  assert.deepEqual(JSON.parse(requirements.files[0].content), {
+    kind: "codex",
+    selections: {},
+  });
+});
+
+test("provider Harness endpoint admits only exact node and provider peers", async () => {
+  const fixture = await preparedEndpoint();
+  const { revision, namespace, read, writes, provisions, peerLookups, gatewayNamespace } = fixture;
+  const workspaceNodePolicy = read("NetworkPolicy", "allow-node-gateway");
+  assert.equal(
+    selectorMatches(workspaceNodePolicy.spec.podSelector, provisions[0].requirements.labels),
+    true,
+    "the provider-fenced Harness must retain exact workspace-node Gateway egress",
+  );
+  // The supervisor's egress is OpenShell's own (egress to every destination);
+  // Compute writes no supervisor-selecting policy (finding 1127).
+  assert.equal(
+    read("NetworkPolicy", `allow-workspace-node-gateway-${digest(revision.agentId)}`, namespace),
+    undefined,
+  );
+  const gatewayNodePolicy = read(
+    "NetworkPolicy",
+    `allow-gateway-workspace-node-${digest(revision.agentId)}`,
+    gatewayNamespace,
+  );
+  // Only this revision's own supervisor, never every supervisor in the namespace.
+  assert.deepEqual(gatewayNodePolicy.spec.ingress, [
+    {
+      from: [
+        {
+          namespaceSelector: {
+            matchLabels: { "kubernetes.io/metadata.name": namespace },
+          },
+          podSelector: { matchLabels: supervisorPeerLabels(revision.id) },
+        },
+      ],
+      ports: [{ protocol: "TCP", port: 8080 }],
+    },
+  ]);
+  // Before the Sandbox existed the policy admitted no relay at all; the policy is
+  // re-applied right after provisioning, before the workspace node is awaited.
+  const workspaceNodeWrites = writes.filter(
+    ({ metadata }) => metadata.name === `allow-gateway-workspace-node-${digest(revision.agentId)}`,
+  );
+  assert.deepEqual(workspaceNodeWrites[0].spec.ingress, []);
+  assert.ok(fixture.policiesAtHarnessObservation.length > 0);
+  for (const policy of fixture.policiesAtHarnessObservation) {
+    assert.deepEqual(
+      policy.spec.ingress,
+      gatewayNodePolicy.spec.ingress,
+      "the exact node policy must exist before every provider Pod observation",
+    );
+  }
+  for (const policies of fixture.provisioningPolicies) {
+    assert.equal(
+      policies.some(
+        ({ metadata }) => metadata.name === `allow-agent-auth-${digest(revision.agentId)}`,
+      ),
+      false,
+      "provider-fenced Harnesses receive no Compute authentication egress",
+    );
+    assert.equal(
+      policies.some(
+        ({ metadata }) => metadata.name === `allow-agent-runtime-${digest(revision.agentId)}`,
+      ),
+      false,
+      "provider-owned transport does not grant direct ingress to the Harness",
+    );
+  }
+  assert.ok(peerLookups.every((id) => id === revision.id));
+  const agentServiceName = `agent-${digest(revision.agentId)}`;
+  assert.equal(
+    read("Service", agentServiceName).spec.selector["app.kubernetes.io/name"],
+    `${agentServiceName}-inactive`,
+  );
+});
+
+test("provider Harness malformed Pod stops preparation and cannot write activation", async () => {
+  const fixture = await preparedEndpoint();
+  const { hooks, writes } = fixture;
+  fixture.observePods([fixture.pod("ready"), null]);
+  await assert.rejects(fixture.prepare(), /invalid or incomplete/);
+  assert.deepEqual(hooks.slice(-2), ["start", "stop"]);
+  const writesBeforeActivation = writes.length;
+  await assert.rejects(fixture.activate(), /invalid or incomplete/);
+  assert.equal(writes.length, writesBeforeActivation);
+});
+
+test("provider Harness activation replaces broad legacy peers and deletes obsolete policies with UID preconditions", async () => {
+  const fixture = await preparedEndpoint();
+  const {
+    driver,
+    revision,
+    namespace,
+    objects,
+    key,
+    read,
+    save,
+    clients,
+    endpoints,
+    gatewayNamespace,
+  } = fixture;
+  const agentServiceName = `agent-${digest(revision.agentId)}`;
+  // Finding 861, reverse switch: a plain dedicated predecessor's Harness grant is
+  // not one this revision writes, so activation deletes it and keeps the pair.
+  const plainRuntime = driver
+    .agentNetworkPolicies(
+      { ...revision, id: "plain-predecessor", sandboxDriverId: undefined },
+      { name: namespace, plane: "execution" },
+    )
+    .map(({ resource }) => resource)
+    .find(({ metadata }) => metadata.name === `allow-agent-runtime-${digest(revision.agentId)}`);
+  save({ ...plainRuntime, metadata: { ...plainRuntime.metadata, uid: "plain-runtime-uid" } });
+  const deletedPolicies = [];
+  clients.networking.deleteNamespacedNetworkPolicy = async ({ name, namespace: target, body }) => {
+    assert.equal(body.preconditions.uid, read("NetworkPolicy", name, target).metadata.uid);
+    deletedPolicies.push(name);
+    objects.delete(key("NetworkPolicy", name, target));
+  };
+  // Upgrade: an earlier controller's pair admitted every supervisor Pod in the
+  // namespace. Activation replaces the ingress half and deletes the egress half.
+  const legacySupervisor = { "openshell.ai/boundary-role": "supervisor" };
+  const legacyIngressName = `allow-gateway-workspace-node-${digest(revision.agentId)}`;
+  const legacyIngress = read("NetworkPolicy", legacyIngressName);
+  save({
+    ...legacyIngress,
+    spec: {
+      ...legacyIngress.spec,
+      ingress: [
+        {
+          from: [
+            {
+              namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": namespace } },
+              podSelector: { matchLabels: legacySupervisor },
+            },
+          ],
+          ports: [{ protocol: "TCP", port: 8080 }],
+        },
+      ],
+    },
+  });
+  const legacyEgress = driver.manifest(
+    "networking.k8s.io/v1",
+    "NetworkPolicy",
+    `allow-workspace-node-gateway-${digest(revision.agentId)}`,
+    { namespaceId: tenant.id, agentId: revision.agentId },
+    { name: namespace, plane: "execution" },
+  );
+  save({
+    ...legacyEgress,
+    metadata: { ...legacyEgress.metadata, uid: "legacy-egress-uid" },
+    spec: {
+      podSelector: { matchLabels: legacySupervisor },
+      policyTypes: ["Egress"],
+      egress: [{ ports: [{ protocol: "TCP", port: 8080 }] }],
+    },
+  });
+  fixture.observePods([fixture.pod("ready")]);
+  await fixture.activate();
+  assert.equal(endpoints.length, 2);
+  assert.deepEqual(deletedPolicies, [legacyEgress.metadata.name, plainRuntime.metadata.name]);
+  assert.equal(read("NetworkPolicy", legacyEgress.metadata.name), undefined);
+  assert.deepEqual(read("NetworkPolicy", legacyIngressName).spec.ingress[0].from[0].podSelector, {
+    matchLabels: supervisorPeerLabels(revision.id),
+  });
+  assert.equal(
+    read("Service", agentServiceName).spec.selector["app.kubernetes.io/name"],
+    `${agentServiceName}-inactive`,
+  );
+  const gatewayPolicy = read(
+    "NetworkPolicy",
+    `allow-gateway-agent-${digest(revision.agentId)}`,
+    gatewayNamespace,
+  );
+  assert.deepEqual(gatewayPolicy.spec.egress, [
+    {
+      to: [
+        {
+          namespaceSelector: {
+            matchLabels: { "kubernetes.io/metadata.name": "openshell-system" },
+          },
+          podSelector: { matchLabels: { app: "openshell-gateway" } },
+        },
+      ],
+      ports: [{ protocol: "TCP", port: 8080 }],
+    },
+  ]);
+});
+
+const transportScenarios = [
+  { name: "serving transport", answer: { state: "serving" }, outcome: { ready: true } },
+  { name: "starting transport", answer: { state: "starting" }, outcome: { ready: false } },
+  {
+    name: "held model failure",
+    answer: { state: "failed", runtimeFailure: heldFailure },
+    outcome: { ready: false, runtimeFailure: heldFailure },
+  },
+];
+const statusScenarios = [
+  ...transportScenarios,
+  {
+    name: "redacted provider cause",
+    answer: {
+      state: "failed",
+      runtimeFailure: { ...heldFailure, cause: { kind: "PROVIDER_TEXT", detail: "key sk-123" } },
+    },
+    outcome: { ready: false, runtimeFailure: withoutCause },
+  },
+];
+for (const scenario of statusScenarios) {
+  test(`provider Harness preparation observes ${scenario.name}`, async () => {
+    const fixture = await endpointWithGateway();
+    const { revision } = fixture;
+    const observations = [];
+    fixture.sandbox.harnessStatus = async (context) => {
+      observations.push(context);
+      return scenario.answer;
+    };
+    fixture.observePods([fixture.pod("ready")]);
+    assert.deepEqual(await fixture.prepare(), {
+      ...expectedRevision(fixture),
+      ...scenario.outcome,
+    });
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].transportToken, "test-transport");
+    assert.equal(observations[0].revision, revision);
+    assert.deepEqual(observations[0].requirements.labels, fixture.labels);
+  });
+}
+
+for (const scenario of [
+  { name: "missing evidence", runtimeFailure: undefined },
+  { name: "null evidence", runtimeFailure: null },
+  { name: "string evidence", runtimeFailure: "MODEL_PROBE_FAILED" },
+  { name: "invalid code", runtimeFailure: { ...heldFailure, code: "not a code" } },
+  { name: "invalid timestamp", runtimeFailure: { ...heldFailure, checkedAt: "yesterday" } },
+]) {
+  test(`provider Harness rejects ${scenario.name}`, async () => {
+    const fixture = await endpointWithGateway();
+    fixture.observePods([fixture.pod("ready")]);
+    fixture.sandbox.harnessStatus = async () => ({
+      state: "failed",
+      runtimeFailure: scenario.runtimeFailure,
+    });
+    await assert.rejects(fixture.prepare(), /Runtime failure status returned invalid data/);
+    assert.deepEqual(fixture.hooks.slice(-2), ["start", "stop"]);
+  });
+}
+
+test("provider Harness unready Pod prevents transport status observation", async () => {
+  const fixture = await endpointWithGateway();
+  let observations = 0;
+  fixture.sandbox.harnessStatus = async () => {
+    observations++;
+    return { state: "failed", runtimeFailure: heldFailure };
+  };
+  fixture.observePods([fixture.pod("starting", "False")]);
+  assert.deepEqual(await fixture.prepare(), {
+    ...expectedRevision(fixture),
+    ready: false,
+  });
+  assert.equal(observations, 0);
+});
+
+for (const scenario of transportScenarios) {
+  test(`provider Harness activation re-observes ${scenario.name}`, async () => {
+    const fixture = await endpointWithGateway();
+    fixture.observePods([fixture.pod("ready")]);
+    const observations = [];
+    let answer = { state: "serving" };
+    fixture.sandbox.harnessStatus = async (context) => {
+      observations.push(context);
+      return answer;
+    };
+    assert.deepEqual(await fixture.prepare(), {
+      ...expectedRevision(fixture),
+      ready: true,
+    });
+    assert.equal(observations.length, 1);
+    // The previously serving Harness can stop between preparation and activation.
+    answer = scenario.answer;
+    const before = fixture.writes.length;
+    if (scenario.outcome.ready) {
+      await fixture.activate();
+      assert.ok(fixture.writes.length > before);
+    } else {
+      await assert.rejects(fixture.activate(), /The exact AgentRevision workload is not ready/);
+      assert.equal(fixture.writes.length, before);
+    }
+    assert.equal(observations.length, 2);
+    assert.equal(observations[1].transportToken, "test-transport");
+  });
+}
+
+for (const scenario of transportScenarios) {
+  test(`provider Harness ready credential attachment still requires ${scenario.name}`, async () => {
+    const fixture = await endpointWithGateway();
+    const { driver, revision } = fixture;
+    fixture.observePods([fixture.pod("ready")]);
+    const harnessObservations = [];
+    fixture.sandbox.harnessStatus = async (context) => {
+      harnessObservations.push(context);
+      return scenario.answer;
+    };
+    const attachmentChecks = [];
+    // The Credential Gateway Compute holds; only revisions that bind sources reach it.
+    driver.credentialGatewayDriver = {
+      id: "credential-gateway",
+      capability: "credential_gateway",
+      async attachForRevision(context) {
+        return context.sources.map(({ id }) => ({ sourceId: id, ref: `ref-${id}` }));
+      },
+      async attachmentStatus(context) {
+        attachmentChecks.push(context.sources.map(({ id }) => id));
+        return context.sources.map(({ id }) => ({ sourceId: id, state: "ready" }));
+      },
+    };
+    const toolSource = {
+      id: "cs_00000000-0000-4000-8000-000000000546",
+      namespaceId: tenant.id,
+      name: "tool",
+      type: "bearer-token",
+      config: {},
+      secrets: {},
+      driverId: "credential-gateway",
+      state: "ready",
+      createdAt: "2026-10-08T00:00:00.000Z",
+    };
+    const sourced = {
+      ...revision,
+      credentialSources: [
+        {
+          sourceId: toolSource.id,
+          credentialGatewayId: "credential-gateway",
+          sourceType: "bearer-token",
+        },
+      ],
+    };
+    const sourcedContext = { ...authContext(sourced), credentialSources: [toolSource] };
+    assert.deepEqual(await fixture.prepare(sourced, sourcedContext), {
+      ...expectedRevision(fixture),
+      ...scenario.outcome,
+    });
+    assert.deepEqual(attachmentChecks, [[toolSource.id]]);
+    assert.equal(harnessObservations.length, 1);
+    assert.equal(harnessObservations[0].revision, sourced);
+  });
+}
+
+test("provider Harness unreachable transport is diagnosed as Sandbox provisioning failure", async () => {
+  const fixture = await endpointWithGateway();
+  const { driver } = fixture;
+  fixture.observePods([fixture.pod("ready")]);
+  // An unreachable Harness transport is a Sandbox provisioning failure in diagnostics.
+  fixture.sandbox.harnessStatus = async () => {
+    throw new DependencyUnavailableError("OpenShell service is unreachable.");
+  };
+  const unreachable = await fixture.prepare().then(
+    () => assert.fail("an unreachable Harness must not prepare"),
+    (error) => error,
+  );
+  assert.ok(unreachable instanceof DependencyUnavailableError, String(unreachable));
+  assert.equal(driver.describePrepareRevisionFailure(unreachable).stage, "sandbox_provision");
+});
+
+test("provider Harness verified endpoint trust is projected before rollout and immutable", async (t) => {
+  const tls = await harnessTlsFixture(t);
+  const untrusted = await harnessTlsFixture(t);
+  const controllerRequire = createRequire(
+    new URL("../../apps/controller/package.json", import.meta.url),
+  );
+  const socketRequire = createRequire(controllerRequire.resolve("@kubernetes/client-node"));
+  const { WebSocketServer } = socketRequire("ws");
+  const server = createHttpsServer({ key: tls.key, cert: tls.cert });
+  const sockets = new WebSocketServer({ server });
+  t.after(() => {
+    for (const client of sockets.clients) {
+      client.terminate();
+    }
+    sockets.close();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  sockets.on("connection", (socket, request) => {
+    assert.equal(request.headers.authorization, "Bearer test-transport");
+    socket.send("trust-ok");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const providerPort = server.address().port;
+  let providerCaBundle = tls.caBundle;
+
+  const providerUrl = `wss://localhost:${providerPort}/`;
+  const fixture = providerEndpointFixture({
+    providerNetwork: {
+      namespace: "openshell-system",
+      podLabels: { app: "openshell-gateway" },
+      address: "10.43.0.50",
+      port: providerPort,
+    },
+    harnessEndpoint: async () => ({
+      url: providerUrl,
+      workspaceRoot: providerWorkspaceRoot,
+      tls: { caBundle: providerCaBundle },
+    }),
+  });
+  const { objects, key, read, writes, revision, provisions, gatewayNamespace } = fixture;
+  await fixture.prepare();
+  const bootstrap = fixture.gateway();
+  assert.equal(
+    bootstrap.spec.template.spec.containers[0].env.some(
+      ({ name }) => name === "NODE_EXTRA_CA_CERTS",
+    ),
+    false,
+  );
+  const configurationName = `gateway-${digest(revision.agentId)}-rev-${digest(revision.id)}`;
+  const initialSnapshot = read("ConfigMap", configurationName, gatewayNamespace);
+  fixture.setGatewayServing();
+  fixture.setSetupAvailable(true);
+  fixture.observePods([fixture.pod("ready")]);
+  assert.equal((await fixture.prepare()).ready, true);
+  const gatewayContainer = fixture.gateway().spec.template.spec.containers[0];
+  // Endpoint discovery must not rewrite the immutable configuration created for
+  // bootstrap. Only this revision's Gateway receives the separate public bundle.
+  assert.deepEqual(
+    objects.get(key("ConfigMap", configurationName, gatewayNamespace)),
+    initialSnapshot,
+  );
+  const deployedGateway = fixture.gateway();
+  const trustMount = gatewayContainer.volumeMounts.find(({ name }) => name === "harness-trust");
+  assert.ok(trustMount, "the provider endpoint CA must be mounted into the Gateway");
+  const trustVolume = deployedGateway.spec.template.spec.volumes.find(
+    ({ name }) => name === trustMount.name,
+  );
+  assert.equal(trustMount.readOnly, true);
+  assert.equal(trustVolume.configMap.optional, false);
+  const trust = objects.get(key("ConfigMap", trustVolume.configMap.name, gatewayNamespace));
+  assert.equal(trust.immutable, true);
+  assert.equal(trust.metadata.labels["openclaw.dev/revision"], revision.id);
+  assert.deepEqual(trust.data, { "ca-bundle.pem": tls.caBundle });
+  assert.equal(gatewayContainer.env.filter(({ name }) => name === "NODE_EXTRA_CA_CERTS").length, 1);
+  const trustPath = gatewayContainer.env.find(({ name }) => name === "NODE_EXTRA_CA_CERTS").value;
+  assert.equal(trustPath, `${trustMount.mountPath}/${trustVolume.configMap.items[0].path}`);
+  assert.equal(
+    provisions[0].requirements.environment.some(({ name }) => name === "NODE_EXTRA_CA_CERTS"),
+    false,
+  );
+  const trustWrite = writes.findIndex(
+    ({ kind, metadata }) => kind === "ConfigMap" && metadata.name === trust.metadata.name,
+  );
+  const rolloutWrite = writes.findIndex(
+    ({ kind, spec }) =>
+      kind === "Deployment" &&
+      spec.template.spec.volumes.some(({ name }) => name === "harness-trust"),
+  );
+  assert.ok(
+    trustWrite >= 0 && trustWrite < rolloutWrite,
+    "public trust exists before the Gateway rollout",
+  );
+
+  // Materialize the actual projection in a private directory. A fresh Node
+  // process exercises ws's default TLS path, as the pinned Gateway client does;
+  // no ca/rejectUnauthorized override or process trust mutation is supplied.
+  const projectedPath = join(tls.directory, "projected-ca.pem");
+  await writeFile(projectedPath, trust.data[trustVolume.configMap.items[0].key]);
+  const probe = async (caPath, url = providerUrl) => {
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+      const WebSocket = require(${JSON.stringify(socketRequire.resolve("ws"))});
+      const socket = new WebSocket(process.env.APP_SERVER_URL, {
+        headers: { Authorization: "Bearer " + process.env.APP_SERVER_TOKEN },
+        handshakeTimeout: 2000,
+      });
+      socket.on("message", (data) => {
+        if (data.toString() !== "trust-ok") process.exitCode = 2;
+        socket.close();
+      });
+      socket.on("error", (error) => { process.stderr.write(String(error.code)); process.exitCode = 1; });
+    `,
+      ],
+      {
+        env: {
+          APP_SERVER_URL: url,
+          APP_SERVER_TOKEN: "test-transport",
+          ...(caPath === undefined ? {} : { NODE_EXTRA_CA_CERTS: caPath }),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let errors = "";
+    child.stderr.on("data", (chunk) => {
+      errors += chunk;
+    });
+    const [code] = await once(child, "exit");
+    return { code, errors };
+  };
+  assert.deepEqual(await probe(projectedPath), { code: 0, errors: "" });
+  for (const caPath of [undefined, untrusted.rootCertificatePath]) {
+    const denied = await probe(caPath);
+    assert.equal(denied.code, 1);
+    assert.match(
+      denied.errors,
+      /UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY/,
+    );
+  }
+  const mismatch = await probe(projectedPath, `wss://127.0.0.1:${providerPort}/`);
+  assert.equal(mismatch.code, 1);
+  assert.equal(mismatch.errors, "ERR_TLS_CERT_ALTNAME_INVALID");
+
+  providerCaBundle = untrusted.caBundle;
+  await assert.rejects(fixture.activate(), /invalid immutable Kubernetes ConfigMap/);
+  assert.deepEqual(read("ConfigMap", trust.metadata.name, gatewayNamespace), trust);
+});
+
+test("provider Harness protected execution is released only on current signed installation and warmth", async (t) => {
+  const fixture = await preparedEndpoint();
+  const { driver, revision, provisions, objects, save, core } = fixture;
+  let harnessAnswer = { state: "serving" };
+  fixture.sandbox.harnessStatus = async () => harnessAnswer;
+  driver.credentialGatewayDriver = { id: "credential-gateway", capability: "credential_gateway" };
+  // A separately admitted protected revision waits for the installation commit.
+  // These Driver dependencies expose ordering; actual authenticated release and
+  // first model-request behavior are covered by the enrollment integration test.
+  const protectedId = "ar_00000000-0000-4000-8000-000000000547";
+  const execution = {
+    installationId: "ins_00000000-0000-4000-8000-000000000001",
+    namespaceId: tenant.id,
+    agentId: revision.agentId,
+    servicePrincipalId: revision.servicePrincipalId,
+    revisionId: protectedId,
+    executionId: "00000000-0000-4000-8000-000000000547",
+  };
+  const protectedSourceId = "cs_00000000-0000-4000-8000-000000000547";
+  const sourceKey = {
+    installationId: execution.installationId,
+    namespaceId: tenant.id,
+    source: { id: protectedSourceId, generation: 1 },
+    backend: { id: "static-input", generation: 1 },
+    provider: openAiStaticProvider.ref,
+  };
+  const source = {
+    namespaceId: tenant.id,
+    secrets: {},
+    driverId: "credential-gateway",
+    state: "ready",
+    createdAt: tenant.createdAt,
+    id: protectedSourceId,
+    name: "model",
+    type: "openai",
+    config: openAiStaticProvider.normalizeConfig({}),
+    egress: {
+      key: sourceKey,
+      schemaVersion: 1,
+      adoption: "live",
+      retention: "none",
+      materialRefId: "material-model",
+      secret: {
+        kind: "secret",
+        id: "sec_00000000-0000-4000-8000-000000000550",
+        namespaceId: tenant.id,
+      },
+      secretDriver: { id: "secrets", generation: 1 },
+      sender: { id: "supervisor", generation: 1 },
+      resolver: { id: "resolver", generation: 1 },
+    },
+  };
+  const grant = openAiStaticProvider.normalizeGrant(["gpt-5"]);
+  const plan = {
+    id: "00000000-0000-4000-8000-000000000548",
+    generation: 1,
+    execution,
+    sandboxDriverId: fixture.sandbox.id,
+    egressDriverId: "protected-egress",
+    routes: openAiStaticProvider.routes(source, {
+      binding: { id: "00000000-0000-4000-8000-000000000549", generation: 1 },
+      execution,
+      source: sourceKey,
+      grant,
+      grantHash: createHash("sha256").update(JSON.stringify(grant)).digest("hex"),
+      isolationId: revision.agentId,
+    }),
+  };
+  const protectedAuth = {
+    method: "credential_source",
+    sourceId: source.id,
+    credentialGatewayId: source.driverId,
+    sourceType: source.type,
+    loginMode: "api_key",
+  };
+  const protectedRevision = {
+    ...revision,
+    id: protectedId,
+    executionAdmission: { version: 2, mode: "protected" },
+    revision: revision.revision + 1,
+    harnessAuth: protectedAuth,
+    egressPlan: plan,
+    credentialSources: [
+      { sourceId: source.id, credentialGatewayId: source.driverId, sourceType: source.type },
+    ],
+  };
+  const attachment = { plan, configuration: { middleware: "protected-attachment" } };
+  const installed = {
+    plan,
+    sandboxId: "installed-sandbox",
+    sender: source.egress.sender,
+    installedAt: "2026-10-14T00:00:00.000Z",
+    enforcement: {
+      instanceId: "current-instance",
+      configurationId: "current-configuration",
+      peerKeyId: "enrolled-exchange-key",
+    },
+  };
+  const events = [];
+  let observation = installed;
+  let current = true;
+  driver.credentialGatewayDriver.listSourceTypes = async () => [openAiStaticProvider.sourceType];
+  driver.conduitDriver = {
+    id: plan.egressDriverId,
+    implementation: "openshell",
+    async configureRevision() {
+      return attachment;
+    },
+    async wiringStatus() {
+      events.push("observe");
+      return observation;
+    },
+    async verifyInstallation() {
+      events.push("verify-current");
+      return current;
+    },
+  };
+  let enrollmentRequirements;
+  let releaseByCompute;
+  const released = new DependencyUnavailableError("stop after authenticated enrollment boundary");
+  fixture.sandbox.enrollHarness = async (context, receipt, release) => {
+    releaseByCompute = release;
+    assert.equal(context.transportToken, "test-transport");
+    assert.equal(context.revision, protectedRevision);
+    assert.equal(receipt, installed);
+    enrollmentRequirements = context.requirements;
+    events.push("enroll");
+    throw released;
+  };
+  // A new revision has its own node setup; the already-ready Gateway remains the
+  // predecessor. Its setup Secret is independently seeded, not made ready by writes.
+  const protectedSetup = core.readNamespacedSecret({ name: driver.workspaceNodeName(revision) });
+  const setup = await protectedSetup;
+  save({
+    ...setup,
+    metadata: {
+      ...setup.metadata,
+      name: driver.workspaceNodeName(protectedRevision),
+      labels: { ...setup.metadata.labels, "openclaw.dev/revision": protectedId },
+    },
+  });
+  const protectedContext = {
+    harnessAuth: { ...protectedAuth, source },
+    credentialSources: [source],
+    async recordEgressInstallation() {
+      events.push("commit");
+    },
+    currentEgressInstallation: async () => observation,
+  };
+  observation = undefined;
+  assert.equal((await driver.prepareRevision(protectedRevision, protectedContext)).ready, false);
+  assert.deepEqual(events.splice(0), ["observe"]);
+  observation = installed;
+  const commitFailure = new Error("installation commit failed");
+  await assert.rejects(
+    driver.prepareRevision(protectedRevision, {
+      ...protectedContext,
+      async recordEgressInstallation() {
+        events.push("commit-rejected");
+        throw commitFailure;
+      },
+    }),
+    (error) => error === commitFailure,
+  );
+  assert.deepEqual(events.splice(0), ["observe", "commit-rejected"]);
+  current = false;
+  assert.equal((await driver.prepareRevision(protectedRevision, protectedContext)).ready, false);
+  assert.deepEqual(events.splice(0), ["observe", "commit", "verify-current"]);
+  current = true;
+  const entered = Promise.withResolvers();
+  const commit = Promise.withResolvers();
+  const preparing = driver.prepareRevision(protectedRevision, {
+    ...protectedContext,
+    async recordEgressInstallation() {
+      events.push("commit-start");
+      entered.resolve();
+      await commit.promise;
+      events.push("commit-finished");
+    },
+  });
+  // Await both branches so an earlier preparation failure cannot leave the test hanging.
+  await Promise.race([entered.promise, preparing]);
+  assert.deepEqual(events, ["observe", "commit-start"]);
+  commit.resolve();
+  await assert.rejects(preparing, (error) => error === released);
+  assert.deepEqual(events.splice(0), [
+    "observe",
+    "commit-start",
+    "commit-finished",
+    "verify-current",
+    "enroll",
+  ]);
+
+  // Exercise the actual producer's output, not a hand-built environment that
+  // can accidentally restore the revision variable removed during projection.
+  const manifest = JSON.parse(
+    enrollmentRequirements.files.find(
+      (file) => file.environmentVariable === "OPENCLAW_PLUGIN_RUNTIME_MANIFEST",
+    ).content,
+  );
+  const environment = Object.fromEntries(
+    enrollmentRequirements.environment
+      .filter((entry) => "value" in entry)
+      .map(({ name, value }) => [name, value]),
+  );
+  for (const name of [
+    "OPENCLAW_AGENT_REVISION_ID",
+    "OPENCLAW_RUNTIME_STATUS_PORT",
+    "OPENCLAW_RUNTIME_STATUS_CONTAINER",
+    "OPENCLAW_POD_UID",
+    "APP_SERVER_TOKEN",
+  ]) {
+    assert.equal(
+      enrollmentRequirements.environment.some((entry) => entry.name === name),
+      false,
+    );
+  }
+  assert.equal(
+    provisions[0].requirements.environment.some(
+      (entry) => entry.name === "OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID",
+    ),
+    false,
+    "unprotected provider Harnesses do not receive enrollment identity",
+  );
+  const reservation = createServer();
+  reservation.listen(0, "127.0.0.1");
+  await once(reservation, "listening");
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+  // Only remap the service port to an available loopback test port. All
+  // enrollment identity and authentication inputs come from prepareRevision.
+  environment.APP_SERVER_PORT = String(port);
+  const program = `
+    function isPlainObject(value) {
+      return value !== null && typeof value === "object" &&
+        Object.getPrototypeOf(value) === Object.prototype;
+    }
+    ${HARNESS_EGRESS_ENROLLMENT_HELPER}
+    waitForHarnessEgressEnrollment(${JSON.stringify(manifest.egressEnrollment)})
+      .then(() => process.exit(0), (error) => {
+        console.error(error.message); process.exit(1);
+      });
+  `;
+  await t.test(
+    "production provider requirements open the authenticated enrollment challenge",
+    async (t) => {
+      const child = spawn(process.execPath, ["-e", program], {
+        env: environment,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      const exited = once(child, "exit");
+      let diagnostics = "";
+      child.stderr.on("data", (chunk) => {
+        diagnostics += chunk;
+      });
+      t.after(async () => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill();
+          await exited;
+        }
+      });
+      const url = `http://127.0.0.1:${port}${HARNESS_EGRESS_ENROLLMENT_PATH}`;
+      let response;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        assert.equal(child.exitCode, null, diagnostics);
+        response = await fetch(url, {
+          headers: { authorization: "Bearer test-transport" },
+        }).catch(() => undefined);
+        if (response) {
+          break;
+        }
+        await delay(20);
+      }
+      assert.equal(response?.status, 200, diagnostics);
+      const challenge = await response.json();
+      assert.deepEqual(challenge.execution, plan.execution);
+      assert.deepEqual(challenge.plan, { id: plan.id, generation: plan.generation });
+      assert.equal((await fetch(url)).status, 401);
+      const release = (body) =>
+        fetch(url, {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test-transport",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+      assert.equal(
+        (
+          await release({
+            ...challenge,
+            execution: { ...challenge.execution, revisionId: "wrong-revision" },
+          })
+        ).status,
+        409,
+      );
+      // A bearer holder can read the real challenge but cannot echo it to release startup.
+      assert.equal((await release(challenge)).status, 409);
+      for (const substitution of [
+        undefined,
+        { ...installed, sandboxId: "replacement" },
+        {
+          ...installed,
+          enforcement: { ...installed.enforcement, peerKeyId: "new-enrolled-peer" },
+        },
+      ]) {
+        observation = substitution;
+        await assert.rejects(
+          releaseByCompute(challenge.startupId),
+          /exact current committed installation/,
+        );
+      }
+      observation = installed;
+      current = false;
+      await assert.rejects(
+        releaseByCompute(challenge.startupId),
+        /exact current committed installation/,
+      );
+      current = true;
+      const stale = await releaseByCompute("another-startup");
+      assert.equal((await release(stale)).status, 409);
+      const signed = await releaseByCompute(challenge.startupId);
+      const signer = [...objects.values()].find((v) =>
+        v.metadata?.name.startsWith("compute-release-"),
+      );
+      assert.ok(signer?.immutable);
+      assert.equal(JSON.stringify(enrollmentRequirements).includes(signer.data.signer), false);
+      for (const forged of [
+        { ...signed, signature: Buffer.alloc(64).toString("base64url") },
+        { ...signed, installation: { ...signed.installation, peerKeyId: "new-peer" } },
+      ]) {
+        assert.equal((await release(forged)).status, 409);
+      }
+      assert.equal((await release(signed)).status, 200);
+      assert.deepEqual(await exited, [0, null]);
+    },
+  );
+  for (const [name, value, extra] of [
+    ["mismatched revision", "wrong-revision", {}],
+    ["omitted revision", undefined, {}],
+    [
+      "private status identity cannot substitute",
+      undefined,
+      { OPENCLAW_AGENT_REVISION_ID: protectedRevision.id },
+    ],
+  ]) {
+    await t.test(name, () => {
+      const env = { ...environment, ...extra };
+      delete env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID;
+      if (value !== undefined) {
+        env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID = value;
+      }
+      const result = spawnSync(process.execPath, ["-e", program], {
+        env,
+        encoding: "utf8",
+        timeout: 3000,
+      });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /Protected Harness enrollment configuration is invalid/);
+    });
+  }
+  await t.test(
+    "a zero-binding execution releases only its local app server, after the exact committed deny-all",
+    async (t) => {
+      const id = "ar_00000000-0000-4000-8000-000000000548";
+      const zeroPlan = { ...plan, execution: { ...plan.execution, revisionId: id }, routes: [] };
+      const zero = {
+        ...protectedRevision,
+        id,
+        revision: protectedRevision.revision + 1,
+        harnessAuth: { method: "runtime" },
+        egressPlan: zeroPlan,
+        credentialSources: [],
+      };
+      save({
+        ...setup,
+        metadata: {
+          ...setup.metadata,
+          name: driver.workspaceNodeName(zero),
+          labels: { ...setup.metadata.labels, "openclaw.dev/revision": id },
+        },
+      });
+      const zeroInstalled = { ...installed, plan: zeroPlan };
+      observation = zeroInstalled;
+      driver.conduitDriver.configureRevision = async ({ plan }) => ({ ...attachment, plan });
+      let zeroRequirements;
+      let authorizeZero;
+      fixture.sandbox.enrollHarness = async ({ requirements }, receipt, release) => {
+        assert.equal(receipt, zeroInstalled);
+        zeroRequirements = requirements;
+        authorizeZero = release;
+        throw released;
+      };
+      const zeroContext = {
+        harnessAuth: zero.harnessAuth,
+        credentialSources: [],
+        currentEgressInstallation: async () => zeroInstalled,
+        recordEgressInstallation: async (receipt) => assert.equal(receipt, zeroInstalled),
+      };
+      await assert.rejects(
+        driver.prepareRevision(zero, zeroContext),
+        (error) => error === released,
+      );
+      const directory = await mkdtemp(join(tmpdir(), "oce-compute-deny-all-"));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const calls = join(directory, "codex-calls");
+      await writeFile(calls, "");
+      // Stub only the CLI. Use the owning prepareRevision's actual files and environment.
+      await writeFile(
+        join(directory, "codex"),
+        '#!/bin/sh\necho "$@" >> "$OCE_TEST_CODEX_CALLS"\n',
+        { mode: 0o700 },
+      );
+      const env = {
+        ...Object.fromEntries(
+          zeroRequirements.environment
+            .filter((entry) => "value" in entry)
+            .map(({ name, value }) => [name, value]),
+        ),
+        PATH: directory + ":" + process.env.PATH,
+        HOME: directory,
+        CODEX_HOME: directory,
+        OPENCLAW_WORKSPACE_DIR: directory,
+        OCE_TEST_CODEX_CALLS: calls,
+        APP_SERVER_PORT: String(port),
+      };
+      for (const file of zeroRequirements.files) {
+        const path = join(directory, file.name);
+        await writeFile(path, file.content);
+        env[file.environmentVariable] = path;
+      }
+      const script = join(directory, "harness.cjs");
+      await writeFile(script, AGENT_RUNTIME_ENTRYPOINT);
+      const child = spawn(process.execPath, [script], {
+        env,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      t.after(() => child.kill());
+      const exited = once(child, "exit");
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const url = "http://127.0.0.1:" + port + HARNESS_EGRESS_ENROLLMENT_PATH;
+      const headers = {
+        authorization: "Bearer test-transport",
+        "content-type": "application/json",
+      };
+      let challenge;
+      for (let n = 0; n < 100; n++) {
+        assert.equal(child.exitCode, null, stderr);
+        challenge = await fetch(url, { headers })
+          .then((r) => r.json())
+          .catch(() => undefined);
+        if (challenge) {
+          break;
+        }
+        await delay(20);
+      }
+      assert.equal(challenge?.routeCount, 0, stderr);
+      assert.equal(
+        await readFile(calls, "utf8"),
+        "",
+        "protected startup ran no CLI before release",
+      );
+      const signed = await authorizeZero(challenge.startupId);
+      assert.equal(
+        (await fetch(url, { headers, method: "POST", body: JSON.stringify(signed) })).status,
+        200,
+      );
+      assert.equal((await exited)[0], 0, stderr);
+      const invocations = (await readFile(calls, "utf8")).trim().split("\n");
+      assert.equal(invocations.length, 1);
+      assert.match(invocations[0], /app-server/);
+    },
+  );
+  await t.test(
+    "metadata-only Compute observes exact warm preparation before release and waits for serving",
+    async () => {
+      const id = "ar_00000000-0000-4000-8000-000000000549";
+      const execution = { ...plan.execution, revisionId: id };
+      const provider = { id: "github-app-metadata", generation: 1 };
+      const key = { ...sourceKey, provider };
+      const grant = {
+        kind: "github_repository_metadata",
+        appId: "7",
+        installationId: "9",
+        repositoryId: "11",
+        repository: "test/example",
+        isolationId: execution.agentId,
+        profile: "metadata-read",
+      };
+      const binding = { ...plan.routes[0].binding, execution, grant, source: key };
+      const route = { ...plan.routes[0], method: "GET", path: "/repos/test/example", binding };
+      const metadataPlan = { ...plan, execution, routes: [route] };
+      const metadata = {
+        ...protectedRevision,
+        id,
+        revision: protectedRevision.revision + 2,
+        harnessAuth: { method: "runtime" },
+        egressPlan: metadataPlan,
+      };
+      save({
+        ...setup,
+        metadata: {
+          ...setup.metadata,
+          name: driver.workspaceNodeName(metadata),
+          labels: { ...setup.metadata.labels, "openclaw.dev/revision": id },
+        },
+      });
+      const receipt = { ...installed, plan: metadataPlan };
+      const sequence = [];
+      let warmth;
+      const lifecycle = {
+        // This owner can only observe readiness. Access, issue and refresh are not wired.
+        async ready(source) {
+          assert.deepEqual(source.grant, grant);
+          assert.deepEqual(source.key, key);
+          sequence.push("observe-warmth");
+          return warmth === "ignore-abort" ? new Promise(() => {}) : warmth;
+        },
+      };
+      driver.conduitDriver.sourceControl = {
+        sender: installed.sender,
+        resolver: { id: "resolver", generation: 1 },
+        preparedGitHub: lifecycle,
+      };
+      observation = receipt;
+      let expireDuringRelease = false;
+      fixture.sandbox.enrollHarness = async (context, current, release) => {
+        assert.equal(current, receipt);
+        assert.ok(
+          context.requirements.environment.some(
+            (v) => v.name === "CODEX_LOGIN_MODE" && v.value === "protected-no-inference",
+          ),
+        );
+        if (expireDuringRelease) {
+          warmth = false;
+        }
+        const authorization = await release("00000000-0000-4000-8000-000000000549");
+        assert.equal(authorization.challenge.inference, false);
+        assert.equal(authorization.challenge.routeCount, 1);
+        sequence.push("signed");
+      };
+      const context = {
+        harnessAuth: metadata.harnessAuth,
+        recordEgressInstallation: async () => sequence.push("commit"),
+        currentEgressInstallation: async () => receipt,
+      };
+      for (const cold of [false, "ignore-abort"]) {
+        warmth = cold;
+        assert.equal((await driver.prepareRevision(metadata, context)).ready, false, String(cold));
+        assert.deepEqual(
+          sequence.splice(0),
+          ["observe-warmth"],
+          "cold and bounded-out observations release nothing",
+        );
+      }
+      warmth = true;
+      expireDuringRelease = true;
+      await assert.rejects(
+        driver.prepareRevision(metadata, context),
+        /exact current committed installation/,
+      );
+      assert.deepEqual(sequence.splice(0), ["observe-warmth", "commit", "observe-warmth"]);
+      warmth = true;
+      expireDuringRelease = false;
+      // Independently observe the metadata revision's Ready provider Pod, not the
+      // predecessor used by this fixture. Harness status still determines readiness.
+      const pod = fixture.pod("metadata-revision");
+      pod.metadata.labels["openclaw.dev/revision"] = id;
+      pod.metadata.labels["app.kubernetes.io/name"] =
+        "agent-" + digest(metadata.agentId) + "-rev-" + digest(id);
+      const originalList = core.listNamespacedPod;
+      core.listNamespacedPod = async (request) =>
+        request.labelSelector.includes("openclaw.dev/revision=" + id)
+          ? { items: [pod] }
+          : originalList(request);
+      for (const state of ["starting", "serving"]) {
+        harnessAnswer = { state };
+        const prepared = await driver.prepareRevision(metadata, context);
+        assert.equal(prepared.ready, state === "serving");
+        assert.deepEqual(sequence.splice(0), [
+          "observe-warmth",
+          "commit",
+          "observe-warmth",
+          "signed",
+        ]);
+      }
+      core.listNamespacedPod = originalList;
+    },
+  );
+});

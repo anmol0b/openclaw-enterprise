@@ -3,11 +3,11 @@
 Run the dedicated `egress-custody-installed` lane on a newly prepared, disposable
 controller and OpenShell pair before landing whole-execution repository authority.
 The [lane manifest](../../scripts/ci/test-suites/egress-custody-installed.json)
-requires every named observation. An ordinary CI pass or the [static inference lane](./static-egress.md)
+requires every named observation. An ordinary CI pass or the [static inference lane](./static-egress.md#select-the-prepared-connected-lane)
 does not run this qualification. Preserve exact build, image selection, installed
 configuration and independent network-enforcement evidence with the result.
 
-Use the [version 2 connected inputs](./static-egress.md), with `authorityProfile` set to
+Use the [version 2 connected inputs](./static-egress.md#select-the-prepared-connected-lane), with `authorityProfile` set to
 `fresh-whole-execution` and no `credentialConnector`. The supplier must actually
 report, in order, credential access, installation exchange, response custody,
 execution authority and protected no-material support. Configure its fixture bridge and valid TLS trust for both
@@ -45,6 +45,7 @@ then select the actual lane. The state and results paths must belong to this att
 
 ```sh
 export OCC_TEST_EGRESS_DISPATCH_OBSERVER_SOCKET="$new_observer_dir/control.sock"
+CI_RUNNER_DEADLINE_MS=$(node -p 'Date.now() + 95 * 60000') \
 CI_RUNNER_TEST_TIMEOUT_MS=5100000 node scripts/ci/run-tests.mjs run egress-custody-installed \
   --state "$attempt/state.json" --results "$attempt/results.json"
 ```
