@@ -4,7 +4,7 @@ import { getEventListeners } from "node:events";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { connect } from "node:net";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -25,6 +25,8 @@ import {
 } from "../../apps/controller/src/backends/openshell.ts";
 import { TransientDependencyError } from "../../packages/occ/src/index.ts";
 import { DependencyUnavailableError } from "../../packages/occ/src/errors.ts";
+import { createManagedWorkloadExec } from "../helpers/egress-managed-workload-exec.mjs";
+import { agentClients } from "../helpers/egress-custody-observations.mjs";
 
 const require = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
 const grpc = require("@grpc/grpc-js");
@@ -2101,4 +2103,130 @@ test("OpenShell client serializes v0.1.3-pre.2 gateway-owned refresh", async () 
     client.close();
     await new Promise((resolve) => server.tryShutdown(resolve));
   }
+});
+
+test("installed workload clients select the enrolled Sandbox at authenticated ExecSandbox; a lost Exit is not replayed", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "openshell-workload-exec-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const identity = selfSignedCertificate(directory, "server", "IP:127.0.0.1");
+  const ca = selfSignedCertificate(directory, "client-ca", "DNS:client-ca.invalid");
+  const auth = signedClientCertificate(directory, "observer", ca);
+
+  // Record the real clients' mTLS RPCs, independently of any kubectl or cluster.
+  // Only an installed run can establish that the supplier launched the filtered child.
+  const service = (fixture) => {
+    const proto = loader.loadSync(join(import.meta.dirname, "../fixtures", fixture), {
+      keepCase: true,
+      longs: String,
+    });
+    return grpc.loadPackageDefinition(proto).openshell.v1.OpenShell.service;
+  };
+  const { GetSandbox } = service("openshell-v0.1.3-pre.2-wire.proto");
+  const { ExecSandbox } = service("openshell-workload-exec.proto");
+  const binding = { sandboxName: "managed-reader", sandboxId: "enrolled-id" };
+  const workspace = "managed-workspace";
+  const launches = [];
+  const phases = [];
+  let selectedId = binding.sandboxId;
+  let loseExit = false;
+  const server = new grpc.Server();
+  server.addService(
+    { GetSandbox, ExecSandbox },
+    {
+      GetSandbox({ request }, callback) {
+        callback(null, {
+          sandbox: {
+            metadata: {
+              id: selectedId,
+              name: request.name,
+              workspace: request.workspace_scope.workspace,
+            },
+          },
+        });
+      },
+      ExecSandbox(call) {
+        const { request } = call;
+        const dispatch = phases.find((entry) => entry.requestId === request.request_id);
+        launches.push({ request, dispatch });
+        call.write({ stdout: { data: Buffer.from("recipient") } });
+        call.write({ stderr: { data: Buffer.from("diagnostic") } });
+        call.write({ stdout: { data: Buffer.from("-bytes") } });
+        if (!loseExit) {
+          call.write({ exit: {} });
+        }
+        call.end();
+      },
+    },
+  );
+  const credentials = grpc.ServerCredentials.createSsl(
+    await readFile(ca.certPath),
+    [
+      {
+        cert_chain: await readFile(identity.certPath),
+        private_key: await readFile(identity.keyPath),
+      },
+    ],
+    true,
+  );
+  const port = await new Promise((resolve, reject) =>
+    server.bindAsync("127.0.0.1:0", credentials, (error, value) =>
+      error ? reject(error) : resolve(value),
+    ),
+  );
+  t.after(() => server.forceShutdown());
+  const backend = {
+    endpoint: `https://127.0.0.1:${port}`,
+    rootCertificatePath: identity.certPath,
+    auth,
+  };
+  const gatewayClient = new GrpcOpenShellGatewayClient(backend);
+  t.after(() => gatewayClient.close());
+  const execWorkload = createManagedWorkloadExec(t, {
+    backend,
+    workspace,
+    gatewayClient,
+    checkpoint: (phase, details) => phases.push({ phase, ...details }),
+  });
+  const inAgent = async (...command) => {
+    const { stdout, stderr, exitCode } = await execWorkload(binding, command);
+    assert.equal(exitCode, 0);
+    assert.equal(stderr.toString(), "diagnostic");
+    return stdout.toString();
+  };
+  const target = "https://provider.test/repos/fixture/repository";
+  const { curl, throughFin } = agentClients({ inAgent }, new URL(target).origin);
+  assert.deepEqual(await Promise.all([curl(), throughFin()]), [
+    "recipient-bytes",
+    "recipient-bytes",
+  ]);
+
+  assert.deepEqual(launches.map(({ request }) => request.command[0]).sort(), ["curl", "node"]);
+  for (const { request, dispatch } of launches) {
+    assert.equal(request.sandbox, binding.sandboxName);
+    assert.equal(request.workspace_scope.workspace, workspace);
+    assert.equal(request.command.at(-1), target, "ordinary argv, not a shell command string");
+    assert.equal(request.no_login_shell, true);
+    assert.equal(request.execution_timeout.seconds, "120");
+    assert.equal(
+      dispatch.phase,
+      "managed-workload-exec-dispatch-unknown",
+      "persisted before launch",
+    );
+    assert.equal(dispatch.sandboxId, binding.sandboxId);
+  }
+  assert.notEqual(launches[0].dispatch.requestId, launches[1].dispatch.requestId);
+
+  loseExit = true;
+  await assert.rejects(curl(), /Unconfirmed managed workload exec/);
+  assert.equal(
+    launches.length,
+    3,
+    "even clean gRPC completion cannot cause a missing Exit to be retried",
+  );
+  assert.equal(phases.at(-1).phase, "managed-workload-exec-unconfirmed");
+  assert.equal(phases.at(-1).requestId, launches[2].dispatch.requestId);
+
+  selectedId = "replaced-id";
+  await assert.rejects(curl(), /supplier Sandbox replaced/);
+  assert.equal(launches.length, 3, "an old enrolled recipient never silently switches Sandbox");
 });

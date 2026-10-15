@@ -973,7 +973,7 @@ function ipEndpointCredentials(
   return new IpEndpointCredentials();
 }
 
-async function metadata(
+export async function openShellGatewayGrpcMetadata(
   grpc: typeof import("@grpc/grpc-js"),
   auth: OpenShellGatewayClientOptions["auth"],
 ): Promise<Metadata> {
@@ -1871,7 +1871,7 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     signal.throwIfAborted();
     const { grpc, client } = await this.ensureClient();
     signal.throwIfAborted();
-    const headers = await metadata(grpc, this.options.auth);
+    const headers = await openShellGatewayGrpcMetadata(grpc, this.options.auth);
     signal.throwIfAborted();
     return new Promise<RecordValue>((resolve, reject) => {
       let call: ClientUnaryCall | undefined;
@@ -1979,40 +1979,45 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     if (OpenShell === undefined) {
       throw new OpenShellGatewayFailure("OpenShell gRPC service was not found in the proto.");
     }
-    const endpoint = normalizeEndpoint(this.options.endpoint);
-    let credentials: ChannelCredentials = grpc.credentials.createInsecure();
-    if (endpoint.secure) {
-      const rootCertificate =
-        this.options.rootCertificatePath === undefined
-          ? undefined
-          : readFileSync(this.options.rootCertificatePath);
-      const address = new URL(`https://${endpoint.target}`).hostname.replace(/^\[(.*)\]$/, "$1");
-      // Administrator credentials belong only to this gRPC control channel.
-      // Service HTTP/WebSocket calls retain their scoped bearer identity.
-      const clientCertificate =
-        this.options.auth?.mode === "mtls"
-          ? readFileSync(this.options.auth.certificatePath)
-          : undefined;
-      const clientPrivateKey =
-        this.options.auth?.mode === "mtls"
-          ? readFileSync(this.options.auth.privateKeyPath)
-          : undefined;
-      credentials =
-        isIP(address) === 0
-          ? grpc.credentials.createSsl(rootCertificate, clientPrivateKey, clientCertificate)
-          : ipEndpointCredentials(
-              grpc,
-              address,
-              rootCertificate,
-              clientCertificate,
-              clientPrivateKey,
-            );
-    }
+    const { target, credentials } = openShellGatewayGrpcChannel(grpc, this.options);
     return {
       grpc,
-      client: new OpenShell(endpoint.target, credentials, {
+      client: new OpenShell(target, credentials, {
         "grpc.max_receive_message_length": MAX_RECEIVE_MESSAGE_BYTES,
       }) as unknown as OpenShellGrpcClient,
     };
   }
+}
+
+/** Shared control-channel identity and trust; each caller keeps its own RPC contract. */
+export function openShellGatewayGrpcChannel(
+  grpc: typeof import("@grpc/grpc-js"),
+  options: OpenShellGatewayClientOptions,
+): { readonly target: string; readonly credentials: ChannelCredentials } {
+  const endpoint = normalizeEndpoint(options.endpoint);
+  let credentials: ChannelCredentials = grpc.credentials.createInsecure();
+  if (endpoint.secure) {
+    const rootCertificate =
+      options.rootCertificatePath === undefined
+        ? undefined
+        : readFileSync(options.rootCertificatePath);
+    const address = new URL(`https://${endpoint.target}`).hostname.replace(/^\[(.*)\]$/, "$1");
+    // Administrator credentials belong only to this gRPC control channel.
+    // Service HTTP/WebSocket calls retain their scoped bearer identity.
+    const clientCertificate =
+      options.auth?.mode === "mtls" ? readFileSync(options.auth.certificatePath) : undefined;
+    const clientPrivateKey =
+      options.auth?.mode === "mtls" ? readFileSync(options.auth.privateKeyPath) : undefined;
+    credentials =
+      isIP(address) === 0
+        ? grpc.credentials.createSsl(rootCertificate, clientPrivateKey, clientCertificate)
+        : ipEndpointCredentials(
+            grpc,
+            address,
+            rootCertificate,
+            clientCertificate,
+            clientPrivateKey,
+          );
+  }
+  return { target: endpoint.target, credentials };
 }

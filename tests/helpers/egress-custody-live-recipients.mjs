@@ -100,7 +100,9 @@ export async function verifyLiveRecipients({
     const before = await events(i);
     const prior = await rows(i);
     const gate = provider.holdNext(shape);
-    const read = clientFor(i).throughFin();
+    // Both recipients read through FIN: ordinary curl at A, an independent Node TLS client at B.
+    const client = clientFor(i);
+    const read = i === a ? client.curl() : client.throughFin();
     // Attach a failure observer immediately. An early client exit is not evidence
     // of a held response; only the independent authenticated origin can establish it.
     const entry = await Promise.race([

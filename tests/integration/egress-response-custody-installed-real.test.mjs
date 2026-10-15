@@ -98,8 +98,7 @@ test(
       const admitted = await admitRepositoryAgent(setup, stack, evidence, owned);
       const activate = () => activateRepositoryAgent(setup, stack, evidence, owned, admitted);
       const installed = await activate();
-      const clientFor = ({ harness }) =>
-        agentClients(setup, stack, harness, provider.businessOrigin);
+      const clientFor = (recipient) => agentClients(recipient, provider.businessOrigin);
       const { curl, node, inAgent } = clientFor(installed);
       const events = (i = installed) => supplierEvents(setup, stack.placement, i.supervisor);
       const rows = (i = installed) => receipts(stack.pool, i.installation);
