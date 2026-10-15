@@ -34,6 +34,8 @@ import type {
   Agent,
   AgentCredentialSourceBinding,
   AgentRead,
+  AgentRevisionSummary,
+  AgentRevisionSummaryPage,
   AgentRevisionRead,
   InitialWorkspaceFiles,
   AgentDeploymentDiagnostics,
@@ -79,6 +81,7 @@ import type {
   ManagedIAMResourceKind,
   Permission,
   Preset,
+  PresetSummary,
   PresetTemplate,
   PermissionAction,
   PluginDesiredSelection,
@@ -338,6 +341,7 @@ export {
   RuntimeLogsError,
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
+  SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
   ScopeViolationError,
   SecretBindingDriverError,
@@ -3477,29 +3481,63 @@ export class OpenClawController {
     });
   }
 
+  /**
+   * One page of the Agent's revisions the principal may read, newest first, as summaries: a
+   * list never decodes a saved snapshot (finding 1323). The page holds up to `limit` readable
+   * revisions numbered below `before`; unreadable ones are skipped. `nextBefore` names the
+   * page's last revision, and only when an older revision was found readable when checked.
+   */
   async listRevisions(
     principalId: string,
     namespaceId: string,
     agentId: string,
-  ): Promise<readonly Readonly<AgentRevisionRead>[]> {
+    page: { readonly before?: number; readonly limit: number } = { limit: 50 },
+  ): Promise<Readonly<AgentRevisionSummaryPage>> {
+    if (!Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 100) {
+      throw new ScopeViolationError("The revision page size is invalid.");
+    }
+    if (page.before !== undefined && (!Number.isSafeInteger(page.before) || page.before < 1)) {
+      throw new ScopeViolationError("The revision page cursor is invalid.");
+    }
     const agent = await this.getAgentForBrowsing(principalId, namespaceId, agentId);
+    // Read checks stay per revision. The cursor names only a revision found readable when
+    // checked. The scan reads the store in batches of at least 100, reducing queries for
+    // small pages, but it may still scan all older revisions. A full page looks ahead for
+    // one more revision found readable when checked before it emits a cursor.
+    // Access can change before the next request, so that page may be empty. A batch one
+    // larger than the page lets a fully readable page find the next revision in one query.
+    const batch = Math.max(page.limit + 1, 100);
     return this.read(async (state) => {
-      const readable: Readonly<AgentRevisionRead>[] = [];
-      for (const revision of await state.revisions.listRevisionsForBrowsing(
-        agent.namespaceId,
-        agent.id,
-      )) {
-        if (
-          await this.canRead(principalId, {
-            kind: "agent_revision",
-            id: revision.id,
-            namespaceId: agent.namespaceId,
-          })
-        ) {
+      const readable: Readonly<AgentRevisionSummary>[] = [];
+      let before = page.before;
+      for (;;) {
+        const listed = await state.revisions.pageRevisionSummaries(agent.namespaceId, agent.id, {
+          ...(before === undefined ? {} : { before }),
+          limit: batch,
+        });
+        for (const revision of listed.revisions) {
+          if (
+            !(await this.canRead(principalId, {
+              kind: "agent_revision",
+              id: revision.id,
+              namespaceId: agent.namespaceId,
+            }))
+          ) {
+            continue;
+          }
+          if (readable.length === page.limit) {
+            return Object.freeze({
+              revisions: Object.freeze(readable),
+              nextBefore: readable.at(-1)!.revision,
+            });
+          }
           readable.push(revision);
         }
+        if (listed.nextBefore === undefined) {
+          return Object.freeze({ revisions: Object.freeze(readable) });
+        }
+        before = listed.nextBefore;
       }
-      return Object.freeze(readable);
     });
   }
 
@@ -3611,7 +3649,15 @@ export class OpenClawController {
         });
         return Object.freeze({ outcome: "succeeded" as const, revisionId });
       }
-      const error = deploymentErrorForWork(work);
+      const deploymentError = deploymentErrorForWork(work);
+      // Stopping the first rollout is the owner's choice, not a fault to correct.
+      const error =
+        deploymentError?.code === "REVISION_STOPPED"
+          ? Object.freeze({
+              code: "REVISION_STOPPED",
+              message: "The Agent was stopped before its first deployment finished.",
+            })
+          : deploymentError;
       const pending = status !== "failed";
       const code = pending
         ? "PROVISIONING_DEPLOYMENT_PENDING"
@@ -4103,14 +4149,15 @@ export class OpenClawController {
     });
   }
 
+  /** The Presets the principal may read, without their templates (finding 1323). */
   async listPresets(
     principalId: string,
     namespaceId: string,
-  ): Promise<readonly Readonly<Preset>[]> {
+  ): Promise<readonly Readonly<PresetSummary>[]> {
     const namespace = await this.getNamespace(principalId, namespaceId);
     return this.read(async (state) => {
-      const readable: Readonly<Preset>[] = [];
-      for (const preset of await state.presets.listPresets(namespace.id)) {
+      const readable: Readonly<PresetSummary>[] = [];
+      for (const preset of await state.presets.listPresetSummaries(namespace.id)) {
         if (
           await this.canRead(principalId, {
             kind: "preset",
@@ -7397,7 +7444,9 @@ export class OpenClawController {
       // Agent saves check the plugins against the Configuration they name, but a later
       // Configuration save does not know which Agents use it: check the admitted pair again.
       this.validatePluginConfiguration(pluginState?.plugins, admittedConfiguration);
-      const previous = await state.revisions.listRevisionMetadata(namespace.id, lockedAgent.id);
+      // Decode every earlier revision: one that is unreadable refuses the deploy here (503,
+      // nothing created), because the worker must decode them all to stop or retire them.
+      const previous = await state.revisions.listRevisions(namespace.id, lockedAgent.id);
       const createdAt = this.timestamp();
       const repositoryCredentials = this.admitRepositoryCredentials(
         lockedAgent,
@@ -7780,7 +7829,7 @@ export class OpenClawController {
       }
       await state.provisioning.cancelByAgent(namespaceId, agentId, {
         code: "PROVISIONING_CANCELLED",
-        message: "Provisioning was cancelled by Stop.",
+        message: "Provisioning was cancelled because the Agent was stopped.",
       });
       const stopped = await state.agents.transitionAgentDesiredRuntimeState(
         namespaceId,
@@ -8000,7 +8049,7 @@ export class OpenClawController {
       }
       await state.provisioning.cancelByAgent(namespace.id, agent.id, {
         code: "PROVISIONING_CANCELLED",
-        message: "Provisioning was cancelled by deletion.",
+        message: "Provisioning was cancelled because the Agent was deleted.",
       });
       // Deletion ends delivery ownership immediately, including never-deployed Agents.
       await state.workspaceSetups.delete(namespace.id, agent.id);
@@ -9095,8 +9144,9 @@ export class OpenClawController {
     return found;
   }
 
+  /** Callers hold the Namespace lock. */
   private async guardAgentProvisioning(
-    state: PlatformReadView,
+    state: PlatformUnitOfWork,
     namespaceId: string,
     agentId: string,
     handoff = false,
@@ -9113,13 +9163,61 @@ export class OpenClawController {
       record.status === "queued" ||
       record.status === "running" ||
       this.provisioningBefore(record, "configuration") ||
-      (record.status === "failed" && record.revisionId === undefined) ||
-      (record.status === "cancelled" && this.provisioningHasUnresolvedEffect(record))
+      (record.status === "failed" && record.revisionId === undefined)
     ) {
       throw new ResourceStateConflictError(
         "The Agent is reserved for provisioning. Stop or delete it, or retry its failed provisioning request.",
       );
     }
+    if (record.status === "cancelled" && this.provisioningHasUnresolvedEffect(record)) {
+      await this.settleAbandonedProvisioningEffect(state, namespaceId, agentId);
+    }
+  }
+
+  /**
+   * A cancelled job never runs again, so nothing else settles the runtime-credential write it
+   * left pending, and without this its stopped Agent could only be deleted (finding 1384). Once
+   * the claim that began the write has lapsed (at once if no worker held it when Stop cancelled
+   * the job), its worker has stopped issuing requests, so this settles it under the Namespace and
+   * Agent locks, as Agent deletion does. A request already sent may still land; that is safe
+   * because the write creates only absent Secrets, and deploy admission checks the runtime
+   * credentials and creates missing ones. Inside the lease the Agent stays reserved; with
+   * conflicting or malformed evidence it can only be deleted.
+   */
+  private async settleAbandonedProvisioningEffect(
+    state: PlatformUnitOfWork,
+    namespaceId: string,
+    agentId: string,
+  ): Promise<void> {
+    const agent = await state.agents.lockAgent(namespaceId, agentId);
+    if (agent?.status !== "active") {
+      throw new AgentDeletingError();
+    }
+    const current =
+      (await state.provisioning.settleAbandonedEffect(namespaceId, agentId)) ??
+      (await state.provisioning.findByAgent(namespaceId, agentId));
+    if (
+      current === undefined ||
+      current.revisionId !== undefined ||
+      !this.provisioningHasUnresolvedEffect(current)
+    ) {
+      return;
+    }
+    const pending = provisioningPendingEffect(current);
+    // Only a well-formed write still inside its cancelled claim's lease settles by waiting.
+    if (
+      pending?.kind === "transport" &&
+      pending.ownerPresent &&
+      current.progress.effectReceipt === undefined &&
+      current.progress.cancelledClaimExpiresAt !== undefined
+    ) {
+      throw new ResourceStateConflictError(
+        "The Agent's cancelled provisioning may still be writing its runtime credentials. Try again in a few seconds, or delete the Agent.",
+      );
+    }
+    throw new ResourceStateConflictError(
+      "The Agent's cancelled provisioning left a runtime-credential write that cannot be settled. Delete the Agent.",
+    );
   }
 
   private async guardProvisioningConfiguration(

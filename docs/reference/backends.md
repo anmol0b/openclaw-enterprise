@@ -155,7 +155,10 @@ Its closed `configuration` accepts:
 - `serviceName`, `scheme`, and `port`: used when `endpoint` is omitted. A dotted
   name is used as-is; a bare name resolves in each tenant namespace. `port`
   defaults to `8080`, and `scheme` defaults to `https` only when
-  `rootCertificatePath` is set.
+  `rootCertificatePath` is set. OAuth2 credential sources refuse `token_url`
+  hosts in the gateway's namespace only when OCE knows it: from a bare or
+  `<service>.<namespace>` `serviceName`, or a `serviceName` or `endpoint` host
+  `<service>.<namespace>.svc[.<cluster domain>]`.
 - `auth`: `{ mode: unauthenticated }`, `{ mode: bearerTokenFile, path }`, or
   `{ mode: mtls, certificatePath, privateKeyPath }`. File paths must be absolute.
   mTLS requires HTTPS and supplies the client certificate and key to gRPC only.
@@ -182,7 +185,7 @@ optional `drivers.credential_refresh` member must match the selected
 [Credential Refresh Driver](drivers/credential-refresh.md); OpenShell keeps
 refresh state on the gateway's provider records, so the two roles share this
 Backend. Optional `drivers.conduit` selects the paired
-[protected static inference adapter](credential-sources/protected-inference.md).
+[Conduit adapter for protected static inference](credential-sources/protected-inference.md).
 That path requires an authenticated HTTPS gateway and a negotiated credential
 access counterpart; legacy provider substitution cannot satisfy it.
 One OpenShell Backend is supported. Composition builds one gateway client object

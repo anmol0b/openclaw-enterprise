@@ -1,7 +1,7 @@
 ---
 created: "2026-09-21"
 updated: 2026-10-14
-last_updated_session: authoring-run/0bb26444-920f-4713-8f19-4c0b7f35e048
+last_updated_session: authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d
 ---
 
 # OpenShell Sandbox provisioning flow
@@ -110,6 +110,10 @@ references. `internal/occdev/openshell.go:installOpenShellGateway` supplies the
 three imported Helm images with pull policy `Never`. See
 [candidate digest/provenance verification](../guides/deploy/local-openshell-images.md). Kubernetes-only also imports
 controller/runtime and PostgreSQL images and resolves in-cluster digests.
+
+Both profiles import larger OCE images before the selected OpenShell images,
+then install OpenShell workloads. This prevents k3s image
+garbage collection during platform-image imports from removing idle OpenShell images.
 
 On Agent Sandbox rollout failure, `prepareOpenShell` calls
 `internal/occdev/agent_sandbox_rollout_diagnostics.go:captureAgentSandboxRollout`
@@ -284,6 +288,12 @@ reconciliation.
 `harnessEndpoint` validates the exposure and returns that WebSocket origin,
 `/sandbox/enterprise` workspace root and optional public Backend CA from
 `apps/controller/src/backends/openshell.ts:publicRootCertificate`.
+Missing, malformed or changed exposure fails closed.
+
+`apps/controller/src/drivers/sandbox/openshell.ts:harnessStatus` probes the authenticated WebSocket handshake before
+reading a held-failure document. `apps/controller/src/drivers/sandbox/openshell-service-transport.ts:serviceWebSocketHandshake`
+destroys HTTP refusal responses immediately, so unfinished bodies cannot retain
+connections after the probe returns.
 
 The revision provider survives an uncertain create; revision cleanup deletes
 the Sandbox first.
@@ -365,6 +375,8 @@ networking. Native OpenClaw remains verification-only.
 
 ## Changelog
 
+- 2026-10-14 20:27: Release refused WebSocket probes. (authoring-run/01a10a81-070c-7aa3-97d0-fbce8f285d4d - 4727e9b109a2127150e03e39e859d45e0668f82f)
+
 - 2026-10-14 17:56: Trace closed gRPC validation diagnostics in the accompanying uncommitted change. (authoring-run/0bb26444-920f-4713-8f19-4c0b7f35e048 - 18c3d7449ca95914c2e248455ccc72b044a27855)
 
 - 2026-10-14 16:28: Trace public Harness endpoint trust projection and retirement in the accompanying uncommitted change. (authoring-run/c696045b-5231-4253-a4bd-823334718d6a - a071498ddb2ac4dd5d9a22ec678cf0d602c61a0a)
@@ -372,6 +384,8 @@ networking. Native OpenClaw remains verification-only.
 - 2026-10-14 12:17: Document candidate preflight/import in the accompanying uncommitted change. (authoring-run/217a5c5f-ae2d-47c4-9dd6-d16ed0244627 - dc5648b67d2618cc43ef07562298e986a94674e7)
 
 - 2026-10-13 14:11: Reconcile setup-Secret ordering and preserve service-IPv6 history alongside credential endpoint safeguards. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - 90268463bbd255c3c13a0e0bdeb437728189eb1a)
+
+- 2026-10-13 13:57: Reconciled development image import order with upstream rollout diagnostics. (authoring-run/503e74ea-e82a-4d1a-8081-fcf4fc4e6868 - 96272fa0a5e4f359ed354abb1918e44986c19e76)
 
 - 2026-10-10 13:04: Reconcile native hook HOME/CA flow with endpoint safeguards; trim repeated narration. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - 90268463bbd255c3c13a0e0bdeb437728189eb1a)
 
@@ -386,6 +400,8 @@ networking. Native OpenClaw remains verification-only.
 - 2026-10-09 15:30: Record bounded Agent Sandbox failure metadata before the original error returns and rollback proceeds; tighten setup prose. (authoring-run/54f8d1c2-fb6e-4074-999f-5185af50a86f - 8bfec22f49b207c16afce21bd9a941ee0e9cd95d)
 
 - 2026-10-06 22:10: Preserve HTTP port 80 when creating the OpenShell gRPC target. (authoring-run/88f2e095-3f3a-4d9b-a878-663034cdde6e - 2fc8320cf8bfbf9d7ea20757ef3fe32d7157e6aa)
+
+- 2026-10-06 15:57: Recorded the development image-import order that keeps pinned OpenShell images available until their workloads start. (authoring-run/473c1419-a5a2-4774-ac8d-33d6a265ae06 - 99641a7ab00ad8fdd987e27e9ee838814e5f535a)
 
 - 2026-10-06 11:17: Reconciled endpoint flow with current namespace and provider provisioning; condensed repeated prose. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - b6dc6b87a461ad33374e133d15cc739d8e074fea)
 
