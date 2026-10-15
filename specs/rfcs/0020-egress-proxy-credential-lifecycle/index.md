@@ -4,15 +4,15 @@ implementation_status: Not implemented
 status: Proposed
 ---
 
-# Egress Proxy and credential lifecycle
+# Conduit and credential lifecycle
 
-**RFC-0020** · [Proposal #1530](https://github.com/openclaw/openclaw-enterprise/pull/1530) · [Implementation contract](contracts.md) · [Security and migration](security.md)
+**RFC-0020** · [Proposal #1530](https://github.com/openclaw/openclaw-enterprise/pull/1530) · [Interfaces and records](contracts.md) · [Protocol](protocol.md) · [Security and migration](security.md)
 
 ## Decision
 
 Let an Agent use a provider without giving it the provider credential. If `build-agent` may read GitHub repository `123`, it makes an ordinary request; a trusted sender verifies which execution sent it, checks whether the read is still allowed, and authenticates to GitHub. A child process has the same access as its parent. A different execution needs its own admitted authority.
 
-Replace `CredentialGatewayDriver` with one new registered capability, `EgressProxyDriver`. It configures and withdraws egress; `SandboxDriver` installs that configuration and prevents bypass. We retain `SecretDriver` and `CredentialRefreshDriver` for credential access and preparation. These are [distinct responsibilities](contracts.md), not a requirement to run four services.
+Replace `CredentialGatewayDriver` with the `conduit` capability and its `ConduitDriver`. It configures and withdraws egress; `SandboxDriver` installs that configuration and prevents bypass. We retain `SecretDriver` and `CredentialRefreshDriver` for credential access and preparation. These are [distinct responsibilities](contracts.md), not a requirement to run four services.
 
 ![Proposed protected egress: Sandbox prevents bypass; a trusted sender checks current authority, resolves a credential if needed, and sends the request](assets/overview.svg)
 
@@ -33,10 +33,4 @@ The deployment selects an egress implementation; it does not separately select a
 2. **Prepare the GitHub credential in the background.** OCE owns the GitHub App key, obtains an installation token for the admitted repositories and permissions, verifies the actual grant and expiry, and commits the token in encrypted custody. The request path can use eligible committed material; it cannot mint a token or schedule renewal.
 3. **Authorize the actual read, then send once.** At acceptance, bind the request *and its reply path* to the originating execution. Check current authority before reading the prepared token, then check the same operation and the actual token version before sending. If access was removed between checks, refuse. If removal races the final check, the read can still reach GitHub. Replacing execution A with B can invalidate A’s request; it can never turn it into B’s request or deliver A’s reply to B.
 
-[Request sequence and exact failure semantics](contracts.md#capture-and-forward)
-
-## What qualifies the MVP
-
-Start with a bodyless repository-metadata read and withhold its bounded response until it passes response policy. Show that a sibling in the admitted execution can read it, a replacement cannot inherit an earlier execution’s request or response, and losing the dispatch-commit acknowledgment produces no send. Then qualify Git transport, optional clone, and static inference; a metadata read does not qualify `git push`.
-
-New static sources follow their live Secret. Existing static sources retain their approved material, and an existing, narrower execution grant cannot silently become whole-execution authority. [Retire the old Driver only after that migration is safe](security.md#retire-the-legacy-path-without-widening-existing-grants). Rotating Codex OAuth and custom dynamic providers remain OCE 1.0 requirements, not prerequisites for this first read.
+[Request protocol and failure semantics](protocol.md#capture-and-authorize-a-request) · [Verification and migration](security.md)

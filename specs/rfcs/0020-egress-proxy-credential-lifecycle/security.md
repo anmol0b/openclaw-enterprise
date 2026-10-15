@@ -8,7 +8,7 @@ rfc: index.md
 receiving the provider credential. The security principal is the **whole admitted Agent execution**.
 If a repository read is allowed, the Agent, its child process and code it downloads can all make
 that read and see the permitted response. Another execution, even of the same Agent, has no claim
-on that exchange. The [contracts](contracts.md) specify how to enforce this boundary. The evidence
+on that exchange. The [protocol](protocol.md) specifies how to enforce this boundary. The evidence
 below is required before relying on it.
 
 ## Where authority and secrets reside
@@ -33,7 +33,9 @@ purpose, version and attempt evidence. Check response status, headers, body, tra
 errors as well as success. Start with a bounded response withheld in full until accepted. Blocking
 it cannot undo a provider action, and streaming needs protection at each release boundary.
 
-## Required verification on the protected path
+## Qualification
+
+### First protected operation
 
 Start with one bodyless metadata read of repository `123` and a recognizable, safe response. Record
 **source**, **independent contract-peer**, **installed runtime** and **live-provider** evidence
@@ -59,12 +61,18 @@ installations. Current state may invalidate A's exchange but can never relabel i
 | Lose the provider reply *after a write* | Record the send permit and write; the provider effect remains uncertain. One permit does not prove exactly-once delivery. Never replay to resolve the uncertainty. |
 | Lose the credential-rejection acknowledgment, then restart and redeliver | Before acknowledgment, durably deduplicate the authenticated receipt, fence its exact store and version, and commit any coalesced recovery obligation. Observe one obligation for rejected N, none for N+1, no second recovery and no business retry. |
 
+### Destination, response and Git controls
+
 Exercise DNS, destination and TLS authority, redirects, raw TCP, opaque SSH, UDP and QUIC from the
 sandbox. Deny operations that cannot be classified. Swap two live custody handles or replay a consumed permit:
 neither permits a provider write. Put forbidden data in the last response trailer: for the bounded
 read, release no provider bytes. A metadata read qualifies neither clone nor push. For ref-constrained push,
 the trusted sender must parse *all* ref commands, including object IDs, authorize each, and dispatch exactly the checked operation. An allowed first ref followed by a
 forbidden second must result in no provider write. Otherwise refuse protected push.
+
+### Additional provider coverage
+
+The first metadata read does not qualify Git transport, optional clone or static inference; each needs its own evidence. Rotating Codex OAuth and custom dynamic providers remain OCE 1.0 requirements, not prerequisites for the first read.
 
 Cover static inference and GitHub first. For rotating credentials, race grants sharing one input
 family, crash between provider rotation and durable replacement, and attempt stale-owner publication.
@@ -100,22 +108,28 @@ schedules, hooks and pending work inert. Preserve authorized read-only access to
 
 ## Retire the legacy path without widening existing grants
 
+### Execution authority
+
 Migrate execution authority and static-material approval **independently**. If a legacy grant
 allowed the parent read but barred the sibling above, retain its safe authorized path or withhold
 the binding until someone authorized to bind this Agent to this source explicitly admits whole-execution
 access. Carry authority forward only with durable evidence of equivalence. Fence incompatible readers first. Moving to
 unprotected requires a new execution without old mounts, helpers, sessions or late reattachment.
 
+### Approved static material
+
 If an operator approved static `v1` and a Secret writer later stored `v2`, keep serving approved
 `v1` in `explicit_update` mode unless revoked. Verify its exact version or owned immutable snapshot,
 including scope and store. If material or ownership cannot be verified, fail closed until an
-authorized source update. Running attachments keep their approved material until replacement
+authorized source update. Running installations keep their approved material until replacement
 installation is verified, subject to current denial or revocation. The provenance Secret need
 not remain readable. With zero retention, read that snapshot again. Test rejection, eviction and reread; the version fence must survive. To adopt
 live updates, require `credential_source:update` and `secret:operate`, stage and validate a separate
 candidate, then activate mode, material reference and generation together. Failed opt-in preserves
 approval; uncertain activation requires reconciliation. Verify adoption and outstanding use before
 retiring the old key.
+
+### Interface and consumer migration
 
 | Credential Gateway method | Responsibility that must survive retirement |
 | --- | --- |
@@ -124,9 +138,9 @@ retiring the old key.
 | `updateSource` | `applySource` with admitted configuration and static adoption or approved replacement |
 | `sourceStatus` | Configuration status, distinct from per-grant `refreshStatus` |
 | `removeSource` | `removeSource`, `removeRefresh` and owned provider/profile cleanup |
-| `attachForRevision` | `configureRevision`, then Sandbox `installEgress` |
-| `attachmentStatus` | Join Egress `attachmentStatus` to Sandbox `egressStatus` for the exact installation |
-| `withdraw` | Durable withdrawal, `withdrawBinding` and late-attachment rechecks |
+| `attachForRevision` | `configureRevision`, then Sandbox `applyConduit` |
+| `attachmentStatus` | Join Conduit `wiringStatus` to Sandbox `conduitStatus` for the exact installation |
+| `withdraw` | Durable withdrawal, `withdrawBinding` and late-installation rechecks |
 | Additional `validateSourceConfig` | OCC schema validation and provider `normalizeInput`, without I/O and before Secret access |
 
 Move persisted driver IDs, revision and Harness snapshots, Agent bindings and authentication
