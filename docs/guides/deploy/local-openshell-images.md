@@ -52,9 +52,10 @@ not select candidate images.
 
 ## Select the protected profile
 
-Protected Agent deployment is currently refused by all shipped Compute Drivers.
-The packaging below does not bypass the
-[execution admission cutoff](../../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
+Use a reviewed Kubernetes Compute and OpenShell candidate pair. The bundled
+OpenShell release cannot enforce this profile. In the candidate, Compute verifies
+the current installation before [signing the workload release](../../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
+Launching the profile prepares the pair for qualification.
 
 For a fresh Kubernetes control plane with a matching protected-inference
 candidate, set the image selectors above without starting the stack, then add:
