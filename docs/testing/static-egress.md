@@ -221,8 +221,8 @@ exact contract:
 
 | Input                                                                                                | Required preparation                                                                                                                                                                                                                         |
 | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`, `namespaceId`, `model`                                                                    | Version `1`, the existing `ns_*` tenant ID and explicit Codex model name.                                                                                                                                                                    |
-| `apiOrigin`, `serviceKeyPath`                                                                        | Loopback controller origin and absolute path to its provisioned non-Agent service key.                                                                                                                                                       |
+| `version`, `namespaceId`, `model`                                                                    | Version `2`, the existing `ns_*` tenant ID and explicit Codex model name.                                                                                                                                                                    |
+| `apiOrigin`                                                                                          | The controller's literal `127.0.0.1` origin with an explicit port above 1024.                                                                                                                                                                |
 | `kubeconfigPath`, `kubernetesContext`, `runtimeClass`                                                | Explicit kubeconfig, disposable `k3d-*` context and approved OpenShell RuntimeClass.                                                                                                                                                         |
 | `controllerNamespace`, `controllerSelector`, `openShellGatewayNamespace`, `openShellGatewaySelector` | Exact namespaces and selectors for the prepared controller (both API and worker) and supplier gateway Pods.                                                                                                                                  |
 | `oceCommit`, `supplierCommit`                                                                        | Accepted 40-character source commits. These are recorded provenance; Pod image references do not establish build-source equivalence.                                                                                                         |
@@ -237,10 +237,19 @@ resolve to the prepared listener address and appear in its certificate SAN;
 it permits no other provider hostname. mTLS requires a controller build with
 Backend mTLS support; input validation alone does not establish that support.
 Use synthetic material only; no real provider
-credential is required. Supply the controller's loopback PostgreSQL URL through
-`OCC_TEST_DATABASE_URL` in an existing private environment file. URL query
-parameters are rejected because they can override the selected host or database.
-Keep both input files and credential contents out of logs and Git.
+credential is required.
+
+In the runner's private environment file, set `OCC_TEST_EGRESS_CONNECTED_CONTROLLER`
+to a JSON object with `apiOrigin`, `namespaceId`, `model` and `providerOrigin` from
+the placement the operator prepared. These must match the stack manifest. Supply the
+provisioned non-Agent controller service key through `OCC_TEST_EGRESS_CONNECTED_SERVICE_KEY`
+in that same private environment. The manifest cannot choose a file to send as the
+service key. The test confines the key to the selected origin, refuses redirects, and
+removes the key from the environment inherited by its child commands.
+
+Supply the controller's loopback PostgreSQL URL through `OCC_TEST_DATABASE_URL`.
+URL query parameters are rejected because they can override the selected host or
+database. Keep both input files and credential contents out of logs and Git.
 
 With those prerequisites ready, select a fresh result directory:
 
@@ -252,8 +261,8 @@ node --env-file=/absolute/path/to/private/connected.env \
   --state "$run_dir/state.json" --results "$run_dir/results.json"
 ```
 
-The environment file supplies `OCC_TEST_EGRESS_CONNECTED_INPUTS` and
-`OCC_TEST_DATABASE_URL`; lane selection supplies `OCC_TEST_EGRESS_CONNECTED=1`.
+The environment file supplies the input path, controller selection, service key
+and database URL. Lane selection supplies `OCC_TEST_EGRESS_CONNECTED=1`.
 The test has a 30-minute deadline, a 12-minute activation wait, 90-second Codex
 turns and 20-second API requests. Connected cluster commands have a 120-second
 local deadline. The overall deadline takes precedence over the individual
@@ -276,7 +285,9 @@ responses, bounded logs, diagnostics, audit, Pod specs and ConfigMaps.
 
 The per-run `.build/egress-connected/runtime-<uuid>/` directory retains atomic
 phase checkpoints, resource IDs and bounded provider observations without raw
-requests or credentials. Failure diagnostics retain the phase and source
+requests or credentials. Each controller request records a local operation ID and
+an unknown outcome before sending. A later success or error status means the test
+received a response, not that the requested effect completed. Failure diagnostics retain the phase and source
 location. Cleanup deletes the owned Agent, waits for API absence and disappearance of
 the observed Sandbox and owned workload Pods, removes recorded supporting
 resources and closes the provider. An unobserved Sandbox identity requires
