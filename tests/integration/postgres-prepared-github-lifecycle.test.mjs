@@ -401,6 +401,45 @@ test(
     assert.equal(gh.issuesOfTokens.length, issuedBefore + 1);
     assert.equal(await lifecycle.readWarm(lost, signal, deadlineAt()), undefined);
     await assert.rejects(lifecycle.withdraw(lost, signal), /unsettled provider attempt/);
+    await t.test("a lost retirement commit receipt clears the unreceived candidate", async (t) => {
+      // An out-of-scope issuance leaves a real cleanup candidate for the next worker pass.
+      const retiring = await f.request("POST", path, {
+        body: { ...registration, name: "prepared-lost-retirement-commit" },
+      });
+      assert.equal(retiring.status, 201);
+      invalidScope = true;
+      assert.equal(await fresh.maintain(signal), "quarantined");
+
+      // Let PostgreSQL commit the claim, then lose its acknowledgment at the client boundary.
+      // Observe the exact buffer open() returned, without copying or printing its contents.
+      const open = t.mock.method(fresh.repository, "open");
+      const client = await f.pool.connect();
+      const query = client.query.bind(client);
+      let bytes;
+      t.mock.method(client, "query", async (sql, ...args) => {
+        const result = await query(sql, ...args);
+        if (sql === "COMMIT") {
+          bytes = open.mock.calls[0].result;
+          assert.ok(
+            bytes.some((byte) => byte !== 0),
+            "claim must have opened live bytes",
+          );
+          throw Object.assign(new Error("commit acknowledgment lost"), { code: "08007" });
+        }
+        return result;
+      });
+      t.mock.method(f.pool, "connect", () => client, { times: 1 });
+      const providerCalls = gh.trace.length;
+      await assert.rejects(
+        fresh.maintain(signal),
+        /custody transaction did not complete \(08007\)/,
+      );
+      assert.equal(gh.trace.length, providerCalls, "an uncertain claim must not reach the issuer");
+      assert.ok(
+        bytes.every((byte) => byte === 0),
+        "unreceived retirement bytes were not cleared",
+      );
+    });
     assert.deepEqual(gh.errors, []);
   },
 );

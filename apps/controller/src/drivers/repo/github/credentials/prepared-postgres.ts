@@ -326,7 +326,8 @@ export class PreparedGitHubPostgres {
   // Commit possible revocation before contacting GitHub. A missing response leaves 'revoking'
   // or 'unknown' and encrypted cleanup custody, never an automatic replay or a claim of revocation.
   async takeRetirement(key: string | null) {
-    return this.transaction(async (c) => {
+    let owned: Buffer | undefined;
+    const claim = this.transaction(async (c) => {
       // A foreign or absent issuance authority leaves the original custody and outcome intact.
       // Only a matching claim returns ciphertext; this also works after source withdrawal.
       const { rows } = await c.query(
@@ -343,10 +344,19 @@ export class PreparedGitHubPostgres {
       );
       const a = rows[0] as (AttemptRow & { authorized: boolean }) | undefined;
       if (!a || !a.authorized) {
-        return a && "issuer-mismatch";
+        return a && ("issuer-mismatch" as const);
       }
-      return { id: a.id, admission: a.admission, bytes: this.open(a.sealed, a.admission, a.id) };
+      owned = this.open(a.sealed, a.admission, a.id);
+      return { id: a.id, admission: a.admission, bytes: owned };
     });
+    try {
+      const candidate = await claim;
+      owned = undefined; // The retirement caller now owns the live copy.
+      return candidate;
+    } finally {
+      // A lost commit receipt or failed release discards our copy, without retrying the claim.
+      owned?.fill(0);
+    }
   }
 
   async finishRetirement(id: string, revoked: boolean) {
