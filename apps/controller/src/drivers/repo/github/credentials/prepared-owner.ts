@@ -6,6 +6,7 @@ import {
   parseInstallationTokenResponse,
   validateInstallationTokenResponse,
 } from "./driver/acquisition-response.ts";
+import { preparationIssuerAuthority } from "./grants.ts";
 import { permissionsForProfile } from "./profiles.ts";
 import { createProviderTransport } from "./provider-transport.ts";
 
@@ -23,8 +24,6 @@ interface PreparationOptions {
 
 /**
  * One background worker owner, invoked independently of requests/provisioning.
- * TODO(RFC 0020): join the durable repository and worker scheduler in composition.
- * No production owner is registered by this module.
  */
 export function createGitHubPreparationOwner(options: PreparationOptions) {
   const { store, clock, getKey, renewBeforeMs, minimumValidityMs } = options;
@@ -37,6 +36,9 @@ export function createGitHubPreparationOwner(options: PreparationOptions) {
     renewBeforeMs <= 0
   ) {
     throw new Error("invalid-preparation-validity");
+  }
+  if (admission.issuerAuthority !== preparationIssuerAuthority(options.apiOrigin, options.ca)) {
+    throw new Error("prepared-issuer-authority-mismatch");
   }
   const exchange = createProviderTransport(options.apiOrigin, options.ca, clock, admission.grant);
   const permissions = permissionsForProfile(admission.grant.profile);

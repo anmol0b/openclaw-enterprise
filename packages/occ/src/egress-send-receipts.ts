@@ -1,13 +1,44 @@
 import { isDeepStrictEqual } from "node:util";
-import type { EgressRef, StaticMaterialEvidence } from "@openclaw-enterprise/contracts";
+import type {
+  EgressExecution,
+  EgressRef,
+  EgressMaterialEvidence,
+  EgressSelectionEvidence,
+} from "@openclaw-enterprise/contracts";
 import { ResourceStateConflictError } from "./errors.ts";
+
+/** Metadata from trusted acceptance, never from workload headers or a bearer. */
+export interface AcceptedEgressAssociation {
+  readonly execution: EgressExecution;
+  readonly installation: {
+    readonly sandboxId: string;
+    readonly instanceId: string;
+    readonly configurationId: string;
+    readonly peerKeyId?: string;
+    // Absent in historical receipts. Reading one never upgrades its authority.
+    readonly policyHash?: string;
+    readonly authorityScope?: "execution";
+    readonly plan: EgressRef;
+  };
+  readonly exchangeId: string;
+  readonly responseId: string;
+  readonly custodyId: string;
+}
+
+export interface AuthorizedSend {
+  readonly association: AcceptedEgressAssociation;
+  readonly requestDigest: string;
+  readonly injectionDigest: string;
+  readonly authorizedAt: string;
+  readonly sendStartBy: string;
+}
 
 export interface SendAttempt {
   readonly sender: EgressRef;
   readonly instanceId: string;
   readonly useId: string;
   readonly attemptId: string;
-  readonly material: StaticMaterialEvidence | null;
+  readonly material: EgressSelectionEvidence | null;
   readonly deadlineAt: string;
 }
 
@@ -33,6 +64,7 @@ type Refusal =
 export type SendObservation = Extract<SendOutcome, { dispatch: "confirmed" }>;
 
 export interface StoredSendReceipt extends SendAttempt {
+  readonly authorization: AuthorizedSend | null;
   /** Observed response/policy decision, never proof the sender applied that decision. */
   readonly observation: SendObservation | null;
   readonly outcome: SendOutcome;
@@ -45,7 +77,7 @@ interface TransactionOwner {
     work: (unit: {
       readonly egressSendReceipts: EgressSendReceiptRepository;
       readonly credentialSources: {
-        rejectEgressMaterial(evidence: StaticMaterialEvidence): Promise<void>;
+        rejectEgressMaterial(evidence: EgressMaterialEvidence): Promise<void>;
       };
     }) => Promise<T>,
   ): Promise<T>;
@@ -55,6 +87,7 @@ export interface EgressSendReceiptRepository {
   find(input: SendAttempt): Promise<StoredSendReceipt | undefined>;
   insert(input: SendAttempt): Promise<boolean>;
   save(receipt: StoredSendReceipt): Promise<void>;
+  authorize(input: SendAttempt, authorization: AuthorizedSend): Promise<boolean>;
 }
 
 function invalid(): never {
@@ -103,29 +136,75 @@ function ref(value: unknown): EgressRef {
   return { id: text(item.id), generation: item.generation };
 }
 
-function material(value: unknown): StaticMaterialEvidence {
-  const item = exact(value, [
+function material(value: unknown): EgressMaterialEvidence {
+  const item = object(value);
+  const common = [
     "kind",
     "source",
     "binding",
     "grantHash",
     "isolationId",
-    "adoption",
-    "materialRefId",
-    "secret",
-    "secretDriver",
     "materialId",
     "materialVersion",
-    "authoritativeObservedAt",
     "usableUntil",
-    "retention",
-  ]);
+  ];
   const source = exact(item.source, [
     "installationId",
     "namespaceId",
     "source",
     "backend",
     "provider",
+  ]);
+  if (item.kind === "prepared_github") {
+    exact(item, [
+      ...common,
+      "family",
+      "ownerEpoch",
+      "inputVersion",
+      "preparationAttemptId",
+      "providerExpiresAt",
+    ]);
+    const epoch = item.ownerEpoch;
+    const usableUntil = date(item.usableUntil);
+    const providerExpiresAt = date(item.providerExpiresAt);
+    if (
+      typeof epoch !== "number" ||
+      !Number.isSafeInteger(epoch) ||
+      epoch < 1 ||
+      Date.parse(usableUntil) > Date.parse(providerExpiresAt)
+    ) {
+      return invalid();
+    }
+    return {
+      kind: "prepared_github",
+      source: {
+        installationId: text(source.installationId),
+        namespaceId: text(source.namespaceId),
+        source: ref(source.source),
+        backend: ref(source.backend),
+        provider: ref(source.provider),
+      },
+      binding: ref(item.binding),
+      grantHash: text(item.grantHash),
+      isolationId: text(item.isolationId),
+      family: ref(item.family),
+      ownerEpoch: epoch,
+      inputVersion: text(item.inputVersion),
+      preparationAttemptId: text(item.preparationAttemptId),
+      materialId: text(item.materialId),
+      materialVersion: text(item.materialVersion),
+      providerExpiresAt,
+      usableUntil,
+    };
+  }
+  exact(item, [
+    ...common,
+    "adoption",
+    "materialRefId",
+    "secret",
+    "secretDriver",
+    "authoritativeObservedAt",
+    "retention",
   ]);
   const secret = exact(item.secret, ["kind", "namespaceId", "id"]);
   if (
@@ -161,6 +240,41 @@ function material(value: unknown): StaticMaterialEvidence {
   };
 }
 
+function selection(value: unknown): EgressSelectionEvidence {
+  const selected = object(value);
+  if (selected.kind !== "no_material_required") {
+    return material(value);
+  }
+  const item = exact(selected, ["kind", "source", "binding", "grantHash", "isolationId"]);
+  const src = exact(item.source, [
+    "installationId",
+    "namespaceId",
+    "source",
+    "backend",
+    "provider",
+  ]);
+  const source = {
+    installationId: text(src.installationId),
+    namespaceId: text(src.namespaceId),
+    source: ref(src.source),
+    backend: ref(src.backend),
+    provider: ref(src.provider),
+  };
+  if (
+    source.provider.id !== "credential-free-repository-metadata" ||
+    source.provider.generation !== 1
+  ) {
+    return invalid();
+  }
+  return {
+    kind: "no_material_required",
+    source,
+    binding: ref(item.binding),
+    grantHash: text(item.grantHash),
+    isolationId: text(item.isolationId),
+  };
+}
+
 export function attempt(value: unknown, authenticatedSender: EgressRef): SendAttempt {
   const item = exact(value, [
     "sender",
@@ -179,7 +293,7 @@ export function attempt(value: unknown, authenticatedSender: EgressRef): SendAtt
     instanceId: text(item.instanceId),
     useId: text(item.useId),
     attemptId: text(item.attemptId),
-    material: item.material === null ? null : material(item.material),
+    material: item.material === null ? null : selection(item.material),
     deadlineAt: date(item.deadlineAt),
   };
 }
@@ -264,6 +378,7 @@ export function outcome(value: unknown): SendOutcome {
 export function receipt(row: unknown, input: SendAttempt): StoredSendReceipt {
   const value = object(row);
   const {
+    authorization: _authorization,
     outcome: _outcome,
     observation: _observation,
     settled: _settled,
@@ -280,6 +395,7 @@ export function receipt(row: unknown, input: SendAttempt): StoredSendReceipt {
   }
   return {
     ...recorded,
+    authorization: value.authorization === null ? null : authorizedSend(value.authorization),
     observation: value.observation === null ? null : observation(value.observation),
     outcome: outcome(value.outcome),
     settled: value.settled,
@@ -290,6 +406,74 @@ export function receipt(row: unknown, input: SendAttempt): StoredSendReceipt {
 export function observation(value: unknown): SendObservation {
   const result = outcome(value);
   return result.kind === "refused" || result.kind === "uncertain" ? invalid() : result;
+}
+
+export function authorizedSend(value: unknown): AuthorizedSend {
+  const item = exact(value, [
+    "association",
+    "requestDigest",
+    "injectionDigest",
+    "authorizedAt",
+    "sendStartBy",
+  ]);
+  const association = exact(item.association, [
+    "execution",
+    "installation",
+    "exchangeId",
+    "responseId",
+    "custodyId",
+  ]);
+  const execution = exact(association.execution, [
+    "installationId",
+    "namespaceId",
+    "agentId",
+    "servicePrincipalId",
+    "revisionId",
+    "executionId",
+  ]);
+  const claimedInstallation = object(association.installation);
+  const boundKey = "peerKeyId" in claimedInstallation;
+  const hasExecution = "authorityScope" in claimedInstallation;
+  const installation = exact(claimedInstallation, [
+    "sandboxId",
+    "instanceId",
+    "configurationId",
+    ...(boundKey ? ["peerKeyId"] : []),
+    ...(hasExecution ? ["policyHash", "authorityScope"] : []),
+    "plan",
+  ]);
+  if (hasExecution && installation.authorityScope !== "execution") {
+    return invalid();
+  }
+  return {
+    association: {
+      execution: {
+        installationId: text(execution.installationId),
+        namespaceId: text(execution.namespaceId),
+        agentId: text(execution.agentId),
+        servicePrincipalId: text(execution.servicePrincipalId),
+        revisionId: text(execution.revisionId),
+        executionId: text(execution.executionId),
+      },
+      installation: {
+        sandboxId: text(installation.sandboxId),
+        instanceId: text(installation.instanceId),
+        configurationId: text(installation.configurationId),
+        ...(boundKey ? { peerKeyId: text(installation.peerKeyId) } : {}),
+        ...(hasExecution
+          ? { policyHash: text(installation.policyHash), authorityScope: "execution" as const }
+          : {}),
+        plan: ref(installation.plan),
+      },
+      exchangeId: text(association.exchangeId),
+      responseId: text(association.responseId),
+      custodyId: text(association.custodyId),
+    },
+    requestDigest: text(item.requestDigest),
+    injectionDigest: text(item.injectionDigest),
+    authorizedAt: date(item.authorizedAt),
+    sendStartBy: date(item.sendStartBy),
+  };
 }
 
 /** Trusted sender persistence. Receipts never authorize sending or retries. */
@@ -308,6 +492,28 @@ export class EgressSendReceipts {
     return this.state.transact(async (unit) => {
       const created = await unit.egressSendReceipts.insert(input);
       return { created, receipt: receipt(await unit.egressSendReceipts.find(input), input) };
+    });
+  }
+
+  /** A separate, non-replayable transition. Unknown COMMIT must propagate unchanged. */
+  async authorize(
+    authenticatedSender: EgressRef,
+    value: unknown,
+    authorization: AuthorizedSend,
+  ): Promise<StoredSendReceipt> {
+    const input = attempt(value, authenticatedSender);
+    const selected = authorizedSend(authorization);
+    return this.state.transact(async (unit) => {
+      const previous = receipt(await unit.egressSendReceipts.find(input), input);
+      if (
+        previous.authorization !== null ||
+        previous.settled ||
+        previous.observation !== null ||
+        !(await unit.egressSendReceipts.authorize(input, selected))
+      ) {
+        return invalid();
+      }
+      return receipt(await unit.egressSendReceipts.find(input), input);
     });
   }
 
@@ -368,6 +574,9 @@ export class EgressSendReceipts {
     }
     return this.state.transact(async (unit) => {
       const previous = receipt(await unit.egressSendReceipts.find(input), input);
+      if (previous.authorization !== null && final.kind === "refused") {
+        return invalid();
+      }
       if (previous.settled && (!settle || !isDeepStrictEqual(previous.outcome, final))) {
         return invalid();
       }

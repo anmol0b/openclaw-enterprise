@@ -553,11 +553,18 @@ export const CredentialSourceSchema = Type.Object(
     config: CredentialSourceConfig,
     egress: Type.Optional(
       Type.Object(
-        { adoption: Type.Literal("live"), retention: Type.Literal("none") },
+        {
+          adoption: Type.Union([
+            Type.Literal("live"),
+            Type.Literal("prepared"),
+            Type.Literal("credential_free"),
+          ]),
+          retention: Type.Literal("none"),
+        },
         {
           additionalProperties: false,
           description:
-            "Protected live static reads with no retained material. The first inference grant permits the configured model and local Harness tools; provider-executed tools are unsupported. Runtime readiness requires current authenticated supervisor evidence.",
+            "Protected live static, eligible prepared, or explicitly credential-free metadata access. Each profile requires its own grant; missing material never selects credential-free access. Runtime readiness requires current authenticated supervisor evidence.",
         },
       ),
     ),

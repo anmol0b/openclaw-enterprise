@@ -182,6 +182,15 @@ repositoryCredentials:
   publicCaKey: ca.crt
   upstreamCidrs: []
 
+# Anonymous reads of known public GitHub repositories, for ordinary dedicated
+# Codex Agents whose authored proxy allows the exact Service IP. No GitHub App or token required.
+publicGithubRead:
+  enabled: false
+  # Reserve this Service IP until all revisions granting access to it retire.
+  clusterIP: ""
+  # Operator-approved IPv4 CIDRs for api.github.com; no default Internet grant.
+  upstreamCidrs: []
+
 gatewayRouting:
   enabled: false
   # Empty derives the private Envoy Service DNS name:
@@ -322,3 +331,17 @@ egressAuthority:
   # Only public.pem is projected from the Gateway's issuer Secret.
   # Every client requires both namespaceSelector and podSelector.matchLabels.
   clients: []
+
+# Optional OCE custody for explicitly enrolled, Agent-scoped GitHub metadata reads.
+# In the Installation's drivers.conduit.configuration.preparedGitHub set
+# custodyKeyPath: /etc/openclaw/prepared-github/custody.key. Supply a dedicated
+# Secret with exactly 32 random binary bytes at custody.key, keep it stable across
+# API and worker restarts, and protect its backup separately from the database.
+# The issuer's App key belongs to an OCC Secret, never to this Secret or Helm values.
+preparedGitHub:
+  custodySecretName: ""
+  # Operator-maintained, exact api.github.com IPv4 destinations for issue/retire.
+  issuerCidrs: []
+  issuerPort: 443
+  # Optional public ca.crt for an explicitly configured private HTTPS issuer.
+  issuerCaConfigMapName: ""

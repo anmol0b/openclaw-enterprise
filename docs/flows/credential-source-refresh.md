@@ -1,7 +1,7 @@
 ---
 created: "2026-10-08"
 updated: "2026-10-14"
-last_updated_session: "authoring-run/bb74066d-9a10-4c10-932f-fb5843e85628"
+last_updated_session: fix-1366
 ---
 
 # Credential source refresh Flow
@@ -175,7 +175,7 @@ A background worker can prepare one admitted GitHub App grant without traffic
 from an Agent. The owner commits an `issuing` attempt before retrieving the exact
 signing key version, then checks the family, owner epoch and that attempt again
 before calling GitHub. It reuses the existing signer and installation-token
-exchange. This is the [OCE-owned GitHub preparation option](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/protocol.md#prepare-and-renew-credentials).
+exchange. This is the [OCE-owned GitHub preparation option](../../specs/rfcs/0021-egress-proxy-credential-lifecycle/protocol.md#prepare-and-renew-credentials).
 
 GitHub issuance cannot be atomic with local storage. The owner verifies the exact
 returned repository, rights and provider expiry. The publication transaction
@@ -189,12 +189,11 @@ committed material during renewal. Cold, expired or differently admitted materia
 returns `not_ready`, including when validity runs out during the read. The
 Resolver must authorize both access and the actual send.
 
-To connect this core, admission, takeover, preparation and reads must share a
-durable family transaction, encrypted custody and retained attempt history. The
-port currently accepts only one grant per family; its family ID must include the
-installation and namespace boundary. Connect a background worker with bounded
-attempts and an exact-version signing-key lookup, then give the Resolver only the
-read facet. Neither component is registered in production yet.
+The optional PostgreSQL lifecycle joins the family transaction, encrypted custody,
+and retained attempts. The API and worker need the same dedicated 32-byte custody
+key across restarts. Only the worker prepares material. The Installation owns the
+HTTPS issuer and its trust roots; a source cannot redirect the issuer. A cold or
+expired read cannot start an exchange, and uncertain issuance blocks another attempt.
 
 ## Debugging and Verification
 
@@ -205,7 +204,9 @@ read facet. Neither component is registered in production yet.
   scope/expiry, cancellation, and transaction failures before/after commit.
   Its serializable in-memory fixture reconnects owners to shared committed state;
   it is not production durability, process-crash, live-provider, installed-runtime,
-  cluster or regular Agent workflow proof. No production owner is registered.
+  cluster or regular Agent workflow proof.
+  `postgres-prepared-github-lifecycle.test.mjs` exercises the durable lifecycle,
+  signed protected exchange, issuer rotation, withdrawal and quarantine over loopback.
 
 - Read the source: `status.refresh.state`, `lastRefreshAt`, `failureCode`, and
   `recoveryAction` explain the last mint without exposing a token.
@@ -230,9 +231,8 @@ read facet. Neither component is registered in production yet.
 
 ## Changelog
 
-- 2026-10-14 21:46: Document the GitHub preparation fence, warm reader and required production join. (authoring-run/bb74066d-9a10-4c10-932f-fb5843e85628 - fc20eb0174eaf8ae9d4ccb327ec65236c49ef4fb)
-
 - 2026-10-14 21:40: Refuse the three-label `<port>.<protocol>.<service>` short form of the gateway's Services. (fix-1366 - bc85338f2)
+- 2026-10-14 21:46: Document the GitHub preparation fence, warm reader and required production join. (authoring-run/bb74066d-9a10-4c10-932f-fb5843e85628 - fc20eb0174eaf8ae9d4ccb327ec65236c49ef4fb)
 
 - 2026-10-09 23:30: Update refuses a recorded refresh token; update and rotation hold only the source lock and audit failures. (fix-848-978-979)
 

@@ -58,7 +58,7 @@ graph TD
   KDriver -->|none| KCodex["Import runtime and verify<br/>the normal Codex sandbox"]
   KCodex -->|success| KRoutingFirst["Install routing controllers<br/>and remaining images"]
   KCodex -->|failure| KRollback
-  KDriver -->|OpenShell| KOpenFirst["Install routing and import platform images,<br/>then prepare OpenShell assets"]
+  KDriver -->|OpenShell| KOpenFirst["Prepare OpenShell assets,<br/>install routing, then import runtime"]
   KRoutingFirst --> KOnly["Install selected control-plane profile<br/>and retain all readiness gates"]
   KOpenFirst --> KProtection{"Protected egress?"}
   KProtection -->|Off| KOnly
@@ -158,10 +158,9 @@ creates the owned cluster, checks node DNS, and writes and selects its kubeconfi
 With Sandbox Driver `none`, it then imports the runtime image and runs
 `prepareDevelopmentCodexSandbox` before installing private routing controllers.
 A sandbox refusal rolls back the owned cluster before controller or PostgreSQL
-image imports, Installation setup, or credential delivery. OpenShell imports the runtime, controller and PostgreSQL images before preparing
-OpenShell assets and installing its workloads, so later platform-image imports
-do not evict idle OpenShell images. Both paths retain network-isolation and
-authenticated readiness gates.
+image imports, Installation setup, or credential delivery. OpenShell retains its
+preparation, routing-controller installation, then runtime-import order. Both
+paths retain the later network-isolation and authenticated readiness gates.
 
 `internal/occdev/kubernetes.go:importDevelopmentImage` exports each selected
 image to a temporary archive, selecting its Linux platform explicitly on Docker.
@@ -209,7 +208,7 @@ candidate images/charts. It prepares authority server TLS and its public CA,
 then installs OpenShell with native PKI and a TLS middleware registration.
 OpenShell owns the complete Gateway server/client certificate and extension-JWT
 key set. The launcher reads only its public key ID and writes the paired Backend,
-Conduit Driver and authority listener settings into the Installation.
+egress Driver and authority listener settings into the Installation.
 
 Gateway startup contacts the registry, so `installDevelopmentPlatform` defers
 its readiness wait until after the OCE release's normal readiness gates. API
@@ -292,7 +291,6 @@ distinguishes local proof from pending connected runtime qualification.
 ## Changelog
 
 - 2026-10-14 18:14: Bound declared and streamed Docker API response bodies before complete buffering. (issue-2406 - 1fc3258afdd73b2888c524092b988a2110449bbb)
-
 - 2026-10-14 17:03: Validate protected development selectors before CLI dispatch and direct Docker script effects. (authoring-run/5607c5fd-a268-466b-a5c9-93e0cc984807 - 3fba9be5bae09aa9c33483a768221f44079edc3b)
 
 - 2026-10-14 16:11: Add the default-off protected OpenShell launch, native mTLS credential ownership, authority-first readiness and disposable database selection. (authoring-run/b0bd473e-3b1d-44cc-a1b1-4a1d411a1829 - 126b6a1b13b48281aee5d3ca4d476ec75da8a24a)

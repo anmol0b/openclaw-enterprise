@@ -185,7 +185,7 @@ optional `drivers.credential_refresh` member must match the selected
 [Credential Refresh Driver](drivers/credential-refresh.md); OpenShell keeps
 refresh state on the gateway's provider records, so the two roles share this
 Backend. Optional `drivers.conduit` selects the paired
-[Conduit adapter for protected static inference](credential-sources/protected-inference.md).
+[protected static inference adapter](credential-sources/protected-inference.md).
 That path requires an authenticated HTTPS gateway and a negotiated credential
 access counterpart; legacy provider substitution cannot satisfy it.
 One OpenShell Backend is supported. Composition builds one gateway client object

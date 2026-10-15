@@ -5431,6 +5431,8 @@ test(
     assert.ok(
       !defaults.some((object) => object.metadata?.name === "openclaw-enterprise-egress-authority"),
     );
+    const issuerPolicyName = "openclaw-enterprise-prepared-github-issuer-egress";
+    assert.ok(!defaults.some((object) => object.metadata?.name === issuerPolicyName));
     for (const workload of defaults.filter((object) => object.kind === "Deployment")) {
       assert.ok(
         !workload.spec.template.spec.volumes?.some(
@@ -5439,6 +5441,7 @@ test(
       );
     }
     const objects = await resources((await render(protectedValues)).stdout);
+    assert.ok(!objects.some((object) => object.metadata?.name === issuerPolicyName));
     const service = objects.find(
       ({ kind, metadata }) =>
         kind === "Service" && metadata.name === "openclaw-enterprise-egress-authority",
@@ -5517,8 +5520,40 @@ test(
       [{ "egressAuthority.clients[0].podSelector": "null" }, /podSelector.matchLabels/],
       [{ "egressAuthority.port": "8080" }, /distinct TCP port/],
       [{ "egressAuthority.port": "65536" }, /distinct TCP port/],
+      [
+        { "backend.openshell.clientSecretName": "authority-server-tls" },
+        /egressAuthority.tlsSecretName must name a dedicated Secret.*backend.openshell.clientSecretName/,
+      ],
+      [
+        { "egressAuthority.issuerSecretName": "authority-server-tls" },
+        /egressAuthority.issuerSecretName must name a dedicated Secret.*egressAuthority.tlsSecretName/,
+      ],
     ]) {
       await assert.rejects(render({ ...protectedValues, ...override }), diagnostic);
+    }
+
+    const prepared = {
+      ...protectedValues,
+      "preparedGitHub.custodySecretName": "prepared-github-custody",
+      "preparedGitHub.issuerCidrs[0]": "192.0.2.19/32",
+    };
+    // Kubernetes interprets a null NetworkPolicyPort.port as every TCP port to this peer.
+    const portKey = "preparedGitHub.issuerPort";
+    for (const invalid of [null, "", "https", 0, 65536]) {
+      await assert.rejects(
+        render({ ...prepared, [portKey]: invalid }),
+        /preparedGitHub.issuerPort must be/,
+      );
+    }
+    for (const override of [{}, { [portKey]: 10443 }]) {
+      const rendered = await resources((await render({ ...prepared, ...override })).stdout);
+      const { spec } = rendered.find(({ metadata }) => metadata?.name === issuerPolicyName);
+      assert.deepEqual(spec.egress, [
+        {
+          to: [{ ipBlock: { cidr: "192.0.2.19/32" } }],
+          ports: [{ protocol: "TCP", port: override[portKey] ?? 443 }],
+        },
+      ]);
     }
   },
 );

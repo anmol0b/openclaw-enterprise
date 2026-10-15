@@ -1,16 +1,17 @@
 ---
 created: "2026-09-26"
-updated: "2026-10-14"
-last_updated_session: authoring-run/fe204745-17c9-4662-82e0-e194d7c187cb
+updated: 2026-10-14
+last_updated_session: authoring-run/dba0a6cb-33d9-40fd-b38b-e20cddf4b75f
 ---
 
 # Credential source lifecycle Flow
 
 ## Overview
 
-The Credential Gateway holds registered Secret values; OCC stores references.
-Admission freezes source identity in the AgentRevision; dispatch supplies the live
-record to Compute. This flow covers registration through withdrawal and deletion.
+Authorized callers register, bind, deploy, update, withdraw and delete Namespace
+credential sources.
+The gateway holds Secret values; OCC stores metadata and references. Admission
+freezes identity in the AgentRevision; the worker passes the live record to Compute.
 [OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md) covers attachment and readiness.
 
 With `conduit` selected, new static sources instead admit live versioned
@@ -28,9 +29,8 @@ continues to describe sources without a protected descriptor.
 - Source: `apps/controller/src/http/credential-sources.ts:createCredentialSource`
 - Source: `packages/occ/src/index.ts:createCredentialSource`
 - Source: `packages/occ/src/index.ts:deleteCredentialSource`
-- Assumptions: the Installation selected a Credential Gateway that belongs to an
-  `openshell` Backend, a Sandbox, and bundled Kubernetes Compute; the Namespace
-  is `ready`; the caller holds the grants named in each phase.
+- Assumptions: a `ready` Namespace; an Installation selecting a Credential Gateway in an
+  `openshell` Backend, a Sandbox and bundled Kubernetes Compute; and per-phase caller grants.
 
 ## Flow
 
@@ -156,7 +156,7 @@ declare `harnessAuth`. The frozen snapshot is `{ method, sourceId,
 credentialGatewayId, sourceType, loginMode }`. `admittedCredentialSourceType`
 requires a selected Sandbox, and Compute `validateHarnessAuth` requires
 a dedicated Codex or native OpenClaw Harness, the paired Sandbox and gateway,
-and an `openai`/`api_key` type. Compute renders no model Secret for either
+and an `openai`/`api_key` type, or `codex-pat`/`codex_pat` for dedicated Codex. Compute renders no model Secret for either
 Harness and passes the resolved source to Sandbox provisioning.
 `admitCredentialSources` refuses a list without a selected Sandbox Driver
 (`409` with its message), rechecks the caller's binding grants, then authorizes
@@ -272,26 +272,28 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 
 ## Debugging and Verification
 
-- `node --test tests/conformance/credential-source-occ.test.mjs`: catalog,
-  grants, compensation, audit, deletion and admission with an in-process gateway.
-- `node --test tests/integration/credential-source-api.test.mjs`: Fastify, IAM,
-  OCC and the OpenShell Driver; storage and placement are doubles, not runtime proof.
-- `node --test tests/conformance/openshell-gateway-wire.test.mjs`: provider,
-  profile, update, detach and recheck RPCs against the `v0.1.3-pre.2` wire fixture.
-- `tests/integration/postgres-worker-agent-revision.test.mjs`: real PostgreSQL
-  queue and worker, with a Compute double, covering withdrawal recovery and denials.
-- `OCC_TEST_OPENSHELL_K3D_REAL=1 node --env-file="$TEST_ENV_FILE" --test tests/integration/sandbox-driver-openshell-k3d-real.test.mjs`:
-  real API registration, model turns, source updates and tool/model withdrawal.
-  Follow [OpenShell prerequisites](../testing/openshell.md).
-
-A `deleting` source returns `503` until gateway cleanup succeeds; GET shows live
-status. Worker `CREDENTIAL_GATEWAY_MISMATCH`, `HARNESS_AUTH_SOURCE_UNAVAILABLE`,
-`CREDENTIAL_WITHDRAWN` and `CREDENTIAL_WITHDRAWAL_PENDING` identify selection,
-availability, withdrawal and pending-confirmation failures respectively.
-`CREDENTIALS_WITHDRAWN` and `WITHDRAWAL_REVISION_RETIRED` complete withdrawal work.
-Unsupported withdrawal, Compute mismatch, misconfiguration, ownership conflict
-and authorization denial fail immediately. See the
-[source reference](../reference/credential-sources.md) for operator recovery.
+- [OCC conformance](../../tests/conformance/credential-source-occ.test.mjs) covers
+  grants, registration recovery, audit and admission with a gateway double.
+- [API integration](../../tests/integration/credential-source-api.test.mjs) exercises
+  Fastify, IAM, OCC and the OpenShell Driver, with storage and Compute doubles.
+- [Wire conformance](../../tests/conformance/openshell-gateway-wire.test.mjs)
+  checks provider, profile, update, detach and recheck against `v0.1.3-pre.2`.
+- [Worker integration](../../tests/integration/postgres-worker-agent-revision.test.mjs)
+  exercises withdrawal, retries, refusals, replays, lost grants and late creates
+  against PostgreSQL, with a Compute double.
+- [Real OpenShell tests](../testing/openshell.md) specify PAT or API-key selection.
+  They register a source, read gateway status, withdraw the tool source (its
+  placeholder stops reaching the echo service), then withdraw the model source
+  (the next turn fails).
+- A source stuck in `deleting` returns `503` on delete until the gateway is
+  reachable; `GET` shows its live `status`.
+- Worker reason codes `CREDENTIAL_GATEWAY_MISMATCH` and
+  `HARNESS_AUTH_SOURCE_UNAVAILABLE` mean a changed selection or an unavailable
+  source; `CREDENTIAL_WITHDRAWN` a withdrawn revision source, and
+  `CREDENTIAL_WITHDRAWAL_PENDING` an unconfirmed revocation. `CREDENTIALS_WITHDRAWN` and `WITHDRAWAL_REVISION_RETIRED` complete the work,
+  and `CREDENTIAL_WITHDRAWAL_UNSUPPORTED`, `COMPUTE_DRIVER_MISMATCH`,
+  `CREDENTIAL_WITHDRAWAL_MISCONFIGURED`, `CREDENTIAL_WITHDRAWAL_OWNERSHIP_CONFLICT`,
+  and `AUTHORIZATION_DENIED` fail it at once.
 
 ## Related docs
 
@@ -307,6 +309,9 @@ and authorization denial fail immediately. See the
 
 ## Changelog
 
+- 2026-10-14 14:04: Scope PAT authentication and OpenShell prerequisites. (authoring-run/dba0a6cb-33d9-40fd-b38b-e20cddf4b75f - 96a2b79fa)
+
+- 2026-10-13 20:30: Document provider-managed Codex PAT authentication. (01a136ee-8824-7043-b9e2-49eccacac3bd - ed9018c09)
 - 2026-10-14 12:34: Distinguish protected source admission from legacy gateway copies. (authoring-run/fe204745-17c9-4662-82e0-e194d7c187cb - dc5648b67d2618cc43ef07562298e986a94674e7)
 
 - 2026-10-13 20:07: Check provider ownership before profile updates. (authoring-run/01a136d4-3550-7042-834c-cf11f51f41f2 - 146c80ef66b5860cb9bea296d2574156468a103c)

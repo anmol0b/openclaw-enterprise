@@ -1,6 +1,6 @@
 import type {
   InitialWorkspaceFiles,
-  StaticEgressSource,
+  ProtectedEgressSource,
   EgressInstallation,
   AgentDesiredRuntimeState,
   AgentStatus,
@@ -475,7 +475,7 @@ export const credentialSources = occSchema.table(
     name: collatedText("name").notNull(),
     type: text("type").notNull(),
     config: jsonb("config").$type<Readonly<Record<string, string>>>().notNull(),
-    egress: jsonb("egress").$type<StaticEgressSource>(),
+    egress: jsonb("egress").$type<ProtectedEgressSource>(),
     driverId: text("driver_id").notNull(),
     state: text("state").$type<CredentialSourceState>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -483,7 +483,12 @@ export const credentialSources = occSchema.table(
   (table): PgTableExtraConfigValue[] => [
     check(
       "credential_sources_egress_valid",
-      sql`${table.egress} IS NULL OR occ.static_egress_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id})`,
+      sql`CASE WHEN ${table.type} = 'credential-free-repository-metadata' THEN
+      ${table.config}->'authority' = '"execution"'::jsonb
+      AND ${table.config}->'agent_id' = ${table.egress} #> '{grant,isolationId}' AND ${table.config}->'origin' = ${table.egress}->'origin'
+      AND ${table.config}->'repository_id' = ${table.egress} #> '{grant,repositoryId}' AND ${table.config}->'repository' = ${table.egress} #> '{grant,repository}'
+      AND occ.credential_free_metadata_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id})
+    ELSE ${table.egress} IS NULL OR occ.egress_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id}) END IS TRUE`,
     ),
     unique("credential_sources_namespace_id_id_unique").on(table.namespaceId, table.id),
     unique("credential_sources_namespace_id_name_unique").on(table.namespaceId, table.name),
@@ -668,9 +673,25 @@ export const agentRevisions = occSchema.table(
         AND ${table.admittedSpec}->'egress_plan'->'execution'->>'namespaceId' = ${table.namespaceId}
         AND ${table.admittedSpec}->'egress_plan'->'execution'->>'agentId' = ${table.agentId}
         AND ${table.admittedSpec}->'egress_plan'->'execution'->>'revisionId' = ${table.id}
-        AND jsonb_typeof(${table.admittedSpec}->'egress_plan'->'routes') = 'array'
-        AND jsonb_array_length(${table.admittedSpec}->'egress_plan'->'routes') > 0,
+        AND jsonb_typeof(${table.admittedSpec}->'egress_plan'->'routes') = 'array',
         false)`,
+    ),
+    // Migration 0056 installs this NOT VALID to preserve old, unreadable history.
+    check(
+      "agent_revisions_execution_admission",
+      sql`COALESCE(
+        jsonb_typeof(${table.admittedSpec}->'execution_admission') = 'object'
+        AND (${table.admittedSpec}->'execution_admission') ?& ARRAY['version', 'mode']
+        AND ((${table.admittedSpec}->'execution_admission') - 'version' - 'mode') = '{}'::jsonb
+        AND ${table.admittedSpec}->'execution_admission'->'version' = '2'::jsonb
+        AND (
+          (${table.admittedSpec}->'execution_admission'->>'mode' = 'unprotected'
+            AND NOT (${table.admittedSpec} ? 'egress_plan')
+            AND NOT ((${table.admittedSpec}->'harness_auth') ? 'protectedExecutionVersion'))
+          OR (${table.admittedSpec}->'execution_admission'->>'mode' = 'protected'
+            AND ${table.admittedSpec} ? 'egress_plan'
+            AND ${table.admittedSpec} #> '{harness_auth,protectedExecutionVersion}' = '2'::jsonb)
+        ), false)`,
     ),
     check(
       "agent_revisions_admitted_snapshot",
@@ -682,7 +703,7 @@ export const agentRevisions = occSchema.table(
           - 'configuration_id' - 'configuration_kind' - 'configuration_generation'
           - 'draft_spec' - 'harness' - 'compute' - 'sandbox_driver_id'
           - 'secret_driver_id' - 'secret_bindings' - 'harness_auth' - 'credential_sources' - 'plugins'
-          - 'repository_credentials' - 'egress_plan') = '{}'::jsonb
+          - 'repository_credentials' - 'egress_plan' - 'execution_admission') = '{}'::jsonb
         AND jsonb_typeof(${table.admittedSpec}->'configuration_id') = 'string'
         AND (${table.admittedSpec}->>'configuration_id') ~ ${identifierPatterns.configuration}
         AND jsonb_typeof(${table.admittedSpec}->'configuration_kind') = 'string'
@@ -703,11 +724,17 @@ export const agentRevisions = occSchema.table(
         AND (${table.admittedSpec} #>> '{harness,mode}') IN ('embedded', 'dedicated')
         AND jsonb_typeof(${table.admittedSpec}->'compute') = 'object'
         AND ((${table.admittedSpec}->'compute') ?& ARRAY['id', 'implementation'])
-        AND ((${table.admittedSpec}->'compute') - 'id' - 'implementation') = '{}'::jsonb
+        AND ((${table.admittedSpec}->'compute') - 'id' - 'implementation' - 'admission') = '{}'::jsonb
         AND jsonb_typeof(${table.admittedSpec} #> '{compute,id}') = 'string'
         AND COALESCE(btrim(${table.admittedSpec} #>> '{compute,id}'), '') <> ''
         AND jsonb_typeof(${table.admittedSpec} #> '{compute,implementation}') = 'string'
         AND COALESCE(btrim(${table.admittedSpec} #>> '{compute,implementation}'), '') <> ''
+        AND (
+          NOT ((${table.admittedSpec}->'compute') ? 'admission')
+          OR (jsonb_typeof(${table.admittedSpec} #> '{compute,admission}') = 'string'
+              AND char_length(${table.admittedSpec} #>> '{compute,admission}') BETWEEN 1 AND 1024
+              AND (${table.admittedSpec} #>> '{compute,admission}') ~ '^[ -~]+$')
+        )
         AND (
           NOT (${table.admittedSpec} ? 'sandbox_driver_id')
           OR (
@@ -726,7 +753,7 @@ export const agentRevisions = occSchema.table(
           NOT (${table.admittedSpec} ? 'secret_bindings')
           OR occ.secret_bindings_are_valid(${table.admittedSpec}->'secret_bindings', ${table.namespaceId})
         )
-        AND occ.harness_auth_is_valid(${table.admittedSpec}->'harness_auth', ${table.namespaceId}, true)
+        AND occ.harness_auth_is_valid((${table.admittedSpec}->'harness_auth') - 'protectedExecutionVersion', ${table.namespaceId}, true)
         AND (
           NOT (${table.admittedSpec} ? 'repository_credentials')
           OR occ.repository_credentials_are_valid(${table.admittedSpec}->'repository_credentials')
@@ -1664,6 +1691,7 @@ export const egressSendReceipts = occSchema.table(
     useId: text("use_id").notNull(),
     attemptId: text("attempt_id").notNull(),
     binding: jsonb("binding").notNull(),
+    authorization: jsonb("authorized_dispatch"),
     observation: jsonb("observation"),
     outcome: jsonb("outcome").notNull(),
     settled: boolean("settled").notNull().default(false),
@@ -1738,7 +1766,99 @@ export const egressSendReceipts = occSchema.table(
     check(
       "egress_send_receipts_check_16",
       sql`feedback IS NULL OR ((observation IS NOT NULL OR (settled AND outcome->>'dispatch' = 'confirmed'))
-    AND binding->'material'->>'kind' = 'static') IS TRUE`,
+    AND occ.egress_receipt_material_is_valid(binding->'material')) IS TRUE`,
     ),
+    check(
+      "egress_send_receipts_check_17",
+      sql`aauthorized_dispatch IS NULL OR (
+    jsonb_typeof(authorized_dispatch) = 'object'
+    AND authorized_dispatch #>> '{association,installation,instanceId}' = instance_id
+    AND authorized_dispatch #>> '{association,execution,installationId}' = binding #>> '{material,source,installationId}'
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz > (authorized_dispatch->>'authorizedAt')::timestamptz
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (authorized_dispatch->>'authorizedAt')::timestamptz + interval '1 second'
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->>'deadlineAt')::timestamptz
+    AND CASE WHEN binding #>> '{material,kind}' = 'no_material_required' THEN
+      (binding->'material') - ARRAY['kind','source','binding','grantHash','isolationId'] = '{}'::jsonb
+      AND binding #>> '{material,grantHash}' ~ '^[0-9a-f]{64}$'
+      AND occ.egress_ref_is_valid(binding #> '{material,binding}')
+      AND binding #> '{material,source,provider}' = '{"id":"credential-free-repository-metadata","generation":1}'::jsonb
+      AND occ.egress_ref_is_valid(binding #> '{material,source,source}') AND occ.egress_ref_is_valid(binding #> '{material,source,backend}')
+      AND binding #>> '{material,source,namespaceId}' = authorized_dispatch #>> '{association,execution,namespaceId}'
+      AND occ.prepared_github_dispatch_matches(authorized_dispatch, binding->'material')
+      AND authorized_dispatch->>'injectionDigest' = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+    ELSE occ.egress_receipt_material_is_valid(binding->'material')
+      AND (binding #>> '{material,kind}' = 'static' OR occ.prepared_github_dispatch_matches(authorized_dispatch, binding->'material'))
+      AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding #>> '{material,usableUntil}')::timestamptz
+      AND length(authorized_dispatch #>> '{association,exchangeId}') > 0 AND length(authorized_dispatch #>> '{association,responseId}') > 0
+      AND length(authorized_dispatch #>> '{association,custodyId}') > 0 AND length(authorized_dispatch->>'requestDigest') = 64
+      AND length(authorized_dispatch->>'injectionDigest') = 64
+    END) IS TRUE`,
+    ),
+  ],
+);
+
+/** Lifecycle custody, never an Agent-readable Secret or a substitute for live source authority. */
+export const preparedGitHubFamilies = occSchema.table(
+  "prepared_github_families",
+  {
+    sourceId: text("source_id").primaryKey(),
+    source: jsonb("source").notNull(),
+    issuer: jsonb("issuer").notNull(),
+    admission: jsonb("admission").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull().defaultNow(),
+    workerClaim: uuid("worker_claim"),
+  },
+  (t) => [
+    check(
+      "prepared_github_families_check",
+      sql`(source #>> '{key,source,id}' = source_id AND source->>'adoption' = 'prepared'
+    AND source #>> '{grant,profile}' = 'metadata-read' AND admission->>'familyId' = source_id
+    AND jsonb_typeof(issuer->'backendRef') = 'object') IS TRUE`,
+    ),
+    index("prepared_github_families_due")
+      .on(t.nextCheckAt)
+      .where(sql`enabled`),
+  ],
+);
+
+export const preparedGitHubAttempts = occSchema.table(
+  "prepared_github_attempts",
+  {
+    id: uuid("id").primaryKey(),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => preparedGitHubFamilies.sourceId),
+    admission: jsonb("admission").notNull(),
+    state: text("state").notNull(),
+    custody: text("custody").notNull().default("intent"),
+    materialVersion: uuid("material_version").unique(),
+    providerExpiresAt: timestamp("provider_expires_at", { withTimezone: true }),
+    usableUntil: timestamp("usable_until", { withTimezone: true }),
+    sealed: customType<{ data: Buffer }>({ dataType: () => "bytea" })("sealed"),
+  },
+  (t) => [
+    check(
+      "prepared_github_attempts_state_check",
+      sql`state IN ('issuing', 'committed', 'quarantined')`,
+    ),
+    check(
+      "prepared_github_attempts_custody_check",
+      sql`custody IN ('intent', 'current', 'retire', 'revoking', 'revoked', 'unknown')`,
+    ),
+    check(
+      "prepared_github_attempts_check",
+      sql`custody <> 'current' OR (state = 'committed' AND sealed IS NOT NULL
+    AND material_version IS NOT NULL AND usable_until IS NOT NULL
+    AND provider_expires_at IS NOT NULL AND usable_until <= provider_expires_at)`,
+    ),
+    check(
+      "prepared_github_attempts_check1",
+      sql`(sealed IS NOT NULL) = (custody IN ('current','retire','revoking','unknown'))`,
+    ),
+    uniqueIndex("prepared_github_current")
+      .on(t.sourceId)
+      .where(sql`custody='current'`),
+    index("prepared_github_attempts_family").on(t.sourceId),
   ],
 );

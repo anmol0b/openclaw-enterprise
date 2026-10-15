@@ -14,6 +14,7 @@ import {
 import { createReadyComputeDriver } from "../helpers/development.mjs";
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
+import { admitRepositoryAgent } from "../helpers/egress-custody-installed-agent.mjs";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
 import {
   encodeSyntheticEvents,
@@ -194,6 +195,12 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
         (role) => [role, `fixture/${role}@sha256:${"a".repeat(64)}`],
       ),
     ),
+    credentialConnector: {
+      path: "/usr/bin/model-client",
+      sha256: "b".repeat(64),
+      image: `fixture/agent@sha256:${"a".repeat(64)}`,
+      verification: "operator-verified-image-executable",
+    },
     openShellBackend: {
       endpoint: "https://gateway.test:8443",
       rootCertificatePath: "/fixture/root.pem",
@@ -232,6 +239,35 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
       assert.equal(validate(input), input);
     }
   }
+  for (const pin of [
+    undefined,
+    {},
+    { ...inputs().credentialConnector, sha256: "" },
+    { ...inputs().credentialConnector, image: inputs().images.sandbox },
+    { ...inputs().credentialConnector, path: "model-client" },
+    { ...inputs().credentialConnector, verification: "discovered" },
+  ]) {
+    assert.throws(() =>
+      validateConnectedInputs({ ...inputs(), credentialConnector: pin }, controller),
+    );
+  }
+  const fresh = {
+    ...inputs(),
+    credentialConnector: undefined,
+    authorityProfile: "fresh-whole-execution",
+  };
+  const wholeExecution = (input) =>
+    validateConnectedInputs(input, controller, { wholeExecution: true });
+  assert.equal(wholeExecution(fresh), fresh);
+  assert.throws(() => validate(fresh), "legacy lane cannot silently broaden a connector grant");
+  assert.throws(
+    () => wholeExecution(inputs()),
+    "fresh profile must not inherit connector authority",
+  );
+  assert.throws(() =>
+    wholeExecution({ ...fresh, credentialConnector: inputs().credentialConnector }),
+  );
+  assert.throws(() => wholeExecution({ ...fresh, authorityProfile: undefined }));
   const rejectedAuth = [
     undefined,
     { mode: "unauthenticated" },
@@ -532,4 +568,72 @@ test("connected request bytes pass the real Fastify parser and preserve missing-
   assert.deepEqual(missingBindingTarget.body.error.details, [
     { path: "/resourceId", code: "INVALID_VALUE" },
   ]);
+});
+
+test("repository admission inspects the current API and worker after an authority restart", async () => {
+  const image = "controller@sha256:" + "a".repeat(64);
+  const namespace = "owned-controller";
+  const pod = (component, name = component) => ({
+    metadata: { name, namespace, labels: { "app.kubernetes.io/component": component } },
+    spec: { containers: [{ name: component, image }] },
+    status: { conditions: [{ type: "Ready", status: "True" }] },
+  });
+  const worker = pod("worker");
+  const stack = { controllerPods: [pod("api", "api-retired"), worker] };
+  const api = pod("api", "api-replacement");
+  let items = [api, worker];
+  const inspected = [];
+  const provider = { businessOrigin: "https://issuer.example.test" };
+  const kubectl = (operation, ...args) => {
+    if (operation === "get") {
+      assert.deepEqual(args, [
+        "pods",
+        "--namespace",
+        namespace,
+        "--selector",
+        "owned=yes",
+        "-o",
+        "json",
+      ]);
+      return JSON.stringify({ items });
+    }
+    const [flag, ns, name] = args;
+    assert.deepEqual([operation, flag, ns], ["exec", "-n", namespace]);
+    assert.ok(
+      items.some(({ metadata }) => metadata.name === name),
+      name + " NotFound",
+    );
+    inspected.push(name);
+    return provider.businessOrigin;
+  };
+  const input = {
+    controllerNamespace: namespace,
+    controllerSelector: "owned=yes",
+    images: { controller: image },
+  };
+  // Stop at the first mutation. A stale snapshot, or a partial inspection, cannot pass this boundary.
+  const stop = new Error("reached enrollment");
+  const create = (kind) => {
+    assert.equal(kind, "configurations");
+    assert.deepEqual(inspected.splice(0), ["api-replacement", "worker"]);
+    throw stop;
+  };
+  const admit = () =>
+    admitRepositoryAgent(
+      { input, f: { kubectl }, controller: {} },
+      stack,
+      {},
+      { provider, create },
+    );
+  await assert.rejects(admit, (error) => error === stop);
+
+  items = [api];
+  await assert.rejects(admit, /worker Pod/);
+  items = [api, worker];
+  worker.metadata.deletionTimestamp = "2026-10-15T00:00:00Z";
+  await assert.rejects(admit, /terminating/);
+  delete worker.metadata.deletionTimestamp;
+  worker.spec.containers[0].image = "wrong-controller";
+  await assert.rejects(admit, /candidate controller image/);
+  assert.deepEqual(inspected, []);
 });

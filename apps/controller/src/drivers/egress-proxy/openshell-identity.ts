@@ -1,6 +1,13 @@
-import { createPublicKey, verify, type KeyObject } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, verify, type KeyObject } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { EgressRef } from "@openclaw-enterprise/contracts";
-import type { EgressPeer, EgressPeerVerifier } from "@openclaw-enterprise/occ";
+import type {
+  AcceptedEgressAssociation,
+  CapturedEgressUse,
+  EgressPeer,
+  EgressPeerVerifier,
+  TrustedEgressAcceptance,
+} from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 
 export interface OpenShellEgressIdentityOptions {
@@ -18,11 +25,150 @@ function instanceId(value: unknown): value is string {
   );
 }
 
-/** Verifies gateway-issued extension identities; sandbox names and request JSON grant nothing. */
-export class OpenShellEgressIdentity implements EgressPeerVerifier {
+interface AcceptedExchange {
+  readonly bearer: string;
+  readonly peer: EgressPeer;
+  readonly requestId: string;
+  readonly responseCustody: Buffer;
+  readonly custodyId: string;
+  use?: CapturedEgressUse;
+  association?: AcceptedEgressAssociation;
+}
+
+const commitment = (input: Buffer | string) => createHash("sha256").update(input).digest("hex");
+
+/** The enrolled supervisor pins the downstream; this owner pins its signed opening and duplex. */
+export class OpenShellEgressIdentity implements EgressPeerVerifier, TrustedEgressAcceptance {
   readonly audience: string;
   private readonly options: OpenShellEgressIdentityOptions;
   private readonly key: KeyObject;
+  private readonly exchanges = new Map<string, AcceptedExchange>();
+  private readonly liveCustodies = new Set<string>();
+
+  /** Only the accepted duplex stream holds this local capability; never put it on the wire. */
+  acceptExchange(
+    bearer: string,
+    challenge: Buffer,
+    request: Buffer,
+    signature: Buffer,
+    // Decode these fields from the exact signed bytes, after checking possession.
+    opening: () => { requestId: string; sandboxId: string; responseCustody: Buffer },
+    signal: AbortSignal,
+  ): string | undefined {
+    const claims = this.claims(bearer);
+    const peer = this.peer(claims);
+    const binding = asRecord(claims?.exchange_key);
+    if (
+      !peer ||
+      challenge.length !== 32 ||
+      signature.length !== 64 ||
+      binding?.profile !== "openshell-exchange-v1" ||
+      binding?.kty !== "OKP" ||
+      binding?.crv !== "Ed25519" ||
+      typeof binding?.x !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(binding.x) ||
+      this.exchanges.size >= 1024
+    ) {
+      return undefined;
+    }
+    try {
+      const key = createPublicKey({
+        key: { kty: "OKP", crv: "Ed25519", x: binding.x },
+        format: "jwk",
+      });
+      if (
+        !verify(
+          null,
+          Buffer.concat([Buffer.from("openshell-exchange-v1\0"), challenge, request]),
+          key,
+          signature,
+        )
+      ) {
+        return undefined;
+      }
+      const { requestId, sandboxId, responseCustody } = opening();
+      const custodyId = commitment(responseCustody);
+      if (
+        !requestId ||
+        sandboxId !== peer.sandboxId ||
+        responseCustody.length !== 32 ||
+        this.liveCustodies.has(custodyId) ||
+        signal.aborted
+      ) {
+        return undefined;
+      }
+      // Possession, signed downstream custody and this actual stream are distinct
+      // checks. Only commitments and public identifiers are persisted or compared.
+      const capability = randomBytes(32).toString("base64url");
+      const exchangeId = commitment(capability);
+      const exchange = {
+        bearer,
+        requestId,
+        responseCustody,
+        custodyId,
+        peer: Object.freeze({ ...peer, peerKeyId: binding.x, exchangeId }),
+      };
+      this.liveCustodies.add(custodyId);
+      this.exchanges.set(exchangeId, exchange);
+      signal.addEventListener(
+        "abort",
+        () => {
+          this.exchanges.delete(exchangeId);
+          this.liveCustodies.delete(custodyId);
+          responseCustody.fill(0);
+        },
+        { once: true },
+      );
+      return capability;
+    } catch {
+      return undefined;
+    }
+  }
+
+  capture(use: CapturedEgressUse): AcceptedEgressAssociation | undefined {
+    const exchange = this.exchanges.get(use.peer.exchangeId ?? "");
+    if (
+      !exchange ||
+      exchange.use ||
+      exchange.requestId !== use.id ||
+      !isDeepStrictEqual(exchange.peer, use.peer)
+    ) {
+      return undefined;
+    }
+    exchange.use = use;
+    exchange.association = {
+      execution: use.installation.plan.execution,
+      installation: {
+        sandboxId: use.installation.sandboxId,
+        ...use.installation.enforcement,
+        plan: { id: use.installation.plan.id, generation: use.installation.plan.generation },
+      },
+      exchangeId: exchange.peer.exchangeId!,
+      responseId: randomBytes(32).toString("hex"),
+      custodyId: exchange.custodyId,
+    };
+    return exchange.association;
+  }
+
+  owns(association: AcceptedEgressAssociation, use: CapturedEgressUse): boolean {
+    const exchange = this.exchanges.get(association.exchangeId);
+    return (
+      exchange?.use === use &&
+      Date.parse(exchange.peer.expiresAt) > Date.now() &&
+      isDeepStrictEqual(exchange.association, association)
+    );
+  }
+
+  /** Release the signed echo only to the stream whose exact association was acknowledged. */
+  responseCustody(
+    authorization: string,
+    association: AcceptedEgressAssociation,
+  ): Buffer | undefined {
+    const exchange = this.exchanges.get(commitment(authorization));
+    return exchange?.use && this.owns(association, exchange.use)
+      ? Buffer.from(exchange.responseCustody)
+      : undefined;
+  }
 
   constructor(options: OpenShellEgressIdentityOptions) {
     this.options = options;
@@ -92,7 +238,11 @@ export class OpenShellEgressIdentity implements EgressPeerVerifier {
   }
 
   async verify(authorization: string): Promise<EgressPeer | undefined> {
-    const claims = this.claims(authorization);
+    const exchange = this.exchanges.get(commitment(authorization));
+    return exchange && this.peer(this.claims(exchange.bearer)) ? exchange.peer : undefined;
+  }
+
+  private peer(claims: Record<string, unknown> | undefined): EgressPeer | undefined {
     if (
       !claims ||
       claims.caller_kind !== "supervisor" ||
@@ -109,6 +259,11 @@ export class OpenShellEgressIdentity implements EgressPeerVerifier {
       instanceId: claims.instance_id,
       expiresAt: new Date(Number(claims.exp) * 1000).toISOString(),
     };
+  }
+
+  /** Preliminary identity only; it cannot establish an exchange or resolve material. */
+  supervisor(authorization: string): EgressPeer | undefined {
+    return this.peer(this.claims(authorization));
   }
 
   verifyControl(authorization: string): boolean {

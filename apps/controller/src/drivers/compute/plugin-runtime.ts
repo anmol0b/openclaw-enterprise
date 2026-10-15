@@ -1,10 +1,16 @@
 import {
   type AgentRevision,
+  assertExecutionAdmission,
   type PluginDesiredState,
   validPluginRevisionState,
   validPluginApprovers,
 } from "@openclaw-enterprise/contracts";
 import { codexApprovalPolicy } from "@openclaw-enterprise/occ";
+import {
+  type CodexPublicGithubRead,
+  PUBLIC_GITHUB_READ_SKILL,
+  publicGithubReadSkill,
+} from "../repo/github/public-read/codex.ts";
 import { harnessEgressEnrollment, type HarnessEgressEnrollment } from "./egress-enrollment.ts";
 
 export const PLUGIN_RUNTIME_DIRECTORY = "/etc/openclaw/plugin-runtime";
@@ -60,6 +66,7 @@ export type PluginRuntimeSpec =
       readonly approvalPolicy?: string | undefined;
       readonly pluginApprovers?: AgentRevision["pluginApprovers"];
       readonly repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy;
+      readonly publicGithubRead?: CodexPublicGithubRead;
       readonly modelEndpoint?: CodexModelEndpoint;
       readonly providerTools?: "none";
       readonly egressEnrollment?: HarnessEgressEnrollment;
@@ -98,6 +105,7 @@ function pluginFreeRuntimeForRevision(
   revision: Readonly<AgentRevision>,
   repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy,
   openaiBaseUrl?: string,
+  publicGithubRead?: CodexPublicGithubRead,
 ): PluginRuntimeSpec | undefined {
   if (!validPluginApprovers(revision.pluginApprovers)) {
     throw new Error("AgentRevision plugin approvers are invalid.");
@@ -120,6 +128,7 @@ function pluginFreeRuntimeForRevision(
         ? {}
         : { modelEndpoint: { baseUrl: openaiBaseUrl, modelProvider: "openai-compatible" } }),
       ...(repositoryBrokerNetworkPolicy === undefined ? {} : { repositoryBrokerNetworkPolicy }),
+      ...(publicGithubRead === undefined ? {} : { publicGithubRead }),
     };
   }
   if (repositoryBrokerNetworkPolicy !== undefined) {
@@ -139,10 +148,20 @@ export function pluginRuntimeSpecForRevision(
   revision: Readonly<AgentRevision>,
   repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy,
   openaiBaseUrl?: string,
+  publicGithubRead?: CodexPublicGithubRead,
 ): PluginRuntimeSpec | undefined {
+  assertExecutionAdmission(revision);
+  if (publicGithubRead !== undefined && revision.executionAdmission.mode !== "unprotected") {
+    throw new Error("The public GitHub reader cannot be selected for protected execution.");
+  }
   const state = revision.plugins;
   if (state === undefined) {
-    return pluginFreeRuntimeForRevision(revision, repositoryBrokerNetworkPolicy, openaiBaseUrl);
+    return pluginFreeRuntimeForRevision(
+      revision,
+      repositoryBrokerNetworkPolicy,
+      openaiBaseUrl,
+      publicGithubRead,
+    );
   }
   if (!validPluginRevisionState(state) || !validPluginApprovers(revision.pluginApprovers)) {
     throw new Error("AgentRevision plugin selections are invalid.");
@@ -170,6 +189,7 @@ export function pluginRuntimeSpecForRevision(
             ? {}
             : { modelEndpoint: { baseUrl: openaiBaseUrl, modelProvider: "openai-compatible" } }),
           ...(repositoryBrokerNetworkPolicy === undefined ? {} : { repositoryBrokerNetworkPolicy }),
+          ...(publicGithubRead === undefined ? {} : { publicGithubRead }),
         }
       : { kind: "openclaw", selections: state.plugins, pluginApprovers: revision.pluginApprovers };
   validateDriverMatchesRuntime(revision, runtime);
@@ -178,7 +198,15 @@ export function pluginRuntimeSpecForRevision(
 
 function protectedProviderTools(revision: Readonly<AgentRevision>): "none" {
   const routes = revision.egressPlan?.routes;
-  if (!routes?.length || routes.some((route) => route.binding.grant.providerTools !== "none")) {
+  if (
+    routes === undefined ||
+    routes.some(({ binding: { grant } }) =>
+      grant.kind === "inference"
+        ? grant.providerTools !== "none"
+        : grant.kind !== "github_repository_metadata" &&
+          grant.kind !== "credential_free_repository_metadata",
+    )
+  ) {
     throw new Error("Unsupported protected inference tool grant.");
   }
   return "none";
@@ -208,7 +236,11 @@ function codexToml(
       ? plugins
       : `approval_policy = ${JSON.stringify(approvalPolicy)}\n\n${plugins}`);
   const endpoint = runtime.modelEndpoint;
-  if (runtime.providerTools === "none" && endpoint === undefined) {
+  if (
+    runtime.providerTools === "none" &&
+    runtime.egressEnrollment?.inference !== false &&
+    endpoint === undefined
+  ) {
     throw new Error("Protected inference requires an explicit normalized model endpoint.");
   }
   return endpoint === undefined
@@ -240,6 +272,9 @@ function configMapData(
   return Object.freeze({
     [PLUGIN_RUNTIME_MANIFEST]: JSON.stringify(runtimeManifest(runtime)),
     ...(codexConfig === undefined ? {} : { [PLUGIN_RUNTIME_CODEX_CONFIG]: codexConfig }),
+    ...(runtime.kind === "codex" && runtime.publicGithubRead !== undefined
+      ? { [PUBLIC_GITHUB_READ_SKILL]: publicGithubReadSkill(runtime.publicGithubRead) }
+      : {}),
   });
 }
 
@@ -306,6 +341,9 @@ function runtimeManifest(runtime: PluginRuntimeSpec): Readonly<Record<string, un
     ...(runtime.pluginApprovers === undefined ? {} : { pluginApprovers: runtime.pluginApprovers }),
     ...(runtime.kind === "codex" && runtime.repositoryBrokerNetworkPolicy !== undefined
       ? { repositoryBrokerNetworkPolicy: runtime.repositoryBrokerNetworkPolicy }
+      : {}),
+    ...(runtime.kind === "codex" && runtime.publicGithubRead !== undefined
+      ? { publicGithubRead: runtime.publicGithubRead }
       : {}),
   };
 }

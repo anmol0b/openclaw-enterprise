@@ -1,10 +1,11 @@
+import { assertExecutionAdmission } from "@openclaw-enterprise/contracts";
 import { memoryEgressSendReceipts } from "./egress-send-receipts.ts";
 import type { EgressSendReceiptRepository, StoredSendReceipt } from "../egress-send-receipts.ts";
 import { isDeepStrictEqual } from "node:util";
 import type {
-  StaticEgressSource,
+  ProtectedEgressSource,
   EgressInstallation,
-  StaticMaterialEvidence,
+  EgressMaterialEvidence,
 } from "@openclaw-enterprise/contracts";
 import { RepositoryTransactionLifetime } from "../ports/transaction.ts";
 import { bindPlatformUnitOfWork } from "../ports/platform-unit-of-work.ts";
@@ -360,10 +361,15 @@ export interface SecretRepository extends SecretReadRepository {
 }
 
 export interface CredentialSourceReadRepository {
-  isEgressMaterialRejected(evidence: StaticMaterialEvidence): Promise<boolean>;
+  isEgressMaterialRejected(evidence: EgressMaterialEvidence): Promise<boolean>;
   findEgressInstallation(
     senderId: string,
     sandboxId: string,
+  ): Promise<Readonly<EgressInstallation> | undefined>;
+
+  findRevisionEgressInstallation(
+    namespaceId: string,
+    revisionId: string,
   ): Promise<Readonly<EgressInstallation> | undefined>;
 
   findCredentialSource(
@@ -385,13 +391,13 @@ export interface CredentialSourceReadRepository {
 export type CredentialSourceBlockingReference = "reference" | "withdrawal_work";
 
 export interface CredentialSourceRepository extends CredentialSourceReadRepository {
-  rejectEgressMaterial(evidence: StaticMaterialEvidence): Promise<void>;
+  rejectEgressMaterial(evidence: EgressMaterialEvidence): Promise<void>;
   recordEgressInstallation(installation: EgressInstallation): Promise<void>;
   admitEgressSource(
     namespaceId: string,
     sourceId: string,
     expectedGeneration: number,
-    egress: StaticEgressSource,
+    egress: ProtectedEgressSource,
   ): Promise<Readonly<CredentialSource> | undefined>;
 
   lockCredentialSource(
@@ -575,7 +581,7 @@ export function validHarnessAuthSnapshot(value: HarnessAuthSnapshot, namespaceId
         Object.keys(value).length === 5 &&
         isNonEmptyString(value.credentialGatewayId) &&
         isNonEmptyString(value.sourceType) &&
-        value.loginMode === "api_key"
+        (value.loginMode === "api_key" || value.loginMode === "codex_pat")
       );
     }
     const binding = normalizeHarnessAuthBinding({ method: value.method, source: value.source });
@@ -772,6 +778,7 @@ export function validCredentialSourceSnapshots(value: unknown): boolean {
 }
 
 function assertAdmittedAgentRevision(revision: AgentRevision): void {
+  assertExecutionAdmission(revision);
   if (
     (revision.backendId !== null && !isBackendId(revision.backendId)) ||
     !/^cfg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
@@ -796,11 +803,16 @@ function assertAdmittedAgentRevision(revision: AgentRevision): void {
     typeof revision.compute !== "object" ||
     revision.compute === null ||
     Array.isArray(revision.compute) ||
-    Object.keys(revision.compute).length !== 2 ||
+    Object.keys(revision.compute).some(
+      (key) => !["id", "implementation", "admission"].includes(key),
+    ) ||
     !Object.hasOwn(revision.compute, "id") ||
     !Object.hasOwn(revision.compute, "implementation") ||
     !isNonEmptyString(revision.compute.id) ||
     !isNonEmptyString(revision.compute.implementation) ||
+    (revision.compute.admission !== undefined &&
+      (typeof revision.compute.admission !== "string" ||
+        !/^[\x20-\x7e]{1,1024}$/.test(revision.compute.admission))) ||
     (revision.sandboxDriverId !== undefined && !isNonEmptyString(revision.sandboxDriverId)) ||
     (revision.secretDriverId !== undefined && !isNonEmptyString(revision.secretDriverId)) ||
     Object.hasOwn(revision, "serviceAccount") ||
@@ -1250,16 +1262,72 @@ function validEgressRef(value: unknown): boolean {
   );
 }
 
-/** Mirrors static_egress_source_is_valid; persisted sources have one closed supported shape. */
-function assertStaticEgressSource(
-  value: StaticEgressSource,
+/** Mirrors egress_source_is_valid; static and prepared sources each have a closed admitted shape. */
+function assertProtectedEgressSource(
+  value: ProtectedEgressSource,
   namespaceId: string,
   sourceId: string,
 ): void {
   const key = value?.key;
+  const common =
+    isPlainRecord(value) &&
+    isPlainRecord(key) &&
+    Object.keys(key).length === 5 &&
+    /^ins_[0-9a-f-]{36}$/.test(key.installationId) &&
+    key.namespaceId === namespaceId &&
+    key.source?.id === sourceId &&
+    [key.source, key.backend, key.provider, value.sender, value.resolver].every(validEgressRef);
+  if (value.adoption === "credential_free") {
+    const { grant } = value;
+    if (
+      !common ||
+      key.provider.id !== "credential-free-repository-metadata" ||
+      key.provider.generation !== 1 ||
+      Object.keys(value).length !== 8 ||
+      value.schemaVersion !== 3 ||
+      value.retention !== "none" ||
+      Object.keys(grant).length !== 5 ||
+      grant.kind !== "credential_free_repository_metadata" ||
+      grant.profile !== "metadata-read" ||
+      !/^[1-9]\d*$/.test(grant.repositoryId) ||
+      !Number.isSafeInteger(Number(grant.repositoryId)) ||
+      !/^[a-zA-Z\d_-]+\/[a-zA-Z\d_.-]+$/.test(grant.repository) ||
+      /\/(?:\.|\.)$/.test(grant.repository) ||
+      !/^agt_[0-9a-f-]{36}$/.test(grant.isolationId) ||
+      !/^https:\/\/[a-z0-9.-]+(?::\d+)?$/.test(value.origin)
+    ) {
+      throw new ScopeViolationError("The credential-free metadata schema or scope is invalid.");
+    }
+    return;
+  }
+  if (value.adoption === "prepared") {
+    const { grant } = value;
+    if (
+      !common ||
+      key.provider.id !== "github-app-metadata" ||
+      key.provider.generation !== 1 ||
+      Object.keys(value).length !== 8 ||
+      value.schemaVersion !== 2 ||
+      value.retention !== "none" ||
+      Object.keys(grant).length !== 7 ||
+      grant.kind !== "github_repository_metadata" ||
+      grant.profile !== "metadata-read" ||
+      ![grant.appId, grant.installationId, grant.repositoryId].every(
+        (id) => /^[1-9]\d*$/.test(id) && Number.isSafeInteger(Number(id)),
+      ) ||
+      !/^[a-zA-Z\d_-]+\/[a-zA-Z\d_.-]+$/.test(grant.repository) ||
+      !/^agt_[0-9a-f-]{36}$/.test(grant.isolationId) ||
+      !/^https:\/\/[a-z0-9.-]+(?::\d+)?$/.test(value.origin)
+    ) {
+      throw new ScopeViolationError(
+        "The prepared GitHub metadata source schema or scope is invalid.",
+      );
+    }
+    return;
+  }
   const secret = value?.secret;
   if (
-    !isPlainRecord(value) ||
+    !common ||
     Object.keys(value).length !== 9 ||
     value.schemaVersion !== 1 ||
     value.adoption !== "live" ||
@@ -1267,19 +1335,7 @@ function assertStaticEgressSource(
     typeof value.materialRefId !== "string" ||
     value.materialRefId.length < 1 ||
     value.materialRefId.length > 200 ||
-    !isPlainRecord(key) ||
-    Object.keys(key).length !== 5 ||
-    !/^ins_[0-9a-f-]{36}$/.test(key.installationId) ||
-    key.namespaceId !== namespaceId ||
-    key.source?.id !== sourceId ||
-    ![
-      key.source,
-      key.backend,
-      key.provider,
-      value.secretDriver,
-      value.sender,
-      value.resolver,
-    ].every(validEgressRef) ||
+    !validEgressRef(value.secretDriver) ||
     !isPlainRecord(secret) ||
     Object.keys(secret).length !== 3 ||
     secret.kind !== "secret" ||
@@ -1293,7 +1349,7 @@ function assertStaticEgressSource(
 /** Mirrors the PostgreSQL credential source constraints for the in-memory adapter. */
 function assertCredentialSource(source: CredentialSource): void {
   if (source.egress !== undefined) {
-    assertStaticEgressSource(source.egress, source.namespaceId, source.id);
+    assertProtectedEgressSource(source.egress, source.namespaceId, source.id);
   }
   const config: unknown = source.config;
   const secretInputs: unknown = source.secrets;
@@ -1877,10 +1933,10 @@ function repositories(
     return found === undefined || !liveWithdrawal(found) ? undefined : immutableCopy(found);
   };
 
-  const materialKey = (evidence: StaticMaterialEvidence) =>
+  const materialKey = (evidence: EgressMaterialEvidence) =>
     JSON.stringify([
       evidence.source.namespaceId,
-      evidence.secretDriver.id,
+      evidence.kind === "static" ? evidence.secretDriver.id : evidence.source.provider.id,
       evidence.materialId,
       evidence.materialVersion,
     ]);
@@ -1901,6 +1957,11 @@ function repositories(
         ? undefined
         : immutableCopy(found);
     },
+    findRevisionEgressInstallation: async (namespaceId, revisionId) =>
+      [...snapshot.egressInstallations.values()].find(
+        ({ plan: { execution } }) =>
+          execution.namespaceId === namespaceId && execution.revisionId === revisionId,
+      ),
     recordEgressInstallation: async (installation) => {
       const execution = installation.plan.execution;
       const revision = (
@@ -1947,7 +2008,7 @@ function repositories(
       ) {
         throw new ScopeViolationError("Egress source generation or scope is invalid.");
       }
-      assertStaticEgressSource(egress, namespaceId, sourceId);
+      assertProtectedEgressSource(egress, namespaceId, sourceId);
       const saved = immutableCopy({ ...current, egress });
       snapshot.credentialSources.set(agentKey(namespaceId, sourceId), saved);
       return saved;

@@ -2,7 +2,7 @@ import type {
   CredentialProviderDefinition,
   EgressRequest,
   EgressResponse,
-  InferenceOperation,
+  EgressOperation,
 } from "@openclaw-enterprise/contracts";
 import { asRecord, immutableCopy } from "@openclaw-enterprise/utils";
 import { normalizeOpenAiBaseUrl } from "../openai-endpoint.ts";
@@ -47,13 +47,17 @@ function protectedResponse(
   response: EgressResponse,
   credential: string,
   request: EgressRequest,
-  operation: InferenceOperation,
+  operation: EgressOperation,
 ): EgressResponse | undefined {
   if (
+    operation.kind !== "inference" ||
     response.status < 200 ||
     response.status >= 600 ||
     (response.status >= 300 && response.status < 400) ||
-    response.body.byteLength > maximumResponseBytes
+    response.body.byteLength > maximumResponseBytes ||
+    // No trailer semantics are approved for this provider. Check actual trailers,
+    // not merely a Trailer declaration (HTTP/2 need not declare them in advance).
+    response.trailers.length !== 0
   ) {
     return undefined;
   }
@@ -130,6 +134,7 @@ function protectedResponse(
       status: response.status,
       headers: [["content-type", sse ? "text/event-stream" : "application/json"]],
       body: new Uint8Array(response.body),
+      trailers: [],
     };
   } catch {
     return undefined;
@@ -139,7 +144,9 @@ function protectedResponse(
 /** Bounded inference with Harness-local tools and complete finite Responses SSE custody. */
 export const openAiStaticProvider: CredentialProviderDefinition =
   Object.freeze<CredentialProviderDefinition>({
-    ref: { id: "openai-static-https", generation: 1 },
+    // Generation 1 could grant only one executable. Exact provider-generation
+    // matching prevents an upgrade or rollback from reinterpreting that grant.
+    ref: { id: "openai-static-https", generation: 2 },
     schemaVersion: 1,
     sourceType: {
       type: "openai",
@@ -162,7 +169,7 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       if (models.length !== 1 || !models[0] || models[0].length > 256) {
         throw new Error("Protected inference requires one explicit model.");
       }
-      return immutableCopy({ kind: "inference", models, providerTools: "none" });
+      return immutableCopy({ kind: "inference", models, providerTools: "none" as const });
     },
     routes(source, binding) {
       const base = new URL(this.normalizeConfig(source.config).base_url!);
@@ -206,6 +213,7 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       if (
         !body ||
         typeof body.model !== "string" ||
+        route.binding.grant.kind !== "inference" ||
         route.binding.grant.providerTools !== "none" ||
         !route.binding.grant.models.includes(body.model) ||
         (body.store !== undefined && body.store !== false)
@@ -289,5 +297,6 @@ export const openAiStaticProvider: CredentialProviderDefinition =
         return false;
       }
     },
-    protectResponse: protectedResponse,
+    protectResponse: (response, value, request, operation) =>
+      value === undefined ? undefined : protectedResponse(response, value, request, operation),
   });

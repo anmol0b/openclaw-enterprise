@@ -1,5 +1,6 @@
 import type {
-  StaticEgressSource,
+  ExecutionAdmission,
+  ProtectedEgressSource,
   CredentialInputRead,
   VersionedSecretValue,
   ConduitPlan,
@@ -10,6 +11,7 @@ import type {
 export type {
   EgressRef,
   EgressSourceKey,
+  ExecutionAdmission,
   StaticEgressSource,
   CredentialInputRead,
   VersionedSecretValue,
@@ -22,6 +24,10 @@ export type {
   EgressRequest,
   InferenceOperation,
   StaticMaterialEvidence,
+  ProtectedEgressSource,
+  EgressOperation,
+  EgressMaterialEvidence,
+  EgressSelectionEvidence,
   EgressRefusal,
   EgressResponse,
   SandboxConduitWiring,
@@ -30,6 +36,9 @@ export type {
   CredentialSourceControl,
   ConduitDriver,
 } from "./conduit.ts";
+export * from "./prepared-github-egress.ts";
+export * from "./credential-free-metadata.ts";
+export { assertExecutionAdmission, assertExecutionReleaseAllowed } from "./conduit.ts";
 import type { WorkspaceSetup } from "./workspace-setup.ts";
 
 export type { ComputePreparationFailureEvidence } from "./compute-preparation.ts";
@@ -371,7 +380,7 @@ export interface CredentialSourceReference extends ResourceRef {
 }
 
 /** Login modes a Harness can use when its model credential arrives from a source. */
-export type CredentialSourceLoginMode = "api_key";
+export type CredentialSourceLoginMode = "api_key" | "codex_pat";
 
 export interface CredentialSourceFieldSpec {
   readonly name: string;
@@ -403,7 +412,7 @@ export type CredentialSourceState = "registering" | "ready" | "deleting";
 
 /** OCC record for a credential held by the selected Credential Gateway; never values. */
 export interface CredentialSource {
-  readonly egress?: StaticEgressSource;
+  readonly egress?: ProtectedEgressSource;
   readonly id: string;
   readonly namespaceId: string;
   readonly name: string;
@@ -416,7 +425,7 @@ export interface CredentialSource {
 }
 
 export interface CredentialSourceMetadata {
-  readonly egress?: Pick<StaticEgressSource, "adoption" | "retention">;
+  readonly egress?: Pick<ProtectedEgressSource, "adoption" | "retention">;
   readonly id: string;
   readonly namespaceId: string;
   readonly name: string;
@@ -529,6 +538,8 @@ export type ResolvedHarnessAuth =
 export interface ComputeRevisionContext {
   /** Worker persists only an authenticated receipt for this admitted plan. */
   readonly recordEgressInstallation?: (installation: EgressInstallation) => Promise<void>;
+  /** A fresh read of the still-authorized revision and its exact committed installation. */
+  readonly currentEgressInstallation?: () => Promise<EgressInstallation | undefined>;
   readonly workspaceSetup?: Readonly<WorkspaceSetup>;
   readonly harnessAuth: ResolvedHarnessAuth;
   /** Non-model sources resolved again at dispatch, in admission order. */
@@ -825,6 +836,7 @@ export interface RevisionHarnessDescriptor extends HarnessDescriptor {
 }
 
 export interface AgentRevision extends Scope {
+  readonly executionAdmission: ExecutionAdmission;
   readonly egressPlan?: ConduitPlan;
   readonly id: string;
   readonly namespaceId: string;
@@ -839,6 +851,8 @@ export interface AgentRevision extends Scope {
   readonly compute: {
     readonly id: string;
     readonly implementation: string;
+    /** Private, immutable admission state owned by the selected Compute Driver. */
+    readonly admission?: string;
   };
   readonly sandboxDriverId?: string;
   readonly secretDriverId?: string;
@@ -878,6 +892,7 @@ export type AgentRevisionRead =
 export function freezeAgentRevision(revision: AgentRevision): Readonly<AgentRevision> {
   return Object.freeze({
     ...revision,
+    executionAdmission: immutableCopy(revision.executionAdmission),
     ...(revision.egressPlan === undefined
       ? {}
       : { egressPlan: immutableCopy(revision.egressPlan) }),
@@ -1537,6 +1552,8 @@ export interface SandboxDriver extends Driver {
   configureAgent?(
     configuration: Readonly<OpenClawConfigurationDocument>,
     harness: Readonly<RevisionHarnessDescriptor>,
+    /** Admitted catalog metadata; unavailable during pre-admission configuration checks. */
+    credentialSourceLoginMode?: CredentialSourceLoginMode,
   ): OpenClawConfigurationDocument;
   ensureNamespace?(context: SandboxNamespaceContext): Promise<void>;
   provisionHarness?(context: SandboxHarnessContext): Promise<SandboxResourceRef>;
@@ -1549,6 +1566,8 @@ export interface SandboxDriver extends Driver {
   enrollHarness?(
     context: SandboxHarnessStatusContext,
     installation: EgressInstallation,
+    /** Compute alone may release this exact fresh startup; the transport bearer cannot. */
+    release: (startupId: string) => Promise<Readonly<Record<string, unknown>>>,
   ): Promise<void>;
   /**
    * Returns the provider-owned transport for the exact provisioned Harness. When present,
@@ -1854,6 +1873,19 @@ export interface ConfigurationValidationOptions {
 }
 
 export interface ComputeDriver extends Driver {
+  /** Admission capability check, not release authority. Missing support fails closed. */
+  validateExecutionAdmission?(
+    revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+  ): void;
+  /**
+   * After release is refused, select a withdrawal only for a grant this Compute previously
+   * admitted. Selection is side-effect free. The worker runs the withdrawal under the active
+   * revision's authorized claim; resolve only after observing the grant and workload gone.
+   * Neither selection nor completion permits preparing, activating or replacing that revision.
+   */
+  rejectedExecutionWithdrawal?(
+    revision: Readonly<AgentRevision>,
+  ): (() => Promise<void>) | undefined;
   readonly supportsWorkspaceSetup?: true;
   readonly capability: "compute";
   /** Deployment must observe and provision Agent-owned runtime credentials before revision admission. */
@@ -1863,6 +1895,8 @@ export interface ComputeDriver extends Driver {
   readonly agentProvisioning?: ComputeAgentProvisioningCapabilities;
   readonly activationOrder?: "beforeCommit" | "afterCommit";
   readonly maintenanceIntervalMs?: number;
+  /** Side-effect-free, bounded Driver-owned facts frozen into a new revision. */
+  admitRevision?(revision: Readonly<AgentRevision>): string | undefined;
   /**
    * Opt into exclusive replacement: the worker stops all earlier revisions before
    * preparation and supersedes their reconciliation once a newer exclusive

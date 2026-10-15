@@ -62,6 +62,8 @@ Stores Agent drafts, their desired runtime state, and the active revision refere
 ### `agent_revisions`
 
 Stores numbered, immutable snapshots of Agent settings accepted for deployment.
+`admitted_spec` includes the explicit v2
+[execution admission decision](../credential-sources/protected-inference.md#execution-admission-cutoff).
 
 - `id`
 - `namespace_id`
@@ -150,6 +152,7 @@ See [protected inference](../credential-sources/protected-inference.md).
 
 - `sender_id`, `sender_generation`, `instance_id`, `use_id`, `attempt_id`
 - `binding` (selected material evidence and original deadline)
+- `authorized_dispatch` (accepted execution, installation and custody, digests and send-start bound)
 - `outcome`, `observation`, `settled`, `feedback`
 
 ### `egress_rejected_material`

@@ -4,14 +4,14 @@ import { getEventListeners } from "node:events";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { connect } from "node:net";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { createSecureServer } from "node:http2";
-import { createServer as createHttpsServer } from "node:https";
+import { createServer as createHttpsServer, get as httpsGet } from "node:https";
 import test from "node:test";
 import {
   GrpcOpenShellGatewayClient,
@@ -25,6 +25,9 @@ import {
 } from "../../apps/controller/src/backends/openshell.ts";
 import { TransientDependencyError } from "../../packages/occ/src/index.ts";
 import { DependencyUnavailableError } from "../../packages/occ/src/errors.ts";
+import { createManagedWorkloadExec } from "../helpers/egress-managed-workload-exec.mjs";
+import { createCustodyTransitions } from "../helpers/egress-supplier-custody-transitions.mjs";
+import { agentClients } from "../helpers/egress-custody-observations.mjs";
 
 const require = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
 const grpc = require("@grpc/grpc-js");
@@ -1238,7 +1241,6 @@ test("OpenShell mTLS authenticates DNS and IP channels and refuses missing or fo
   const foreign = signedClientCertificate(directory, "foreign", foreignCA);
   const seen = [];
   const server = createSecureServer({
-    allowHTTP1: true,
     key: readFileSync(serverIdentity.keyPath),
     cert: readFileSync(serverIdentity.certPath),
     ca: readFileSync(ca.certPath),
@@ -1274,32 +1276,13 @@ test("OpenShell mTLS authenticates DNS and IP channels and refuses missing or fo
         t.after(() => client.close());
         return client;
       };
-      const administrator = makeClient(auth);
-      await administrator.health(AbortSignal.timeout(5_000));
+      await makeClient(auth).health(AbortSignal.timeout(5_000));
       assert.equal(seen.at(-1).authorized, true);
       assert.equal(seen.at(-1).subject.CN, "openshell-client");
       assert.equal(seen.at(-1).subject.OU, "openshell-user");
       assert.equal(seen.at(-1).sni, host === "localhost" ? "localhost" : false);
       assert.equal(seen.at(-1).authorization, undefined);
       const count = seen.length;
-
-      // The same client and listener authenticate the control RPC above. A service
-      // request instead must fail specifically because it sent no client certificate.
-      const rejected = once(server, "tlsClientError", { signal: AbortSignal.timeout(5_000) });
-      const [[error]] = await Promise.all([
-        rejected,
-        assert.rejects(
-          administrator.getServiceDocument(
-            "https://harness.example.invalid",
-            "/status",
-            "scoped-service-token",
-            AbortSignal.timeout(5_000),
-          ),
-          DependencyUnavailableError,
-        ),
-      ]);
-      assert.equal(error.code, "ERR_SSL_PEER_DID_NOT_RETURN_A_CERTIFICATE");
-
       // None may reuse the authenticated channel of the successful client.
       for (const rejected of [
         makeClient(undefined),
@@ -1334,33 +1317,80 @@ test("OpenShell mTLS authenticates DNS and IP channels and refuses missing or fo
   );
 });
 
-test("OpenShell service transport uses its scoped bearer over verified TLS", async (t) => {
+test("OpenShell service transport never sends the administrator mTLS identity", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "openshell-service-identity-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const identity = selfSignedCertificate(directory, "server", "IP:127.0.0.1");
-  const requests = [];
-  const service = createHttpsServer(
-    { key: readFileSync(identity.keyPath), cert: readFileSync(identity.certPath) },
+  const ca = selfSignedCertificate(directory, "client-ca", "DNS:client-ca.invalid");
+  const auth = signedClientCertificate(directory, "client", ca);
+  const tls = { key: readFileSync(identity.keyPath), cert: readFileSync(identity.certPath) };
+  const listen = async (options, handler) => {
+    const server = createHttpsServer({ ...tls, ...options }, handler);
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    return server;
+  };
+  const serviceDocument = (server) => {
+    const client = new GrpcOpenShellGatewayClient({
+      endpoint: `https://127.0.0.1:${server.address().port}`,
+      rootCertificatePath: identity.certPath,
+      auth,
+    });
+    t.after(() => client.close());
+    return client.getServiceDocument(
+      "https://harness.example.invalid",
+      "/status",
+      "scoped-service-token",
+      AbortSignal.timeout(5_000),
+    );
+  };
+
+  // First prove that this listener requests and accepts the administrator certificate.
+  const peers = [];
+  const strict = await listen(
+    { ca: readFileSync(ca.certPath), requestCert: true, rejectUnauthorized: true },
     (request, response) => {
-      requests.push(request.headers.authorization);
-      response.writeHead(200, { "content-type": "application/json" }).end('{"ready":true}');
+      peers.push(request.socket.getPeerCertificate().subject.CN);
+      response.writeHead(204).end();
     },
   );
-  await new Promise((resolve) => service.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => service.close(resolve)));
-
-  const client = new GrpcOpenShellGatewayClient({
-    endpoint: `https://127.0.0.1:${service.address().port}`,
-    rootCertificatePath: identity.certPath,
+  const status = await new Promise((resolve, reject) => {
+    const request = httpsGet(
+      {
+        host: "127.0.0.1",
+        port: strict.address().port,
+        ca: tls.cert,
+        cert: readFileSync(auth.certificatePath),
+        key: readFileSync(auth.privateKeyPath),
+        agent: false,
+        signal: AbortSignal.timeout(5_000),
+      },
+      (response) => {
+        response.resume();
+        resolve(response.statusCode);
+      },
+    );
+    request.once("error", reject);
   });
-  t.after(() => client.close());
-  const document = await client.getServiceDocument(
-    "https://harness.example.invalid",
-    "/status",
-    "scoped-service-token",
-    AbortSignal.timeout(5_000),
-  );
-  assert.deepEqual(document, { status: 200, json: { ready: true } });
+  assert.equal(status, 204);
+  assert.deepEqual(peers, ["openshell-client"]);
+
+  // On the service path the same listener must see a missing certificate, not just
+  // an arbitrary connection failure. Sending the administrator identity would succeed.
+  const rejected = once(strict, "tlsClientError", { signal: AbortSignal.timeout(5_000) });
+  const [[error]] = await Promise.all([
+    rejected,
+    assert.rejects(serviceDocument(strict), DependencyUnavailableError),
+  ]);
+  assert.equal(error.code, "ERR_SSL_PEER_DID_NOT_RETURN_A_CERTIFICATE");
+  assert.equal(peers.length, 1, "the service request never reached an authenticated socket");
+
+  const requests = [];
+  const service = await listen({}, (request, response) => {
+    requests.push(request.headers.authorization);
+    response.writeHead(200, { "content-type": "application/json" }).end('{"ready":true}');
+  });
+  assert.deepEqual(await serviceDocument(service), { status: 200, json: { ready: true } });
   assert.deepEqual(requests, ["Bearer scoped-service-token"]);
 });
 
@@ -1616,6 +1646,180 @@ test("OpenShell client reads v0.1.3-pre.2 sandbox logs with nanosecond times", a
   } finally {
     client.close();
     await new Promise((resolve) => server.tryShutdown(resolve));
+  }
+});
+
+test("installed custody observer follows the supplier's structured push shape through GetSandboxLogs", async (t) => {
+  const proto = await loader.load(
+    join(import.meta.dirname, "../fixtures/openshell-v0.1.3-pre.2-wire.proto"),
+    { keepCase: true, longs: String, enums: String, defaults: false, oneofs: true },
+  );
+  const workspace = "tenant-workspace";
+  const sandbox = "selected-enrolled-sandbox";
+  const sandboxId = "immutable-sandbox-id";
+  const supervisor = {
+    metadata: {
+      uid: "supervisor-uid",
+      namespace: workspace,
+      labels: {
+        "openshell.ai/sandbox-id": sandboxId,
+        "openshell.ai/boundary-role": "supervisor",
+      },
+    },
+    status: { containerStatuses: [{ containerID: "supervisor-container-id", restartCount: 0 }] },
+  };
+  // Shape produced by the Rust LogPushLayer, with source and sandbox ID set by
+  // the gateway. Exercise real protobuf and the production client's mapped fields.
+  const id = "0199f07b-a105-7001-8900-0123456789ab";
+  const entry = (event, changes) => ({
+    sandbox_id: sandboxId,
+    source: "sandbox",
+    level: "INFO",
+    target: "openshell_supervisor_network::l7::rest::credentials",
+    message: "Protected response custody transition",
+    event_time: { seconds: "1790000000", nanos: 123_000_000 },
+    fields: { request_id: id, response_custody_event: event },
+    ...changes,
+  });
+  const initial = entry(null, {
+    source: "gateway",
+    target: "ocsf",
+    message: "startup",
+    fields: {},
+  });
+  let reply;
+  const server = new grpc.Server();
+  const service = grpc.loadPackageDefinition(proto).openshell.v1.OpenShell.service;
+  server.addService(service, {
+    GetSandboxLogs(call, callback) {
+      assert.deepEqual(call.request, {
+        sandbox,
+        workspace_scope: { workspace, selection: "workspace" },
+        lines: 2000,
+      });
+      const response = reply();
+      if (response === undefined) {
+        return; // Deliberately leave this read pending until the observer cancels it.
+      }
+      const [logs, buffer_total = logs.length] = response;
+      callback(null, { logs, buffer_total });
+    },
+  });
+  const port = await bindWireServer(server);
+  const gatewayClient = new GrpcOpenShellGatewayClient({ endpoint: `127.0.0.1:${port}` });
+  t.after(() => {
+    gatewayClient.close();
+    server.forceShutdown();
+  });
+  const start = async (deliveryTimeoutMs = 3000) => {
+    reply = () => [[initial]];
+    const custody = createCustodyTransitions(
+      {
+        gatewayClient,
+        workspace,
+        sandbox,
+        sandboxId,
+        supervisor,
+        readSupervisor: async () => supervisor,
+      },
+      { deliveryTimeoutMs, pollIntervalMs: 5 },
+    );
+    return { custody, before: await custody.snapshot() };
+  };
+  await t.test(
+    "partial batch at origin hold then terminal batch through FIN, same operation",
+    async () => {
+      const { custody, before } = await start();
+      const events = ["resolve_accepted", "permit_accepted"];
+      let n = 0;
+      reply = () => [[initial, ...events.slice(0, n++).map((event) => entry(event))]];
+      assert.equal(await custody.expectAfter(before, events), id);
+      events.push("response_released");
+      assert.equal(await custody.expectAfter(before, events), id);
+    },
+  );
+  const denied = ["resolve_refused", "no_permit", "response_blocked"];
+  const lines = denied.map((event) => entry(event));
+  await t.test(
+    "negative requires affirmative no_permit, not silence or a missing prefix",
+    async () => {
+      const { custody, before } = await start(250);
+      await assert.rejects(
+        custody.expectAfter(before, denied),
+        /unobservable before delivery deadline/,
+      );
+      reply = () => [[initial, ...lines.slice(1)]];
+      await assert.rejects(custody.expectAfter(before, denied), /missing, or ambiguous/);
+      // Use a fresh observer; the damaged sequence above cannot be repaired by polling.
+      const fresh = await start();
+      reply = () => [[initial, ...lines]];
+      assert.equal(await fresh.custody.expectAfter(fresh.before, denied), id);
+    },
+  );
+  await t.test(
+    "delivery deadline during an in-flight log read is explicitly unobservable",
+    async () => {
+      const { custody, before } = await start(150);
+      reply = () => undefined;
+      await assert.rejects(custody.expectAfter(before, denied), (error) => {
+        assert.match(
+          error.message,
+          /unobservable before delivery deadline.*GetSandboxLogs read timed out/,
+        );
+        assert.equal(error.cause.name, "TimeoutError");
+        return true;
+      });
+    },
+  );
+  for (const [name, logs, error, bufferTotal] of [
+    [
+      "foreign source",
+      [initial, entry(denied[0], { source: "gateway" })],
+      /not the selected supervisor INFO/,
+    ],
+    [
+      "foreign target",
+      [initial, entry(denied[0], { target: "other" })],
+      /not the selected supervisor INFO/,
+    ],
+    ["foreign sandbox", [initial, entry(denied[0], { sandbox_id: "other" })], /foreign Sandbox/],
+    [
+      "invalid request ID",
+      [
+        initial,
+        entry(denied[0], {
+          fields: {
+            response_custody_event: denied[0],
+            request_id: "malformed",
+          },
+        }),
+      ],
+      /malformed supplier custody/,
+    ],
+    ["unknown transition", [initial, entry("future_transition")], /malformed supplier custody/],
+    [
+      "mixed request IDs",
+      [
+        initial,
+        lines[0],
+        entry(denied[1], {
+          fields: {
+            request_id: id.replace(/ab$/, "cd"),
+            response_custody_event: denied[1],
+          },
+        }),
+      ],
+      /missing, or ambiguous/,
+    ],
+    ["lost baseline", lines, /supplier log prefix changed/],
+    ["full ring could conceal loss", Array(2000).fill(initial), /incomplete supplier log ring/],
+    ["ambiguous or truncated ring", [initial, ...lines], /incomplete supplier log ring/, 2000],
+  ]) {
+    await t.test("reject " + name, async () => {
+      const { custody, before } = await start();
+      reply = () => [logs, bufferTotal];
+      await assert.rejects(custody.expectAfter(before, denied), error);
+    });
   }
 });
 
@@ -2074,4 +2278,130 @@ test("OpenShell client serializes v0.1.3-pre.2 gateway-owned refresh", async () 
     client.close();
     await new Promise((resolve) => server.tryShutdown(resolve));
   }
+});
+
+test("installed workload clients select the enrolled Sandbox at authenticated ExecSandbox; a lost Exit is not replayed", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "openshell-workload-exec-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const identity = selfSignedCertificate(directory, "server", "IP:127.0.0.1");
+  const ca = selfSignedCertificate(directory, "client-ca", "DNS:client-ca.invalid");
+  const auth = signedClientCertificate(directory, "observer", ca);
+
+  // Record the real clients' mTLS RPCs, independently of any kubectl or cluster.
+  // Only an installed run can establish that the supplier launched the filtered child.
+  const service = (fixture) => {
+    const proto = loader.loadSync(join(import.meta.dirname, "../fixtures", fixture), {
+      keepCase: true,
+      longs: String,
+    });
+    return grpc.loadPackageDefinition(proto).openshell.v1.OpenShell.service;
+  };
+  const { GetSandbox } = service("openshell-v0.1.3-pre.2-wire.proto");
+  const { ExecSandbox } = service("openshell-workload-exec.proto");
+  const binding = { sandboxName: "managed-reader", sandboxId: "enrolled-id" };
+  const workspace = "managed-workspace";
+  const launches = [];
+  const phases = [];
+  let selectedId = binding.sandboxId;
+  let loseExit = false;
+  const server = new grpc.Server();
+  server.addService(
+    { GetSandbox, ExecSandbox },
+    {
+      GetSandbox({ request }, callback) {
+        callback(null, {
+          sandbox: {
+            metadata: {
+              id: selectedId,
+              name: request.name,
+              workspace: request.workspace_scope.workspace,
+            },
+          },
+        });
+      },
+      ExecSandbox(call) {
+        const { request } = call;
+        const dispatch = phases.find((entry) => entry.requestId === request.request_id);
+        launches.push({ request, dispatch });
+        call.write({ stdout: { data: Buffer.from("recipient") } });
+        call.write({ stderr: { data: Buffer.from("diagnostic") } });
+        call.write({ stdout: { data: Buffer.from("-bytes") } });
+        if (!loseExit) {
+          call.write({ exit: {} });
+        }
+        call.end();
+      },
+    },
+  );
+  const credentials = grpc.ServerCredentials.createSsl(
+    await readFile(ca.certPath),
+    [
+      {
+        cert_chain: await readFile(identity.certPath),
+        private_key: await readFile(identity.keyPath),
+      },
+    ],
+    true,
+  );
+  const port = await new Promise((resolve, reject) =>
+    server.bindAsync("127.0.0.1:0", credentials, (error, value) =>
+      error ? reject(error) : resolve(value),
+    ),
+  );
+  t.after(() => server.forceShutdown());
+  const backend = {
+    endpoint: `https://127.0.0.1:${port}`,
+    rootCertificatePath: identity.certPath,
+    auth,
+  };
+  const gatewayClient = new GrpcOpenShellGatewayClient(backend);
+  t.after(() => gatewayClient.close());
+  const execWorkload = createManagedWorkloadExec(t, {
+    backend,
+    workspace,
+    gatewayClient,
+    checkpoint: (phase, details) => phases.push({ phase, ...details }),
+  });
+  const inAgent = async (...command) => {
+    const { stdout, stderr, exitCode } = await execWorkload(binding, command);
+    assert.equal(exitCode, 0);
+    assert.equal(stderr.toString(), "diagnostic");
+    return stdout.toString();
+  };
+  const target = "https://provider.test/repos/fixture/repository";
+  const { curl, throughFin } = agentClients({ inAgent }, new URL(target).origin);
+  assert.deepEqual(await Promise.all([curl(), throughFin()]), [
+    "recipient-bytes",
+    "recipient-bytes",
+  ]);
+
+  assert.deepEqual(launches.map(({ request }) => request.command[0]).sort(), ["curl", "node"]);
+  for (const { request, dispatch } of launches) {
+    assert.equal(request.sandbox, binding.sandboxName);
+    assert.equal(request.workspace_scope.workspace, workspace);
+    assert.equal(request.command.at(-1), target, "ordinary argv, not a shell command string");
+    assert.equal(request.no_login_shell, true);
+    assert.equal(request.execution_timeout.seconds, "120");
+    assert.equal(
+      dispatch.phase,
+      "managed-workload-exec-dispatch-unknown",
+      "persisted before launch",
+    );
+    assert.equal(dispatch.sandboxId, binding.sandboxId);
+  }
+  assert.notEqual(launches[0].dispatch.requestId, launches[1].dispatch.requestId);
+
+  loseExit = true;
+  await assert.rejects(curl(), /Unconfirmed managed workload exec/);
+  assert.equal(
+    launches.length,
+    3,
+    "even clean gRPC completion cannot cause a missing Exit to be retried",
+  );
+  assert.equal(phases.at(-1).phase, "managed-workload-exec-unconfirmed");
+  assert.equal(phases.at(-1).requestId, launches[2].dispatch.requestId);
+
+  selectedId = "replaced-id";
+  await assert.rejects(curl(), /supplier Sandbox replaced/);
+  assert.equal(launches.length, 3, "an old enrolled recipient never silently switches Sandbox");
 });

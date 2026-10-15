@@ -1,20 +1,40 @@
+import {
+  assertExecutionAdmission,
+  assertExecutionReleaseAllowed,
+  credentialFreeMetadataGrant,
+  credentialFreeMetadataType,
+  credentialFreeProviderRef,
+  githubMetadataGrant,
+  preparedGitHubProviderRef,
+  preparedGitHubSourceFromRoute,
+  preparedGitHubType,
+} from "@openclaw-enterprise/contracts";
 import { EgressSendReceipts } from "./egress-send-receipts.ts";
 import type {
   StaticEgressSource,
   ConduitPlan,
   EgressRefusal,
-  StaticMaterialEvidence,
+  EgressSelectionEvidence,
+  CredentialFreeEgressSource,
+  PreparedGitHubEgressSource,
+  ProtectedEgressSource,
 } from "@openclaw-enterprise/contracts";
-import { Conduit, type EgressPeerVerifier, type CapturedEgressUse } from "./conduit.ts";
+import {
+  Conduit,
+  type EgressPeerVerifier,
+  type CapturedEgressUse,
+  type TrustedEgressAcceptance,
+} from "./conduit.ts";
 
+export type { AcceptedEgressAssociation, AuthorizedSend } from "./egress-send-receipts.ts";
 export { Conduit } from "./conduit.ts";
 export type {
   CapturedEgressUse,
   EgressPeerVerifier,
+  TrustedEgressAcceptance,
   EgressPeer,
   EgressResolution,
   EgressSendDecision,
-  RequestAuthorizer,
 } from "./conduit.ts";
 import type { ConduitDriver } from "@openclaw-enterprise/contracts";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -60,6 +80,7 @@ import type {
   CredentialSource,
   CredentialSourceMetadata,
   CredentialSourceSnapshot,
+  CredentialSourceLoginMode,
   CredentialSourceStatus,
   CredentialWithdrawal,
   CredentialWithdrawalStatus,
@@ -274,6 +295,9 @@ import {
   provisioningEffectReceipt as readProvisioningEffectReceipt,
   provisioningPendingEffect,
   settleProvisioningEffect as buildProvisioningEffectSettlement,
+  unrecordedProvisioningConfiguration,
+  withUnrecordedProvisioningConfiguration,
+  withoutUnrecordedProvisioningConfiguration,
   type ProvisioningEffectReceipt,
   type ProvisioningEffectTarget,
 } from "./provisioning-effects.ts";
@@ -739,6 +763,7 @@ export interface AgentCredentialSourceInput {
 
 export interface UpdateCredentialSourceInput {
   readonly adoption?: "live";
+  readonly authorityScope?: "execution";
   readonly namespaceId: string;
   readonly credentialSourceId: string;
   /**
@@ -820,6 +845,11 @@ export type AgentProvisioningWorkerOutcome =
       readonly code: string;
       /** A Compute refusal's reason for the operator log; status keeps the fixed text. */
       readonly reason?: string;
+      /**
+       * For the operator log: a Configuration the refused job wrote but never recorded, which
+       * its Driver could not delete. Nothing references it any more.
+       */
+      readonly orphanedConfigurationId?: string;
     };
 
 export interface AgentProvisioningWorkerOptions {
@@ -899,6 +929,14 @@ const CREDENTIAL_REGISTRATION_FENCE_MS = 2 * CREDENTIAL_GATEWAY_TIMEOUT_MS + 10_
  * sent again. A late original then meets an existing ConfigMap and fails AlreadyExists.
  */
 const PROVISIONING_CONFIGURATION_SETTLE_MS = 90_000;
+
+/**
+ * How far a stored Configuration may run ahead of its record and still count as a leftover of
+ * failed writes (finding 1396). Each failed update whose compensation could not run adds one, and
+ * update advances the record once per skipped generation, so the bound also caps that work.
+ * A document further ahead fails closed, as any other mismatch does.
+ */
+const MAX_CONFIGURATION_LEFTOVER_LEAD = 100;
 
 /**
  * The most references a Secret read or delete examines. Each one costs authorization work,
@@ -2709,6 +2747,13 @@ export class OpenClawController {
         completedPhase: record.completedPhase,
         status: "running",
       });
+      if (await this.deleteMarkedProvisioningConfiguration(record, runEffect)) {
+        record = await this.checkpointAgentProvisioning(claim, {
+          completedPhase: record.completedPhase,
+          status: "running",
+          progress: withoutUnrecordedProvisioningConfiguration(record.progress),
+        });
+      }
       if (this.provisioningBefore(record, "configuration")) {
         record = await this.processAgentProvisioningConfiguration(claim, record, runEffect);
       }
@@ -2837,6 +2882,34 @@ export class OpenClawController {
       const authorizationDenied =
         error instanceof AuthorizationDeniedError && !(error instanceof DependencyUnavailableError);
       const message = provisioningFailureMessage(code, error);
+      // A refusal deletes the Configuration it wrote but never recorded. The job first forgets
+      // the write and marks it for deletion, under its claim, so neither a retry nor a crash can
+      // trust a receipt for a deleted document; the refusal then drops the mark only once the
+      // delete has succeeded. A delete that fails, or never runs, leaves the mark: the next
+      // attempt deletes it before writing another, and a refusal deletes it too (finding 1399).
+      const unrecorded =
+        disposition === "permanent"
+          ? await this.mutate(async (state) => {
+              const current = await state.provisioning.findByWorkId(claim.idempotencyKey);
+              if (current === undefined) {
+                throw new WorkClaimLostError();
+              }
+              const written = await this.unrecordedProvisioningConfiguration(state, current);
+              if (written === undefined) {
+                return this.markedProvisioningConfiguration(state, current);
+              }
+              await this.commitProvisioningCheckpoint(state, claim, {
+                completedPhase: current.completedPhase,
+                status: "running",
+                progress: withUnrecordedProvisioningConfiguration(current.progress, written.id),
+              });
+              return this.provisioningConfiguration(current, written.id);
+            })
+          : undefined;
+      const orphanedConfigurationId =
+        unrecorded === undefined
+          ? undefined
+          : await this.deleteUnrecordedProvisioningConfiguration(unrecorded);
       await this.mutate(async (state) => {
         const current = await state.provisioning.findByWorkId(claim.idempotencyKey);
         if (current === undefined) {
@@ -2847,7 +2920,9 @@ export class OpenClawController {
           {
             completedPhase: current.completedPhase,
             progress: {
-              ...current.progress,
+              ...(unrecorded !== undefined && orphanedConfigurationId === undefined
+                ? withoutUnrecordedProvisioningConfiguration(current.progress)
+                : current.progress),
               error: { code, message },
             },
           },
@@ -2885,6 +2960,7 @@ export class OpenClawController {
         outcome: disposition === "defer" ? ("pending" as const) : disposition,
         code,
         ...(error instanceof ComputeProvisioningRefusedError ? { reason: error.reason } : {}),
+        ...(orphanedConfigurationId === undefined ? {} : { orphanedConfigurationId }),
       });
     }
   }
@@ -4532,8 +4608,9 @@ export class OpenClawController {
   }
 
   /** Trusted composition only: public workloads never supply an identity verifier. */
-  createConduit(verifier: EgressPeerVerifier): Conduit {
+  createConduit(verifier: EgressPeerVerifier, acceptance?: TrustedEgressAcceptance): Conduit {
     return new Conduit({
+      acceptance,
       verifier,
       now: () => this.clock().getTime(),
       installation: (peer) =>
@@ -4553,7 +4630,7 @@ export class OpenClawController {
         const secret = await this.state.read((state) =>
           state.secrets.findSecret(source.secret.namespaceId, source.secret.id),
         );
-        if (!secret || secret.driverId !== source.secretDriver.id) {
+        if (signal.aborted || !secret || secret.driverId !== source.secretDriver.id) {
           throw new DependencyUnavailableError("Selected credential material is unavailable.");
         }
         const driver = this.secretDriver(secret.driverId);
@@ -4565,14 +4642,16 @@ export class OpenClawController {
           materialId: secret.backendRef.uid,
         };
       },
+      readPreparedGitHub: (source, signal, deadlineAt) =>
+        this.preparedGitHubLifecycle().readWarm(source, signal, deadlineAt),
       receipts: new EgressSendReceipts(this.state),
     });
   }
 
   private async checkEgressUse(
     use: CapturedEgressUse,
-    material?: StaticMaterialEvidence,
-  ): Promise<StaticEgressSource | EgressRefusal> {
+    material?: EgressSelectionEvidence,
+  ): Promise<ProtectedEgressSource | EgressRefusal> {
     // Never borrow an enclosing controller/IAM snapshot. The two RPCs each establish a new
     // platform unit and the native IAM Driver loads policy within that exact fresh unit.
     if (this.transactionContext.getStore() !== undefined) {
@@ -4713,12 +4792,73 @@ export class OpenClawController {
         }
         throw error;
       }
+      if (admitted.adoption === "credential_free") {
+        const grant = credentialFreeMetadataGrant(source.config);
+        const { binding } = use.route;
+        if (
+          source.type !== credentialFreeMetadataType ||
+          use.operation.kind !== "credential_free_repository_metadata" ||
+          !isDeepStrictEqual(admitted.key.provider, credentialFreeProviderRef) ||
+          admitted.origin !== source.config.origin ||
+          use.route.origin !== admitted.origin ||
+          grant.isolationId !== execution.agentId ||
+          grant.isolationId !== binding.isolationId ||
+          !isDeepStrictEqual(admitted.grant, grant) ||
+          !isDeepStrictEqual(binding.grant, grant) ||
+          binding.grantHash !== createHash("sha256").update(JSON.stringify(grant)).digest("hex") ||
+          (material !== undefined &&
+            !isDeepStrictEqual(material, {
+              kind: "no_material_required",
+              source: binding.source,
+              binding: binding.binding,
+              grantHash: binding.grantHash,
+              isolationId: grant.isolationId,
+            }))
+        ) {
+          return deny("scope_mismatch");
+        }
+        return admitted;
+      }
+      if (material?.kind === "no_material_required") {
+        return deny("scope_mismatch");
+      }
+      if (admitted.adoption === "prepared") {
+        const lifecycle = control.preparedGitHub;
+        if (
+          !lifecycle ||
+          lifecycle.apiOrigin !== admitted.origin ||
+          !isDeepStrictEqual(admitted, preparedGitHubSourceFromRoute(use.route, control)) ||
+          use.route.binding.grantHash !==
+            createHash("sha256")
+              .update(JSON.stringify(githubMetadataGrant(source.config)))
+              .digest("hex")
+        ) {
+          return deny("scope_mismatch");
+        }
+        if (material !== undefined) {
+          const left = Date.parse(use.request.deadlineAt) - this.clock().getTime();
+          if (
+            material.kind !== "prepared_github" ||
+            left <= 0 ||
+            material.grantHash !== use.route.binding.grantHash ||
+            material.isolationId !== execution.agentId ||
+            !isDeepStrictEqual(material.source, admitted.key) ||
+            !isDeepStrictEqual(material.binding, use.route.binding.binding) ||
+            (await state.credentialSources.isEgressMaterialRejected(material)) ||
+            !(await lifecycle.current(admitted, material, AbortSignal.timeout(Math.ceil(left))))
+          ) {
+            return deny("withdrawn");
+          }
+        }
+        return admitted;
+      }
       if (material !== undefined) {
         const secret = await state.secrets.findSecret(
           admitted.secret.namespaceId,
           admitted.secret.id,
         );
         if (
+          material.kind !== "static" ||
           !secret ||
           secret.driverId !== admitted.secretDriver.id ||
           secret.backendRef.uid !== material.materialId ||
@@ -4738,6 +4878,103 @@ export class OpenClawController {
         }
       }
       return admitted;
+    });
+  }
+
+  private preparedGitHubLifecycle() {
+    const lifecycle = this.selectedDriver("conduit").sourceControl.preparedGitHub;
+    if (!lifecycle) {
+      throw new DependencyUnavailableError("The OCE prepared GitHub lifecycle is not configured.");
+    }
+    return lifecycle;
+  }
+
+  private async admitPreparedGitHubMetadata(
+    state: PlatformUnitOfWork,
+    principalId: string,
+    namespaceId: string,
+    sourceId: string,
+    config: Readonly<Record<string, string>>,
+    issuer: SecretReference,
+  ): Promise<{ source: PreparedGitHubEgressSource; issuer: Readonly<Secret> }> {
+    const control = this.selectedDriver("conduit").sourceControl;
+    const origin = this.preparedGitHubLifecycle().apiOrigin;
+    const grant = githubMetadataGrant(config);
+    await this.authorize(principalId, "operate", {
+      kind: "agent",
+      namespaceId,
+      id: grant.isolationId,
+    });
+    const agent = await state.agents.findAgent(namespaceId, grant.isolationId);
+    if (
+      !agent ||
+      agent.status !== "active" ||
+      agent.executionMode !== "dedicated" ||
+      issuer?.namespaceId !== namespaceId ||
+      !/^https:\/\/[a-z0-9.-]+(?::\d+)?$/.test(origin)
+    ) {
+      throw new ScopeViolationError(
+        "Prepared GitHub metadata requires this Namespace, dedicated Agent and trusted HTTPS origin.",
+      );
+    }
+    await this.authorize(principalId, "operate", issuer);
+    const secret = await state.secrets.lockSecret(namespaceId, issuer.id);
+    if (!secret) {
+      throw new ScopeViolationError("Prepared GitHub issuer material is unavailable.");
+    }
+    await control.assertAvailable(AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS));
+    return {
+      source: immutableCopy({
+        key: {
+          installationId: this.installation.id,
+          namespaceId,
+          source: { id: sourceId, generation: 1 },
+          provider: preparedGitHubProviderRef,
+          backend: control.backend,
+        },
+        sender: control.sender,
+        resolver: control.resolver,
+        origin,
+        grant,
+        schemaVersion: 2 as const,
+        adoption: "prepared" as const,
+        retention: "none" as const,
+      }),
+      issuer: secret,
+    };
+  }
+
+  private async admitCredentialFreeMetadata(
+    state: PlatformUnitOfWork,
+    principalId: string,
+    namespaceId: string,
+    sourceId: string,
+    config: Readonly<Record<string, string>>,
+  ): Promise<CredentialFreeEgressSource> {
+    const control = this.selectedDriver("conduit").sourceControl;
+    const grant = credentialFreeMetadataGrant(config);
+    const id = grant.isolationId;
+    await this.authorize(principalId, "operate", { kind: "agent", namespaceId, id });
+    const agent = await state.agents.findAgent(namespaceId, id);
+    if (agent?.executionMode !== "dedicated" || agent.status !== "active") {
+      throw new ScopeViolationError("Credential-free metadata requires this dedicated Agent.");
+    }
+    await control.assertAvailable(AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS));
+    return immutableCopy({
+      key: {
+        installationId: this.installation.id,
+        namespaceId,
+        source: { id: sourceId, generation: 1 },
+        provider: credentialFreeProviderRef,
+        backend: control.backend,
+      },
+      sender: control.sender,
+      resolver: control.resolver,
+      origin: config.origin!,
+      grant,
+      schemaVersion: 3 as const,
+      adoption: "credential_free" as const,
+      retention: "none" as const,
     });
   }
 
@@ -4828,12 +5065,17 @@ export class OpenClawController {
         sources.push(source);
       }
     }
-    if (sources.length === 0) {
+    if (!this.selections.has("conduit")) {
+      if (sources.length > 0) {
+        throw new DependencyUnavailableError(
+          "Protected sources require the selected egress Driver.",
+        );
+      }
       return undefined;
     }
-    if (sources.length !== 1 || agent.credentialSources?.length !== 1) {
+    if (sources.length > 1 || (agent.credentialSources?.length ?? 0) !== sources.length) {
       throw new ScopeViolationError(
-        "Protected inference requires exactly one source binding and no legacy attachments.",
+        "Protected egress permits at most one explicitly admitted source binding and no legacy attachments.",
       );
     }
     if (!sandboxDriverId || agent.executionMode !== "dedicated") {
@@ -4843,12 +5085,15 @@ export class OpenClawController {
     await driver.sourceControl.assertAvailable(AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS));
     const selection = asRecord(asRecord(configuration.agents)?.defaults)?.model;
     const model = typeof selection === "string" ? selection : asRecord(selection)?.primary;
-    if (typeof model !== "string" || !model.includes("/")) {
+    if (
+      sources.some((source) => source.egress?.adoption === "live") &&
+      (typeof model !== "string" || !model.includes("/"))
+    ) {
       throw new ScopeViolationError(
         "Protected inference requires an explicit provider/model selection.",
       );
     }
-    const modelId = model.slice(model.indexOf("/") + 1);
+    const modelId = typeof model === "string" ? model.slice(model.indexOf("/") + 1) : "";
     const execution = {
       installationId: this.installation.id,
       namespaceId: agent.namespaceId,
@@ -4865,7 +5110,7 @@ export class OpenClawController {
       if (!provider || !isDeepStrictEqual(driver.sourceControl.backend, admitted.key.backend)) {
         throw new DependencyUnavailableError("The admitted egress composition is unavailable.");
       }
-      const grant = provider.normalizeGrant([modelId]);
+      const grant = provider.normalizeGrant([modelId], source.config);
       return provider.routes(source, {
         binding: { id: crypto.randomUUID(), generation: 1 },
         execution,
@@ -4902,7 +5147,7 @@ export class OpenClawController {
     const written = Object.freeze({ ...(input.config ?? {}) });
     const secretRefs = Object.freeze({ ...(input.secrets ?? {}) });
     this.namespaceIdentity(input.namespaceId);
-    const { namespace, gateway, refresh, source, values } = await this.mutate(async (state) => {
+    const registration = await this.mutate(async (state) => {
       await this.authorize(principalId, "create", {
         kind: "credential_source",
         id: input.namespaceId,
@@ -4921,24 +5166,41 @@ export class OpenClawController {
       // The Driver may return the configuration in the form it uses, such as a normalized URL:
       // the stored record, the response and the gateway then agree (finding 1292).
       const config = Object.freeze({
-        ...(selected.validateSourceConfig({ type: type.type, config: written }) ?? written),
+        ...(type.type === preparedGitHubType || type.type === credentialFreeMetadataType
+          ? written
+          : (selected.validateSourceConfig({ type: type.type, config: written }) ?? written)),
       });
       credentialSourceFieldsMatch("config", type.config, config);
       const refreshDriver =
         type.rotation === "refresh" ? this.credentialRefreshDriver() : undefined;
       const sourceId = this.nextIdentifier("credential_source");
-      const egress = this.selections.has("conduit")
-        ? await this.admitStaticEgressSource(
-            state,
-            principalId,
-            locked.id,
-            sourceId,
-            type.type,
-            config,
-            secretRefs,
-            1,
-          )
-        : undefined;
+      const prepared =
+        type.type === preparedGitHubType
+          ? await this.admitPreparedGitHubMetadata(
+              state,
+              principalId,
+              locked.id,
+              sourceId,
+              config,
+              secretRefs.private_key!,
+            )
+          : undefined;
+      const egress =
+        prepared?.source ??
+        (type.type === credentialFreeMetadataType
+          ? await this.admitCredentialFreeMetadata(state, principalId, locked.id, sourceId, config)
+          : this.selections.has("conduit")
+            ? await this.admitStaticEgressSource(
+                state,
+                principalId,
+                locked.id,
+                sourceId,
+                type.type,
+                config,
+                secretRefs,
+                1,
+              )
+            : undefined);
       const read =
         egress === undefined
           ? await this.readCredentialSourceSecrets(state, principalId, locked, secretRefs)
@@ -4963,18 +5225,28 @@ export class OpenClawController {
         gateway: selected,
         refresh: refreshDriver,
         source: registering,
+        issuer: prepared?.issuer,
         values: read,
       };
     });
+    const { namespace, gateway, refresh, source, values, issuer } = registration;
     const config = source.config;
     const placed = await this.credentialNamespace(namespace);
     let status: CredentialSourceStatus;
     // A returned result means every gateway effect of this attempt has finished; a throw does not.
     let terminal = false;
     try {
+      if (source.egress?.adoption === "prepared" && issuer) {
+        // Management authorizes the owner. Only its background worker may issue and renew.
+        await this.preparedGitHubLifecycle().configure(
+          source.egress,
+          issuer,
+          AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS),
+        );
+      }
       status =
         source.egress !== undefined
-          ? { state: "ready" }
+          ? { state: source.egress.adoption === "prepared" ? "pending" : "ready" }
           : await this.credentialGatewayOperation(() =>
               gateway.registerSource(
                 {
@@ -5001,6 +5273,13 @@ export class OpenClawController {
         status = { ...status, refresh: minted };
       }
     } catch (error) {
+      if (source.egress?.adoption === "prepared") {
+        // Unknown configure outcome stays visible and denied. DELETE withdraws the exact family without replay.
+        await this.mutate((state) =>
+          state.credentialSources.markCredentialSourceDeleting(source.namespaceId, source.id),
+        );
+        throw error;
+      }
       await this.abandonCredentialRegistration(placed, gateway, source, terminal, refresh);
       throw error;
     }
@@ -5017,8 +5296,10 @@ export class OpenClawController {
       return marked;
     });
     if (ready === undefined) {
-      // A concurrent deletion won; remove the copy this registration may have stored after it.
-      await this.abandonCredentialRegistration(placed, gateway, source, true, refresh);
+      // A concurrent deletion owns the prepared family withdrawal. It must not be reconfigured or replayed.
+      if (source.egress?.adoption !== "prepared") {
+        await this.abandonCredentialRegistration(placed, gateway, source, true, refresh);
+      }
       throw new ResourceStateConflictError("The credential source changed during registration.");
     }
     return this.credentialSourceMetadata(ready, status);
@@ -5136,7 +5417,31 @@ export class OpenClawController {
       if (type.rotation === "refresh") {
         refuseIssuerRotatedResend(type, source.secrets, secretRefs);
       }
-      if (source.egress !== undefined || input.adoption === "live") {
+      if (source.egress?.adoption === "prepared" || source.egress?.adoption === "credential_free") {
+        throw new ScopeViolationError(
+          "A different protected metadata source or grant requires explicit new admission.",
+        );
+      }
+      if (
+        source.egress !== undefined ||
+        input.adoption !== undefined ||
+        input.authorityScope !== undefined
+      ) {
+        const previous = source.egress?.key.provider;
+        const alreadyAdmitted =
+          previous !== undefined &&
+          this.selections.has("conduit") &&
+          this.selectedDriver("conduit").sourceControl.providers.some((provider) =>
+            isDeepStrictEqual(provider.ref, previous),
+          );
+        if (
+          !alreadyAdmitted &&
+          !(input.adoption === "live" && input.authorityScope === "execution")
+        ) {
+          throw new ResourceStateConflictError(
+            "Adopting a legacy or narrower source requires explicit live adoption and execution authority scope.",
+          );
+        }
         // The first cutover refuses bound sources. Keeping the legacy copy intact is safer
         // than replacing material before an exact replacement installation can be verified.
         // TODO(egress live cutover): admit and install a separate candidate for running bindings.
@@ -5385,8 +5690,15 @@ export class OpenClawController {
     });
     if (source.egress !== undefined) {
       // Configuration admission is not attachment readiness or proof of usable material.
+      const prepared =
+        source.egress.adoption !== "prepared" ||
+        (source.state === "ready" &&
+          (await this.preparedGitHubLifecycle().ready(
+            source.egress,
+            AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS),
+          )));
       return this.credentialSourceMetadata(source, {
-        state: source.state === "ready" ? "ready" : "pending",
+        state: source.state === "ready" && prepared ? "ready" : "pending",
       });
     }
     let status: CredentialSourceStatus;
@@ -5497,11 +5809,18 @@ export class OpenClawController {
       source,
       signal: AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS),
     });
-    const refresh = await this.refreshDriverForSource(gateway, source.type);
-    if (refresh !== undefined) {
-      await this.credentialGatewayOperation(() => refresh.removeRefresh(context()));
+    if (source.egress?.adoption === "prepared") {
+      await this.preparedGitHubLifecycle().withdraw(
+        source.egress,
+        AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS),
+      );
+    } else if (source.egress?.adoption !== "credential_free") {
+      const refresh = await this.refreshDriverForSource(gateway, source.type);
+      if (refresh !== undefined) {
+        await this.credentialGatewayOperation(() => refresh.removeRefresh(context()));
+      }
+      await this.credentialGatewayOperation(() => gateway.removeSource(context()));
     }
-    await this.credentialGatewayOperation(() => gateway.removeSource(context()));
     if (this.clock().getTime() < Date.parse(source.createdAt) + CREDENTIAL_REGISTRATION_FENCE_MS) {
       throw new DependencyUnavailableError(
         "The credential source registration may still be completing; retry the deletion shortly.",
@@ -5870,12 +6189,7 @@ export class OpenClawController {
         throw new ScopeViolationError("The Configuration does not belong to the exact Namespace.");
       }
       await this.guardProvisioningConfiguration(state, namespace.id, input.configurationId);
-      const previous = this.exactConfiguration(
-        await this.driverOperation(() =>
-          driver.read({ id: metadata.id, namespaceId: namespace.id }),
-        ),
-        metadata,
-      );
+      const previous = await this.lockedConfiguration(driver, metadata);
       let secretBindings: SecretBindings;
       if (input.secretBindings === undefined) {
         secretBindings = this.bindings(metadata.secretBindings);
@@ -5884,12 +6198,23 @@ export class OpenClawController {
         rejectCrossNamespaceSecretSources(namespace.id, secretBindings, undefined);
       }
       await this.authorizeBindings(state, principalId, namespace.id, secretBindings);
-      const advanced = await state.configurations.advanceConfigurationGeneration(
+      let advanced = await state.configurations.advanceConfigurationGeneration(
         namespace.id,
         metadata.id,
         metadata.generation,
         secretBindings,
       );
+      // A stored document ahead of the record holds content that was never recorded. The
+      // replacement skips past every generation it went through, one advance at a time (the
+      // record moves by exactly one per write), so no number names two documents.
+      while (advanced && advanced.generation <= previous.generation) {
+        advanced = await state.configurations.advanceConfigurationGeneration(
+          namespace.id,
+          metadata.id,
+          advanced.generation,
+          secretBindings,
+        );
+      }
       if (!advanced) {
         throw new ResourceStateConflictError(
           "The Configuration generation changed during its update.",
@@ -5912,11 +6237,13 @@ export class OpenClawController {
       // Registered before the write: a replace that applied but answered with an error (a
       // timeout, a lost response) would otherwise leave the stored Configuration one generation
       // ahead of the rolled-back metadata (finding 911). A write that never applied is left alone,
-      // and so is a stored generation another update committed after the lock was released.
+      // and so is a stored generation another update committed after the lock was released. A
+      // replacement of a leftover ahead of the record restores that leftover, which a retry can
+      // replace again (finding 1396).
       this.registerRollback(async () => {
         const stored = await driver.read({ id: previous.id, namespaceId: previous.namespaceId });
         if (
-          stored.generation !== previous.generation &&
+          stored.generation === configuration.generation &&
           (await this.configurationRecordUnchanged(metadata))
         ) {
           await driver.update(previous);
@@ -5964,37 +6291,43 @@ export class OpenClawController {
           "An Agent provisioning request that has not succeeded still references the Configuration. Let it finish or retry it, or delete the Agent it provisioned, first.",
         );
       }
-      const previous = this.exactConfiguration(
-        await this.driverOperation(() =>
-          driver.read({ id: configuration.id, namespaceId: namespace.id }),
-        ),
-        configuration,
+      // A record whose document a failed delete already removed has nothing left to delete or
+      // restore (finding 1396); only a Driver that confirms the absence lets it go.
+      const previous = await this.lockedConfiguration(driver, configuration).catch(
+        async (error: unknown) => {
+          if (await this.configurationAbsent(driver, configuration)) {
+            return undefined;
+          }
+          throw error;
+        },
       );
-      // Registered before the write: a delete that applied but answered with an error would
-      // otherwise leave the metadata without its ConfigMap (finding 916). The rollback recreates
-      // the previous Configuration only when it is gone and its record is still the one locked
-      // here; one still stored exactly means the delete never applied, and a record another
-      // request deleted or changed in the meantime is that request's (finding 945). A Driver that
-      // cannot inspect it is compensated only after a delete it saw succeed.
-      let deleted = false;
-      this.registerRollback(async () => {
-        if (driver.inspectExact === undefined) {
-          if (!deleted) {
+      if (previous !== undefined) {
+        // Registered before the write: a delete that applied but answered with an error would
+        // otherwise leave the metadata without its ConfigMap (finding 916). The rollback
+        // recreates the previous Configuration only when it is gone and its record is still the
+        // one locked here; one still stored exactly means the delete never applied, and a record
+        // another request deleted or changed in the meantime is that request's (finding 945). A
+        // Driver that cannot inspect it is compensated only after a delete it saw succeed.
+        let deleted = false;
+        this.registerRollback(async () => {
+          if (driver.inspectExact === undefined) {
+            if (!deleted) {
+              return;
+            }
+          } else if (
+            (await this.driverOperation(() => driver.inspectExact!(previous))) !== undefined
+          ) {
             return;
           }
-        } else if (
-          (await this.driverOperation(() => driver.inspectExact!(previous))) !== undefined
-        ) {
-          return;
-        }
-        if (await this.configurationRecordUnchanged(configuration)) {
-          await this.driverOperation(() => driver.create(previous));
-        }
-      });
-      await this.driverOperation(() =>
-        driver.delete({ id: configuration.id, namespaceId: namespace.id }),
-      );
-      deleted = true;
+          if (await this.configurationRecordUnchanged(configuration)) {
+            await this.driverOperation(() => driver.create(previous));
+          }
+        });
+        await this.driverOperation(() =>
+          driver.delete({ id: configuration.id, namespaceId: namespace.id }),
+        );
+        deleted = true;
+      }
       const removed = await accessBindingsTargeting(
         state,
         namespace.id,
@@ -7383,6 +7716,7 @@ export class OpenClawController {
         revisionHarness,
         compute,
         sandbox,
+        harnessAuth.method === "credential_source" ? harnessAuth.loginMode : undefined,
       );
       // The Compute rules first, as on Configuration save, so a stored Configuration that
       // predates a rule both refuse gets the message its next save would.
@@ -7506,33 +7840,56 @@ export class OpenClawController {
         admittedConfiguration,
         sandbox?.id,
       );
+      const executionAdmission = {
+        version: 2 as const,
+        mode: this.selections.has("conduit") ? ("protected" as const) : ("unprotected" as const),
+      };
+      const execution = { executionAdmission, ...(egressPlan === undefined ? {} : { egressPlan }) };
+      assertExecutionAdmission(execution);
+      try {
+        if (compute.validateExecutionAdmission === undefined) {
+          assertExecutionReleaseAllowed(execution);
+        } else {
+          compute.validateExecutionAdmission(execution);
+        }
+      } catch {
+        throw new DependencyUnavailableError(
+          "The selected Compute cannot admit this execution mode; protected release and old-reader fencing are unavailable.",
+        );
+      }
+      const revisionDraft: AgentRevision = {
+        id: revisionId,
+        ...execution,
+        namespaceId: namespace.id,
+        agentId: lockedAgent.id,
+        revision: previous.length + 1,
+        backendId,
+        configurationId: configuration.id,
+        configurationKind: configuration.kind,
+        configurationGeneration: configuration.generation,
+        configuration: admittedConfiguration,
+        harness: revisionHarness,
+        compute: { id: compute.id, implementation: compute.implementation },
+        ...(sandbox === undefined ? {} : { sandboxDriverId: sandbox.id }),
+        ...(secretDriver === undefined ? {} : { secretDriverId: secretDriver.id, secretBindings }),
+        ...(pluginState === undefined ? {} : { plugins: pluginState }),
+        ...(lockedAgent.pluginApprovers === undefined
+          ? {}
+          : { pluginApprovers: lockedAgent.pluginApprovers }),
+        ...(repositoryCredentials === undefined ? {} : { repositoryCredentials }),
+        harnessAuth,
+        ...(credentialSources.length === 0 ? {} : { credentialSources }),
+        servicePrincipalId: lockedAgent.servicePrincipalId,
+        createdAt,
+      };
+      const computeAdmission = compute.admitRevision?.(freezeAgentRevision(revisionDraft));
       const revision = await state.revisions.createRevision(
         freezeAgentRevision({
-          id: revisionId,
-          ...(egressPlan === undefined ? {} : { egressPlan }),
-          namespaceId: namespace.id,
-          agentId: lockedAgent.id,
-          revision: previous.length + 1,
-          backendId,
-          configurationId: configuration.id,
-          configurationKind: configuration.kind,
-          configurationGeneration: configuration.generation,
-          configuration: admittedConfiguration,
-          harness: revisionHarness,
-          compute: { id: compute.id, implementation: compute.implementation },
-          ...(sandbox === undefined ? {} : { sandboxDriverId: sandbox.id }),
-          ...(secretDriver === undefined
-            ? {}
-            : { secretDriverId: secretDriver.id, secretBindings }),
-          ...(pluginState === undefined ? {} : { plugins: pluginState }),
-          ...(lockedAgent.pluginApprovers === undefined
-            ? {}
-            : { pluginApprovers: lockedAgent.pluginApprovers }),
-          ...(repositoryCredentials === undefined ? {} : { repositoryCredentials }),
-          harnessAuth,
-          ...(credentialSources.length === 0 ? {} : { credentialSources }),
-          servicePrincipalId: lockedAgent.servicePrincipalId,
-          createdAt,
+          ...revisionDraft,
+          compute: {
+            ...revisionDraft.compute,
+            ...(computeAdmission === undefined ? {} : { admission: computeAdmission }),
+          },
         }),
       );
       const running = await state.agents.transitionAgentDesiredRuntimeState(
@@ -9528,6 +9885,134 @@ export class OpenClawController {
     });
   }
 
+  /**
+   * The Configuration a failing job wrote through its Driver but never recorded (finding 1395).
+   * The write settled, then the Configuration step's transaction refused (a duplicate Agent name,
+   * for example) and rolled back the record, or a later fence refused the job before that step
+   * ran again. Nothing else deletes that document. A write that has not settled, a job past its
+   * Configuration step, a Configuration record with the ID, or a write made through a Driver the
+   * Installation no longer selects leaves it alone.
+   */
+  private async unrecordedProvisioningConfiguration(
+    state: PlatformUnitOfWork,
+    record: Readonly<AgentProvisioningRecord>,
+  ): Promise<Readonly<{ id: string; namespaceId: string }> | undefined> {
+    if (!this.provisioningBefore(record, "configuration") || record.configurationId !== undefined) {
+      return undefined;
+    }
+    const receipt = readProvisioningEffectReceipt(record);
+    const pending = provisioningPendingEffect(record);
+    if (
+      receipt?.kind !== "configuration" ||
+      pending?.kind !== "configuration" ||
+      pending.owner !== receipt.owner ||
+      pending.targetId !== receipt.targetId ||
+      !this.provisioningConfigurationDriverSelected(record)
+    ) {
+      return undefined;
+    }
+    if (
+      (await state.configurations.findConfiguration(record.namespaceId, receipt.targetId)) !==
+      undefined
+    ) {
+      return undefined;
+    }
+    return Object.freeze({ id: receipt.targetId, namespaceId: record.namespaceId });
+  }
+
+  /** Whether the accepted plan names the Configuration Driver the Installation selects. */
+  private provisioningConfigurationDriverSelected(
+    record: Readonly<AgentProvisioningRecord>,
+  ): boolean {
+    return (
+      this.selections.has("configuration") &&
+      asRecord(record.plan.drivers)?.configuration === this.configurationDriver().id
+    );
+  }
+
+  /**
+   * The Configuration an earlier refusal of this job marked for deletion but did not finish
+   * deleting: its delete failed, or the worker lost its claim first (finding 1399). A
+   * Configuration record with the ID, or a Driver the accepted plan no longer names, leaves it
+   * alone.
+   */
+  private async markedProvisioningConfiguration(
+    state: PlatformReadView,
+    record: Readonly<AgentProvisioningRecord>,
+  ): Promise<Configuration | undefined> {
+    const configurationId = unrecordedProvisioningConfiguration(record.progress);
+    if (
+      configurationId === undefined ||
+      !this.provisioningConfigurationDriverSelected(record) ||
+      (await state.configurations.findConfiguration(record.namespaceId, configurationId)) !==
+        undefined
+    ) {
+      return undefined;
+    }
+    return this.provisioningConfiguration(record, configurationId);
+  }
+
+  /**
+   * Deletes a Configuration the job wrote but never recorded, through the Driver call
+   * Configuration deletion uses. Nothing references it: the job forgot it when it marked it, and
+   * its ID is unique to the job. It is inspected first, so a document already gone (an applied
+   * delete whose response was lost) is not an error.
+   */
+  private async removeUnrecordedProvisioningConfiguration(
+    configuration: Configuration,
+  ): Promise<void> {
+    const driver = this.configurationDriver();
+    if (driver.inspectExact === undefined) {
+      throw new DependencyUnavailableError(
+        "The Configuration Driver does not support exact provisioning recovery.",
+      );
+    }
+    if ((await this.driverOperation(() => driver.inspectExact!(configuration))) !== undefined) {
+      await this.driverOperation(() =>
+        driver.delete({ id: configuration.id, namespaceId: configuration.namespaceId }),
+      );
+    }
+  }
+
+  /**
+   * A refusal's delete of its unrecorded or marked Configuration, once the mark has committed.
+   * A failed delete keeps the refusal as it is, leaves the mark, and returns the ID for the
+   * operator log.
+   */
+  private async deleteUnrecordedProvisioningConfiguration(
+    configuration: Configuration,
+  ): Promise<string | undefined> {
+    try {
+      await this.removeUnrecordedProvisioningConfiguration(configuration);
+      return undefined;
+    } catch {
+      return configuration.id;
+    }
+  }
+
+  /**
+   * Deletes the marked Configuration after this attempt's first fence and before it writes
+   * another, so the mark is never dropped with the document still stored. A failed delete fails
+   * the attempt and keeps the mark. Returns whether the job had a mark to drop.
+   */
+  private async deleteMarkedProvisioningConfiguration(
+    record: Readonly<AgentProvisioningRecord>,
+    runEffect: <T>(operation: (signal: AbortSignal) => Promise<T>) => Promise<T>,
+  ): Promise<boolean> {
+    if (unrecordedProvisioningConfiguration(record.progress) === undefined) {
+      return false;
+    }
+    if (!this.provisioningConfigurationDriverSelected(record)) {
+      // The fence refuses this first; never let a new write replace the mark.
+      throw new DependencyUnavailableError("The selected Configuration Driver is unavailable.");
+    }
+    const marked = await this.read((state) => this.markedProvisioningConfiguration(state, record));
+    if (marked !== undefined) {
+      await runEffect(() => this.removeUnrecordedProvisioningConfiguration(marked));
+    }
+    return true;
+  }
+
   /** The Configuration that provisioning writes through the Configuration Driver. */
   private provisioningConfiguration(
     record: Readonly<AgentProvisioningRecord>,
@@ -10357,6 +10842,30 @@ export class OpenClawController {
     driver: CredentialGatewayDriver,
     type: string,
   ): Promise<CredentialSourceType> {
+    if (type === credentialFreeMetadataType) {
+      if (this.selections.has("conduit")) {
+        const control = this.selectedDriver("conduit").sourceControl;
+        const provider = control.providers.find((entry) =>
+          isDeepStrictEqual(entry.ref, credentialFreeProviderRef),
+        );
+        if (provider) {
+          return provider.sourceType;
+        }
+      }
+      throw new CredentialSourceTypeNotOfferedError();
+    }
+    if (type === preparedGitHubType) {
+      if (this.selections.has("conduit")) {
+        const control = this.selectedDriver("conduit").sourceControl;
+        const provider = control.providers.find((entry) =>
+          isDeepStrictEqual(entry.ref, preparedGitHubProviderRef),
+        );
+        if (control.preparedGitHub && provider) {
+          return provider.sourceType;
+        }
+      }
+      throw new CredentialSourceTypeNotOfferedError();
+    }
     const catalog = await this.credentialGatewayOperation(() =>
       driver.listSourceTypes({ signal: AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS) }),
     );
@@ -10976,10 +11485,13 @@ export class OpenClawController {
     harness: RevisionHarnessDescriptor,
     compute: ComputeDriver,
     sandbox: SandboxDriver | undefined,
+    credentialSourceLoginMode?: CredentialSourceLoginMode,
   ): OpenClawConfigurationDocument {
     const sandboxConfiguration =
       sandbox?.configureAgent !== undefined
-        ? frozenValues(sandbox.configureAgent(frozenValues(values), harness))
+        ? frozenValues(
+            sandbox.configureAgent(frozenValues(values), harness, credentialSourceLoginMode),
+          )
         : values;
     return frozenValues(
       compute.runtimeLogging === "driver"
@@ -11187,6 +11699,69 @@ export class OpenClawController {
       current.generation === expected.generation &&
       current.createdAt === expected.createdAt
     );
+  }
+
+  /**
+   * The stored Configuration behind a record that update or delete holds locked. A failed update
+   * whose compensation could not run (a crash, a lost COMMIT acknowledgement that hid a rollback,
+   * or a compensation read that failed in the same outage) leaves the stored document one
+   * generation ahead of the record, and each such failure during recovery one more (finding
+   * 1396). The record lock keeps other requests out, so a document up to
+   * MAX_CONFIGURATION_LEFTOVER_LEAD generations ahead is a leftover, not a write in flight; it is
+   * returned at its own generation, for update to replace and delete to remove. Another
+   * request's compensation runs without the lock, but the Kubernetes Driver refuses a replace
+   * that does not move the generation by exactly one from the document it read, or whose
+   * resource version changed since, so the later of two writes fails and rolls back. Reads and
+   * deploys keep refusing the leftover, so unrecorded content is never served or recorded.
+   */
+  private async lockedConfiguration(
+    driver: ConfigurationDriver,
+    record: Pick<
+      Configuration,
+      "id" | "namespaceId" | "kind" | "generation" | "createdAt" | "secretBindings"
+    >,
+  ): Promise<Readonly<Configuration>> {
+    const stored = await this.driverOperation(() =>
+      driver.read({ id: record.id, namespaceId: record.namespaceId }),
+    );
+    const lead = Number.isSafeInteger(stored?.generation)
+      ? stored.generation - record.generation
+      : 0;
+    return this.exactConfiguration(
+      stored,
+      lead > 0 && lead <= MAX_CONFIGURATION_LEFTOVER_LEAD
+        ? { ...record, generation: stored.generation }
+        : record,
+    );
+  }
+
+  /**
+   * Whether the Driver confirms that nothing is stored for a record: a failed delete whose
+   * compensation could not run leaves the record without its document (finding 1396). Only exact
+   * inspection tells absence from an unreachable backend: it answers undefined only when nothing
+   * is stored, and any stored document answers or conflicts with the placeholder values. A Driver
+   * without it, or one that fails, does not confirm absence.
+   */
+  private async configurationAbsent(
+    driver: ConfigurationDriver,
+    record: Pick<Configuration, "id" | "namespaceId" | "kind" | "generation" | "createdAt">,
+  ): Promise<boolean> {
+    if (driver.inspectExact === undefined) {
+      return false;
+    }
+    const placeholder: Configuration = {
+      id: record.id,
+      namespaceId: record.namespaceId,
+      kind: record.kind,
+      generation: record.generation,
+      values: {},
+      createdAt: record.createdAt,
+    };
+    try {
+      return (await driver.inspectExact(placeholder)) === undefined;
+    } catch {
+      return false;
+    }
   }
 
   private exactConfiguration(

@@ -41,7 +41,9 @@
     "tests/integration/ci-image-reconciliation.test.mjs",
     "tests/conformance/repository-runtime-material.test.mjs",
     "tests/integration/repository-credentials-server-timeout.test.mjs",
+    "tests/integration/protected-repository-metadata-read.test.mjs",
     "tests/integration/repository-credentials-http.test.mjs",
+    "tests/integration/public-github-read-http.test.mjs",
     "tests/conformance/repository-credentials-fixture-ownership.test.mjs",
     "tests/integration/repository-credentials-projected-inputs.test.mjs",
     "tests/integration/ci-image-pull.test.mjs",
@@ -344,7 +346,13 @@
       "path": "tests/integration/repository-credentials-config.test.mjs"
     },
     {
+      "path": "tests/integration/protected-repository-metadata-read.test.mjs"
+    },
+    {
       "path": "tests/integration/repository-credentials-http.test.mjs"
+    },
+    {
+      "path": "tests/integration/public-github-read-http.test.mjs"
     },
     {
       "path": "tests/integration/repository-credentials-transport-bounds.test.mjs"

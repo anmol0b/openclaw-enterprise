@@ -1,6 +1,3 @@
-{{- if .Values.backend.openshell.clientSecretName }}
-{{- include "openclaw.validateResourceName" (dict "label" "backend.openshell.clientSecretName" "value" .Values.backend.openshell.clientSecretName) }}
-{{- end }}
 {{- if .Values.egressAuthority.enabled }}
 {{- $authority := .Values.egressAuthority }}
 {{- include "openclaw.validateResourceName" (dict "label" "egressAuthority.tlsSecretName" "value" (required "egressAuthority.tlsSecretName is required" $authority.tlsSecretName)) }}

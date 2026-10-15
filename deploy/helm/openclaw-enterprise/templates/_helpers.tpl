@@ -591,6 +591,14 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- /* Dedicated Secrets (findings 1037, 1044, 1046, 1048, 1054): each Secret an enabled feature reads, or cert-manager writes, needs its own name. A shared Secret mounts other credentials into a component, is overwritten by cert-manager (the Gateway TLS and root CA), or turns its other entries into keys Envoy Gateway's apiKeyAuth accepts (gatewayRouting.apiKeySecretName). Chart-named and generated Secrets come first and the log collector's last, so a refusal names the operator's setting. The public CA settings (marked "ca") may share one Secret with each other, such as one trust bundle: each mounts only its selected key, which holds public data (finding 1059). They stay apart from database.secretName, whose migration URL key a matching CA key would mount into the API and worker. Each name must also be a Kubernetes resource name, so a malformed one fails here rather than when Kubernetes refuses the Pod or leaves it waiting for a Secret that cannot exist (finding 1066). */ -}}
 {{- $routing := .Values.gatewayRouting -}}
 {{- $roles := list -}}
+{{- $roles = append $roles (list "backend.openshell.clientSecretName" .Values.backend.openshell.clientSecretName) -}}
+{{- if .Values.egressAuthority.enabled -}}
+{{- $roles = concat $roles (list (list "egressAuthority.tlsSecretName" .Values.egressAuthority.tlsSecretName) (list "egressAuthority.issuerSecretName" .Values.egressAuthority.issuerSecretName)) -}}
+{{- end -}}
+{{- if .Values.preparedGitHub.custodySecretName -}}
+{{- if not .Values.egressAuthority.enabled -}}{{- fail "preparedGitHub custody requires egressAuthority.enabled" -}}{{- end -}}
+{{- $roles = append $roles (list "preparedGitHub.custodySecretName" .Values.preparedGitHub.custodySecretName) -}}
+{{- end -}}
 {{- if and $routing.enabled (not $routing.issuerRef.name) -}}{{- $roles = append $roles (list "the generated Gateway root CA" (include "openclaw.gatewayRouting.rootSecretName" .)) -}}{{- end -}}
 {{- $roles = concat $roles (list (list "installation.secretName" .Values.installation.secretName) (list "database.secretName" .Values.database.secretName) (list "auth.secretName" .Values.auth.secretName)) -}}
 {{- if $routing.enabled -}}{{- $roles = append $roles (list "gatewayRouting.tlsSecretName" (include "openclaw.gatewayRouting.tlsSecretName" .)) -}}{{- end -}}

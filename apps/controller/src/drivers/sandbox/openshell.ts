@@ -14,6 +14,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import type {
   AgentRevision,
+  CredentialSourceLoginMode,
   EgressInstallation,
   ConduitPlan,
   Backend,
@@ -59,6 +60,7 @@ import {
 import { RUNTIME_WRAPPER_COMMAND } from "../compute/kubernetes/runtime-entrypoints.ts";
 import { nodeProgramArguments } from "../compute/node-program.ts";
 import {
+  COMPUTE_RELEASE_PROFILE,
   HARNESS_EGRESS_ENROLLMENT_PATH,
   harnessEgressEnrollment,
 } from "../compute/egress-enrollment.ts";
@@ -220,20 +222,13 @@ const OPENSHELL_WORKSPACE_STATE_DIRECTORY = "state";
 // OpenShell probes TMPDIR before the Harness entrypoint can create a nested directory.
 const OPENSHELL_TEMPORARY = "/tmp";
 /**
- * The Codex app-server policy every OpenShell dedicated Codex revision freezes. OpenShell is
- * the outer containment boundary, and Codex's own sandbox (bwrap) cannot create a user
- * namespace inside it, so every command would fail. The pinned OpenClaw Gateway sends each
- * turn `workspace-write`, whatever `sandbox` says, when it forces a user reviewer: guardian
- * mode without an explicit `user` reviewer, or an explicit model-backed reviewer, on a model
- * it cannot verify for model-backed review (the documented `codex/<model>` Configuration is
- * one). An explicit `user` reviewer keeps the configured sandbox, and approvals still go to a
- * person. OpenClaw `tools.exec` settings other than the default or `mode: full` still make
- * every command fail (Codex's own sandbox, or a refusal).
- * Source: `extensions/codex/src/app-server/config-options.ts` at the `OPENCLAW_COMMIT` in
- * `deploy/runtime/Dockerfile`; recheck when that pin changes.
+ * Default PAT and unresolved sources to managed Codex workspace restrictions. OpenShell owns
+ * the outer filesystem, network and credential boundary; native sandbox failures remain
+ * failures. The explicit user reviewer preserves human approval instead of selecting a
+ * model-backed reviewer. Recheck against the pinned OpenClaw config-options.ts on upgrades.
  */
 export const OPENSHELL_CODEX_APP_SERVER_POLICY = Object.freeze({
-  sandbox: "danger-full-access",
+  sandbox: "workspace-write",
   approvalsReviewer: "user",
 } as const);
 const OPENSHELL_DEFAULT_READ_ONLY_PATHS = Object.freeze([
@@ -1726,9 +1721,9 @@ function protectedEgressPolicy(
   options: OpenShellSandboxDriverOptions,
   requirements: HarnessWorkloadRequirements,
 ): Readonly<Record<string, unknown>> {
-  const wiring = requirements.conduitWiring;
+  const attachment = requirements.conduitWiring;
   if (
-    !wiring ||
+    !attachment ||
     !options.egress ||
     requirements.credentialAttachments.length !== 0 ||
     (options.providers?.length ?? 0) !== 0
@@ -1737,9 +1732,9 @@ function protectedEgressPolicy(
       "Protected egress requires its exact paired policy and no legacy credential attachments.",
     );
   }
-  const expected = openShellEgressConfiguration(wiring.plan, options.egress);
-  if (!isDeepStrictEqual(wiring.configuration, expected)) {
-    throw new OpenShellSandboxConfigurationFailure("Conduit wiring was altered.");
+  const expected = openShellEgressConfiguration(attachment.plan, options.egress);
+  if (!isDeepStrictEqual(attachment.configuration, expected)) {
+    throw new OpenShellSandboxConfigurationFailure("Protected egress attachment was altered.");
   }
   return expected;
 }
@@ -2034,6 +2029,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   configureAgent(
     configuration: Readonly<OpenClawConfigurationDocument>,
     harness: Readonly<AgentRevision["harness"]>,
+    credentialSourceLoginMode?: CredentialSourceLoginMode,
   ): OpenClawConfigurationDocument {
     if (harness.mode !== "dedicated") {
       throw new OpenShellSandboxConfigurationFailure(
@@ -2096,6 +2092,12 @@ export class OpenShellSandboxDriver implements SandboxDriver {
               appServer: {
                 ...appServer,
                 ...OPENSHELL_CODEX_APP_SERVER_POLICY,
+                // API-key login has no managed Codex policy; OpenShell owns its isolation.
+                // PAT and unresolved sources retain native restrictions until admission.
+                sandbox:
+                  credentialSourceLoginMode === "api_key"
+                    ? "danger-full-access"
+                    : "workspace-write",
               },
             },
           },
@@ -2151,7 +2153,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     this.requireOperatorWorkspaceMode("provision a Harness");
     if (!isDeepStrictEqual(context.requirements.conduitWiring?.plan, context.revision.egressPlan)) {
       throw new OpenShellSandboxConfigurationFailure(
-        "Conduit wiring must match the admitted revision.",
+        "Protected egress attachment must match the admitted revision.",
       );
     }
     if (context.revision.egressPlan !== undefined && context.revision.harness.id !== "codex") {
@@ -2349,6 +2351,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   async enrollHarness(
     context: SandboxHarnessStatusContext,
     installation: EgressInstallation,
+    release: (startupId: string) => Promise<Readonly<Record<string, unknown>>>,
   ): Promise<void> {
     if (
       !context.revision.egressPlan ||
@@ -2372,11 +2375,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         "Harness enrollment must match the installed Sandbox.",
       );
     }
-    if (
-      await client.serviceWebSocketHandshake(service.url, context.transportToken, context.signal)
-    ) {
-      return;
-    }
     const document = await client.getServiceDocument(
       service.url,
       HARNESS_EGRESS_ENROLLMENT_PATH,
@@ -2389,9 +2387,10 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       return;
     }
     const challenge = asRecord(document.json);
-    const { startupId, ...binding } = challenge ?? {};
+    const { profile, startupId, ...binding } = challenge ?? {};
     if (
       !challenge ||
+      profile !== COMPUTE_RELEASE_PROFILE ||
       typeof startupId !== "string" ||
       !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(startupId) ||
       !isDeepStrictEqual(binding, harnessEgressEnrollment(installation.plan))
@@ -2404,7 +2403,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       service.url,
       HARNESS_EGRESS_ENROLLMENT_PATH,
       context.transportToken,
-      challenge,
+      await release(startupId),
       context.signal,
     );
     // A restarted Harness refuses the old challenge. The next reconcile observes

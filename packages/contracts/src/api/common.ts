@@ -390,7 +390,13 @@ export const UpdateCredentialSourceBody = Type.Object(
     adoption: Type.Optional(
       Type.Literal("live", {
         description:
-          "Explicitly opt an unbound static source into protected live Secret reads. Requires source update and Secret operate permission; failure preserves the existing source.",
+          "Opt an unbound static source into protected live Secret reads. A legacy or narrower source also requires explicit authorityScope: execution. Requires source update and Secret operate permission.",
+      }),
+    ),
+    authorityScope: Type.Optional(
+      Type.Literal("execution", {
+        description:
+          "Consent to every process in this dedicated execution using the constrained inference grant. An older executable-specific grant is never broadened by an upgrade or Secret change.",
       }),
     ),
     secrets: Type.Optional(CredentialSourceSecrets),
@@ -398,7 +404,7 @@ export const UpdateCredentialSourceBody = Type.Object(
   {
     additionalProperties: false,
     description:
-      "For a legacy source, omitting adoption re-reads Secret inputs and updates the Credential Gateway copy. adoption: live explicitly admits an unbound static source for protected per-operation reads. Already-protected sources remain live; PATCH changes require an unbound source. Updating the referenced Secret value needs no source PATCH. Existing legacy sources never opt in merely because their Secret changes. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
+      "For a legacy source, omitting adoption and authorityScope updates the Credential Gateway copy. To admit an unbound legacy or narrower source for protected per-operation reads, send adoption: live and authorityScope: execution together. Existing approvals never expand because of an upgrade or a Secret change. Already-admitted sources remain live. PATCH requires an unbound source. A refresh token field (`refresh_token` of `oauth2-refresh-token`) must reference a new Secret. Non-secret config is immutable.",
   },
 );
 

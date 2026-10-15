@@ -5,9 +5,15 @@ import {
   KubernetesComputeDriver,
   kubernetesNamespaceName,
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
+import { ControllerWorker } from "../../apps/controller/src/worker.ts";
+import { OpenShellConduitDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
+import { staticEgressFixture } from "../helpers/static-egress.mjs";
 import { SETUP_WRAPPER_COMMAND } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
+import { pluginRuntimeSpecForRevision } from "../../apps/controller/src/drivers/compute/plugin-runtime.ts";
+import { withYieldingComputeStop } from "../../apps/controller/src/drivers/compute/operation-context.ts";
 import { encodeRepositoryCredentialSessionFiles } from "../../apps/controller/src/drivers/repo/github/credentials/client/config.ts";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
+import { runOpenClawRuntimeHelper } from "../helpers/plugin-runtime.mjs";
 
 const deadlineWallMs = Date.now() + 86400000;
 function repositoryClient(gatewayOrigin = "https://git.credentials.svc.cluster.local") {
@@ -113,6 +119,9 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
           podLabels: { app: "credentials" },
           port: 8443,
         },
+        ...(options.publicGithubRead === undefined
+          ? {}
+          : { publicGithubRead: options.publicGithubRead }),
       },
       ...(nodeEnrollment === undefined
         ? {}
@@ -167,6 +176,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
       secretDriverId: "kubernetes-secret",
     },
     compute: { id: driver.id, implementation: driver.implementation },
+    executionAdmission: { version: 2, mode: "unprotected" },
     servicePrincipalId: "principal-repository-material",
     createdAt: "2026-09-18T00:00:00.000Z",
     repositoryCredentials: {
@@ -1324,6 +1334,814 @@ test("Dedicated Codex without repository bindings does not receive broker policy
   assert.equal(preparedCodexManifest(f).repositoryBrokerNetworkPolicy, undefined);
 });
 
+const publicReader = {
+  namespace: "control",
+  podLabels: { app: "read-public-github" },
+  address: "10.43.0.19",
+};
+
+function publicReaderPolicies(f) {
+  return [...f.objects.values()].filter(
+    ({ kind, spec }) =>
+      kind === "NetworkPolicy" &&
+      spec.egress?.some(({ to }) =>
+        to?.some(({ podSelector }) => podSelector?.matchLabels?.app === publicReader.podLabels.app),
+      ),
+  );
+}
+
+test("enabling the reader cannot grant an already admitted revision during activation or repair", async () => {
+  const f = await fixture("dedicated");
+  delete f.revision.repositoryCredentials;
+  f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  const context = f.context(undefined);
+  await f.driver.prepareRevision(f.revision, context);
+  f.markReady();
+  await f.driver.activateRevision(f.revision, context);
+
+  // The serialized revision predates the operator enabling the service.
+  const oldRevision = structuredClone(f.revision);
+  f.driver.options.network.publicGithubRead = publicReader;
+  await f.driver.prepareRevision(oldRevision, context);
+  await f.driver.activateRevision(oldRevision, context);
+  assert.equal(publicReaderPolicies(f).length, 0);
+  assert.equal(preparedCodexManifest(f).publicGithubRead, undefined);
+
+  // Reconstructing a lost immutable projection must retain the old decision.
+  for (const [key, object] of f.objects) {
+    if (object.kind === "ConfigMap" && object.data?.["runtime.json"]) {
+      f.objects.delete(key);
+    }
+  }
+  await f.driver.prepareRevision(oldRevision, context);
+  assert.equal(preparedCodexManifest(f).publicGithubRead, undefined);
+  assert.equal(publicReaderPolicies(f).length, 0);
+});
+
+test("protected execution cannot acquire the anonymous reader or use it as a fallback", async () => {
+  const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+  delete f.revision.repositoryCredentials;
+  f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  const admission = f.driver.admitRevision(f.revision);
+  assert.match(admission, /^public-github-read:v1:/, "unprotected control selects this exact peer");
+  const protectedRevision = {
+    ...f.revision,
+    executionAdmission: { version: 2, mode: "protected" },
+    egressPlan: { routes: [] },
+  };
+  assert.equal(f.driver.admitRevision(protectedRevision), undefined);
+  assert.throws(
+    () => pluginRuntimeSpecForRevision(protectedRevision, undefined, undefined, publicReader),
+    /public GitHub reader cannot be selected for protected execution/,
+  );
+  await assert.rejects(f.driver.prepareRevision(protectedRevision), /exact paired Compute release/);
+  assert.equal(publicReaderPolicies(f).length, 0);
+  assert.equal(f.deployments().length, 0);
+});
+
+// Exercise Worker.process and the shipping Drivers. Only state, IAM decisions, the queue and
+// the Kubernetes transport are local fixtures; a successful prepare alone missed this cutover.
+test("the owning active reconcile withdraws its admitted reader across the Conduit cutoff", async () => {
+  const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+  const { revision, driver } = f;
+  delete revision.repositoryCredentials;
+  revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  revision.compute.admission = driver.admitRevision(revision);
+  assert.match(revision.compute.admission, /^public-github-read:v1:[a-f0-9]{64}$/);
+  const context = f.context(undefined);
+  await driver.prepareRevision(revision, context);
+  f.markReady();
+  await driver.activateRevision(revision, context);
+  const deployment = f.consumer();
+  const policy = publicReaderPolicies(f)[0];
+  assert.ok(policy.metadata.uid && deployment.metadata.uid);
+  f.setPods([workloadPod(deployment, f.namespace, "selected-agent")]);
+
+  driver.options.network.publicGithubRead = undefined;
+  driver.conduitDriver = new OpenShellConduitDriver(
+    { middlewareName: "oce-authority", authorityScope: "execution" },
+    {
+      id: "openshell-egress",
+      backend: { id: "test-gateway" },
+      sandbox: { harnessResource: () => assert.fail("must not use the protected Sandbox") },
+    },
+  );
+  assert.throws(() => driver.validateExecutionAdmission(revision), /exact paired Compute release/);
+
+  const legacy = structuredClone(revision);
+  delete legacy.executionAdmission;
+  const unselected = structuredClone(revision);
+  delete unselected.compute.admission;
+  const otherCompute = structuredClone(revision);
+  otherCompute.compute.id = "other-compute";
+  for (const unsupported of [legacy, unselected, otherCompute]) {
+    assert.equal(driver.rejectedExecutionWithdrawal(unsupported), undefined);
+    assert.throws(() => driver.validateExecutionAdmission(unsupported));
+  }
+
+  const { id: revisionId, namespaceId, agentId, servicePrincipalId } = revision;
+  const actorId = "authorized-actor";
+  const key = "agent_revision:" + revisionId + ":reconcile";
+  const claim = { idempotencyKey: key, namespaceId, agentId, revisionId, actorId, attemptCount: 1 };
+  const iam = {
+    id: "fixture-iam",
+    capability: "iam",
+    async authorize() {
+      return {
+        allowed: true,
+        reason: "authorized maintenance",
+        driverId: this.id,
+        evidence: {
+          identityId: actorId,
+          groupIds: [],
+          roleIds: [],
+          bindingIds: [],
+          restrictionIds: [],
+        },
+      };
+    },
+  };
+  const agent = {
+    id: agentId,
+    namespaceId,
+    servicePrincipalId,
+    activeRevisionId: revisionId,
+    desiredRuntimeState: "running",
+  };
+  const view = {
+    namespaces: { findNamespace: () => ({ id: namespaceId, status: "ready" }) },
+    agents: { findAgent: () => agent },
+    revisions: {
+      findRevision: () => structuredClone(revision),
+      listRevisionMetadata: () => [revision],
+    },
+    credentialSources: { listCredentialWithdrawals: () => [] },
+  };
+  const worker = new ControllerWorker({
+    pool: {},
+    mode: "production",
+    emit() {},
+    drivers: {
+      installation: { drivers: { iam, compute: driver } },
+      computeDriver: driver,
+      conduitDriver: driver.conduitDriver,
+      createIAMDriver: () => iam,
+    },
+  });
+  worker.installation = { id: "cutover-test" };
+  worker.state.loadNativeIAMState = () => ({
+    identities: [
+      { id: actorId },
+      { id: servicePrincipalId, kind: "service_principal", namespaceId, agentId },
+    ],
+  });
+  worker.state.read = (read) => read(view);
+  worker.queue.findWorkAttempt = () => undefined;
+  const queueWrites = [];
+  let ageMs = 100;
+  worker.queue.heartbeat = () => ({ ageMs });
+  const queue = {
+    heartbeat: () => claim,
+    defer: (_claim, result) => queueWrites.push(["defer", result.code]),
+    fail: (_claim, result) => queueWrites.push(["fail", result.code]),
+  };
+  worker.state.transactWithQueue = (update) => update(view, queue);
+
+  // A reconcile whose Agent principal no longer owns the revision has no withdrawal authority.
+  agent.servicePrincipalId = "other-principal";
+  f.apiCalls.length = 0;
+  worker.workOrigins.set(claim, performance.now() - ageMs);
+  await worker.process(claim);
+  assert.deepEqual(f.apiCalls, []);
+  assert.equal(publicReaderPolicies(f)[0].metadata.uid, policy.metadata.uid);
+  assert.equal(f.consumer().metadata.uid, deployment.metadata.uid);
+
+  agent.servicePrincipalId = servicePrincipalId;
+  // Losing the claim at the effect boundary must also leave the exact objects untouched.
+  const heartbeat = worker.queue.heartbeat;
+  worker.queue.heartbeat = () => undefined;
+  await assert.rejects(worker.process(claim), { name: "WorkClaimLostError" });
+  assert.deepEqual(f.apiCalls, []);
+  assert.equal(publicReaderPolicies(f)[0].metadata.uid, policy.metadata.uid);
+  worker.queue.heartbeat = heartbeat;
+
+  // The cutoff is not a convergence failure. Force a real incomplete Pod observation after
+  // closing the policy and UID-bound foreground deletion; even past the convergence deadline the live claim must defer.
+  ageMs = worker.convergenceTimeoutMs + 5000;
+  worker.workOrigins.set(claim, performance.now() - ageMs);
+  queueWrites.length = 0;
+  let deleted = false;
+  const remove = f.clients.apps.deleteNamespacedDeployment;
+  f.clients.apps.deleteNamespacedDeployment = async (request) => {
+    assert.equal(publicReaderPolicies(f).length, 0);
+    assert.equal(request.body.preconditions.uid, deployment.metadata.uid);
+    assert.equal(request.body.propagationPolicy, "Foreground");
+    await remove(request);
+    deleted = true;
+  };
+  const listPods = f.clients.core.listNamespacedPod;
+  let podsExamined = false;
+  f.clients.core.listNamespacedPod = async (request) => {
+    const pods = (await listPods(request)).items;
+    assert.deepEqual(
+      pods.map(({ metadata }) => metadata.name),
+      ["selected-agent"],
+    );
+    podsExamined = true;
+    return { items: pods, metadata: { continue: "incomplete-observation" } };
+  };
+  await worker.process(claim);
+  assert.deepEqual(queueWrites, [["defer", "EXECUTION_ADMISSION_WITHDRAWAL_PENDING"]]);
+  assert.ok(deleted && podsExamined);
+
+  // A mere return of the peer confers no release. Reobserve the selected Pod gone, then fail the
+  // old release (never publish success or start another workload).
+  driver.options.network.publicGithubRead = publicReader;
+  f.clients.core.listNamespacedPod = listPods;
+  let terminationExamined = false;
+  f.observePods(() => {
+    assert.equal(publicReaderPolicies(f).length, 0);
+    assert.equal(f.consumer(), undefined);
+    f.setPods([]);
+    terminationExamined = true;
+  });
+  queueWrites.length = 0;
+  await worker.process(claim);
+  assert.ok(terminationExamined);
+  assert.deepEqual(queueWrites, [["fail", "EXECUTION_ADMISSION_WITHDRAWN"]]);
+  assert.equal(publicReaderPolicies(f).length, 0);
+  assert.equal(f.consumer(), undefined);
+  assert.throws(() => driver.validateExecutionAdmission(revision), /exact paired Compute release/);
+});
+
+test("API-admitted protected credential-free metadata projects no inference tools or anonymous reader", async (t) => {
+  const f = await staticEgressFixture(t, {
+    async admitSource({ app, agent, namespace, path, origin }) {
+      const { status, data: source } = await app.request("POST", path, {
+        body: {
+          name: "identity-only",
+          type: "credential-free-repository-metadata",
+          config: {
+            origin,
+            repository_id: "7311",
+            repository: "fixture/credential-free",
+            agent_id: agent.id,
+            authority: "execution",
+          },
+        },
+      });
+      assert.equal(status, 201);
+      const bound = await app.request(
+        "PATCH",
+        "/namespaces/" + namespace.id + "/agents/" + agent.id,
+        {
+          body: {
+            configurationId: agent.configurationId,
+            harnessAuth: { method: "runtime" },
+            credentialSources: [{ sourceId: source.id }],
+          },
+        },
+      );
+      assert.equal(bound.status, 200);
+      return { agent: bound.data, source };
+    },
+  });
+  const r = f.revision;
+  assert.deepEqual(r.executionAdmission, { version: 2, mode: "protected" });
+  assert.equal(r.egressPlan.routes[0].binding.grant.kind, "credential_free_repository_metadata");
+  const { driver: ordinary, revision: readerRevision } = await fixture("dedicated", undefined, {
+    publicGithubRead: publicReader,
+  });
+  const driver = new KubernetesComputeDriver(ordinary.options, {
+    sandboxDriver: f.sandboxDriver,
+    conduitDriver: f.egress,
+  });
+  // The production Compute release gate and the exact projection prepareRevisionWorkloads uses.
+  driver.validateRevisionExecution(r, { currentEgressInstallation: async () => f.installation });
+  assert.equal(driver.admitRevision(r), undefined);
+  const { runtime } = driver.pluginRuntimeSnapshot(r);
+  assert.equal(runtime.providerTools, "none");
+  assert.equal(runtime.egressEnrollment.inference, false);
+  assert.equal(runtime.publicGithubRead, undefined);
+  readerRevision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  const admission = ordinary.admitRevision(readerRevision);
+  assert.match(admission, /^public-github-read:v1:[a-f0-9]{64}$/);
+  const borrowedReader = { ...r, compute: { ...r.compute, admission } };
+  assert.equal(driver.rejectedExecutionWithdrawal(borrowedReader), undefined);
+  assert.equal(driver.pluginRuntimeSnapshot(borrowedReader).runtime.publicGithubRead, undefined);
+  const unknown = structuredClone(r);
+  unknown.egressPlan.routes[0].binding.grant.kind = "not_an_admitted_grant";
+  assert.throws(
+    () => driver.pluginRuntimeSnapshot(unknown),
+    /Unsupported protected inference tool grant/,
+  );
+});
+
+test("withdrawing a selected reader narrows access and stops only its revision", async () => {
+  for (const replacement of [undefined, { ...publicReader, podLabels: { app: "replacement" } }]) {
+    const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+    delete f.revision.repositoryCredentials;
+    f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+      enabled: true,
+      domains: { [publicReader.address]: "allow" },
+    };
+    f.revision.compute.admission = f.driver.admitRevision(f.revision);
+    const context = f.context(undefined);
+    await f.driver.prepareRevision(f.revision, context);
+    f.markReady();
+    await f.driver.activateRevision(f.revision, context);
+    const selected = f.consumer();
+    const successor = { ...structuredClone(f.revision), id: "unselected-successor", revision: 2 };
+    successor.configuration.plugins.entries.codex.config.appServer.networkProxy.domains = {};
+    delete successor.compute.admission;
+    f.enroll(successor);
+    await f.driver.prepareRevision(successor, context);
+    const successorDeployment = f
+      .deployments()
+      .find(
+        (deployment) =>
+          deployment.spec.template.metadata.labels["openclaw.dev/revision"] === successor.id,
+      );
+    assert.ok(successorDeployment);
+    const successorPod = workloadPod(successorDeployment, f.namespace, "successor");
+    f.setPods([workloadPod(selected, f.namespace, "selected"), successorPod]);
+    assert.equal(publicReaderPolicies(f).length, 1);
+    f.driver.options.network.publicGithubRead = replacement;
+    // Selecting Conduit cannot convert the old grant, or block withdrawal of its owned workload.
+    if (replacement !== undefined) {
+      f.driver.conduitDriver = { id: "selected-after-reader-admission" };
+      await assert.rejects(
+        f.driver.prepareRevision(successor, context),
+        /exact paired Compute release/,
+      );
+    }
+    const deleteDeployment = f.clients.apps.deleteNamespacedDeployment;
+    const readDeployment = f.clients.apps.readNamespacedDeployment;
+    let deleting = false;
+    let observedTerminatingDeployment = false;
+    let releaseObservation;
+    let reachedObservation;
+    const reached = new Promise((resolve) => {
+      reachedObservation = resolve;
+    });
+    const release = new Promise((resolve) => {
+      releaseObservation = resolve;
+    });
+    f.clients.apps.deleteNamespacedDeployment = async (request) => {
+      assert.equal(publicReaderPolicies(f).length, 0);
+      assert.equal(request.body.propagationPolicy, "Foreground");
+      assert.equal(request.body.preconditions.uid, selected.metadata.uid);
+      await deleteDeployment(request);
+      deleting = true;
+    };
+    f.clients.apps.readNamespacedDeployment = async (request) => {
+      if (deleting && request.name === selected.metadata.name && !observedTerminatingDeployment) {
+        observedTerminatingDeployment = true;
+        reachedObservation();
+        await release;
+      }
+      return readDeployment(request);
+    };
+    let observed = false;
+    f.observePods(() => {
+      observed = true;
+      assert.equal(observedTerminatingDeployment, true);
+      assert.ok(!f.deployments().some(({ metadata }) => metadata.name === selected.metadata.name));
+      assert.ok(
+        f.deployments().some(({ metadata }) => metadata.name === successorDeployment.metadata.name),
+      );
+      assert.equal(
+        publicReaderPolicies(f).length,
+        0,
+        "new connections are narrowed before Pod termination",
+      );
+      f.setPods([successorPod]);
+    });
+    const withdrawal = f.driver.prepareRevision(f.revision, context);
+    await reached;
+    assert.equal(
+      observed,
+      false,
+      "Pods cannot establish completion before the Deployment observation",
+    );
+    releaseObservation();
+    await assert.rejects(withdrawal, (error) => {
+      assert.match(error.message, /reader peer was withdrawn/);
+      assert.equal(
+        f.driver.describePrepareRevisionFailure(error).code,
+        "KUBERNETES_CONFIGURATION_INVALID",
+      );
+      return true;
+    });
+    assert.equal(observed, true);
+    assert.equal(publicReaderPolicies(f).length, 0);
+    assert.ok(
+      f.deployments().some(({ metadata }) => metadata.name === successorDeployment.metadata.name),
+    );
+    f.observePods(undefined);
+    let removedProjection = 0;
+    for (const [key, object] of f.objects) {
+      if (
+        object.kind === "ConfigMap" &&
+        object.data?.["runtime.json"] &&
+        object.metadata.labels?.["openclaw.dev/revision"] === f.revision.id
+      ) {
+        f.objects.delete(key);
+        removedProjection++;
+      }
+    }
+    assert.equal(removedProjection, 1);
+    await assert.rejects(
+      f.driver.activateRevision(f.revision, context),
+      /reader peer was withdrawn/,
+    );
+    await assert.rejects(
+      f.driver.prepareRevision(f.revision, context),
+      /reader peer was withdrawn/,
+    );
+    assert.equal(publicReaderPolicies(f).length, 0);
+    assert.ok(!f.deployments().some(({ metadata }) => metadata.name === selected.metadata.name));
+    assert.ok(
+      f.deployments().some(({ metadata }) => metadata.name === successorDeployment.metadata.name),
+    );
+  }
+});
+
+test("withdrawal precedes missing or expired repository material in preparation and activation", async () => {
+  for (const operation of ["prepareRevision", "activateRevision"]) {
+    for (const invalid of ["missing", "expired"]) {
+      const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+      f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+        enabled: true,
+        domains: { [publicReader.address]: "allow" },
+      };
+      f.revision.compute.admission = f.driver.admitRevision(f.revision);
+      const valid = f.context([runtimeBinding()]);
+      await f.driver.prepareRevision(f.revision, valid);
+      f.markReady();
+      await f.driver.activateRevision(f.revision, valid);
+      assert.equal(publicReaderPolicies(f).length, 1);
+      const selected = f.consumer();
+      f.setPods([]);
+      f.driver.options.network.publicGithubRead = undefined;
+      const context =
+        invalid === "missing"
+          ? f.context(undefined)
+          : f.context([{ ...runtimeBinding(), deadlineWallMs: 1 }]);
+      await assert.rejects(f.driver[operation](f.revision, context), /reader peer was withdrawn/);
+      assert.equal(publicReaderPolicies(f).length, 0);
+      assert.ok(!f.deployments().some(({ metadata }) => metadata.name === selected.metadata.name));
+    }
+  }
+});
+
+test("reader withdrawal uses the admitted Compute ownership when the Sandbox changes", async () => {
+  for (const [operation, replacement] of [
+    ["prepareRevision", undefined],
+    ["activateRevision", { id: "different-sandbox" }],
+    ["prepareRevision", { id: "sandbox", async provisionHarness() {} }],
+  ]) {
+    const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+    delete f.revision.repositoryCredentials;
+    f.revision.sandboxDriverId = "sandbox";
+    f.driver.sandboxDriver = { id: "sandbox" };
+    f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+      enabled: true,
+      domains: { [publicReader.address]: "allow" },
+    };
+    f.revision.compute.admission = f.driver.admitRevision(f.revision);
+    const context = f.context(undefined);
+    await f.driver.prepareRevision(f.revision, context);
+    f.markReady();
+    await f.driver.activateRevision(f.revision, context);
+    const selected = f.consumer();
+    assert.equal(publicReaderPolicies(f).length, 1);
+    f.setPods([]);
+    f.driver.options.network.publicGithubRead = undefined;
+    f.driver.sandboxDriver = replacement;
+    await assert.rejects(f.driver[operation](f.revision, context), /reader peer was withdrawn/);
+    assert.equal(publicReaderPolicies(f).length, 0);
+    assert.ok(!f.deployments().some(({ metadata }) => metadata.name === selected.metadata.name));
+  }
+});
+
+test("stop and retirement fence an admitted reader when the Sandbox is unavailable or changed", async () => {
+  for (const [operation, replacement] of [
+    ["stopRevision", undefined],
+    ["retireRevision", { id: "different-sandbox" }],
+    ["stopRevision", { id: "sandbox", async provisionHarness() {}, async cleanup() {} }],
+    ["retireRevision", { id: "sandbox", async provisionHarness() {}, async cleanup() {} }],
+  ]) {
+    const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+    delete f.revision.repositoryCredentials;
+    f.revision.sandboxDriverId = "sandbox";
+    f.driver.sandboxDriver = { id: "sandbox" };
+    f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+      enabled: true,
+      domains: { [publicReader.address]: "allow" },
+    };
+    f.revision.compute.admission = f.driver.admitRevision(f.revision);
+    const context = f.context(undefined);
+    await f.driver.prepareRevision(f.revision, context);
+    f.markReady();
+    await f.driver.activateRevision(f.revision, context);
+    const selected = f.consumer();
+    assert.equal(publicReaderPolicies(f).length, 1);
+    f.setPods([]);
+    f.driver.sandboxDriver = replacement;
+    await assert.rejects(f.driver[operation](f.revision), /SandboxDriver|Sandbox-owned/);
+    assert.ok(!f.deployments().some(({ metadata }) => metadata.name === selected.metadata.name));
+    assert.equal(publicReaderPolicies(f).length, 0);
+  }
+});
+
+test("yielding stop starts foreground deletion before OAuth cleanup", async () => {
+  const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+  delete f.revision.repositoryCredentials;
+  f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  f.revision.compute.admission = f.driver.admitRevision(f.revision);
+  await f.driver.prepareRevision(f.revision, f.context(undefined));
+  const selected = f.consumer();
+  // Exercise the OAuth stop branch with the same admitted Compute-owned workload.
+  f.revision.harnessAuth = { method: "oauth" };
+  const read = f.clients.apps.readNamespacedDeployment;
+  const remove = f.clients.apps.deleteNamespacedDeployment;
+  let deletion;
+  let reachedOAuth = false;
+  f.clients.apps.deleteNamespacedDeployment = async (request) => {
+    if (request.name === selected.metadata.name) {
+      deletion = request;
+      return; // Foreground deletion is still in progress at the API server.
+    }
+    return remove(request);
+  };
+  f.clients.apps.readNamespacedDeployment = async (request) => {
+    if (deletion) {
+      if (request.name === selected.metadata.name) {
+        throw new Error("waited for Deployment before OAuth cleanup");
+      }
+      reachedOAuth = true;
+      throw new Error("OAuth cleanup reached");
+    }
+    return read(request);
+  };
+  await assert.rejects(
+    withYieldingComputeStop(() => f.driver.stopRevision(f.revision)),
+    /OAuth cleanup reached/,
+  );
+  assert.equal(deletion.body.preconditions.uid, selected.metadata.uid);
+  assert.equal(deletion.body.propagationPolicy, "Foreground");
+  assert.equal(reachedOAuth, true);
+});
+
+test("reader withdrawal refuses an ambiguous workload profile", async () => {
+  const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+  delete f.revision.repositoryCredentials;
+  f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  f.revision.compute.admission = f.driver.admitRevision(f.revision);
+  const context = f.context(undefined);
+  await f.driver.prepareRevision(f.revision, context);
+  const selected = f.consumer();
+  selected.spec.template.metadata.labels["openclaw.dev/network-profile"] = "provider-fenced-v1";
+  f.save(selected);
+  f.driver.options.network.publicGithubRead = undefined;
+  await assert.rejects(f.driver.prepareRevision(f.revision, context), /workload profile/);
+  assert.ok(f.deployments().some(({ metadata }) => metadata.name === selected.metadata.name));
+});
+
+test("withdrawal cannot complete when Pod termination cannot be observed completely", async () => {
+  const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+  delete f.revision.repositoryCredentials;
+  f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  f.revision.compute.admission = f.driver.admitRevision(f.revision);
+  const context = f.context(undefined);
+  await f.driver.prepareRevision(f.revision, context);
+  f.markReady();
+  await f.driver.activateRevision(f.revision, context);
+  f.driver.options.network.publicGithubRead = undefined;
+  const listPods = f.clients.core.listNamespacedPod;
+  f.clients.core.listNamespacedPod = async () => ({ items: [], metadata: { continue: "next" } });
+  await assert.rejects(f.driver.prepareRevision(f.revision, context), /invalid workload Pod list/);
+  assert.equal(publicReaderPolicies(f).length, 0);
+  f.clients.core.listNamespacedPod = listPods;
+  f.setPods([]);
+  await assert.rejects(f.driver.prepareRevision(f.revision, context), /reader peer was withdrawn/);
+  assert.equal(publicReaderPolicies(f).length, 0);
+});
+
+test("withdrawal fails if the reader policy reappears during Pod termination", async () => {
+  const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+  delete f.revision.repositoryCredentials;
+  f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  f.revision.compute.admission = f.driver.admitRevision(f.revision);
+  const context = f.context(undefined);
+  await f.driver.prepareRevision(f.revision, context);
+  f.markReady();
+  await f.driver.activateRevision(f.revision, context);
+  const policy = publicReaderPolicies(f)[0];
+  f.driver.options.network.publicGithubRead = undefined;
+  f.observePods(() => {
+    f.save(policy);
+    f.setPods([]);
+  });
+  await assert.rejects(f.driver.prepareRevision(f.revision, context), /reader policy reappeared/);
+});
+
+test("ordinary dedicated revision gets only the public reader peer and skill; a disabled proxy or deny removes both", async () => {
+  const { address } = publicReader;
+  for (const [proxy, allowed] of [
+    [
+      {
+        enabled: true,
+        mode: "limited",
+        allowLocalBinding: false,
+        domains: { "example.org": "deny", [address]: "allow" },
+      },
+      true,
+    ],
+    [{ enabled: true }, false],
+    [{ enabled: false, domains: { [address]: "allow" } }, false],
+    [{ enabled: true, domains: { [address]: "allow", "10.43.0.*": "deny" } }, false],
+    [{ enabled: true, domains: { [address]: "allow", [`[${address}]:8080`]: "deny" } }, false],
+  ]) {
+    const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+    delete f.revision.repositoryCredentials;
+    f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = proxy;
+    f.revision.compute.admission = f.driver.admitRevision(f.revision);
+    await f.driver.prepareRevision(f.revision, f.context(undefined));
+    f.markReady();
+    await f.driver.activateRevision(f.revision, f.context(undefined));
+
+    // Inspect the mounts and policies that the kubelet and CNI actually consume,
+    // then run the Gateway's generated translator on this revision's real artifacts.
+    const agent = f.consumer().spec.template.spec;
+    const mounts = agent.containers[0].volumeMounts;
+    const skill = mounts.find(({ mountPath }) => mountPath.endsWith("public-github-read/SKILL.md"));
+    assert.equal(Boolean(skill), allowed, JSON.stringify(proxy));
+    const gateway = f
+      .deployments()
+      .find(({ spec }) => spec.template.metadata.labels["openclaw.dev/workload-role"] === "gateway")
+      .spec.template.spec;
+    const gatewaySkill = gateway.containers[0].volumeMounts.find(({ mountPath }) =>
+      mountPath.endsWith("public-github-read/SKILL.md"),
+    );
+    assert.equal(Boolean(gatewaySkill), allowed, "Gateway managed skill discovery");
+    if (allowed) {
+      assert.equal(gatewaySkill.readOnly, true);
+      assert.equal(gatewaySkill.subPath, skill.subPath);
+    }
+    // Prepare the private parent as the runtime user before projecting a read-only
+    // file there. A root-owned .openclaw would break the node's existing skill publication.
+    const prepareHome = agent.initContainers.find(({ name }) => name === "prepare-private-state");
+    assert.equal(
+      prepareHome.args[0].includes("/runtime-state/home/.openclaw/skills/public-github-read"),
+      allowed,
+    );
+    const policies = publicReaderPolicies(f);
+    assert.equal(policies.length, allowed ? 1 : 0, JSON.stringify(proxy));
+    const manifest = preparedCodexManifest(f);
+    assert.equal(manifest.repositoryBrokerNetworkPolicy, undefined);
+    const { files } = runOpenClawRuntimeHelper({ manifest }, [], {
+      baseConfig: JSON.parse(preparedNativeDocument(f)),
+    });
+    const config = JSON.parse(files.get("/home/node/.openclaw/openclaw.json"));
+    const effective = config.plugins.entries.codex.config.appServer.networkProxy;
+    if (allowed) {
+      assert.deepEqual(policies[0].spec.egress, [
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { "kubernetes.io/metadata.name": publicReader.namespace },
+              },
+              podSelector: { matchLabels: publicReader.podLabels },
+            },
+          ],
+          ports: [{ protocol: "TCP", port: 8080 }],
+        },
+      ]);
+      assert.equal(skill.readOnly, true);
+      assert.deepEqual(effective.domains, { "example.org": "deny", [address]: "allow" });
+      assert.equal(effective.allowLocalBinding, false);
+      assert.equal(effective.mode, "limited");
+      assert.deepEqual(effective.readOnlyPaths, ["/app/node_modules/openclaw", skill.mountPath]);
+      const runtime = [...f.objects.values()].find(({ data }) => data?.[skill.subPath]);
+      assert.ok(runtime.data[skill.subPath].includes("http://" + address + ":8080/repos/"));
+    } else {
+      assert.equal(manifest.publicGithubRead, undefined);
+      assert.deepEqual(effective.domains, proxy.domains);
+      assert.deepEqual(effective.readOnlyPaths, ["/app/node_modules/openclaw"]);
+    }
+  }
+});
+
+for (const [change, previouslySelected] of [
+  ["selects", false],
+  ["deselects", true],
+]) {
+  test(`successor that ${change} the public reader changes only its own grant, through exact retirement`, async () => {
+    const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+    delete f.revision.repositoryCredentials;
+    const context = f.context(undefined);
+    const prepare = (revision, selected) => {
+      revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+        enabled: true,
+        domains: selected ? { [publicReader.address]: "allow" } : {},
+      };
+      revision.compute.admission = f.driver.admitRevision(revision);
+      return f.driver.prepareRevision(revision, context);
+    };
+    const deployment = (revision) =>
+      f
+        .deployments()
+        .find(
+          ({ spec }) =>
+            spec.template.metadata.labels["openclaw.dev/workload-role"] === "agent" &&
+            spec.template.metadata.labels["openclaw.dev/revision"] === revision.id,
+        );
+    const assertGatewaySkill = (selected) => {
+      const gateway = f
+        .deployments()
+        .find(
+          ({ spec }) => spec.template.metadata.labels["openclaw.dev/workload-role"] === "gateway",
+        );
+      const mounts = gateway.spec.template.spec.containers[0].volumeMounts;
+      assert.equal(
+        mounts.some(({ mountPath }) => mountPath.endsWith("public-github-read/SKILL.md")),
+        selected,
+        "the serving Gateway follows its selected revision",
+      );
+    };
+    const assertAccess = (revision, selected) => {
+      const { labels } = deployment(revision).spec.template.metadata;
+      const grants = publicReaderPolicies(f).filter(({ spec }) =>
+        Object.entries(spec.podSelector.matchLabels).every(([key, value]) => labels[key] === value),
+      );
+      assert.equal(grants.length, selected ? 1 : 0, revision.id + ": public reader egress");
+    };
+
+    const current = f.revision;
+    await prepare(current, previouslySelected);
+    f.markReady();
+    await f.driver.activateRevision(current, context);
+    assertGatewaySkill(previouslySelected);
+    const next = { ...structuredClone(current), id: "revision-public-read-successor", revision: 2 };
+    f.enroll(next);
+
+    // Compute must preserve the serving revision's choice even when its worker
+    // has not stopped it before preparing a successor with the opposite choice.
+    assert.equal((await prepare(next, !previouslySelected)).ready, false);
+    assertAccess(current, previouslySelected);
+    assertAccess(next, !previouslySelected);
+    assertGatewaySkill(previouslySelected);
+    f.markReady();
+    assert.equal((await f.driver.prepareRevision(next, context)).ready, true);
+    await assert.rejects(f.driver.activateRevision(next, context), /gateway is not ready/);
+    f.markReady();
+    await f.driver.activateRevision(next, context);
+    assertGatewaySkill(!previouslySelected);
+    assertAccess(current, previouslySelected);
+    assertAccess(next, !previouslySelected);
+
+    // Kubernetes has terminated the predecessor's Pods. The successor still serves.
+    f.setPods([workloadPod(deployment(next), f.namespace, "serving-successor")]);
+    await f.driver.retireRevision(current);
+    assert.deepEqual(
+      publicReaderPolicies(f).map(
+        ({ spec }) => spec.podSelector.matchLabels["openclaw.dev/revision"],
+      ),
+      previouslySelected ? [] : [next.id],
+    );
+    f.setPods([]);
+    await f.driver.retireRevision(next);
+    assert.equal(publicReaderPolicies(f).length, 0);
+  });
+}
+
 test("Embedded OpenClaw repository bindings without Codex plugins do not receive broker policy", async () => {
   const f = await fixture("embedded");
   await f.driver.prepareRevision(f.revision, f.context([runtimeBinding()]));
@@ -1346,12 +2164,25 @@ test("Embedded OpenClaw plugin runtime does not receive Codex broker policy", as
 });
 
 test("Embedded Codex plugin runtime receives broker network policy centrally", async () => {
-  const f = await fixture("embedded");
+  const address = "10.43.0.19";
+  const f = await fixture("embedded", undefined, {
+    publicGithubRead: { namespace: "control", podLabels: { app: "read-public-github" }, address },
+  });
   f.revision.plugins = codexPluginState();
+  const networkProxy = { enabled: true, domains: { [address]: "allow" } };
+  f.revision.configuration.plugins = {
+    entries: { codex: { config: { appServer: { networkProxy } } } },
+  };
   await f.driver.prepareRevision(f.revision, f.context([runtimeBinding()]));
-  assert.deepEqual(preparedCodexManifest(f).repositoryBrokerNetworkPolicy, {
+  const manifest = preparedCodexManifest(f);
+  assert.equal(
+    manifest.publicGithubRead,
+    undefined,
+    "the public reader is scoped to ordinary dedicated Codex",
+  );
+  assert.deepEqual(manifest.repositoryBrokerNetworkPolicy, {
     host: "git.credentials.svc.cluster.local",
-    domains: {},
+    domains: { [address]: "allow" },
   });
 });
 

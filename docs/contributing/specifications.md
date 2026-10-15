@@ -257,4 +257,4 @@ The unmerged Egress Proxy proposal was renumbered after RFC-0019 was assigned:
 
 | Previous RFC path                         | Current RFC                                                                  |
 | ----------------------------------------- | ---------------------------------------------------------------------------- |
-| `0019-egress-proxy-credential-lifecycle/` | [RFC-0020](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/index.md) |
+| `0019-egress-proxy-credential-lifecycle/` | [RFC-0021](../../specs/rfcs/0021-egress-proxy-credential-lifecycle/index.md) |

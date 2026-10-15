@@ -398,7 +398,7 @@ function validateOpenShellBackend(
       credential_gateway: drivers.credential_gateway,
       ...(drivers.conduit === undefined
         ? {}
-        : { conduit: backendId(drivers.conduit, "Conduit Driver ID") }),
+        : { conduit: backendId(drivers.conduit, "Egress Driver ID") }),
       ...(drivers.credential_refresh === undefined
         ? {}
         : { credential_refresh: drivers.credential_refresh as string }),

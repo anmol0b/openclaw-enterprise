@@ -51,8 +51,8 @@ service HttpResponsePreReturn {
       returns (stream HttpResponseEventResult);
 }
 
-// HttpCredentialAccess shares an authenticated SupervisorMiddleware registration.
-// It is available only when explicitly selected by credential_authority policy.
+// Historical unary wire shape. Current protected policy requires HttpInstallationExchange;
+// supervisors must never fall back to a bearer-authenticated unary credential send.
 // Implementations must authenticate the supervisor, bind its immutable sandbox
 // identity to current execution records, and enforce single-use operation handles.
 // Request fields supplied by a workload never establish caller authority.
@@ -74,13 +74,28 @@ message HttpCredentialResolveRequest {
   google.protobuf.Timestamp deadline = 2;
   // Exact operator-configured audience, also verified in the channel JWT.
   string audience = 3;
+  // Random commitment to the supervisor's exclusively held accepted response stream.
+  // This field is signed in InstallationExchangeOpen. It cannot select a destination.
+  bytes response_custody = 4;
+  // For execution-authority.v1 only: canonical typed policy of the verified blocked connect.
+  // Signed with the custody and operation. No caller-executable claim belongs to this profile.
+  string verified_execution_policy_hash = 5;
 }
 
 message HttpCredentialResolveResponse {
   oneof result {
     HttpCredentialMaterial ready = 1;
     HttpCredentialRefusal refused = 2;
+    // Positive authority selection, never inferred from absent or unusable credentials.
+    HttpNoMaterialRequired ready_without_material = 3;
   }
+}
+
+message HttpNoMaterialRequired {
+  string request_id = 1;
+  // Binds this admitted operation to both authorization decisions and its one dispatch.
+  bytes operation_handle = 2;
+  string audience = 3;
 }
 
 // Material is transient supervisor custody, never workload-visible or logged.
@@ -111,9 +126,13 @@ message HttpCredentialAuthorizeSendRequest {
   bytes operation_handle = 2;
   string audience = 3;
   google.protobuf.Timestamp deadline = 4;
-  HttpCredentialEvidence evidence = 5;
+  oneof selection {
+    HttpCredentialEvidence evidence = 5;
+    // Must be true. Only valid for the operation selected as ready_without_material.
+    bool no_material_required = 7;
+  }
   // SHA-256 of each ordered name/value, each prefixed by its unsigned 64-bit
-  // big-endian UTF-8 byte length. Binds actual selected injection bytes.
+  // big-endian UTF-8 byte length; SHA-256 of empty input for no material required.
   bytes credential_headers_sha256 = 6;
 }
 
@@ -131,6 +150,10 @@ message HttpCredentialSendPermit {
   // Finite deadline for starting this send, no later than the operation
   // deadline or material usability. Not cached or reused for another send.
   google.protobuf.Timestamp send_start_by = 4;
+  // Exact signed custody committed with this dispatch, not a bearer capability.
+  bytes response_custody = 5;
+  // True only for a committed dispatch expressly authorized without material.
+  bool no_material_required = 6;
 }
 
 message HttpCredentialRefusal {
@@ -682,6 +705,10 @@ message WebSocketSessionEventResult {
 // RequestContext identifies the sandbox request being evaluated.
 message RequestContext {
   // Request id used to correlate middleware and supervisor logs.
+  // Protected HTTP credential operations require canonical UUIDv7. The first
+  // 48 bits encode creation milliseconds; deadline <= creation + 30000 ms.
+  // Verifiers allow at most 1000 ms future clock skew and retain replay state
+  // through that fixed horizon, even when a caller submits an earlier deadline.
   string request_id = 1;
   // Sandbox id that originated the request.
   string sandbox_id = 2;
@@ -695,6 +722,14 @@ message RequestContext {
   // Workspace the sandbox belongs to. For display and logging only; see the
   // sandbox guidance above.
   string workspace = 5;
+  // Trusted connection-opening leaf, bound to the active typed policy generation.
+  VerifiedCredentialConnector verified_credential_connector = 6;
+}
+
+message VerifiedCredentialConnector {
+  string path = 1;
+  string sha256 = 2;
+  string policy_hash = 3;
 }
 
 // HttpRequestTarget describes the admitted HTTP destination and request target.
@@ -817,4 +852,38 @@ message HttpRequestResult {
   // letters, digits, and underscores, with a maximum length of 64 bytes.
   // OpenShell may return this code to the requester, unlike free-form reason.
   string reason_code = 8;
+}
+// One operation per stream. The server challenge binds the signed opening bytes
+// to this actual reply stream; a client-selected destination is never authority.
+service HttpInstallationExchange {
+  rpc Exchange(stream InstallationExchangeRequest) returns (stream InstallationExchangeReply);
+}
+message InstallationExchangeOpen {
+  // Exact binary encoding of HttpCredentialResolveRequest, signed without re-encoding.
+  bytes resolve_request = 1;
+  bytes signature = 2;
+}
+message InstallationExchangeResponse {
+  uint32 status = 1;
+  repeated HttpHeader headers = 2;
+  bytes body = 3;
+  // Complete final trailer block, in wire order; never an intermediate fragment.
+  repeated HttpHeader trailers = 4;
+  // Required true, including when there were no trailers. Legacy absence fails closed.
+  bool response_complete = 5;
+}
+message InstallationExchangeRequest {
+  oneof event {
+    InstallationExchangeOpen open = 1;
+    HttpCredentialAuthorizeSendRequest authorize = 2;
+    InstallationExchangeResponse response = 3;
+  }
+}
+message InstallationExchangeReply {
+  oneof event {
+    bytes challenge = 1;
+    HttpCredentialResolveResponse resolved = 2;
+    HttpCredentialAuthorizeSendResponse authorized = 3;
+    InstallationExchangeResponse response = 4;
+  }
 }

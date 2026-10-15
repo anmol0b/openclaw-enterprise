@@ -1165,19 +1165,6 @@ test("startup rejects caller-selected Installation IDs and obsolete Driver selec
     );
   }
 
-  // A retired protected selector must fail rather than start without the Conduit.
-  for (const mode of ["development", "production"]) {
-    const retired = installation();
-    retired.drivers.egress_proxy = { id: "openshell-egress", configuration: {} };
-    await assert.rejects(
-      loadInstallationConfiguration({
-        mode,
-        environment: { OCC_CONFIG_PATH: await fixture(t, retired) },
-      }),
-      /drivers contains unsupported option egress_proxy/,
-    );
-  }
-
   const injected = installation();
   injected.drivers.compute.configuration.authentication.installation_id = "ins_untrusted";
   await assert.rejects(

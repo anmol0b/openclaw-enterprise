@@ -358,6 +358,7 @@ export async function composePostgresDevelopment(
       },
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });
+    await drivers?.preparedGitHub?.connect(pool);
     if (conduitDriver !== undefined && egressAuthority !== undefined) {
       await installEgressAuthority(app, controller, conduitDriver, egressAuthority);
     }
@@ -367,10 +368,12 @@ export async function composePostgresDevelopment(
       return { status: "ready" };
     });
     app.addHook("onClose", async () => {
+      await drivers?.preparedGitHub?.close();
       await state.close();
     });
     return app;
   } catch (error) {
+    await drivers?.preparedGitHub?.close();
     await pool.end();
     throw error;
   }

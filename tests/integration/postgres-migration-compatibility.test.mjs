@@ -1204,7 +1204,10 @@ function receiptsMatchEntries(receipts, entries) {
   );
 }
 
-async function seedCanonicalData(db, { preset = false } = {}) {
+async function seedCanonicalData(
+  db,
+  { preset = false, computeAdmission = false, executionAdmission = false } = {},
+) {
   const installation = `ins_${randomUUID()}`;
   const namespace = `ns_${randomUUID()}`;
   const configuration = `cfg_${randomUUID()}`;
@@ -1248,7 +1251,14 @@ async function seedCanonicalData(db, { preset = false } = {}) {
           draft_spec: {},
           harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
           harness_auth: { method: "runtime" },
-          compute: { id: "kubernetes", implementation: "test" },
+          ...(executionAdmission
+            ? { execution_admission: { version: 2, mode: "unprotected" } }
+            : {}),
+          compute: {
+            id: "kubernetes",
+            implementation: "test",
+            ...(computeAdmission ? { admission: `public-github-read:v1:${"a".repeat(64)}` } : {}),
+          },
         },
       ],
     );
@@ -1633,11 +1643,21 @@ test(
       [50, "preCredentialWithdrawalRequester"],
       [51, "preProvisioningDeploymentOutcome"],
       [52, "preComputePreparationFailureEvidence"],
-      [54, "preSendReceipts"],
+      [53, "preCredentialSourcePat"],
+      [54, "preComputeRevisionAdmission"],
+      [55, "preStaticEgress"],
+      [56, "preSendReceipts"],
+      [57, "prePreparedGitHubCustody"],
+      [58, "prePreparedGitHubEgress"],
+      [59, "preCredentialFreeMetadata"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
-        await seedCanonicalData(db, { preset: prefix >= 25 });
+        await seedCanonicalData(db, {
+          preset: prefix >= 25,
+          computeAdmission: prefix >= 55,
+          executionAdmission: prefix >= 56,
+        });
         const before = await canonicalData(db);
         const receipts = await historyReceipts(db.migrator);
         assert.deepEqual(await runHistoryMigration(db, "production", true), {
@@ -1895,7 +1915,13 @@ test(
       [50, "preCredentialWithdrawalRequester"],
       [51, "preProvisioningDeploymentOutcome"],
       [52, "preComputePreparationFailureEvidence"],
-      [54, "preSendReceipts"],
+      [53, "preCredentialSourcePat"],
+      [54, "preComputeRevisionAdmission"],
+      [55, "preStaticEgress"],
+      [56, "preSendReceipts"],
+      [57, "prePreparedGitHubCustody"],
+      [58, "prePreparedGitHubEgress"],
+      [59, "preCredentialFreeMetadata"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -1977,15 +2003,43 @@ test(
       [50, "preCredentialWithdrawalRequester"],
       [51, "preProvisioningDeploymentOutcome"],
       [52, "preComputePreparationFailureEvidence"],
-      [54, "preSendReceipts"],
+      [53, "preCredentialSourcePat"],
+      [54, "preComputeRevisionAdmission"],
+      [55, "preStaticEgress"],
+      [56, "preSendReceipts"],
+      [57, "prePreparedGitHubCustody"],
+      [58, "prePreparedGitHubEgress"],
+      [59, "preCredentialFreeMetadata"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
         if (prefix) {
-          await seedCanonicalData(db, { preset: prefix >= 25 });
+          await seedCanonicalData(db, {
+            preset: prefix >= 25,
+            computeAdmission: prefix >= 55,
+            executionAdmission: prefix >= 56,
+          });
         }
         const before = await historySnapshot(db);
         const data = prefix ? await canonicalData(db) : undefined;
+        // 0054 replaces the validator function; earlier prefixes also contain grants/indexes.
+        let rejectedDdl = "CREATE FUNCTION";
+        if (prefix !== 53 && prefix !== 59) {
+          rejectedDdl =
+            prefix >= 50
+              ? "GRANT"
+              : prefix >= 41
+                ? "ALTER TABLE"
+                : prefix >= 38
+                  ? "CREATE FUNCTION"
+                  : prefix >= 36
+                    ? "CREATE INDEX"
+                    : prefix >= 31
+                      ? "ALTER TABLE"
+                      : prefix >= 27
+                        ? "CREATE FUNCTION"
+                        : "ALTER FUNCTION";
+        }
         // A database-local event trigger aborts the real final DDL. Drizzle must
         // roll back every preceding SQL statement and receipt in that transaction.
         // 0051's final GRANT runs after it dropped both withdrawal triggers.
@@ -1993,7 +2047,7 @@ test(
           db,
           db.name,
           `CREATE FUNCTION public.reject_migration_ddl() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'migration rollback fixture' USING ERRCODE='55000'; END $$;
-        CREATE EVENT TRIGGER reject_migration_ddl ON ddl_command_start WHEN TAG IN ('${prefix >= 50 ? "GRANT" : prefix >= 41 ? "ALTER TABLE" : prefix >= 38 ? "CREATE FUNCTION" : prefix >= 36 ? "CREATE INDEX" : prefix >= 31 ? "ALTER TABLE" : prefix >= 27 ? "CREATE FUNCTION" : "ALTER FUNCTION"}') EXECUTE FUNCTION public.reject_migration_ddl()`,
+        CREATE EVENT TRIGGER reject_migration_ddl ON ddl_command_start WHEN TAG IN ('${rejectedDdl}') EXECUTE FUNCTION public.reject_migration_ddl()`,
         );
         assert.deepEqual(await runHistoryMigration(db), { ok: false, code: "MIGRATION_FAILED" });
         assert.deepEqual(await historyReceipts(db.migrator), before.receipts);

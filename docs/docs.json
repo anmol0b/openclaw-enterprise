@@ -389,6 +389,10 @@
                       {
                         "page": "reference/repository-credentials/push-ref-guardrail",
                         "label": "Push Guardrail"
+                      },
+                      {
+                        "page": "reference/public-github-reads",
+                        "label": "Public GitHub Reads"
                       }
                     ]
                   }
@@ -942,6 +946,7 @@
               "guides/deploy/local-compose-kubernetes",
               "guides/deploy/openshell-credential-sources",
               "guides/deploy/local-openshell-images",
+              "guides/deploy/protected-egress-development",
               "reference/settings/development",
               "design/resources",
               "design/access",
@@ -1015,6 +1020,7 @@
               "testing/openshell-first-agent",
               "testing/openshell-pre5-local-experiment",
               "flows/agent-repository-credentials",
+              "flows/public-github-reads",
               "flows/repository-credentials",
               "flows/repository-credential-configuration",
               "testing/repository-credentials",
@@ -1022,7 +1028,8 @@
               "testing/repository-credentials-platform",
               "flows/agent-presets",
               "flows/credential-source-egress",
-              "testing/static-egress"
+              "testing/static-egress",
+              "testing/protected-repository-custody"
             ]
           }
         ]

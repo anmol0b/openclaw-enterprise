@@ -5,6 +5,7 @@ CREATE TABLE occ.egress_send_receipts (
   use_id text NOT NULL CONSTRAINT egress_send_receipts_check_3 CHECK (length(use_id) > 0),
   attempt_id text NOT NULL CONSTRAINT egress_send_receipts_check_4 CHECK (length(attempt_id) > 0),
   binding jsonb NOT NULL CONSTRAINT egress_send_receipts_check_5 CHECK (jsonb_typeof(binding) = 'object'),
+  authorized_dispatch jsonb,
   observation jsonb,
   outcome jsonb NOT NULL CONSTRAINT egress_send_receipts_check_6 CHECK (jsonb_typeof(outcome) = 'object'),
   settled boolean NOT NULL DEFAULT false,
@@ -35,7 +36,20 @@ CREATE TABLE occ.egress_send_receipts (
   CONSTRAINT egress_send_receipts_check_14 CHECK (observation->>'kind' IS DISTINCT FROM 'provider_rejected' OR feedback IS NOT DISTINCT FROM 'fenced'),
   CONSTRAINT egress_send_receipts_check_15 CHECK (observation IS NULL OR NOT settled OR outcome = observation OR outcome->>'kind' = 'uncertain'),
   CONSTRAINT egress_send_receipts_check_16 CHECK (feedback IS NULL OR ((observation IS NOT NULL OR (settled AND outcome->>'dispatch' = 'confirmed'))
-    AND binding->'material'->>'kind' = 'static') IS TRUE)
+    AND binding->'material'->>'kind' = 'static') IS TRUE),
+  CONSTRAINT egress_send_receipts_check_17 CHECK (authorized_dispatch IS NULL OR (jsonb_typeof(authorized_dispatch) = 'object'
+    AND binding->'material'->>'kind' = 'static'
+    AND authorized_dispatch->'association'->'installation'->>'instanceId' = instance_id
+    AND authorized_dispatch->'association'->'execution'->>'installationId' = binding->'material'->'source'->>'installationId'
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz > (authorized_dispatch->>'authorizedAt')::timestamptz
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (authorized_dispatch->>'authorizedAt')::timestamptz + interval '1 second'
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->>'deadlineAt')::timestamptz
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->'material'->>'usableUntil')::timestamptz
+    AND length(authorized_dispatch->'association'->>'exchangeId') > 0
+    AND length(authorized_dispatch->'association'->>'responseId') > 0
+    AND length(authorized_dispatch->'association'->>'custodyId') > 0
+    AND length(authorized_dispatch->>'requestDigest') = 64
+    AND length(authorized_dispatch->>'injectionDigest') = 64) IS TRUE)
 );
 
-GRANT SELECT, INSERT, UPDATE (outcome, observation, settled, feedback) ON occ.egress_send_receipts TO occ_app;
+GRANT SELECT, INSERT, UPDATE (authorized_dispatch, outcome, observation, settled, feedback) ON occ.egress_send_receipts TO occ_app;

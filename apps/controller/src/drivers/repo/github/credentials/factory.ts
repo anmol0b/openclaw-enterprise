@@ -10,7 +10,7 @@ import { createGrantResolver } from "./grants.ts";
 import { createTokenSource } from "./token-source.ts";
 import type { GitHubDriverFactory, GitHubFactoryOptions, GitHubTokenProfile } from "./types.ts";
 
-function endpoint(value: string): string {
+export function githubProviderOrigin(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.origin !== value || url.username || url.password) {
     throw new Error("invalid-endpoint");
@@ -46,9 +46,13 @@ export function createGitHubDriverFactory(options: GitHubFactoryOptions): GitHub
       throw new Error("invalid-binding");
     }
   }
-  const apiOrigin = endpoint(options.trustedEndpoints?.apiOrigin ?? "https://api.github.com");
-  const gitOrigin = endpoint(options.trustedEndpoints?.gitOrigin ?? "https://github.com");
-  const gatewayOrigin = endpoint(options.gatewayOrigin);
+  const apiOrigin = githubProviderOrigin(
+    options.trustedEndpoints?.apiOrigin ?? "https://api.github.com",
+  );
+  const gitOrigin = githubProviderOrigin(
+    options.trustedEndpoints?.gitOrigin ?? "https://github.com",
+  );
+  const gatewayOrigin = githubProviderOrigin(options.gatewayOrigin);
   const source = createTokenSource(options.authority, {
     config,
     apiOrigin,
@@ -70,7 +74,16 @@ export function createGitHubDriverFactory(options: GitHubFactoryOptions): GitHub
       gatewayOrigin,
       gitOrigin,
       apiOrigin,
-      limits: options.limits,
+      limits:
+        config.kind === "github-token"
+          ? {
+              ...options.limits,
+              gitFetchExchangeMs: Math.min(
+                options.limits.gitFetchExchangeMs,
+                config.leaseSeconds * 1000 - 2 * options.limits.credentialMarginMs,
+              ),
+            }
+          : options.limits,
       graphql: source.graphql(profile),
       ...(source.pushRefAllowlist === undefined
         ? {}

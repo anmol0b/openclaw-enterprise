@@ -1096,8 +1096,11 @@ function openClawPluginConfiguration(runtime, failures = [], base) {
     return pluginRuntimeTranslator.codexOpenClawConfiguration(
       runtime.manifest.selections ?? {},
       failures,
-      runtime.manifest.repositoryBrokerNetworkPolicy,
-      runtime.manifest.pluginApprovers,
+      {
+        ...runtime.manifest,
+        dedicatedCodex: process.env.APP_SERVER_URL !== undefined,
+        baseProxyEnabled: base?.plugins?.entries?.codex?.config?.appServer?.networkProxy?.enabled === true,
+      },
     );
   }
   return undefined;
@@ -1209,8 +1212,9 @@ function assertCodexPluginRuntime(runtime) {
   if ((runtime.manifest.providerTools !== undefined || runtime.manifest.egressEnrollment !== undefined) &&
       (runtime.manifest.providerTools !== "none" ||
        !isPlainObject(runtime.manifest.egressEnrollment) ||
-       runtime.manifest.modelEndpoint?.modelProvider !== "openai-compatible" ||
-       typeof runtime.manifest.modelEndpoint.baseUrl !== "string")) {
+       (runtime.manifest.egressEnrollment.inference !== false &&
+        (runtime.manifest.modelEndpoint?.modelProvider !== "openai-compatible" ||
+         typeof runtime.manifest.modelEndpoint.baseUrl !== "string")))) {
     throw new Error("Codex protected inference profile is invalid.");
   }
 }
@@ -3408,7 +3412,7 @@ if (loginMode === "api_key") {
   if (apiKey !== undefined || accessToken !== undefined) {
     throw new Error("Codex OAuth authentication configuration is invalid.");
   }
-} else {
+} else if (loginMode !== "protected-no-inference") {
   throw new Error("Codex authentication mode is missing or unsupported.");
 }
 
@@ -3427,18 +3431,24 @@ if (pluginRuntime !== undefined) {
   assertCodexPluginRuntime(pluginRuntime);
   writeCodexConfigToml(pluginRuntime);
 }
-const loginArguments = loginMode === "api_key"
-  ? ["-c", "cli_auth_credentials_store=file", "login", "--with-api-key"]
-  : [
-      "-c",
-      "cli_auth_credentials_store=file",
-      "login",
-      "--with-access-token",
-    ];
+// A Credential Gateway supplies an opaque token, so native CLI prefix detection cannot
+// classify it. The native PAT auth-file contract still hydrates and validates account metadata.
+const providerManagedPat = loginMode === "codex_pat" && process.env.OCE_CODEX_CREDENTIAL_SOURCE === "1";
+if (providerManagedPat) {
+  require("node:fs").writeFileSync(process.env.CODEX_HOME + "/auth.json",
+    JSON.stringify({ personal_access_token: accessToken }), { mode: 0o600 });
+}
+const loginFlag = loginMode === "api_key" ? "--with-api-key" : "--with-access-token";
+const loginArguments = [
+  "-c", "cli_auth_credentials_store=file", "login", providerManagedPat ? "status" : loginFlag,
+];
 function codexChildEnvironment() {
   const environment = { ...process.env };
   delete environment.APP_SERVER_TOKEN;
   delete environment.APP_TOKEN_SHA;
+  if (providerManagedPat) {
+    delete environment.CODEX_ACCESS_TOKEN;
+  }
   return environment;
 }
 // Codex reports provider HTTP rejections as "status 401 Unauthorized" or
@@ -3446,9 +3456,18 @@ function codexChildEnvironment() {
 function codexAuthenticationRejected(message) {
   return typeof message === "string" && /\bstatus 40[13] (Unauthorized|Forbidden)\b/.test(message);
 }
+const enrollment = pluginRuntime?.manifest.egressEnrollment;
+const noInference = loginMode === "protected-no-inference";
+if (noInference && (enrollment?.inference !== false || apiKey !== undefined || accessToken !== undefined)) {
+  throw new Error("Protected execution without inference requires its exact non-inference plan.");
+}
+// Protected startup runs no Codex process, login or model probe until Compute releases it.
+const startReleasedCodex = () => {
 const loginStartedAt = Date.now();
 let login;
-if (loginMode === "oauth") {
+if (noInference) {
+  login = { status: 0 };
+} else if (loginMode === "oauth") {
   try {
     const fs = require("node:fs");
     const receipt = JSON.parse(fs.readFileSync(process.env.CODEX_HOME + "/.oce-oauth.json", "utf8"));
@@ -3479,7 +3498,7 @@ if (loginMode === "oauth") {
     }
   }
 }
-logStartupPhase("codex-login", loginStartedAt, login.status !== 0 || login.error ? "failed" : "ok");
+if (!noInference) logStartupPhase("codex-login", loginStartedAt, login.status !== 0 || login.error ? "failed" : "ok");
 if (login.status !== 0 || login.error) {
   holdFailedAuthentication(
     "login",
@@ -3640,8 +3659,9 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     holdFailedAuthentication("model-probe", "MODEL_PROBE_TIMEOUT");
     return;
   }
-  const result = probeCodexAuthentication(timeout);
-  console.error(JSON.stringify({
+  // An execution without an inference route may serve its local app protocol, but never probes a model.
+  const result = noInference ? {} : probeCodexAuthentication(timeout);
+  if (!noInference) console.error(JSON.stringify({
     event: "codex.model_probe",
     attempt,
     elapsedMs: Math.round(performance.now() - startedAt),
@@ -3661,7 +3681,7 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     holdFailedAuthentication("model-probe", result.code, result.cause);
     return;
   }
-  logStartupPhase("model-probe", modelProbeStartedAt);
+  if (!noInference) logStartupPhase("model-probe", modelProbeStartedAt);
 
 function forwardTermination(child) {
   let terminating = false;
@@ -3701,7 +3721,7 @@ if (digest === undefined) {
 const child = spawn(
   "codex",
   [
-    // The successful probe validated this model; native policy readback must see it too.
+    // Preserve the admitted model selection for native policy readback.
     "-c",
     "model=" + JSON.stringify(process.env.OPENCLAW_HARNESS_MODEL.slice(process.env.OPENCLAW_HARNESS_MODEL.indexOf("/") + 1)),
     "-c",
@@ -3716,7 +3736,7 @@ const child = spawn(
     "shell_environment_policy.experimental_use_profile=false",
     "-c",
     "shell_environment_policy.set.PATH=" + JSON.stringify(process.env.PATH ?? ""),
-    ...(loginMode === "oauth" ? ["-c", "cli_auth_credentials_store=file"] : []),
+    ...(loginMode === "oauth" || providerManagedPat ? ["-c", "cli_auth_credentials_store=file"] : []),
     "app-server",
     "--listen",
     "ws://0.0.0.0:" + process.env.APP_SERVER_PORT,
@@ -3763,19 +3783,23 @@ child.on("exit", (code, signal) => {
 })();
 }
 let modelProbeStartedAt = Date.now();
-if (pluginRuntime?.manifest.egressEnrollment === undefined) {
-  startAuthenticatedCodex();
+startAuthenticatedCodex();
+}
+};
+const protectedStartup = enrollment !== undefined || noInference ||
+  process.env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID !== undefined ||
+  process.env.OPENCLAW_EGRESS_COMPUTE_RELEASE_PUBLIC_KEY !== undefined;
+if (!protectedStartup) {
+  startReleasedCodex();
 } else {
   const enrollmentStartedAt = Date.now();
-  waitForHarnessEgressEnrollment(pluginRuntime.manifest.egressEnrollment).then(() => {
+  waitForHarnessEgressEnrollment(enrollment).then(() => {
     logStartupPhase("egress-enrollment", enrollmentStartedAt);
-    modelProbeStartedAt = Date.now();
-    startAuthenticatedCodex();
+    startReleasedCodex();
   }, () => {
     logStartupPhase("egress-enrollment", enrollmentStartedAt, "failed");
     holdFailedAuthentication("egress-enrollment", "UNAVAILABLE");
   });
-}
 }
 `;
 

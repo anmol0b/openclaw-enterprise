@@ -1,4 +1,15 @@
 import type {
+  CredentialFreeEgressSource,
+  CredentialFreeMetadataGrant,
+  NoMaterialSelection,
+} from "./credential-free-metadata.ts";
+import type {
+  GitHubMetadataGrant,
+  PreparedGitHubEgressLifecycle,
+  PreparedGitHubEgressSource,
+  PreparedGitHubMaterialEvidence,
+} from "./prepared-github-egress.ts";
+import type {
   AgentRevision,
   CredentialSource,
   CredentialSourceType,
@@ -36,6 +47,9 @@ export interface StaticEgressSource {
   readonly retention: "none";
 }
 
+export type ProtectedEgressSource =
+  StaticEgressSource | PreparedGitHubEgressSource | CredentialFreeEgressSource;
+
 export interface VersionedSecretValue {
   readonly value: string;
   readonly version: string;
@@ -70,7 +84,7 @@ export interface EgressBinding {
   readonly binding: EgressRef;
   readonly execution: EgressExecution;
   readonly source: EgressSourceKey;
-  readonly grant: InferenceGrant;
+  readonly grant: InferenceGrant | GitHubMetadataGrant | CredentialFreeMetadataGrant;
   readonly grantHash: string;
   readonly isolationId: string;
 }
@@ -80,7 +94,7 @@ export interface EgressRoute {
   readonly binding: EgressBinding;
   readonly origin: string;
   readonly path: string;
-  readonly method: "POST";
+  readonly method: "POST" | "GET";
   readonly operationPolicy: EgressRef;
   readonly responsePolicy: EgressRef;
   readonly deadlineMs: number;
@@ -105,6 +119,10 @@ export interface EgressInstallation {
   readonly enforcement: {
     readonly instanceId: string;
     readonly configurationId: string;
+    readonly policyHash: string;
+    readonly authorityScope: "execution";
+    /** Public key bound by the adapter to this installation, never selected by a request. */
+    readonly peerKeyId?: string;
   };
 }
 
@@ -116,6 +134,8 @@ export interface EgressRequest {
   readonly body: Uint8Array;
   readonly deadlineAt: string;
   readonly bindingId?: string;
+  /** Execution policy observed on the intercepted connection, covered by the signed opening. */
+  readonly verifiedExecutionPolicyHash?: string;
 }
 
 export interface InferenceOperation {
@@ -123,6 +143,18 @@ export interface InferenceOperation {
   readonly action: "generate";
   readonly model: string;
 }
+
+export type EgressOperation =
+  | InferenceOperation
+  | {
+      readonly kind: "github_repository_metadata" | "credential_free_repository_metadata";
+      readonly repository: string;
+      readonly repositoryId: string;
+    };
+
+export type EgressMaterialEvidence = StaticMaterialEvidence | PreparedGitHubMaterialEvidence;
+
+export type EgressSelectionEvidence = EgressMaterialEvidence | NoMaterialSelection;
 
 export interface StaticMaterialEvidence {
   readonly kind: "static";
@@ -165,6 +197,8 @@ export interface EgressResponse {
   readonly status: number;
   readonly headers: readonly (readonly [string, string])[];
   readonly body: Uint8Array;
+  /** Complete, ordered trailers, including an empty list when the upstream sent none. */
+  readonly trailers: readonly (readonly [string, string])[];
 }
 
 /** Installed trusted provider semantics; callers never supply code or an injection callback. */
@@ -173,21 +207,25 @@ export interface CredentialProviderDefinition {
   readonly schemaVersion: 1;
   readonly sourceType: CredentialSourceType;
   normalizeConfig(config: Readonly<Record<string, string>>): Readonly<Record<string, string>>;
-  normalizeGrant(models: readonly string[]): InferenceGrant;
+  normalizeGrant(
+    models: readonly string[],
+    config?: Readonly<Record<string, string>>,
+  ): InferenceGrant | GitHubMetadataGrant | CredentialFreeMetadataGrant;
   routes(source: Readonly<CredentialSource>, binding: EgressBinding): readonly EgressRoute[];
-  classify(route: EgressRoute, request: EgressRequest): InferenceOperation | undefined;
+  classify(route: EgressRoute, request: EgressRequest): EgressOperation | undefined;
   inject(value: string): readonly (readonly [string, string])[];
   /** Positive provider evidence only; status alone never identifies rejected credentials. */
   credentialRejected(response: EgressResponse): boolean;
   protectResponse(
     response: EgressResponse,
-    value: string,
+    value: string | undefined,
     request: EgressRequest,
-    operation: InferenceOperation,
+    operation: EgressOperation,
   ): EgressResponse | undefined;
 }
 
 export interface CredentialSourceControl {
+  readonly preparedGitHub?: PreparedGitHubEgressLifecycle;
   readonly backend: EgressRef;
   readonly sender: EgressRef;
   readonly resolver: EgressRef;
@@ -224,4 +262,43 @@ export interface ConduitDriver extends Driver {
   ): Promise<boolean>;
   withdrawBinding(context: ConduitRevisionContext, binding: EgressRef): Promise<boolean>;
   removeRevision(context: ConduitRevisionContext): Promise<boolean>;
+}
+
+/** Durable admission semantics, independent of credential bindings and route count. */
+export interface ExecutionAdmission {
+  readonly version: 2;
+  readonly mode: "protected" | "unprotected";
+}
+
+/** Recognition only. A valid protected schema is not proof of deployability. */
+export function assertExecutionAdmission(
+  revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+): void {
+  const admission = revision.executionAdmission;
+  if (
+    !admission ||
+    admission.version !== 2 ||
+    (admission.mode !== "protected" && admission.mode !== "unprotected") ||
+    Object.keys(admission).some((key) => key !== "version" && key !== "mode")
+  ) {
+    throw new Error("Missing or unsupported durable execution admission.");
+  }
+  if ((admission.mode === "protected") !== (revision.egressPlan !== undefined)) {
+    throw new Error("Inconsistent durable execution admission and egress plan.");
+  }
+  if (admission.mode === "protected" && !Array.isArray(revision.egressPlan?.routes)) {
+    throw new Error("Invalid protected execution plan.");
+  }
+}
+
+/** Default cutoff for Compute implementations without protected installation and release. */
+export function assertExecutionReleaseAllowed(
+  revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+): void {
+  assertExecutionAdmission(revision);
+  if (revision.executionAdmission.mode === "protected") {
+    throw new Error(
+      "Protected execution is unavailable on a Compute without exact installation and release.",
+    );
+  }
 }

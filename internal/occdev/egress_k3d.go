@@ -18,6 +18,10 @@ const (
 	developmentEgressPort       = 9444
 	developmentEgressDriver     = "egress-openshell-development"
 	developmentEgressMiddleware = "oce-authority"
+	developmentEgressAudience   = "oce-egress"
+	developmentEgressCA         = "occ-egress-ca"
+	developmentEgressPayload    = 4 * 1024 * 1024
+	developmentEgressTimeout    = "30s"
 )
 
 var developmentDatabaseName = regexp.MustCompile(`^openclaw_k8s_[a-z0-9_]+$`)
@@ -108,9 +112,13 @@ func (r *runner) prepareDevelopmentEgress(ctx context.Context, state *developmen
 	labels := map[string]string{"app.kubernetes.io/managed-by": "openclaw-development"}
 	resources := map[string]any{"apiVersion": "v1", "kind": "List", "items": []any{
 		map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": kubernetesMetadata("occ-egress-tls", state.PlatformNamespace, labels), "type": "kubernetes.io/tls", "stringData": map[string]string{"tls.crt": material["tls.crt"], "tls.key": material["tls.key"]}},
-		map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": kubernetesMetadata("occ-egress-ca", state.PlatformNamespace, labels), "data": map[string]string{"ca.crt": material["ca.crt"]}},
+		map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": kubernetesMetadata(developmentEgressCA, state.PlatformNamespace, labels), "data": map[string]string{"ca.crt": material["ca.crt"]}},
 	}}
 	return r.writeAndApply(ctx, state, "egress-tls", resources)
+}
+
+func developmentAuthorityEndpoint(state *developmentState) string {
+	return fmt.Sprintf("https://%s:%d", developmentAuthorityHostname(state), developmentEgressPort)
 }
 
 func developmentProtectedOpenShellValues(state *developmentState) map[string]any {
@@ -123,9 +131,9 @@ func developmentProtectedOpenShellValues(state *developmentState) map[string]any
 		},
 		"supervisor": map[string]any{"middleware": []any{map[string]any{
 			"name":         developmentEgressMiddleware,
-			"grpcEndpoint": fmt.Sprintf("https://%s:%d", developmentAuthorityHostname(state), developmentEgressPort),
-			"audience":     "oce-egress", "tlsCaConfigMapName": "occ-egress-ca",
-			"maxPayloadBytes": 4 * 1024 * 1024, "timeout": "30s",
+			"grpcEndpoint": developmentAuthorityEndpoint(state),
+			"audience":     developmentEgressAudience, "tlsCaConfigMapName": developmentEgressCA,
+			"maxPayloadBytes": developmentEgressPayload, "timeout": developmentEgressTimeout,
 		}}},
 	}
 	if state.OpenShellHostGatewayIP != "" {
@@ -163,13 +171,13 @@ func (r *runner) readDevelopmentEgressKeyID(ctx context.Context, state *developm
 
 func developmentEgressConfiguration(state *developmentState) map[string]any {
 	return map[string]any{"id": developmentEgressDriver, "configuration": map[string]any{
-		"middlewareName": developmentEgressMiddleware, "binaries": openShellCodexBinaries(),
+		"middlewareName": developmentEgressMiddleware, "authorityScope": "execution",
 		"authority": map[string]any{
 			"host": "0.0.0.0", "port": developmentEgressPort,
 			"certificatePath":     "/etc/openclaw/egress/tls/tls.crt",
 			"privateKeyPath":      "/etc/openclaw/egress/tls/tls.key",
 			"issuerPublicKeyPath": "/etc/openclaw/egress/issuer/issuer.pub",
-			"issuer":              "openshell-gateway:" + openShellGatewayService, "audience": "oce-egress", "keyId": state.egressKeyID,
+			"issuer":              "openshell-gateway:" + openShellGatewayService, "audience": developmentEgressAudience, "keyId": state.egressKeyID,
 		},
 	}}
 }

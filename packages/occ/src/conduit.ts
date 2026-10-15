@@ -1,4 +1,10 @@
-import type { EgressSendReceipts, SendAttempt, SendObservation } from "./egress-send-receipts.ts";
+import type {
+  EgressSendReceipts,
+  SendAttempt,
+  SendObservation,
+  AcceptedEgressAssociation,
+  AuthorizedSend,
+} from "./egress-send-receipts.ts";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -9,9 +15,12 @@ import type {
   EgressRequest,
   EgressResponse,
   EgressRoute,
-  InferenceOperation,
+  EgressOperation,
+  EgressMaterialEvidence,
+  EgressSelectionEvidence,
+  ProtectedEgressSource,
+  PreparedGitHubEgressLifecycle,
   StaticEgressSource,
-  StaticMaterialEvidence,
   VersionedSecretValue,
 } from "@openclaw-enterprise/contracts";
 import { immutableCopy } from "@openclaw-enterprise/utils";
@@ -21,6 +30,9 @@ export interface EgressPeer {
   readonly sandboxId: string;
   readonly instanceId: string;
   readonly expiresAt: string;
+  readonly exchangeId?: string;
+  /** Public key identifier authenticated by the transport, pinned separately at installation. */
+  readonly peerKeyId?: string;
 }
 
 /** Only installed transport verifiers implement this interface, never workload input. */
@@ -34,54 +46,69 @@ export interface CapturedEgressUse {
   readonly installation: EgressInstallation;
   readonly route: EgressRoute;
   readonly request: EgressRequest;
-  readonly operation: InferenceOperation;
+  readonly operation: EgressOperation;
 }
 
-export interface RequestAuthorizer {
-  /** Each call must open a new policy unit, independent of the capture and Secret read. */
-  check(
-    use: CapturedEgressUse,
-    material?: StaticMaterialEvidence,
-  ): Promise<StaticEgressSource | EgressRefusal>;
+/** Installed acceptance owns the actual request, sender and response destination. */
+export interface TrustedEgressAcceptance {
+  capture(use: CapturedEgressUse): AcceptedEgressAssociation | undefined;
+  /** Match the active transport sender and reply custody, not just stored IDs or liveness. */
+  owns(association: AcceptedEgressAssociation, use: CapturedEgressUse): boolean;
 }
 
-export interface EgressAuthorityPorts extends RequestAuthorizer {
+export interface EgressAuthorityPorts {
+  readonly acceptance?: TrustedEgressAcceptance | undefined;
   readonly verifier: EgressPeerVerifier;
   readonly now: () => number;
   installation(peer: EgressPeer): Promise<EgressInstallation | undefined>;
   provider(route: EgressRoute): CredentialProviderDefinition | undefined;
+  /** Each call must open a new policy unit, independent of the capture and Secret read. */
+  check(
+    use: CapturedEgressUse,
+    material?: EgressSelectionEvidence,
+  ): Promise<ProtectedEgressSource | EgressRefusal>;
   read(
     source: StaticEgressSource,
     signal: AbortSignal,
     deadlineAt: string,
   ): Promise<VersionedSecretValue & { readonly materialId: string }>;
-  readonly receipts: Pick<EgressSendReceipts, "begin" | "record" | "observe">;
+  readonly readPreparedGitHub?: PreparedGitHubEgressLifecycle["readWarm"];
+  readonly receipts: Pick<EgressSendReceipts, "begin" | "authorize" | "record" | "observe">;
 }
 
 export type EgressResolution =
+  | { readonly kind: "ready_without_material"; readonly handle: string }
   | { readonly kind: "refused"; readonly error: EgressRefusal }
   | {
       readonly kind: "ready";
       readonly handle: string;
-      readonly evidence: StaticMaterialEvidence;
+      readonly evidence: EgressMaterialEvidence;
       readonly headers: readonly (readonly [string, string])[];
       readonly injectionDigest: string;
     };
 
 export type EgressSendDecision =
   | { readonly kind: "refused"; readonly error: EgressRefusal }
-  | { readonly kind: "allow"; readonly sendStartBy: string; readonly injectionDigest: string };
+  | {
+      readonly kind: "allow";
+      readonly authorization: AuthorizedSend;
+      readonly sendStartBy: string;
+      readonly injectionDigest: string;
+      readonly noMaterialRequired: boolean;
+    };
 
 interface OperationRecord {
   readonly use: CapturedEgressUse;
   readonly provider: CredentialProviderDefinition;
-  readonly source: StaticEgressSource;
-  readonly evidence: StaticMaterialEvidence;
+  readonly source: ProtectedEgressSource;
+  readonly evidence: EgressSelectionEvidence;
   readonly attempt: SendAttempt;
   readonly digest: string;
-  value: string;
+  readonly association: AcceptedEgressAssociation;
+  value: string | undefined;
   phase: "resolved" | "checking" | "permitted" | "protecting" | "observing";
   timer?: ReturnType<typeof setTimeout>;
+  release?: () => void;
 }
 
 function refuse(
@@ -133,7 +160,8 @@ export class Conduit {
 
   private discard(handle: string, record: OperationRecord): void {
     clearTimeout(record.timer);
-    record.value = "";
+    record.release?.();
+    record.value = undefined;
     this.records.delete(handle);
   }
 
@@ -157,6 +185,10 @@ export class Conduit {
     input: EgressRequest,
     signal: AbortSignal,
   ): Promise<EgressResolution> {
+    input = {
+      ...immutableCopy({ ...input, body: undefined }),
+      body: new Uint8Array(input.body),
+    } as EgressRequest;
     this.prune();
     // Reserve before authentication or any other await. Pending Secret/policy I/O
     // consumes the same capacity as an outstanding material handle.
@@ -218,9 +250,19 @@ export class Conduit {
     if (
       !installation ||
       !isDeepStrictEqual(installation.sender, peer.sender) ||
-      installation.enforcement?.instanceId !== peer.instanceId
+      installation.enforcement?.instanceId !== peer.instanceId ||
+      installation.enforcement.peerKeyId !== peer.peerKeyId
     ) {
       return { kind: "refused", error: { kind: "not_ready", code: "attachment_pending" } };
+    }
+    const policyHash = request.verifiedExecutionPolicyHash;
+    if (
+      installation.enforcement.authorityScope !== "execution" ||
+      !policyHash ||
+      !/^[a-f0-9]{64}$/.test(policyHash) ||
+      policyHash !== installation.enforcement.policyHash
+    ) {
+      return refuse("identity");
     }
     const matches = installation.plan.routes.flatMap((route) => {
       if (request.bindingId !== undefined && route.binding.binding.id !== request.bindingId) {
@@ -247,7 +289,12 @@ export class Conduit {
     }) as unknown as CapturedEgressUse;
     // Keep captured bytes private and detached from the transport's mutable buffer.
     const captured = { ...use, request };
-    let source: StaticEgressSource | EgressRefusal;
+    const accepted = this.ports.acceptance?.capture(captured);
+    const association = accepted === undefined ? undefined : immutableCopy(accepted);
+    if (!association || !this.owns(association, captured)) {
+      return refuse("identity");
+    }
+    let source: ProtectedEgressSource | EgressRefusal;
     try {
       source = await this.ports.check(captured);
     } catch {
@@ -256,47 +303,31 @@ export class Conduit {
     if (!("key" in source)) {
       return { kind: "refused", error: source };
     }
+    // Policy and installation I/O may have been queued when the accepted stream
+    // closed. Losing that sender revokes material access, not just a later send.
+    if (signal.aborted || !this.owns(association, captured)) {
+      return { kind: "refused", error: { kind: "cancelled" } };
+    }
     try {
-      const material = await this.ports.read(source, signal, request.deadlineAt);
-      const observed = Date.parse(material.authoritativeObservedAt);
-      const usableUntil = Math.min(
-        deadline,
-        material.expiresAt === undefined ? deadline : Date.parse(material.expiresAt),
-      );
-      if (
-        !material.version ||
-        !material.materialId ||
-        !Number.isFinite(observed) ||
-        observed > this.ports.now() ||
-        !Number.isFinite(usableUntil) ||
-        usableUntil <= this.ports.now()
-      ) {
-        return { kind: "refused", error: { kind: "not_ready", code: "expired" } };
+      // Recheck the same accepted response owner after selection, including any independent material read.
+      const material = await this.selectMaterial(source, captured, signal);
+      if (!("evidence" in material)) {
+        return { kind: "refused", error: material };
       }
-      if (signal.aborted) {
-        return { kind: "refused", error: { kind: "cancelled" } };
+      const { evidence } = material;
+      if (signal.aborted || !this.owns(association, captured)) {
+        return refuse("identity");
       }
-      const evidence: StaticMaterialEvidence = immutableCopy({
-        kind: "static",
-        source: source.key,
-        binding: route.binding.binding,
-        grantHash: route.binding.grantHash,
-        isolationId: route.binding.isolationId,
-        adoption: source.adoption,
-        materialRefId: source.materialRefId,
-        secret: source.secret,
-        secretDriver: source.secretDriver,
-        materialId: material.materialId,
-        materialVersion: material.version,
-        authoritativeObservedAt: material.authoritativeObservedAt,
-        usableUntil: new Date(usableUntil).toISOString(),
-        retention: "none",
-      });
-      const headers = provider.inject(material.value);
+      if (evidence.kind !== "no_material_required" && material.value === undefined) {
+        return { kind: "refused", error: { kind: "not_ready", code: "material_missing" } };
+      }
+      const headers =
+        evidence.kind === "no_material_required" ? [] : provider.inject(material.value!);
       const digest = egressInjectionDigest(headers);
       const handle = randomUUID();
       const record: OperationRecord = {
         use: captured,
+        association: immutableCopy(association),
         provider,
         source,
         evidence,
@@ -314,16 +345,152 @@ export class Conduit {
         phase: "resolved",
       };
       this.records.set(handle, record);
+      const closed = () => this.discard(handle, record);
+      signal.addEventListener("abort", closed, { once: true });
+      record.release = () => signal.removeEventListener("abort", closed);
       record.timer = setTimeout(
         () => {
           this.discard(handle, record);
         },
         Math.max(1, deadline - this.ports.now()),
       ).unref();
-      return { kind: "ready", handle, evidence, headers, injectionDigest: digest };
+      return evidence.kind === "no_material_required"
+        ? { kind: "ready_without_material", handle }
+        : { kind: "ready", handle, evidence, headers, injectionDigest: digest };
     } catch {
       return { kind: "refused", error: { kind: "unavailable", code: "secret_store" } };
     }
+  }
+
+  private async selectMaterial(
+    source: ProtectedEgressSource,
+    use: CapturedEgressUse,
+    signal: AbortSignal,
+  ): Promise<{ value?: string; evidence: EgressSelectionEvidence } | EgressRefusal> {
+    const { route, request } = use;
+    const deadline = Date.parse(request.deadlineAt);
+    if (source.adoption === "credential_free") {
+      if (
+        use.operation.kind !== "credential_free_repository_metadata" ||
+        source.origin !== route.origin ||
+        !isDeepStrictEqual(source.grant, route.binding.grant) ||
+        !isDeepStrictEqual(source.key, route.binding.source)
+      ) {
+        return { kind: "denied", code: "scope_mismatch" };
+      }
+      const { binding, grantHash, isolationId } = route.binding;
+      return {
+        evidence: immutableCopy({
+          kind: "no_material_required" as const,
+          source: source.key,
+          binding,
+          grantHash,
+          isolationId,
+        }),
+      };
+    }
+    if (source.adoption === "prepared") {
+      if (
+        use.operation.kind !== "github_repository_metadata" ||
+        !isDeepStrictEqual(source.grant, route.binding.grant) ||
+        !isDeepStrictEqual(source.key, route.binding.source)
+      ) {
+        return { kind: "denied", code: "scope_mismatch" };
+      }
+      const remaining = deadline - this.ports.now();
+      if (!(remaining > 0)) {
+        return { kind: "deadline_exceeded" };
+      }
+      const accessSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(remaining))]);
+      const selected = await this.ports.readPreparedGitHub?.(
+        source,
+        accessSignal,
+        request.deadlineAt,
+      );
+      if (!selected) {
+        return { kind: "not_ready", code: "material_missing" };
+      }
+      const { value, usableUntil, ...selection } = selected;
+      const until = Math.min(
+        deadline,
+        Date.parse(usableUntil),
+        Date.parse(selection.providerExpiresAt),
+      );
+      if (!Number.isFinite(until) || until <= this.ports.now() || accessSignal.aborted) {
+        return { kind: "not_ready", code: "expired" };
+      }
+      return {
+        value,
+        evidence: immutableCopy({
+          family: selection.family,
+          ownerEpoch: selection.ownerEpoch,
+          inputVersion: selection.inputVersion,
+          preparationAttemptId: selection.preparationAttemptId,
+          materialId: selection.materialId,
+          materialVersion: selection.materialVersion,
+          providerExpiresAt: selection.providerExpiresAt,
+          kind: "prepared_github",
+          source: source.key,
+          binding: route.binding.binding,
+          grantHash: route.binding.grantHash,
+          isolationId: source.grant.isolationId,
+          usableUntil: new Date(until).toISOString(),
+        }),
+      };
+    }
+    if (use.operation.kind !== "inference") {
+      return { kind: "denied", code: "scope_mismatch" };
+    }
+    const material = await this.ports.read(source, signal, request.deadlineAt);
+    const observed = Date.parse(material.authoritativeObservedAt);
+    const usableUntil = Math.min(
+      deadline,
+      material.expiresAt === undefined ? deadline : Date.parse(material.expiresAt),
+    );
+    if (
+      !material.version ||
+      !material.materialId ||
+      !Number.isFinite(observed) ||
+      observed > this.ports.now() ||
+      !Number.isFinite(usableUntil) ||
+      usableUntil <= this.ports.now()
+    ) {
+      return { kind: "not_ready", code: "expired" };
+    }
+    if (signal.aborted) {
+      return { kind: "cancelled" };
+    }
+    const evidence: EgressMaterialEvidence = immutableCopy({
+      kind: "static",
+      source: source.key,
+      binding: route.binding.binding,
+      grantHash: route.binding.grantHash,
+      isolationId: route.binding.isolationId,
+      adoption: source.adoption,
+      materialRefId: source.materialRefId,
+      secret: source.secret,
+      secretDriver: source.secretDriver,
+      materialId: material.materialId,
+      materialVersion: material.version,
+      authoritativeObservedAt: material.authoritativeObservedAt,
+      usableUntil: new Date(usableUntil).toISOString(),
+      retention: "none" as const,
+    });
+
+    return { value: material.value, evidence };
+  }
+
+  private owns(association: AcceptedEgressAssociation, use: CapturedEgressUse): boolean {
+    return (
+      isDeepStrictEqual(association.execution, use.route.binding.execution) &&
+      isDeepStrictEqual(association.execution, use.installation.plan.execution) &&
+      isDeepStrictEqual(association.installation, {
+        sandboxId: use.installation.sandboxId,
+        ...use.installation.enforcement,
+        plan: { id: use.installation.plan.id, generation: use.installation.plan.generation },
+      }) &&
+      this.ports.acceptance?.owns(association, use) === true
+    );
   }
 
   async authorizeSend(
@@ -331,7 +498,7 @@ export class Conduit {
     sandboxId: string,
     requestId: string,
     handle: string,
-    evidence: StaticMaterialEvidence,
+    selection: EgressMaterialEvidence | true,
     injectionDigest: string,
     deadlineAt: string,
     signal: AbortSignal,
@@ -347,10 +514,14 @@ export class Conduit {
       peer.sandboxId !== sandboxId ||
       !isDeepStrictEqual(peer.sender, record.use.peer.sender) ||
       peer.instanceId !== record.use.peer.instanceId ||
+      peer.exchangeId !== record.use.peer.exchangeId ||
       sandboxId !== record.use.peer.sandboxId ||
       requestId !== record.use.request.id ||
       deadlineAt !== record.use.request.deadlineAt ||
-      !isDeepStrictEqual(record.evidence, evidence) ||
+      (selection === true
+        ? record.evidence.kind !== "no_material_required"
+        : record.evidence.kind === "no_material_required" ||
+          !isDeepStrictEqual(record.evidence, selection)) ||
       !sameSecret(record.digest, injectionDigest)
     ) {
       return refuse("invalid_handle");
@@ -384,7 +555,7 @@ export class Conduit {
       return deny({ kind: "cancelled" });
     }
     // Fresh transport and policy checks follow possibly slow durable persistence and exact selection.
-    let decision: StaticEgressSource | EgressRefusal;
+    let decision: ProtectedEgressSource | EgressRefusal;
     let finalPeer: EgressPeer | undefined;
     try {
       finalPeer = await this.ports.verifier.verify(authorization);
@@ -405,18 +576,61 @@ export class Conduit {
     const sendStartBy = Math.min(
       now + 1000,
       Date.parse(record.use.request.deadlineAt),
-      Date.parse(record.evidence.usableUntil),
+      record.evidence.kind === "no_material_required"
+        ? Infinity
+        : Date.parse(record.evidence.usableUntil),
       Date.parse(finalPeer.expiresAt),
     );
     if (sendStartBy <= now || this.records.get(handle) !== record || record.phase !== "checking") {
       return deny({ kind: "deadline_exceeded" });
     }
+    const authorized: AuthorizedSend = immutableCopy({
+      association: record.association,
+      requestDigest: createHash("sha256")
+        .update(
+          JSON.stringify({
+            ...record.use.request,
+            body: Buffer.from(record.use.request.body).toString("base64"),
+          }),
+        )
+        .digest("hex"),
+      injectionDigest: record.digest,
+      authorizedAt: new Date(now).toISOString(),
+      sendStartBy: new Date(sendStartBy).toISOString(),
+    });
+    if (!this.owns(record.association, record.use)) {
+      return deny({ kind: "denied", code: "identity" });
+    }
+    try {
+      const committed = await this.ports.receipts.authorize(
+        peer.sender,
+        record.attempt,
+        authorized,
+      );
+      // Never repair/replay a lost acknowledgment or extend the bound across this await.
+      if (
+        !isDeepStrictEqual(committed.authorization, authorized) ||
+        signal.aborted ||
+        this.records.get(handle) !== record ||
+        record.phase !== "checking" ||
+        this.ports.now() >= sendStartBy ||
+        !this.owns(record.association, record.use)
+      ) {
+        this.discard(handle, record);
+        return refuse("invalid_handle");
+      }
+    } catch {
+      this.discard(handle, record);
+      return { kind: "refused", error: { kind: "unavailable", code: "authority" } };
+    }
     // This means permission issued, NOT confirmed dispatch. The durable receipt stays possible.
     record.phase = "permitted";
     return {
       kind: "allow",
+      authorization: authorized,
       sendStartBy: new Date(sendStartBy).toISOString(),
       injectionDigest: record.digest,
+      noMaterialRequired: record.evidence.kind === "no_material_required",
     };
   }
 
@@ -434,9 +648,11 @@ export class Conduit {
     const entry = [...this.records].find(
       ([, record]) =>
         record.phase === "permitted" &&
+        this.owns(record.association, record.use) &&
         record.use.request.id === requestId &&
         record.use.peer.sandboxId === sandboxId &&
         record.use.peer.instanceId === peer.instanceId &&
+        record.use.peer.exchangeId === peer.exchangeId &&
         isDeepStrictEqual(record.use.peer.sender, peer.sender),
     );
     if (!entry) {
@@ -461,7 +677,10 @@ export class Conduit {
     // Consume even while persistence is pending; no second stream/body can reuse this response.
     record.phase = "observing";
     try {
-      const rejected = inspect && record.provider.credentialRejected(response);
+      const rejected =
+        inspect &&
+        record.evidence.kind !== "no_material_required" &&
+        record.provider.credentialRejected(response);
       const safe =
         inspect && !signal.aborted && Date.parse(record.use.request.deadlineAt) > this.ports.now()
           ? record.provider.protectResponse(
@@ -488,7 +707,8 @@ export class Conduit {
       // Persistence may outlive the original deadline or cancellation. Never release late bytes.
       return this.records.get(handle) === record &&
         !signal.aborted &&
-        Date.parse(record.use.request.deadlineAt) > this.ports.now()
+        Date.parse(record.use.request.deadlineAt) > this.ports.now() &&
+        this.owns(record.association, record.use)
         ? safe
         : undefined;
     } finally {

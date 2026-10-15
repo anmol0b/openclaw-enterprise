@@ -1,27 +1,30 @@
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
-import { OpenShellGateway } from "../../apps/controller/src/backends/openshell.ts";
-import { createRealKubernetesFixture } from "../helpers/kubernetes-real.mjs";
-import { createOpenShellKubernetesFixture } from "../helpers/openshell-kubernetes-real.mjs";
-import { startSyntheticEgressProvider } from "../fixtures/synthetic-egress-provider.mjs";
 import {
-  assertConnectedResponse,
   assertNoConnectedAssistantOutput,
-  connectedReceiptRevision,
   protectedAgentBody,
   protectedConfigurationBody,
-  protectedEgressCapability,
   protectedSourceBody,
-  sendConnectedRequest,
-  serializeConnectedRequest,
   sourceAccessBindingBody,
-  takeConnectedControllerBinding,
-  validateConnectedInputs,
-  validateConnectedDatabaseUrl,
 } from "../helpers/egress-connected-inputs.mjs";
+import {
+  arrangeRealPrerequisites,
+  observePreparedStack,
+  createRunEvidence,
+} from "../helpers/egress-installed-stack.mjs";
+import {
+  registerCleanupAndStartProvider,
+  observeInstalledProtection,
+} from "../helpers/egress-installed-agent.mjs";
+import { tryDirectTcp } from "../helpers/egress-custody-observations.mjs";
+import {
+  encodeSyntheticEvents,
+  syntheticResponsesEvents,
+} from "../fixtures/synthetic-egress-provider.mjs";
 
 const inputsPath = process.env.OCC_TEST_EGRESS_CONNECTED_INPUTS;
 const selected = process.env.OCC_TEST_EGRESS_CONNECTED === "1" || inputsPath !== undefined;
@@ -31,7 +34,7 @@ function safeConnectedFailure(error, stage) {
   // location and the durable phase, never raw error payloads or an unsafe cause.
   const location =
     String(error.stack).match(
-      /(?:agent-openshell-static-egress-k3d-real\.test|egress-connected-inputs|openshell-kubernetes-real)\.mjs:\d+:\d+/,
+      /(?:agent-openshell-static-egress-k3d-real\.test|egress-[\w.-]+|openshell-kubernetes-real)\.mjs:\d+:\d+/,
     )?.[0] ?? "external-operation";
   const kind = error.code === "ERR_ASSERTION" ? "assertion" : "operation";
   return new Error(
@@ -50,7 +53,7 @@ function safeConnectedFailure(error, stage) {
  */
 
 test(
-  "a protected OpenShell Agent uses fresh IAM, live Secret rotation and bounded Responses delivery",
+  "protected Codex and a sibling share bounded execution authority through IAM revocation and live rotation",
   {
     skip: selected ? false : "Select OCC_TEST_EGRESS_CONNECTED=1 with a prepared protected stack.",
     timeout: 30 * 60_000,
@@ -58,7 +61,14 @@ test(
   async (t) => {
     const progress = { stage: "input-preflight" };
     try {
-      const setup = await arrangeRealPrerequisites(t, progress);
+      const setup = await arrangeRealPrerequisites(t, progress, inputsPath, {
+        wholeExecution: true,
+      });
+      assert.equal(
+        execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        setup.input.oceCommit,
+        "run this qualification from the selected candidate checkout",
+      );
       const evidence = await createRunEvidence(t, setup, progress);
       const stack = await observePreparedStack(t, setup, evidence, progress);
       const owned = await registerCleanupAndStartProvider(t, setup, stack, evidence);
@@ -66,7 +76,7 @@ test(
       const installed = await observeInstalledProtection(setup, stack, evidence, deployment);
       const turns = await observeRunningAgent(setup, stack, evidence, owned, deployment, installed);
 
-      await verifyFirstTurnAndBinaryBypass(setup, stack, evidence, owned, installed, turns);
+      await verifyManagedClientsAndDirectBypass(setup, evidence, owned, installed, turns);
       await revokeExactGrantAndObserveDenial(stack, evidence, owned, deployment, turns);
       await regrantAndObserveRecovery(owned, deployment, turns);
       const rotatedSecret = await rotateSecretOnly(setup, stack, evidence, deployment, turns);
@@ -75,419 +85,14 @@ test(
       await withdrawAndObserveSandboxAbsence(setup, stack, evidence, deployment, installed);
       assert.equal(
         owned.provider.observations.length,
-        16,
-        "one startup probe and fifteen measured sends, with no background retries",
+        17,
+        "one startup probe, fifteen measured Codex sends and one managed sibling send; no retries",
       );
     } catch (error) {
       throw safeConnectedFailure(error, progress.stage);
     }
   },
 );
-
-async function arrangeRealPrerequisites(t, progress) {
-  assert.equal(process.env.OCC_TEST_EGRESS_CONNECTED, "1");
-  assert.ok(inputsPath, "OCC_TEST_EGRESS_CONNECTED_INPUTS must name the exact prepared stack");
-  const controller = takeConnectedControllerBinding(process.env);
-  const input = validateConnectedInputs(JSON.parse(await readFile(inputsPath, "utf8")), controller);
-  const databaseUrl = validateConnectedDatabaseUrl(process.env.OCC_TEST_DATABASE_URL);
-  const selection = {
-    kubeconfigPath: input.kubeconfigPath,
-    kubernetesContext: input.kubernetesContext,
-    gatewayImage: input.images.gateway,
-    codexImage: input.images.agent,
-    databaseUrl,
-  };
-  const base = createRealKubernetesFixture(selection);
-  // Keep the existing loopback k3d and disposable-database guards. The legacy
-  // fixture's real-provider-key prerequisite belongs to its separate smoke lane.
-  progress.stage = "cluster-prerequisites";
-  await base.validatePrerequisites();
-  const f = createOpenShellKubernetesFixture({
-    ...selection,
-    openShellGatewayImage: input.images.openShellGateway,
-    openShellSandboxImage: input.images.sandbox,
-    openShellSupervisorImage: input.images.supervisor,
-    openShellRuntimeClass: input.runtimeClass,
-    commandTimeoutMs: 120_000,
-    signal: t.signal,
-  });
-  return { input, controller, selection, databaseUrl, f };
-}
-
-/** @param {Prerequisites} setup */
-async function createRunEvidence(t, setup, progress) {
-  const { input, controller } = setup;
-  const runId = randomUUID();
-  const directory = resolve(".build/egress-connected", `runtime-${runId}`);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  t.diagnostic(`egress-connected evidence-directory .build/egress-connected/runtime-${runId}`);
-  const ledger = {
-    runId,
-    startedAt: new Date().toISOString(),
-    oceCommit: input.oceCommit,
-    supplierCommit: input.supplierCommit,
-    images: input.images,
-    namespaceId: controller.namespaceId,
-    resources: [],
-    phases: [],
-    cleanup: "pending",
-  };
-  const saveLedger = async () => {
-    await writeFile(
-      join(directory, "observations.pending.json"),
-      JSON.stringify(ledger, null, 2) + "\n",
-      { mode: 0o600 },
-    );
-    await rename(
-      join(directory, "observations.pending.json"),
-      join(directory, "observations.json"),
-    );
-  };
-  const checkpoint = async (phase, details = {}) => {
-    progress.stage = phase;
-    ledger.phases.push({ phase, at: new Date().toISOString(), ...details });
-    await saveLedger();
-    t.diagnostic(`egress-connected ${phase} ${JSON.stringify(details)}`);
-  };
-  const credentials = {
-    initial: `SYNTHETIC-OCE-EGRESS-${runId}-v1`,
-    rotated: `SYNTHETIC-OCE-EGRESS-${runId}-v2`,
-  };
-  const excludesCredentials = (value, label) => {
-    const text = typeof value === "string" ? value : JSON.stringify(value);
-    for (const secret of Object.values(credentials)) {
-      for (const encoded of [
-        secret,
-        encodeURIComponent(secret),
-        Buffer.from(secret).toString("base64"),
-        Buffer.from(secret).toString("base64url"),
-      ]) {
-        assert.equal(
-          text.includes(encoded),
-          false,
-          `${label} leaked synthetic credential material`,
-        );
-      }
-    }
-  };
-  const request = async (method, path, body, cleanup = false) => {
-    if (!cleanup) {
-      t.signal.throwIfAborted();
-    }
-    const wire = serializeConnectedRequest(method, path, body);
-    // The operation ID identifies this local attempt. Persist uncertainty before
-    // sending; do not copy the controller's response, request ID or URL to this record.
-    ledger.lastApi = { operationId: randomUUID(), method, outcome: "unknown" };
-    await saveLedger();
-    const response = await sendConnectedRequest(
-      controller,
-      wire,
-      cleanup
-        ? AbortSignal.timeout(20_000)
-        : AbortSignal.any([t.signal, AbortSignal.timeout(20_000)]),
-    );
-    const raw = await response.text();
-    excludesCredentials(raw, "controller response");
-    assert.equal(
-      raw.includes(controller.serviceKey),
-      false,
-      "controller response leaked its service key",
-    );
-    const captured = {
-      status: response.status,
-      body: raw === "" ? undefined : JSON.parse(raw),
-    };
-    if (captured.body !== undefined) {
-      excludesCredentials(captured.body, "decoded controller response");
-      assert.equal(
-        JSON.stringify(captured.body).includes(controller.serviceKey),
-        false,
-        "decoded controller response leaked its service key",
-      );
-    }
-    ledger.lastApi.outcome = response.ok ? "received-success-status" : "received-error-status";
-    await saveLedger();
-    return captured;
-  };
-  const api = async (method, path, body, status = 200) =>
-    assertConnectedResponse(await request(method, path, body), status);
-  return {
-    runId,
-    directory,
-    ledger,
-    checkpoint,
-    credentials,
-    excludesCredentials,
-    request,
-    api,
-  };
-}
-
-/**
- * @param {Prerequisites} setup
- * @param {RunEvidence} evidence
- */
-async function observePreparedStack(t, setup, evidence, progress) {
-  const {
-    input,
-    databaseUrl,
-    controller,
-    f: { kubectl },
-  } = setup;
-  const { api } = evidence;
-  const namespacePath = `/namespaces/${controller.namespaceId}`;
-  progress.stage = "prepared-stack-observation";
-  const namespace = await api("GET", namespacePath);
-  assert.equal(namespace.status, "ready");
-  const placements = JSON.parse(await kubectl("get", "namespaces", "-o", "json")).items.filter(
-    ({ metadata }) => metadata.labels?.["openclaw.dev/namespace"] === namespace.id,
-  );
-  assert.equal(placements.length, 1, "select a single-cluster tenant placement");
-  const placement = placements[0].metadata.name;
-  const controllerPods = JSON.parse(
-    await kubectl(
-      "get",
-      "pods",
-      "--namespace",
-      input.controllerNamespace,
-      "--selector",
-      input.controllerSelector,
-      "-o",
-      "json",
-    ),
-  ).items;
-  assert.ok(controllerPods.length > 0, "candidate controller Pod is required");
-  for (const component of ["api", "worker"]) {
-    assert.ok(
-      controllerPods.some(
-        ({ metadata }) => metadata.labels?.["app.kubernetes.io/component"] === component,
-      ),
-      `the prepared controller selector must include the ${component} Pod`,
-    );
-  }
-  for (const pod of controllerPods) {
-    assert.ok(pod.spec.containers.some(({ image }) => image === input.images.controller));
-    assert.ok(
-      pod.status?.conditions?.some(({ type, status }) => type === "Ready" && status === "True"),
-    );
-  }
-  const gateway = new OpenShellGateway(input.openShellBackend);
-  t.after(() => gateway.close());
-  const gatewayClient = gateway.clientForNamespace(placement);
-  const info = await gatewayClient.getGatewayInfo(AbortSignal.timeout(10_000));
-  assert.ok(
-    info.extensions?.some(
-      (extension) =>
-        extension.required_capabilities?.includes(protectedEgressCapability) &&
-        extension.supported_capabilities?.includes(protectedEgressCapability),
-    ),
-    "matching protected counterpart is required",
-  );
-  const { default: pg } = await import("pg");
-  const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    max: 2,
-    connectionTimeoutMillis: 5_000,
-    statement_timeout: 5_000,
-  });
-  t.after(() => pool.end());
-  const role = await pool.query("SELECT current_user AS role");
-  assert.equal(role.rows[0].role, "occ_app", "observe through the limited application role");
-  const installation = await api("GET", "/installation");
-  const persistedInstallation = await pool.query("SELECT id FROM occ.installation");
-  assert.deepEqual(
-    persistedInstallation.rows,
-    [{ id: installation.id }],
-    "the observer must use this controller's database",
-  );
-  const supplierPods = JSON.parse(
-    await kubectl(
-      "get",
-      "pods",
-      "--namespace",
-      input.openShellGatewayNamespace,
-      "--selector",
-      input.openShellGatewaySelector,
-      "-o",
-      "json",
-    ),
-  ).items;
-  assert.ok(supplierPods.length > 0, "candidate OpenShell gateway Pod is required");
-  for (const pod of supplierPods) {
-    assert.ok(pod.spec.containers.some(({ image }) => image === input.images.openShellGateway));
-    assert.ok(
-      pod.status?.conditions?.some(({ type, status }) => type === "Ready" && status === "True"),
-    );
-  }
-  return { namespacePath, namespace, placement, controllerPods, gatewayClient, pool, installation };
-}
-
-/**
- * Owns only confirmed resource IDs; an uncertain create remains in the ledger.
- * @param {Prerequisites} setup
- * @param {PreparedStack} stack
- * @param {RunEvidence} evidence
- */
-async function registerCleanupAndStartProvider(t, setup, stack, evidence) {
-  const {
-    input,
-    controller,
-    selection,
-    f: { waitFor },
-  } = setup;
-  const { namespacePath, placement, controllerPods } = stack;
-  const { ledger, directory, credentials, request, api, checkpoint } = evidence;
-  const providerCleanup = [];
-  let provider;
-  let ownedSandbox;
-  let ownedSandboxId;
-  // Register cleanup before the first creation request. An unknown create outcome
-  // remains in the ledger for the parent; never replay a mutation to hide it.
-  t.after(async () => {
-    const failures = ledger.pendingCreate ? ["unconfirmed create; reconcile ledger"] : [];
-    const clean = async (name, action) => {
-      try {
-        await action();
-      } catch {
-        failures.push(name);
-      }
-    };
-    const ownedAgent = ledger.resources.find(({ kind }) => kind === "agents");
-    if (ownedAgent) {
-      await clean("Agent", async () => {
-        const deleted = await request(
-          "DELETE",
-          `${namespacePath}/agents/${ownedAgent.id}`,
-          undefined,
-          true,
-        );
-        assert.ok([202, 404].includes(deleted.status));
-        assertConnectedResponse(deleted, deleted.status);
-        await waitFor(
-          "owned Agent deletion",
-          async () => {
-            const observed = await request(
-              "GET",
-              `${namespacePath}/agents/${ownedAgent.id}`,
-              undefined,
-              true,
-            );
-            if (observed.status === 404) {
-              assertConnectedResponse(observed, 404);
-              return true;
-            }
-            assertConnectedResponse(observed, 200);
-            return undefined;
-          },
-          180_000,
-        );
-        // API row deletion alone cannot prove that provider-owned workloads
-        // disappeared. Cleanup gets its own bounded reads after test abort.
-        const cleanupFixture = createOpenShellKubernetesFixture({
-          ...selection,
-          commandTimeoutMs: 20_000,
-        });
-        await cleanupFixture.waitFor(
-          "owned Kubernetes workload deletion",
-          async () => {
-            const pods = await cleanupFixture.resources("pods", placement);
-            const sandboxes = await cleanupFixture.customResources(
-              "sandboxes.agents.x-k8s.io",
-              placement,
-            );
-            return (
-              !pods.some(
-                ({ metadata }) =>
-                  metadata.labels?.["openclaw.dev/agent"] === ownedAgent.id ||
-                  (ownedSandboxId !== undefined &&
-                    metadata.labels?.["openshell.ai/sandbox-id"] === ownedSandboxId),
-              ) && !sandboxes.some(({ metadata }) => metadata.name === ownedSandbox)
-            );
-          },
-          180_000,
-        );
-        if (
-          ledger.phases.some(({ phase }) => phase === "deploy-request") &&
-          (ownedSandbox === undefined || ownedSandboxId === undefined)
-        ) {
-          failures.push("Sandbox identity not observed; parent reconciliation required");
-        }
-      });
-    }
-    for (const kind of [
-      "iam/access-bindings",
-      "credential-sources",
-      "iam/roles",
-      "secrets",
-      "configurations",
-    ]) {
-      for (const owned of ledger.resources.filter((entry) => entry.kind === kind)) {
-        await clean(`${kind}/${owned.id}`, async () => {
-          const observed = await request(
-            "DELETE",
-            `${namespacePath}/${kind}/${owned.id}`,
-            undefined,
-            true,
-          );
-          assert.ok(
-            [204, 404].includes(observed.status),
-            `cleanup ${kind} returned HTTP ${observed.status}`,
-          );
-          assertConnectedResponse(observed, observed.status);
-        });
-      }
-    }
-    await clean("provider observations", () =>
-      writeFile(
-        join(directory, "upstream.json"),
-        JSON.stringify(provider?.observations ?? [], null, 2) + "\n",
-        { mode: 0o600 },
-      ),
-    );
-    for (const close of providerCleanup) {
-      await clean("synthetic HTTPS listener", close);
-    }
-    ledger.cleanup = failures.length ? "incomplete" : "complete";
-    await checkpoint("cleanup", { failures });
-    assert.deepEqual(failures, [], "owned resources remain; use the preserved ledger");
-  });
-  // Custody is registered before listen: failed setup must also close the
-  // listener, and bind failures must not leave a pending cleanup unobserved.
-  provider = await startSyntheticEgressProvider(
-    { after: (close) => providerCleanup.push(close) },
-    { ...input.provider, model: controller.model },
-    credentials,
-  );
-  const create = async (kind, body) => {
-    t.signal.throwIfAborted();
-    ledger.pendingCreate = { kind, name: body.name };
-    await checkpoint("create-request", { kind, name: body.name });
-    const value = await api("POST", `${namespacePath}/${kind}`, body, 201);
-    ledger.resources.push({ kind, id: value.id, name: body.name });
-    delete ledger.pendingCreate;
-    await checkpoint("created", { kind, id: value.id });
-    return value;
-  };
-  await checkpoint("prepared-stack-observed", {
-    placement,
-    controllerPods: controllerPods.map(({ metadata }) => metadata.uid),
-  });
-  const recordSandbox = async (sandbox) => {
-    ownedSandbox = sandbox.metadata.name;
-    ownedSandboxId = sandbox.metadata.labels?.["openshell.ai/sandbox-id"];
-    assert.equal(
-      typeof ownedSandboxId,
-      "string",
-      "the real Sandbox must identify its supplier owner",
-    );
-    await checkpoint("sandbox-observed", {
-      sandboxName: ownedSandbox,
-      sandboxId: ownedSandboxId,
-    });
-    return ownedSandboxId;
-  };
-  return { provider, create, recordSandbox };
-}
 
 /**
  * @param {Prerequisites} setup
@@ -505,10 +110,17 @@ async function deployProtectedAgent(setup, stack, evidence, owned) {
     name: `egress-${runId}`,
     value: credentials.initial,
   });
-  const source = await create(
+  const created = await create(
     "credential-sources",
     protectedSourceBody(`egress-${runId}`, secret.ref, controller.providerOrigin),
   );
+  // This is a fresh, unbound source. Record the maintainer's explicit consent
+  // before binding it. Legacy and narrower approvals require this same PATCH.
+  const source = await api("PATCH", `${namespacePath}/credential-sources/${created.id}`, {
+    adoption: "live",
+    authorityScope: "execution",
+  });
+  assert.equal(source.id, created.id);
   assert.deepEqual(
     source.egress,
     { adoption: "live", retention: "none" },
@@ -583,126 +195,6 @@ async function deployProtectedAgent(setup, stack, evidence, owned) {
 }
 
 /**
- * @param {Prerequisites} setup
- * @param {PreparedStack} stack
- * @param {RunEvidence} evidence
- * @param {Deployment} deployment
- */
-async function observeInstalledProtection(setup, stack, evidence, deployment) {
-  const { input, f } = setup;
-  const { resources } = f;
-  const { placement, gatewayClient, pool, namespace, installation } = stack;
-  const { checkpoint } = evidence;
-  const { agent, source, revision, sandbox, sandboxId } = deployment;
-  const harness = await f.waitForProviderHarnessPod(placement, revision);
-  await f.assertProviderOwnedHarness(placement, revision, sandbox, harness, "maintainedLauncher");
-  f.assertWorkspaceMounts(harness);
-  f.assertApprovedOpenShellPrivileges(harness);
-  await f.assertGatewayBootstrapPolicies(placement);
-  assert.equal(
-    harness.spec.containers.find(({ name }) => name === "agent").image,
-    input.images.agent,
-  );
-  assert.equal(
-    harness.spec.initContainers.find(({ name }) => name === "openshell-sandbox-bootstrap")?.image,
-    input.images.sandbox,
-    "the actual trusted bootstrap must use the selected supplier runtime",
-  );
-  const sandboxName = sandbox.metadata.labels["openshell.ai/sandbox-name"];
-  const observedSandbox = await gatewayClient.getSandbox(
-    { workspace: placement, name: sandboxName },
-    AbortSignal.timeout(10_000),
-  );
-  assert.ok(observedSandbox?.id, "read the immutable Sandbox ID from the actual gateway");
-  assert.equal(observedSandbox.id, sandboxId);
-  const installations = await pool.query(
-    "SELECT installation FROM occ.egress_installations WHERE namespace_id = $1 AND revision_id = $2 AND agent_id = $3",
-    [namespace.id, revision.id, agent.id],
-  );
-  assert.equal(
-    installations.rowCount,
-    1,
-    "the real worker must record exactly one installed mapping",
-  );
-  const installed = installations.rows[0].installation;
-  assert.equal(installed.sandboxId, observedSandbox.id);
-  assert.equal(installed.plan.execution.installationId, installation.id);
-  assert.equal(installed.plan.execution.servicePrincipalId, agent.servicePrincipalId);
-  assert.ok(installed.plan.routes.length > 0, "an empty plan cannot prove protected routing");
-  assert.ok(
-    installed.plan.routes.every(
-      ({ binding: routeBinding }) =>
-        routeBinding.source.source.id === source.id && routeBinding.grant.providerTools === "none",
-    ),
-  );
-  const readReceipt = async () => {
-    const status = await gatewayClient.getSandboxPolicyStatus(
-      placement,
-      sandboxName,
-      AbortSignal.timeout(10_000),
-    );
-    const observation = status.loaded_policy_observation;
-    assert.ok(observation, "LOADED or legacy field 3 cannot substitute for a V1 observation");
-    const receipt = observation.enforcement;
-    assert.ok(receipt, "V1 requires current supervisor enforcement evidence");
-    assert.equal(receipt.sandbox_id, observedSandbox.id);
-    assert.equal(receipt.instance_id, installed.enforcement?.instanceId);
-    assert.equal(receipt.policy_version, installed.plan.generation);
-    assert.equal(status.active_version, receipt.policy_version);
-    assert.equal(status.revision.policy_hash, observation.source_policy_hash);
-    assert.match(observation.source_policy_hash, /^[a-f0-9]{64}$/);
-    assert.ok(observation.effective_policy);
-    const effective = structuredClone(observation.effective_policy);
-    const name = `_provider_oce_runtime_${createHash("sha256").update(revision.id).digest("hex").slice(0, 16)}`;
-    assert.equal(observation.inert_provider_rule, name);
-    assert.equal(Object.hasOwn(status.revision.policy.network_policies, name), false);
-    assert.deepEqual(effective.network_policies[name], { name });
-    delete effective.network_policies[name];
-    assert.notEqual(observation.source_policy_hash, receipt.policy_hash);
-    assert.equal(status.loaded_enforcement, undefined);
-    assert.deepEqual(effective, status.revision.policy);
-    assert.ok([2, "POLICY_STATUS_LOADED"].includes(status.revision.status));
-    assert.match(
-      receipt.instance_id,
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-    );
-    assert.match(receipt.policy_hash, /^[a-f0-9]{64}$/);
-    connectedReceiptRevision(receipt.config_revision);
-    connectedReceiptRevision(receipt.provider_env_revision);
-    assert.deepEqual(receipt.enforced_capabilities, [protectedEgressCapability]);
-    // Retain both supplier identities and policies for the subsequent turn's
-    // freshness comparison; enforcement.policy_hash identifies the effective policy.
-    return observation;
-  };
-  const receipt = await readReceipt();
-  await checkpoint("installed", {
-    sourcePolicyHash: receipt.source_policy_hash,
-    effectivePolicyHash: receipt.enforcement.policy_hash,
-    policyVersion: String(receipt.enforcement.policy_version),
-    configRevision: connectedReceiptRevision(receipt.enforcement.config_revision),
-    providerEnvRevision: connectedReceiptRevision(receipt.enforcement.provider_env_revision),
-    capability: protectedEgressCapability,
-    derivation: "inert_runtime_provider_rule",
-  });
-  const pods = await resources("pods", placement);
-  const gatewayPods = pods.filter(
-    ({ metadata }) =>
-      metadata.labels?.["openclaw.dev/agent"] === agent.id &&
-      metadata.labels?.["openclaw.dev/workload-role"] === "gateway",
-  );
-  assert.equal(gatewayPods.length, 1);
-  assert.ok(gatewayPods[0].spec.containers.some(({ image }) => image === input.images.gateway));
-  const supervisors = pods.filter(
-    ({ metadata }) =>
-      metadata.labels?.["openshell.ai/sandbox-id"] === installed.sandboxId &&
-      metadata.labels?.["openshell.ai/boundary-role"] === "supervisor",
-  );
-  assert.equal(supervisors.length, 1, "a separate selected supervisor must own forwarding");
-  assert.ok(supervisors[0].spec.containers.some(({ image }) => image === input.images.supervisor));
-  return { harness, sandboxName, readReceipt, receipt, gatewayPods };
-}
-
-/**
  * Captures process and receipt baselines once, before any measured user turn.
  * @param {Prerequisites} setup
  * @param {PreparedStack} stack
@@ -738,11 +230,19 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
       for (const pid of fs.readdirSync("/proc").filter(x => /^\d+$/.test(x))) {
         try {
           if (!fs.readlinkSync("/proc/" + pid + "/exe").endsWith("/codex")) continue;
-          const stat = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
+          const proc = "/proc/" + pid;
+          const stat = fs.readFileSync(proc + "/stat", "utf8");
           found.push({ pid, start: stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] });
         } catch (error) { if (error.code !== "ENOENT" && error.code !== "EACCES") throw error; }
       }
       if (found.length === 0) throw new Error("No running Codex process observed");
+      // Only the synthetic marker is supplied, never the provider credential.
+      // A failure to inspect a selected Codex process is a failure of this check.
+      for (const { pid } of [...found, {pid: "self"}]) {
+        if (fs.readFileSync("/proc/" + pid + "/environ").includes("SYNTHETIC-OCE-EGRESS-")) {
+          throw new Error("Provider credential marker present in the Agent environment");
+        }
+      }
       process.stdout.write(JSON.stringify(found.sort((a,b) => Number(a.pid) - Number(b.pid))));`,
       ),
     );
@@ -780,6 +280,8 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
       nonce,
       upstreamBefore: provider.observations.length,
     });
+    const { custodyTransitions } = installed;
+    const before = await custodyTransitions.snapshot();
     const result = await f.requestCodexTurnFromGatewayPod({
       namespace: placement,
       gatewayPod: gatewayPods[0].metadata.name,
@@ -799,31 +301,35 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
       assert.equal(result.assistant, nonce);
     } else {
       assertNoConnectedAssistantOutput(result);
-      if (phase !== "fresh-iam-revoked") {
-        // A malformed fixture, model error or EOF is not response-policy proof.
-        // These markers are emitted by the supplier's pre-return HTTP refusal.
-        const failure = JSON.stringify(result.error);
-        assert.ok(
-          typeof failure === "string" &&
-            failure.includes("http_response_pre_return") &&
-            failure.includes(
-              phase === "oversize" ? "response_delivery_failed" : "egress_response_policy",
-            ),
-          "expected the supplier's explicit pre-return refusal in the terminal Codex error",
-        );
-      }
+      // The selected supplier returns an empty HTTP 502. Its private, content-free
+      // transitions distinguish refusal before access from a blocked provider response.
+      assert.match(
+        JSON.stringify(result.error),
+        /\b502\b/,
+        "expected the supplier's public refusal",
+      );
     }
+    const revoked = phase === "fresh-iam-revoked";
+    const transitions = revoked
+      ? ["resolve_refused", "no_permit", "response_blocked"]
+      : [
+          "resolve_accepted",
+          "permit_accepted",
+          expected === "completed" ? "response_released" : "response_blocked",
+        ];
+    const requestId = await custodyTransitions.expectAfter(before, transitions);
     assert.deepEqual(provider.errors, [], "synthetic provider failed independently of enforcement");
     await checkpoint("turn-complete", {
       phase,
       status: result.status,
+      requestId,
       upstreamAfter: provider.observations.length,
     });
-    return nonce;
+    return { nonce, requestId };
   };
   const successfulTurn = async (phase, version) => {
     const before = provider.observations.length;
-    const nonce = await turn(phase);
+    const { nonce, requestId } = await turn(phase);
     const sent = provider.observations.slice(before);
     assert.equal(sent.length, 1, "one Agent operation must cause exactly one provider send");
     assert.equal(sent[0].nonce, nonce);
@@ -837,27 +343,23 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
     );
     assert.equal(sent[0].toolTypes.includes("web_search"), false);
     await unchanged();
+    return requestId;
   };
   return { turn, successfulTurn, unchanged };
 }
 
 /**
  * @param {Prerequisites} setup
- * @param {PreparedStack} stack
  * @param {RunEvidence} evidence
  * @param {OwnedResources} owned
  * @param {InstalledProtection} installed
  * @param {AgentTurns} turns
  */
-async function verifyFirstTurnAndBinaryBypass(setup, stack, evidence, owned, installed, turns) {
-  const {
-    controller,
-    f: { kubectl },
-  } = setup;
-  const { placement } = stack;
+async function verifyManagedClientsAndDirectBypass(setup, evidence, owned, installed, turns) {
+  const { controller } = setup;
   const { checkpoint } = evidence;
   const { provider } = owned;
-  const { harness } = installed;
+  const { inAgent } = installed;
   const { successfulTurn } = turns;
   // The normal Launcher may probe the model during activation. Keep those
   // requests visible and distinct from measured user turns; never reset counts.
@@ -874,42 +376,62 @@ async function verifyFirstTurnAndBinaryBypass(setup, stack, evidence, owned, ins
     ),
   );
   await checkpoint("startup-provider-traffic", { sends: provider.observations.length });
-  await successfulTurn("permitted", "initial");
-  // An ordinary workload binary must not bypass the Codex-only protected route.
-  // Check the real process outcome and the independent upstream counter together.
-  const beforeBypass = provider.observations.length;
-  const bypass = JSON.parse(
-    await kubectl(
-      "exec",
-      harness.metadata.name,
-      "--namespace",
-      placement,
-      "--container",
-      "agent",
-      "--",
-      "node",
-      "-e",
-      String.raw`
-      const { spawnSync } = require("node:child_process");
-      const result = spawnSync("/usr/bin/curl", ["--silent", "--show-error", "--fail", "--max-time", "10",
-        "--request", "POST", "--header", "content-type: application/json", "--data", process.argv[2], process.argv[1]],
-        { encoding: "utf8", timeout: 15000, maxBuffer: 65536 });
-      process.stdout.write(JSON.stringify({ status: result.status, errorCode: result.error?.code }));`,
-      `${controller.providerOrigin}/responses`,
-      JSON.stringify({ model: controller.model, input: "unapproved-binary", store: false }),
-    ),
+  const { installation, custodyTransitions } = installed;
+  assert.equal(installation.enforcement.authorityScope, "execution");
+  for (const { binding } of installation.plan.routes) {
+    assert.equal(binding.source.source.generation, 2, "install the explicitly adopted generation");
+    assert.deepEqual(binding.source.provider, { id: "openai-static-https", generation: 2 });
+    assert.deepEqual(binding.grant, {
+      kind: "inference",
+      models: [controller.model],
+      providerTools: "none",
+    });
+  }
+  const released = ["resolve_accepted", "permit_accepted", "response_released"];
+  const codexRequest = await successfulTurn("permitted", "initial");
+  const beforeSibling = await custodyTransitions.snapshot();
+
+  // An ordinary sibling, with no credential, caller claim or binding header,
+  // gets the same managed operation. A Codex-only allowlist fails this control.
+  await checkpoint("managed-sibling-start", { codexRequest });
+  const nonce = `OCE-EGRESS-${randomUUID()}`;
+  const model = controller.model;
+  const before = provider.observations.length;
+  const delivered = await inAgent(
+    "curl",
+    "-q",
+    "--silent",
+    "--show-error",
+    "--fail",
+    "--max-time",
+    "35",
+    "--header",
+    "content-type: application/json",
+    "--data-binary",
+    JSON.stringify({ model, input: nonce, stream: true, store: false }),
+    "--write-out",
+    "%{http_code}",
+    `${controller.providerOrigin}/responses`,
   );
-  assert.equal(bypass.errorCode, undefined, "the bypass probe must execute, not fail to start");
+  evidence.excludesCredentials(delivered, "managed sibling response");
+  const expected = encodeSyntheticEvents(syntheticResponsesEvents(model, nonce)).toString() + "200";
   assert.ok(
-    [7, 22, 28, 35, 56].includes(bypass.status),
-    "curl must report a concrete network/proxy refusal",
+    delivered === expected,
+    "sibling receives only the complete approved Responses stream and HTTP 200",
   );
-  assert.equal(
-    provider.observations.length,
-    beforeBypass,
-    "unapproved workload egress reached the provider",
-  );
-  await checkpoint("unapproved-binary-denied", { curlStatus: bypass.status, providerSends: 0 });
+  const [sent, ...extra] = provider.observations.slice(before);
+  assert.ok(sent?.nonce === nonce && sent.status === 200 && sent.credentialVersion === "initial");
+  assert.equal(extra.length, 0, "one authenticated sibling request at the independent origin");
+  const siblingRequest = await custodyTransitions.expectAfter(beforeSibling, released);
+  assert.notEqual(siblingRequest, codexRequest, "distinct protected exchanges from two callers");
+  await checkpoint("managed-sibling-received", { codexRequest, siblingRequest, providerSends: 1 });
+
+  // Try raw TCP to the same live destination by IP. The independent listener
+  // counts even a connection that delivered no valid TLS or HTTP request.
+  const observed = await tryDirectTcp(provider, setup.input.provider, inAgent);
+  assert.equal(provider.observations.length, before + 1, "direct probe sent no provider request");
+  await turns.unchanged();
+  await checkpoint("direct-bypass-denied", observed);
 }
 
 /**
@@ -934,7 +456,7 @@ async function revokeExactGrantAndObserveDenial(stack, evidence, owned, deployme
   );
   const knownDenials = new Set(beforeDenials.rows.map(({ id }) => id));
   const beforeDenied = provider.observations.length;
-  await turn("fresh-iam-revoked", "failed");
+  const { requestId } = await turn("fresh-iam-revoked", "failed");
   assert.equal(
     provider.observations.length,
     beforeDenied,
@@ -958,10 +480,7 @@ async function revokeExactGrantAndObserveDenial(stack, evidence, owned, deployme
   assert.equal(denied.details.phase, "before_access");
   assert.equal(denied.details.revisionId, revision.id);
   assert.equal(denied.outcome, "denied");
-  assert.match(
-    denied.details.requestId,
-    /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-  );
+  assert.equal(denied.details.requestId, requestId, "IAM denied the exact supervisor exchange");
   await unchanged();
   await checkpoint("fresh-iam-denial", {
     requestId: denied.details.requestId,
@@ -1055,7 +574,7 @@ async function verifyHostileResponsesAndRecovery(owned, turns) {
   ]) {
     provider.setMode(mode);
     const before = provider.observations.length;
-    const nonce = await turn(mode, "failed");
+    const { nonce } = await turn(mode, "failed");
     assert.equal(
       provider.observations.length,
       before + 1,

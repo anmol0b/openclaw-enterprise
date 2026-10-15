@@ -3,6 +3,7 @@ import { immutableCopy } from "@openclaw-enterprise/utils";
 import { ResourceStateConflictError } from "../errors.ts";
 import {
   attempt,
+  authorizedSend,
   observation,
   object,
   outcome,
@@ -19,6 +20,7 @@ function key(input: SendAttempt): readonly unknown[] {
 function initial(input: SendAttempt): StoredSendReceipt {
   return {
     ...input,
+    authorization: null,
     observation: null,
     outcome: { kind: "uncertain", dispatch: "possible" },
     settled: false,
@@ -37,6 +39,41 @@ export function memoryEgressSendReceipts(
         return false;
       }
       rows.set(id(input), immutableCopy(initial(attempt(input, input.sender))));
+      return true;
+    },
+    authorize: async (input, value) => {
+      const previous = rows.get(id(input));
+      const authorization = authorizedSend(value);
+      const start = Date.parse(authorization.sendStartBy);
+      const at = Date.parse(authorization.authorizedAt);
+      if (
+        !previous ||
+        previous.authorization !== null ||
+        previous.settled ||
+        previous.observation !== null
+      ) {
+        return false;
+      }
+      if (
+        authorization.requestDigest.length !== 64 ||
+        authorization.injectionDigest.length !== 64 ||
+        input.material === null ||
+        start <= at ||
+        start > at + 1000 ||
+        start > Date.parse(input.deadlineAt) ||
+        (input.material.kind === "no_material_required"
+          ? authorization.injectionDigest !==
+              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ||
+            authorization.association.execution.agentId !== input.material.isolationId ||
+            authorization.association.installation.authorityScope !== "execution"
+          : start > Date.parse(input.material.usableUntil)) ||
+        !isDeepStrictEqual(previous.material, input.material) ||
+        authorization.association.installation.instanceId !== input.instanceId ||
+        authorization.association.execution.installationId !== input.material.source.installationId
+      ) {
+        throw new ResourceStateConflictError("Invalid authorized send bounds.");
+      }
+      rows.set(id(input), immutableCopy({ ...previous, authorization }));
       return true;
     },
     save: async (value) => {
@@ -64,6 +101,7 @@ export function memoryEgressSendReceipts(
         (saved.feedback !== null &&
           (saved.feedback !== "fenced" ||
             saved.material === null ||
+            saved.material.kind === "no_material_required" ||
             (saved.observation === null &&
               (!saved.settled ||
                 saved.outcome.kind === "refused" ||
@@ -95,6 +133,7 @@ export function postgresEgressSendReceipts(client: {
       return receipt(
         {
           ...object(row.binding),
+          authorization: row.authorized_dispatch,
           outcome: row.outcome,
           observation: row.observation,
           settled: row.settled,
@@ -107,6 +146,15 @@ export function postgresEgressSendReceipts(client: {
       const result = await client.query(
         "INSERT INTO occ.egress_send_receipts (sender_id,sender_generation,instance_id,use_id,attempt_id,binding,outcome) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING sender_id",
         [...key(input), input, initial(input).outcome],
+      );
+      return result.rows.length === 1;
+    },
+    authorize: async (input, authorization) => {
+      const result = await client.query(
+        "UPDATE occ.egress_send_receipts SET authorized_dispatch=$6 WHERE " +
+          where +
+          " AND authorized_dispatch IS NULL AND NOT settled AND observation IS NULL RETURNING sender_id",
+        [...key(input), authorization],
       );
       return result.rows.length === 1;
     },

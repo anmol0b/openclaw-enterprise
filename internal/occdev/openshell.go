@@ -369,6 +369,37 @@ func (r *runner) installOpenShellGateway(ctx context.Context, state *development
 			return err
 		}
 	}
+	var protectedValues string
+	if state.ProtectedEgress {
+		var err error
+		protectedValues, err = r.writeProtectedOpenShellValues(state)
+		if err != nil {
+			return err
+		}
+	}
+	args := []string{"upgrade", "--install", openShellGatewayService, assets.gatewayChart, "--namespace", namespace, "--kubeconfig", filepath.Join(state.directory, "kubeconfig"), "--kube-context", "k3d-" + state.Cluster, "--timeout", timeout.String()}
+	// The registry contacts OCC at startup. Install both releases before waiting
+	// for the protected Gateway; native PKI hooks still complete synchronously.
+	if !state.ProtectedEgress {
+		args = append(args, "--wait")
+	}
+	args = append(args, openShellGatewayValues(state, assets, protectedValues)...)
+	if err := r.run(ctx, "helm", args...); err != nil {
+		return err
+	}
+	if state.DeploymentMode != "k3d" {
+		data, err := r.output(ctx, "kubectl", "get", "service", openShellGatewayService, "--namespace", namespace, "-o", "jsonpath={.spec.ports[0].nodePort}")
+		if err != nil {
+			return err
+		}
+		if string(data) != fmt.Sprint(openShellNodePort) {
+			return fmt.Errorf("OpenShell gateway did not retain its development NodePort")
+		}
+	}
+	return nil
+}
+
+func openShellGatewayValues(state *developmentState, assets *openShellDevelopmentAssets, protectedValues string) []string {
 	values := []string{
 		"--set-string=fullnameOverride=" + openShellGatewayService,
 		"--set-string=serviceAccount.name=" + openShellGatewayService,
@@ -384,12 +415,8 @@ func (r *runner) installOpenShellGateway(ctx context.Context, state *development
 		"--set=sandboxRuntime.image.pullPolicy=Never",
 		"--set=supervisor.image.pullPolicy=Never",
 	}
-	if state.ProtectedEgress {
-		path, err := r.writeProtectedOpenShellValues(state)
-		if err != nil {
-			return err
-		}
-		values = append(values, "-f", path)
+	if protectedValues != "" {
+		values = append(values, "-f", protectedValues)
 	} else {
 		values = append(values, "--set=pkiInitJob.enabled=false", "--set=server.disableTls=true", "--set=server.auth.allowUnauthenticatedUsers=true")
 	}
@@ -405,26 +432,7 @@ func (r *runner) installOpenShellGateway(ctx context.Context, state *development
 	} {
 		values = append(values, openShellImageValues(selected.prefix, selected.image)...)
 	}
-	args := []string{"upgrade", "--install", openShellGatewayService, assets.gatewayChart, "--namespace", namespace, "--kubeconfig", filepath.Join(state.directory, "kubeconfig"), "--kube-context", "k3d-" + state.Cluster, "--timeout", timeout.String()}
-	// The registry contacts OCC at startup. Install both releases before waiting
-	// for the protected Gateway; native PKI hooks still complete synchronously.
-	if !state.ProtectedEgress {
-		args = append(args, "--wait")
-	}
-	args = append(args, values...)
-	if err := r.run(ctx, "helm", args...); err != nil {
-		return err
-	}
-	if state.DeploymentMode != "k3d" {
-		data, err := r.output(ctx, "kubectl", "get", "service", openShellGatewayService, "--namespace", namespace, "-o", "jsonpath={.spec.ports[0].nodePort}")
-		if err != nil {
-			return err
-		}
-		if string(data) != fmt.Sprint(openShellNodePort) {
-			return fmt.Errorf("OpenShell gateway did not retain its development NodePort")
-		}
-	}
-	return nil
+	return values
 }
 
 func (r *runner) openShellGatewayAddress(ctx context.Context, namespace string) (string, error) {

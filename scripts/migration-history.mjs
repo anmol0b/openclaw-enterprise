@@ -112,8 +112,20 @@ function classifyReceipts(receipts, manifest) {
       ...manifest.entries.slice(providerCompleted.entries.length),
     ];
     if (receiptsMatchEntries(receipts, providerEntries)) {
-      if (receipts.length === 54) {
+      if (receipts.length === 55) {
+        return "preStaticEgress";
+      }
+      if (receipts.length === 56) {
         return "preSendReceipts";
+      }
+      if (receipts.length === 57) {
+        return "prePreparedGitHubCustody";
+      }
+      if (receipts.length === 58) {
+        return "prePreparedGitHubEgress";
+      }
+      if (receipts.length === 59) {
+        return "preCredentialFreeMetadata";
       }
       if (receipts.length === manifest.entries.length) {
         return "completed";
@@ -181,6 +193,12 @@ function classifyReceipts(receipts, manifest) {
       if (receipts.length === 52) {
         return "preComputePreparationFailureEvidence";
       }
+      if (receipts.length === 53) {
+        return "preCredentialSourcePat";
+      }
+      if (receipts.length === 54) {
+        return "preComputeRevisionAdmission";
+      }
       return "providerCompleted";
     }
     if (!receiptsMatchEntries(receipts, manifest.entries)) {
@@ -198,8 +216,20 @@ function classifyReceipts(receipts, manifest) {
   if (receipts.length === 25) {
     return "main";
   }
-  if (receipts.length === 54) {
+  if (receipts.length === 55) {
+    return "preStaticEgress";
+  }
+  if (receipts.length === 56) {
     return "preSendReceipts";
+  }
+  if (receipts.length === 57) {
+    return "prePreparedGitHubCustody";
+  }
+  if (receipts.length === 58) {
+    return "prePreparedGitHubEgress";
+  }
+  if (receipts.length === 59) {
+    return "preCredentialFreeMetadata";
   }
   if (receipts.length === manifest.entries.length) {
     return "completed";
@@ -281,6 +311,12 @@ function classifyReceipts(receipts, manifest) {
   }
   if (receipts.length === 52) {
     return "preComputePreparationFailureEvidence";
+  }
+  if (receipts.length === 53) {
+    return "preCredentialSourcePat";
+  }
+  if (receipts.length === 54) {
+    return "preComputeRevisionAdmission";
   }
   refuse("an incomplete or unsupported development history is installed");
 }

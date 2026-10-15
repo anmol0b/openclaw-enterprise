@@ -12,6 +12,7 @@ export function bindPlatformUnitOfWork(
       "find",
       "insert",
       "save",
+      "authorize",
     ]),
     installations: bindRepository(repositories.installations, lifetime, [
       "findInstallation",
@@ -61,6 +62,7 @@ export function bindPlatformUnitOfWork(
     ]),
     credentialSources: bindRepository(repositories.credentialSources, lifetime, [
       "findEgressInstallation",
+      "findRevisionEgressInstallation",
       "isEgressMaterialRejected",
       "findCredentialSource",
       "listCredentialSources",

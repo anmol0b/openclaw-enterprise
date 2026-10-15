@@ -1,5 +1,6 @@
+import { assertExecutionAdmission } from "@openclaw-enterprise/contracts";
 import { postgresEgressSendReceipts } from "./egress-send-receipts.ts";
-import type { StaticEgressSource, EgressInstallation } from "@openclaw-enterprise/contracts";
+import type { ProtectedEgressSource, EgressInstallation } from "@openclaw-enterprise/contracts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { DatabaseError } from "pg";
@@ -592,7 +593,7 @@ function credentialSourceFromRow(row: PostgresRow): Readonly<CredentialSource> {
     config: config as Record<string, string>,
     ...(row.egress == null
       ? {}
-      : { egress: jsonObject(row.egress) as unknown as StaticEgressSource }),
+      : { egress: jsonObject(row.egress) as unknown as ProtectedEgressSource }),
     secrets: Object.fromEntries(
       Object.entries(secretIds as Record<string, string>).map(([field, id]) => [
         field,
@@ -659,18 +660,36 @@ function revisionFromRow(
     harness: AgentRevision["harness"];
     compute: AgentRevision["compute"];
     sandbox_driver_id?: AgentRevision["sandboxDriverId"];
-    harness_auth: AgentRevision["harnessAuth"];
+    harness_auth: AgentRevision["harnessAuth"] & { readonly protectedExecutionVersion?: number };
     credential_sources?: AgentRevision["credentialSources"];
     egress_plan?: AgentRevision["egressPlan"];
+    execution_admission: AgentRevision["executionAdmission"];
     secret_driver_id?: AgentRevision["secretDriverId"];
     secret_bindings?: AgentRevision["secretBindings"];
     plugins?: AgentRevision["plugins"];
     plugin_approvers?: AgentRevision["pluginApprovers"];
     repository_credentials?: AgentRevision["repositoryCredentials"];
   };
+  try {
+    assertExecutionAdmission({
+      executionAdmission: admitted.execution_admission,
+      ...(admitted.egress_plan === undefined ? {} : { egressPlan: admitted.egress_plan }),
+    });
+  } catch {
+    throw new SavedConfigurationReadError(
+      "configuration",
+      "Persisted AgentRevision execution admission is missing, unsupported or inconsistent.",
+    );
+  }
+  // Older readers require an exact Harness-auth shape, rejecting the protected
+  // reader version before handing a revision to Compute. It grants no authority.
+  const { protectedExecutionVersion, ...harnessAuth } = admitted.harness_auth ?? {};
+  const protectedAdmission = admitted.execution_admission.mode === "protected";
   if (
     Object.hasOwn(admitted, "service_account") ||
-    !validHarnessAuthSnapshot(admitted.harness_auth, text(row, "namespace_id"))
+    protectedExecutionVersion !==
+      (protectedAdmission ? admitted.execution_admission.version : undefined) ||
+    !validHarnessAuthSnapshot(harnessAuth, text(row, "namespace_id"))
   ) {
     throw new SavedConfigurationReadError(
       "harnessAuth",
@@ -732,7 +751,8 @@ function revisionFromRow(
     ...(admitted.repository_credentials === undefined
       ? {}
       : { repositoryCredentials: admitted.repository_credentials }),
-    harnessAuth: admitted.harness_auth,
+    harnessAuth,
+    executionAdmission: admitted.execution_admission,
     ...(admitted.egress_plan === undefined ? {} : { egressPlan: admitted.egress_plan }),
     ...(admitted.credential_sources === undefined
       ? {}
@@ -2630,7 +2650,7 @@ export class PostgresPlatformState implements PlatformStateStore {
           "SELECT 1 FROM occ.egress_rejected_material WHERE namespace_id = $1 AND secret_driver_id = $2 AND material_id = $3 AND material_version = $4",
           [
             evidence.source.namespaceId,
-            evidence.secretDriver.id,
+            evidence.kind === "static" ? evidence.secretDriver.id : evidence.source.provider.id,
             evidence.materialId,
             evidence.materialVersion,
           ],
@@ -2642,7 +2662,7 @@ export class PostgresPlatformState implements PlatformStateStore {
           "INSERT INTO occ.egress_rejected_material (namespace_id, secret_driver_id, material_id, material_version) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
           [
             evidence.source.namespaceId,
-            evidence.secretDriver.id,
+            evidence.kind === "static" ? evidence.secretDriver.id : evidence.source.provider.id,
             evidence.materialId,
             evidence.materialVersion,
           ],
@@ -2652,6 +2672,16 @@ export class PostgresPlatformState implements PlatformStateStore {
         const result = await client.query(
           "SELECT installation FROM occ.egress_installations WHERE sender_id = $1 AND sandbox_id = $2",
           [senderId, sandboxId],
+        );
+        const row = rows(result.rows)[0];
+        return row === undefined
+          ? undefined
+          : immutableCopy(jsonObject(row.installation) as unknown as EgressInstallation);
+      },
+      findRevisionEgressInstallation: async (namespaceId, revisionId) => {
+        const result = await client.query(
+          "SELECT installation FROM occ.egress_installations WHERE namespace_id = $1 AND revision_id = $2",
+          [namespaceId, revisionId],
         );
         const row = rows(result.rows)[0];
         return row === undefined
@@ -3722,7 +3752,14 @@ export class PostgresPlatformState implements PlatformStateStore {
               ...(revision.repositoryCredentials === undefined
                 ? {}
                 : { repository_credentials: revision.repositoryCredentials }),
-              harness_auth: revision.harnessAuth,
+              harness_auth:
+                revision.executionAdmission.mode === "protected"
+                  ? {
+                      ...revision.harnessAuth,
+                      protectedExecutionVersion: revision.executionAdmission.version,
+                    }
+                  : revision.harnessAuth,
+              execution_admission: revision.executionAdmission,
               ...(revision.egressPlan === undefined ? {} : { egress_plan: revision.egressPlan }),
               ...(revision.credentialSources === undefined
                 ? {}
