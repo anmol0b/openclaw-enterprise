@@ -7,7 +7,7 @@ same allowed operation. A different execution, even of the same Agent, cannot
 inherit that authority. There is no caller binary allowlist or client hook.
 
 The bundled legacy OpenShell release cannot enforce this profile. Before using a
-candidate pair, [qualify its installed dispatch and response custody](../../testing/static-egress.md#qualify-the-installed-repository-response-and-dispatch-custody)
+candidate pair, [qualify its installed dispatch and response custody](../../testing/protected-repository-custody.md)
 and test the actual static inference path. A repository metadata read exercises the
 shared exchange but does not establish static inference or Git transport support.
 

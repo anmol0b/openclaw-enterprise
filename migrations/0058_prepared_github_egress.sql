@@ -63,6 +63,9 @@ RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
     AND peer ?& peer_fields AND peer - peer_fields = '{}'::jsonb
     AND exec ?& exec_fields AND exec - exec_fields = '{}'::jsonb
     AND peer->>'peerKeyId' ~ '^[A-Za-z0-9_-]{43}$' AND occ.egress_ref_is_valid(peer->'plan')
+    AND peer->>'policyHash' ~ '^[0-9a-f]{64}$' AND peer->>'authorityScope' = 'execution'
+    AND assoc->>'exchangeId' ~ '^[0-9a-f]{64}$' AND assoc->>'responseId' ~ '^[0-9a-f]{64}$'
+    AND assoc->>'custodyId' ~ '^[0-9a-f]{64}$'
     AND length(peer->>'sandboxId') > 0 AND length(peer->>'configurationId') > 0
     AND exec->>'namespaceId' = material->'source'->>'namespaceId' AND exec->>'agentId' = material->>'isolationId'
     AND NOT EXISTS (SELECT FROM unnest(exec_fields) AS t(k)
@@ -73,7 +76,7 @@ RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
       dispatch #> '{association,execution}' AS exec,
       ARRAY['association','requestDigest','injectionDigest','authorizedAt','sendStartBy'] AS dispatch_fields,
       ARRAY['execution','installation','exchangeId','responseId','custodyId'] AS assoc_fields,
-      ARRAY['sandboxId','instanceId','configurationId','peerKeyId','plan'] AS peer_fields,
+      ARRAY['sandboxId','instanceId','configurationId','peerKeyId','policyHash','authorityScope','plan'] AS peer_fields,
       ARRAY['installationId','namespaceId','agentId','servicePrincipalId','revisionId','executionId'] AS exec_fields) association
 $$;
 --> statement-breakpoint

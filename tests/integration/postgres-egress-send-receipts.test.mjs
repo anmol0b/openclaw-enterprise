@@ -502,11 +502,13 @@ test(
         instanceId: input.instanceId,
         configurationId: randomUUID(),
         peerKeyId: Buffer.alloc(32, 7).toString("base64url"),
+        policyHash: digest,
+        authorityScope: "execution",
         plan: ref(),
       },
-      exchangeId: randomUUID(),
-      responseId: randomUUID(),
-      custodyId: randomUUID(),
+      exchangeId: createHash("sha256").update(randomUUID()).digest("hex"),
+      responseId: createHash("sha256").update(randomUUID()).digest("hex"),
+      custodyId: createHash("sha256").update(randomUUID()).digest("hex"),
     };
     const authorization = {
       association,
@@ -534,7 +536,15 @@ test(
           installation: { ...association.installation, peerKeyId: "not an enrolled key" },
         },
       ],
-      [material, { ...association, custodyId: "" }],
+      [material, { ...association, custodyId: randomUUID() }],
+      ...[
+        { authorityScope: undefined },
+        { authorityScope: "connector" },
+        { policyHash: "loaded" },
+      ].map((change) => [
+        material,
+        { ...association, installation: { ...association.installation, ...change } },
+      ]),
       [{ ...material, extra: "forbidden evidence" }, association],
       [{ ...material, usableUntil: instant(200000) }, association],
     ]) {

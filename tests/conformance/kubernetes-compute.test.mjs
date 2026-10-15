@@ -8960,6 +8960,7 @@ async function exerciseEmbeddedReplacement({ providerId, model, environmentName,
     harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
     harnessAuth: apiKeyAuth,
     compute: { id: driver.id, implementation: driver.implementation },
+    executionAdmission: { version: 2, mode: "unprotected" },
     servicePrincipalId: "service-principal-embedded-recovery",
     createdAt: tenant.createdAt,
   };
@@ -8990,7 +8991,6 @@ async function exerciseEmbeddedReplacement({ providerId, model, environmentName,
     },
   };
   const replacement = {
-    executionAdmission: { version: 2, mode: "unprotected" },
     ...base,
     id: "revision-embedded-recovery-restored",
     revision: 8,
