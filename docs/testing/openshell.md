@@ -102,6 +102,10 @@ node scripts/ci/run-tests.mjs run openshell \
   --results "$RUNNER_TEMP/results/openshell.json"
 ```
 
+The Codex account must permit `:danger-full-access`; OpenShell supplies the outer
+sandbox. The live probe checks the effective profile before starting inference
+and fails immediately if managed policy selects a restricted sandbox.
+
 Hosted CI runs the default Codex case. To run the native case the same way,
 also export `OCC_TEST_OPENSHELL_HARNESS=openclaw`.
 
