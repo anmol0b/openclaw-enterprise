@@ -275,6 +275,7 @@ message NetworkMiddlewareConfig {
   int32 order = 6;
   bool credential_authority = 7;
   repeated CredentialConnector credential_connectors = 8;
+  bool execution_authority = 9;
 }
 
 message MiddlewareEndpointSelector {

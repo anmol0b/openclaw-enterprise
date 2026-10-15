@@ -399,9 +399,6 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 			"configuration": map[string]any{"binaries": openShellCodexBinaries()},
 		}
 		if s.ProtectedEgress {
-			if err := validateCredentialConnector(s.CredentialConnector, reference); err != nil {
-				return err
-			}
 			if s.egressKeyID == "" {
 				return fmt.Errorf("protected egress requires the generated OpenShell JWT key identifier")
 			}

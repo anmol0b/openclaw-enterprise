@@ -26,7 +26,6 @@ func TestProtectedEgressSelectionFailsBeforeEffects(t *testing.T) {
 	for _, key := range []string{"OCC_DEVELOPMENT_OPENSHELL_HELM_CHART", "OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART"} {
 		env[key] = "/explicit/chart"
 	}
-	env["OCC_DEVELOPMENT_EGRESS_CONNECTOR"] = `{"path":"/usr/bin/model-client","sha256":"` + strings.Repeat("b", 64) + `","image":"` + env["OCC_KUBERNETES_RUNTIME_IMAGE"] + `","verification":"operator-verified-image-executable"}`
 	r := &runner{env: env}
 	if enabled, err := r.protectedEgressSelection("kubernetes", "openshell"); err != nil || !enabled {
 		t.Fatalf("complete explicit selection refused: %v", err)
@@ -46,14 +45,6 @@ func TestProtectedEgressSelectionFailsBeforeEffects(t *testing.T) {
 		}
 		env[key] = value
 	}
-	savedPin := env["OCC_DEVELOPMENT_EGRESS_CONNECTOR"]
-	for _, pin := range []string{"{}", strings.Replace(savedPin, "/usr/bin/model-client", "model-client", 1), strings.Replace(savedPin, "/usr/bin/model-client", "/usr/bin/../model-client", 1), strings.Replace(savedPin, strings.Repeat("b", 64), "", 1), strings.Replace(savedPin, "registry.example/runtime", "registry.example/other", 1), strings.Replace(savedPin, "operator-verified-image-executable", "discovered", 1)} {
-		env["OCC_DEVELOPMENT_EGRESS_CONNECTOR"] = pin
-		if _, err := r.protectedEgressSelection("kubernetes", "openshell"); err == nil {
-			t.Fatal("accepted invalid connector pin")
-		}
-	}
-	env["OCC_DEVELOPMENT_EGRESS_CONNECTOR"] = savedPin
 	// Only an explicitly selected owned private host can receive the native alias.
 	for _, address := range []string{"", "127.0.0.1", "0.0.0.0", "169.254.169.254", "8.8.8.8", "::1", "172.030.42.1", "host.example.test"} {
 		env["OCC_DEVELOPMENT_OPENSHELL_HOST_GATEWAY_IP"] = address
@@ -125,7 +116,6 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 	}
 	state := kubernetesOnlyOpenShellState(t)
 	state.ProtectedEgress = true
-	state.CredentialConnector = &credentialConnector{Path: "/usr/bin/model-client", SHA256: strings.Repeat("b", 64), Image: "registry.example/runtime@" + profileTestDigest, Verification: "operator-verified-image-executable"}
 	state.DatabaseName = "openclaw_k8s_connected"
 	state.OpenShellHostGatewayIP = "172.30.42.1"
 	assets := &openShellDevelopmentAssets{gatewayChart: supplierChart, gatewayImage: "registry.example/gateway@" + profileTestDigest,

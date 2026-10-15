@@ -356,7 +356,7 @@ export async function staticEgressFixture(
     { gatewayClient },
   );
   t.after(() => backend.client.close());
-  const egressOptions = { middlewareName: "oce-authority", credentialConnectors: [{ path: "/usr/bin/model-client", sha256: "c1".repeat(32) }] };
+  const egressOptions = { middlewareName: "oce-authority", authorityScope: "execution" };
   const sandbox = new OpenShellSandboxDriver(
     {
       egress: egressOptions,
@@ -389,7 +389,7 @@ export async function staticEgressFixture(
     sandbox,
   });
   const catalog = new OpenShellCredentialGatewayDriver(
-    { binaries: egressOptions.credentialConnectors.map((pin) => pin.path) },
+    { binaries: ["/usr/bin/model-client"] },
     { id: "openshell-credentials", backend },
   );
   const placement = createTestKubernetesComputeDriver("placement", {

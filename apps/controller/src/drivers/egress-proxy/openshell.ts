@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
   Backend,
@@ -20,7 +19,7 @@ import { openAiStaticProvider } from "./openai-provider.ts";
 
 export interface OpenShellEgressOptions {
   readonly middlewareName: string;
-  readonly credentialConnectors: readonly { readonly path: string; readonly sha256: string }[];
+  readonly authorityScope: "execution";
 }
 
 // Proto3 omits default fields; compare their semantics while retaining every nondefault.
@@ -87,6 +86,7 @@ function enforcementEvidence(
   const effective = asRecord(observation?.effective_policy);
   const evidence = asRecord(observation?.enforcement);
   const registeredKey = observation?.registered_exchange_public_key;
+  const authority = asRecord(asRecord(effective?.network_middlewares)?.["oce-egress"]);
   if (
     !revision ||
     !observation ||
@@ -111,10 +111,9 @@ function enforcementEvidence(
     observation.source_policy_hash !== revision.policy_hash ||
     revisionNumber(evidence.config_revision) === undefined ||
     revisionNumber(evidence.provider_env_revision) === undefined ||
-    !isDeepStrictEqual(
-      asRecord(asRecord(effective.network_middlewares)?.["oce-egress"])?.credential_connectors,
-      options.credentialConnectors,
-    ) ||
+    authority?.execution_authority !== true || authority.credential_authority !== true ||
+    authority.middleware !== options.middlewareName ||
+    (Array.isArray(authority.credential_connectors) && authority.credential_connectors.length !== 0) ||
     !isDeepStrictEqual(evidence.enforced_capabilities, capabilities)
   ) {
     return undefined;
@@ -158,7 +157,7 @@ function enforcementEvidence(
     instanceId: evidence.instance_id,
     policyHash: evidence.policy_hash,
     peerKeyId: Buffer.from(registeredKey).toString("base64url"),
-    credentialConnectors: options.credentialConnectors,
+    authorityScope: "execution" as const,
     // Local change fence, not the supplier's canonical policy hash. Both supplier
     // identities and complete decoded policies must remain stable on revalidation.
     configurationId: createHash("sha256")
@@ -207,7 +206,6 @@ export function openShellEgressConfiguration(
           `oce-egress-${index}`,
           {
             name: `oce-egress-${index}`,
-            binaries: options.credentialConnectors.map(({ path }) => ({ path })),
             endpoints: [
               {
                 host: origin.hostname,
@@ -229,7 +227,7 @@ export function openShellEgressConfiguration(
         on_error: "fail_closed",
         endpoints: { include: hosts },
         credential_authority: true,
-        credential_connectors: options.credentialConnectors,
+        execution_authority: true,
       },
     },
   });
@@ -247,22 +245,10 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
   static readonly configurationSchema = {
     type: "object",
     additionalProperties: false,
-    required: ["middlewareName", "credentialConnectors"],
+    required: ["middlewareName", "authorityScope"],
     properties: {
       middlewareName: { type: "string", minLength: 1 },
-      credentialConnectors: {
-        type: "array",
-        minItems: 1,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["path", "sha256"],
-          properties: {
-            path: { type: "string", pattern: "^/" },
-            sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
-          },
-        },
-      },
+      authorityScope: { type: "string", const: "execution" },
     },
   };
 
@@ -270,26 +256,10 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     const value = asRecord(configuration);
     if (
       !value ||
-      Object.keys(value).some((key) => !["middlewareName", "credentialConnectors"].includes(key)) ||
+      Object.keys(value).some((key) => !["middlewareName", "authorityScope"].includes(key)) ||
       typeof value.middlewareName !== "string" ||
       !value.middlewareName.trim() ||
-      !Array.isArray(value.credentialConnectors) ||
-      value.credentialConnectors.length === 0 ||
-      value.credentialConnectors.some((pin) => {
-        const item = asRecord(pin);
-        return (
-          !item ||
-          Object.keys(item).some((key) => !["path", "sha256"].includes(key)) ||
-          typeof item.path !== "string" ||
-          !item.path.startsWith("/") ||
-          item.path === "/" ||
-          posix.normalize(item.path) !== item.path ||
-          item.path.endsWith("/") ||
-          [...item.path].some((char) => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127) ||
-          typeof item.sha256 !== "string" ||
-          !/^[a-f0-9]{64}$/.test(item.sha256)
-        );
-      })
+      value.authorityScope !== "execution"
     ) {
       throw new Error("Invalid protected OpenShell egress configuration.");
     }
