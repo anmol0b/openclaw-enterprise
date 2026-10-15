@@ -60,6 +60,7 @@ import {
   DependencyUnavailableError,
   ResourceStateConflictError,
   ServiceAccountCredentialSecretExistsError,
+  TransientDependencyError,
   resolveConfiguredHarnessId,
 } from "../../packages/occ/src/index.ts";
 import {
@@ -1557,6 +1558,8 @@ test("custom Codex endpoints qualify every non-primary model selection before dr
               models: { [ref("entry-policy")]: {}, [ref("small")]: { alias: "entry-small" } },
               modelPolicy: { allow: [ref("gpt-5"), ref("entry-allow/*")] },
             },
+            // An entry whose only model setting is its policy map.
+            helper: { models: { [ref("helper-policy")]: {} } },
           },
         },
         tools: { exec: { reviewer: { model: ref("reviewer") } } },
@@ -1616,6 +1619,7 @@ test("custom Codex endpoints qualify every non-primary model selection before dr
       [qualified("entry-policy")]: {},
       [qualified("small")]: { alias: "entry-small" },
     });
+    assert.deepEqual(rendered.agents.entries.helper.models, { [qualified("helper-policy")]: {} });
     assert.equal(rendered.tools.exec.reviewer.model, qualified("reviewer"));
     assert.equal(rendered.hooks.gmail.model, qualified("gmail"));
     assert.equal(rendered.hooks.mappings[0].model, qualified("hook"));
@@ -5251,6 +5255,7 @@ test("the canonical Kubernetes runtime validates the dedicated Codex model endpo
     "https://192.0.2.1/v1",
     "https://192.0.2.1\\v1",
     "https:\\\\192.0.2.1/v1",
+    "HTTPS://192.0.2.1/v1",
     // These concrete URL forms remain valid here; this does not prove provider
     // support or reachability through a deployment's network policy.
     "https://[2001:db8::1]/v1",
@@ -5279,10 +5284,6 @@ test("the canonical Kubernetes runtime validates the dedicated Codex model endpo
     "https://%2A.example.test/v1",
     "https://ex%2aample.test/v1",
     "https://＊.example.test/v1",
-    "https://192.168.1/v1",
-    "https://2130706433/v1",
-    "https://0177.0.0.1/v1",
-    "https://127.1/v1",
     "https://models.example.test:0/v1",
     "https://models.example.test:000/v1",
     "https://models.example.test/v1?key=fixture",
@@ -5291,6 +5292,22 @@ test("the canonical Kubernetes runtime validates the dedicated Codex model endpo
     assert.throws(
       () => createKubernetesComputeDriver(options({ runtime: { ...runtime, codexModelBaseUrl } })),
       /Codex model endpoint/,
+    );
+  }
+  // IPv4 hosts the URL parser rewrites to another address name the IPv4 rule.
+  for (const codexModelBaseUrl of [
+    "https://192.168.1/v1",
+    "https://2130706433/v1",
+    "https://0177.0.0.1/v1",
+    "https://127.1/v1",
+  ]) {
+    assert.throws(
+      () => createKubernetesComputeDriver(options({ runtime: { ...runtime, codexModelBaseUrl } })),
+      {
+        message:
+          "Codex model endpoint IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
+      },
+      codexModelBaseUrl,
     );
   }
   // Spellings the URL parser rewrites to https://models.example.test/v1 (finding 1292), refused
@@ -17754,6 +17771,134 @@ for (const embedded of [true, false]) {
     }
   });
 }
+
+// A request timeout outside any preparation stage names the timeout, not its cause: the
+// deadline's DOMException carries TIMEOUT_ERR (code 23), which once read as an HTTP status and
+// logged KUBERNETES_API_REJECTED status 23 (finding 1386). A real API refusal keeps its status.
+test("Kubernetes preparation diagnostics name a request timeout and keep real API statuses", async (context) => {
+  const { ApiException } = createRequire(
+    new URL("../../apps/controller/package.json", import.meta.url),
+  )("@kubernetes/client-node");
+  {
+    const fixture = workspaceSetupFixture(true);
+    const clients = await fixture.driver.apiClients;
+    // request() makes its deadline right before it calls the read, so the latest
+    // AbortSignal.timeout is this read's deadline; the read lets it lapse while in flight.
+    let deadline;
+    const timeout = context.mock.method(AbortSignal, "timeout", () => {
+      deadline = new AbortController();
+      return deadline.signal;
+    });
+    clients.core.listNamespace = async () => {
+      deadline.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+      throw deadline.signal.reason;
+    };
+    const error = await fixture.driver.prepareRevision(fixture.revision, fixture.context).then(
+      () => assert.fail("the Namespace read must time out"),
+      (failure) => failure,
+    );
+    timeout.mock.restore();
+    assert.equal(error.name, "TransientDependencyError");
+    assert.equal(error.reason, "timeout");
+    assert.deepEqual(fixture.driver.describePrepareRevisionFailure(error), {
+      code: "KUBERNETES_API_TIMEOUT",
+      stage: "prepare_revision",
+      errorClass: "KubernetesRequestTimeout",
+      message: "Kubernetes API request timed out.",
+    });
+  }
+  {
+    const fixture = workspaceSetupFixture(true);
+    const clients = await fixture.driver.apiClients;
+    clients.core.listNamespace = async () => {
+      throw new ApiException(403, "Forbidden", JSON.stringify({ kind: "Status", code: 403 }), {});
+    };
+    const error = await fixture.driver.prepareRevision(fixture.revision, fixture.context).then(
+      () => assert.fail("the Namespace read must be refused"),
+      (failure) => failure,
+    );
+    assert.deepEqual(fixture.driver.describePrepareRevisionFailure(error), {
+      code: "KUBERNETES_API_REJECTED",
+      stage: "prepare_revision",
+      errorClass: "KubernetesApiError",
+      message: "The Kubernetes API rejected revision preparation.",
+      status: 403,
+    });
+  }
+  // An abort that is no Kubernetes answer never reads as an HTTP status.
+  const fixture = workspaceSetupFixture(true);
+  for (const name of ["TimeoutError", "AbortError"]) {
+    const diagnostic = fixture.driver.describePrepareRevisionFailure(
+      new DOMException("The operation was aborted.", name),
+    );
+    assert.equal(diagnostic.code, "KUBERNETES_PREPARATION_FAILED", name);
+    assert.equal(Object.hasOwn(diagnostic, "status"), false, name);
+  }
+});
+
+// The Agent Gateway's transient failure is classified already, and its cause is the Gateway's
+// socket error: the diagnostic names the Gateway instead of walking on to that cause, which
+// once logged KUBERNETES_API_UNAVAILABLE "The Kubernetes API server is unreachable." for a
+// refused Gateway route (finding 1391). The pass still rethrows the same error, so the worker
+// keeps retrying it within the deadline.
+test("Kubernetes preparation diagnostics name the Agent Gateway for its own transient failure", async () => {
+  const refused = Object.assign(new Error("connect ECONNREFUSED 10.43.0.10:18789"), {
+    code: "ECONNREFUSED",
+  });
+  for (const [failure, message] of [
+    [
+      new TransientDependencyError(
+        "agent_gateway",
+        "unreachable",
+        "The Agent Gateway route was unreachable (ECONNREFUSED).",
+        { cause: refused },
+      ),
+      "The Agent Gateway route was unreachable (ECONNREFUSED).",
+    ],
+    [
+      new TransientDependencyError(
+        "agent_gateway",
+        "timeout",
+        "The Agent Gateway did not answer within its connection budget.",
+        { cause: new DOMException("The operation was aborted due to timeout", "TimeoutError") },
+      ),
+      "The Agent Gateway did not answer within its connection budget.",
+    ],
+  ]) {
+    const fixture = workspaceSetupFixture(false);
+    fixture.state.ready = true;
+    // The Deployment-backed Codex Harness enrolls its workspace node after the Gateway starts,
+    // outside any tagged preparation stage; enrollment throws what the Gateway client throws.
+    fixture.driver.nodeEnrollment.createSetup = async () => {
+      throw failure;
+    };
+    const error = await fixture.driver.prepareRevision(fixture.revision, fixture.context).then(
+      () => assert.fail("workspace node enrollment must fail"),
+      (rejected) => rejected,
+    );
+    assert.equal(error, failure);
+    assert.deepEqual(fixture.driver.describePrepareRevisionFailure(error), {
+      code: "AGENT_GATEWAY_UNAVAILABLE",
+      stage: "prepare_revision",
+      errorClass: "TransientDependencyError",
+      message,
+    });
+  }
+  // OpenShell's admission limit names itself too. Its message exceeds the worker's 256-character
+  // bound, so the diagnostic leaves it out rather than have the worker drop the whole line.
+  const { OpenShellAdmissionLimitError } =
+    await import("../../apps/controller/src/drivers/sandbox/openshell-gateway-errors.ts");
+  assert.deepEqual(
+    workspaceSetupFixture(false).driver.describePrepareRevisionFailure(
+      new OpenShellAdmissionLimitError("CreateSandbox", Object.assign(new Error("8"), { code: 8 })),
+    ),
+    {
+      code: "SANDBOX_ADMISSION_LIMIT_REACHED",
+      stage: "prepare_revision",
+      errorClass: "TransientDependencyError",
+    },
+  );
+});
 
 for (const embedded of [true, false]) {
   test(`Kubernetes ${embedded ? "embedded" : "dedicated"} failed workspace initialization reports safe evidence and retains retry content`, async () => {
