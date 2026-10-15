@@ -176,7 +176,7 @@ const loaded = await loadInstallationConfiguration({mode:'production', environme
 assert.equal(loaded.installation.backend[0].configuration.auth.mode,'mtls');
 assert.equal(loaded.egressAuthority.keyId,'test-kid');
 assert.equal(loaded.egressAuthority.issuer,'openshell-gateway:openshell-gateway');
-assert.equal(loaded.installation.backend[0].drivers.egress_proxy,loaded.egressProxyDriver.id);
+assert.equal(loaded.installation.backend[0].drivers.conduit,loaded.conduitDriver.id);
 `
 	parse := exec.Command(realNode, "--input-type=module", "-e", program, filepath.Join(state.directory, "installation.yaml"))
 	parse.Dir = state.Repository

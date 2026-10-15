@@ -54,7 +54,7 @@ export function driverHasCapabilityContract(driver: Driver): boolean {
         typeof candidate.readCredentialInput === "function")
     );
   }
-  if (driver.capability === "egress_proxy") {
+  if (driver.capability === "conduit") {
     const control = asRecord(candidate.sourceControl);
     return (
       control !== undefined &&
@@ -77,7 +77,7 @@ export function driverHasCapabilityContract(driver: Driver): boolean {
       }) &&
       [
         "configureRevision",
-        "attachmentStatus",
+        "wiringStatus",
         "verifyInstallation",
         "withdrawBinding",
         "removeRevision",

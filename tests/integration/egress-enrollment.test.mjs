@@ -272,7 +272,7 @@ test(
         command: ["node", script],
         workspaceMounts: [],
         credentialAttachments: [],
-        egressAttachment: f.attachment,
+        conduitWiring: f.attachment,
         labels: { "openclaw.dev/revision": f.revision.id },
         files: [],
         environment: Object.entries(environment).map(([name, value]) => ({ name, value })),
@@ -289,7 +289,7 @@ test(
     );
     // Consume the same independently verified adapter observation that Compute
     // commits. State is real; this test does not manufacture an installation receipt.
-    const installed = await f.egress.attachmentStatus({ ...f.context, signal }, f.attachment);
+    const installed = await f.egress.wiringStatus({ ...f.context, signal }, f.attachment);
     assert.ok(installed);
     await f.controller.transact((unit) =>
       unit.credentialSources.recordEgressInstallation(installed),

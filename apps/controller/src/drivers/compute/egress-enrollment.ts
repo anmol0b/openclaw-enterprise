@@ -1,4 +1,4 @@
-import type { EgressExecution, EgressPlan, EgressRef } from "@openclaw-enterprise/contracts";
+import type { EgressExecution, ConduitPlan, EgressRef } from "@openclaw-enterprise/contracts";
 
 export const HARNESS_EGRESS_ENROLLMENT_PATH = "/openclaw/runtime/egress-enrollment";
 
@@ -7,7 +7,7 @@ export interface HarnessEgressEnrollment {
   readonly execution: EgressExecution;
 }
 
-export function harnessEgressEnrollment(plan: EgressPlan): HarnessEgressEnrollment {
+export function harnessEgressEnrollment(plan: ConduitPlan): HarnessEgressEnrollment {
   return { plan: { id: plan.id, generation: plan.generation }, execution: plan.execution };
 }
 

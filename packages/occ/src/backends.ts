@@ -364,7 +364,7 @@ function validateOpenShellBackend(
       key !== "sandbox" &&
       key !== "credential_gateway" &&
       key !== "credential_refresh" &&
-      key !== "egress_proxy"
+      key !== "conduit"
     ) {
       throw new ScopeViolationError(path(id, `drivers.${key}`) + " is unsupported.");
     }
@@ -395,9 +395,9 @@ function validateOpenShellBackend(
     drivers: {
       sandbox: drivers.sandbox,
       credential_gateway: drivers.credential_gateway,
-      ...(drivers.egress_proxy === undefined
+      ...(drivers.conduit === undefined
         ? {}
-        : { egress_proxy: backendId(drivers.egress_proxy, "Egress Driver ID") }),
+        : { conduit: backendId(drivers.conduit, "Conduit Driver ID") }),
       ...(drivers.credential_refresh === undefined
         ? {}
         : { credential_refresh: drivers.credential_refresh as string }),

@@ -14,7 +14,7 @@ import { createOpenShellBackend } from "../../apps/controller/src/backends/opens
 import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
 import { OpenShellSandboxDriver } from "../../apps/controller/src/drivers/sandbox/openshell.ts";
 import { OpenShellCredentialGatewayDriver } from "../../apps/controller/src/drivers/credential-gateway/openshell.ts";
-import { OpenShellEgressProxyDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
+import { OpenShellConduitDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
 import {
   createOpenShellEgressAuthority,
@@ -348,7 +348,7 @@ export async function staticEgressFixture(
       drivers: {
         sandbox: "openshell-sandbox",
         credential_gateway: "openshell-credentials",
-        egress_proxy: "openshell-egress",
+        conduit: "openshell-egress",
       },
     },
     { gatewayClient },
@@ -381,7 +381,7 @@ export async function staticEgressFixture(
     },
     { id: "openshell-sandbox", backend },
   );
-  const egress = new OpenShellEgressProxyDriver(egressOptions, {
+  const egress = new OpenShellConduitDriver(egressOptions, {
     id: "openshell-egress",
     backend,
     sandbox,
@@ -456,7 +456,7 @@ export async function staticEgressFixture(
     legacySource = legacy.data;
   }
   app.controller.registerDriver(egress);
-  app.controller.selectDriver("egress_proxy", egress.id);
+  app.controller.selectDriver("conduit", egress.id);
   const created = await app.request("POST", path, {
     body: {
       name: "inference",
@@ -544,7 +544,7 @@ export async function staticEgressFixture(
   };
   observed.policy = structuredClone({ version: 1, ...attachment.configuration });
   assert.equal(
-    await egress.attachmentStatus(context, attachment),
+    await egress.wiringStatus(context, attachment),
     undefined,
     "a loaded gateway policy without an applied-capability receipt must not become ready",
   );
@@ -573,7 +573,7 @@ export async function staticEgressFixture(
     effective_policy: effectivePolicy,
     inert_provider_rule: ruleName,
   };
-  const installation = await egress.attachmentStatus(context, attachment);
+  const installation = await egress.wiringStatus(context, attachment);
   assert.ok(installation, "the adapter must validate the complete supplier observation");
   if (recordInstallation) {
     await app.controller.transact((unit) =>
@@ -592,7 +592,7 @@ export async function staticEgressFixture(
   });
   let authority = createOpenShellEgressAuthority(
     identity,
-    app.controller.createEgressForwarder(identity),
+    app.controller.createConduit(identity),
   );
   const authorityPort = await bindOpenShellEgressAuthority(authority, "127.0.0.1:0", cert, key);
   t.after(() => authority.forceShutdown());
@@ -764,7 +764,7 @@ export async function staticEgressFixture(
       authority.forceShutdown();
       authority = createOpenShellEgressAuthority(
         identity,
-        app.controller.createEgressForwarder(identity),
+        app.controller.createConduit(identity),
       );
       await bindOpenShellEgressAuthority(authority, "127.0.0.1:" + authorityPort, cert, key);
       for (const [name, client] of Object.entries(clients)) {

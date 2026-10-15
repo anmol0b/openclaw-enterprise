@@ -13,7 +13,7 @@ Admission freezes source identity in the AgentRevision; dispatch supplies the li
 record to Compute. This flow covers registration through withdrawal and deletion.
 [OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md) covers attachment and readiness.
 
-With `egress_proxy` selected, new static sources instead admit live versioned
+With `conduit` selected, new static sources instead admit live versioned
 Secret references. Existing sources need exact source-update opt-in while unbound.
 They skip legacy gateway registration; source readiness alone does not establish
 installed protection. The [protected request flow](credential-source-egress.md)

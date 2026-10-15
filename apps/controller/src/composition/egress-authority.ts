@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { FastifyInstance } from "fastify";
 import type { OpenClawController } from "@openclaw-enterprise/occ";
-import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
+import type { ConduitDriver } from "@openclaw-enterprise/contracts";
 import { OpenShellEgressIdentity } from "../drivers/egress-proxy/openshell-identity.ts";
 import {
   bindOpenShellEgressAuthority,
@@ -59,7 +59,7 @@ export function egressAuthorityConfiguration(
 export async function installEgressAuthority(
   app: FastifyInstance,
   controller: OpenClawController,
-  driver: EgressProxyDriver,
+  driver: ConduitDriver,
   configuration: EgressAuthorityConfiguration,
 ): Promise<void> {
   const [certificate, privateKey, publicKey] = await Promise.all([
@@ -74,10 +74,7 @@ export async function installEgressAuthority(
     publicKey,
     sender: driver.sourceControl.sender,
   });
-  const server = createOpenShellEgressAuthority(
-    identity,
-    controller.createEgressForwarder(identity),
-  );
+  const server = createOpenShellEgressAuthority(identity, controller.createConduit(identity));
   try {
     await bindOpenShellEgressAuthority(
       server,

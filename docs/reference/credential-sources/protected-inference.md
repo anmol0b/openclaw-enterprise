@@ -1,6 +1,6 @@
 # Protected static inference
 
-The optional `egress_proxy` Driver adds protected static inference through
+The optional Conduit Driver (`conduit`) adds protected static inference through
 OpenShell. For each admitted request, OCC checks current authorization, reads the
 current Kubernetes Secret material, and protects the response before the trusted
 supervisor releases it to the Agent.
@@ -47,7 +47,7 @@ responses, dynamic credential issuance and multiple source bindings are unsuppor
 
 ### Choose a source
 
-New sources created while `egress_proxy` is selected use `adoption: live` and
+New sources created while `conduit` is selected use `adoption: live` and
 `retention: none`. Each operation reads its exact Namespace Secret through the
 selected versioned Secret Driver. Kubernetes supplies the owned object UID and
 resourceVersion. An update applies to the next operation without changing the
@@ -117,11 +117,11 @@ uncertain and unsettled. Recovery does not resend.
 ## Installation configuration
 
 Keep the existing [OpenShell Backend and Sandbox configuration](../drivers/openshell-credential-gateway.md).
-Add the same egress Driver ID to `backend[].drivers.egress_proxy` and select:
+Add the same Conduit Driver ID to `backend[].drivers.conduit` and select:
 
 ```yaml
 drivers:
-  egress_proxy:
+  conduit:
     id: openshell-egress
     configuration:
       middlewareName: oce-authority
@@ -261,9 +261,9 @@ supervisor candidates. Mixed-version hot upgrades are not supported in this slic
 | RFC responsibility                  | Implemented owner and limit                                                                                                                                                                                                              |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Credential Provider                 | Registered `CredentialProviderDefinition` normalizes source configuration and grants, declares routes, classifies operations, injects static material and protects responses. The current operation/grant types describe inference only. |
-| Credential binding                  | `EgressPlan` freezes source generation, grant, route, execution and binding identities during ordinary Agent admission. Workload headers cannot select them.                                                                             |
-| Credential access                   | `EgressForwarder` and controller policy units enforce authenticated identity, current permission, receipt and material evidence around the selected versioned Secret Driver. No request-time mint or refresh scheduler exists.           |
-| Enforcement adapter                 | `EgressProxyDriver` prepares, verifies and withdraws the paired Sandbox attachment. The OpenShell adapter owns receipt interpretation and current-state queries.                                                                         |
+| Credential binding                  | `ConduitPlan` freezes source generation, grant, route, execution and binding identities during ordinary Agent admission. Workload headers cannot select them.                                                                            |
+| Credential access                   | `Conduit` and controller policy units enforce authenticated identity, current permission, receipt and material evidence around the selected versioned Secret Driver. No request-time mint or refresh scheduler exists.                   |
+| Enforcement adapter                 | `ConduitDriver` prepares `SandboxConduitWiring`, observes it with `wiringStatus`, and verifies and withdraws the paired Sandbox wiring. OpenShell owns receipt interpretation and current-state queries.                                 |
 | Trusted sender and response custody | The supervisor performs the sole business send and withholds the complete response until provider-owned policy approves delivery. This requires the matching runtime counterpart.                                                        |
 
 Another provider requires a registered definition and a supported declarative
