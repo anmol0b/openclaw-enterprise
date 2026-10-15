@@ -90,53 +90,28 @@ graph TD
 `internal/occdev/openshell.go:prepareOpenShell`,
 `internal/occdev/kubernetes.go:writeInstallation`
 
-The Installation declares the `openshell` Backend, Gateway endpoint, Sandbox and
-Credential Gateway; `binaries` lists native Codex for x64/ARM64 regardless of host.
-Credential-source profiles, not Sandbox policy, govern egress.
+The Installation declares the OpenShell Backend, Gateway, Sandbox and Credential
+Gateway. Credential-source profiles list native Codex binaries for x64 and ARM64.
+[Local development](../guides/deploy/local-kubernetes-development.md) describes the
+Compose and Kubernetes-only topologies; Kubernetes-only preflight rejects port collisions before recording state.
 
-`scripts/dev-up` invokes `occ dev up`; `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes`
-selects Kubernetes-only. Its preflight rejects port collisions before recording
-engine, cluster, namespace, port and key destination.
+Both launchers [validate candidate images](../guides/deploy/local-openshell-images.md)
+before creating resources. Candidates are three local SHA-256 references labeled with
+one full OpenShell revision; without selectors, use release images. Import the larger
+OCE images first so k3s garbage collection cannot evict idle OpenShell images. Then
+import the selected OpenShell images without pulling candidates and install with Helm
+pull policy `Never`.
 
-Before resource creation, both launchers call
-`internal/occdev/openshell.go:selectOpenShellImages` and
-`internal/occdev/openshell.go:validateOpenShellImageRevisions`. Candidates require
-three local SHA-256 references with revision labels matching a full OpenShell
-commit; absent selectors retain releases. `prepareOpenShell` rechecks candidates,
-verifies pinned or selects local assets, then calls
-`internal/occdev/openshell.go:importOpenShellImage`. Import forbids candidate pulls,
-retains staging-collision/Linux checks and cleanup, and prints source/containerd
-references. `internal/occdev/openshell.go:installOpenShellGateway` supplies the
-three imported Helm images with pull policy `Never`. See
-[candidate digest/provenance verification](../guides/deploy/local-openshell-images.md). Kubernetes-only also imports
-controller/runtime and PostgreSQL images and resolves in-cluster digests.
+On Sandbox rollout failure, capture the Deployment, its ReplicaSets and Pods, and
+Warning reasons once, then return the original error for rollback. Omit messages,
+environment and full labels; mark incomplete or oversized observations. Capture has
+15 seconds, at most three seconds and 256 KiB per command, and a 32 KiB record limit.
+A 200 ms pipe drain does not terminate descendants; output writes are best effort.
 
-Both profiles import larger OCE images before the selected OpenShell images,
-then install OpenShell workloads. This prevents k3s image
-garbage collection during platform-image imports from removing idle OpenShell images.
-
-On Agent Sandbox rollout failure, `prepareOpenShell` calls
-`internal/occdev/agent_sandbox_rollout_diagnostics.go:captureAgentSandboxRollout`
-once, then returns the original error for rollback. Capture reads the fixed
-Deployment, controller-UID-linked ReplicaSets/Pods and associated Warning reasons;
-omits messages, environment, full labels and logs; and marks unavailable,
-malformed or oversized results.
-
-Limits: fresh 15-second context, three seconds/request/command, 256 KiB/command,
-32 KiB/record. Commands are awaited; 200 ms pipe draining cannot terminate arbitrary
-descendants. Output-write errors are ignored; writer latency/durability remain
-outside the budget. Capture neither retries nor diagnoses.
-
-After Helm, `network.providerHarness` records Gateway ClusterIP, Pod selector and
-TCP/8080. The Agent Gateway aliases only the advertised hostname, preserving HTTP
-Host; NetworkPolicy restricts access to those Pods/port.
-
-Compose runs PostgreSQL/OCC/worker; Kubernetes-only uses `oce-system` and
-in-cluster authentication. Both install private Envoy routing and operator
-Workspaces; only API, worker, supervisor callbacks and dedicated Agent Gateways reach the Gateway.
-[Local development](../guides/deploy/local-kubernetes-development.md) owns topology
-and cleanup: validated engine/state bounds deletion to the recorded cluster and
-Compose project/volumes; partial cleanup retains recovery state.
+`network.providerHarness` records the Gateway ClusterIP, Pod selector and TCP/8080.
+The Agent Gateway preserves the advertised HTTP Host while NetworkPolicy restricts it
+to those Pods and port. Cleanup validates recorded engine and state before removing the
+named cluster or Compose project and volumes; partial cleanup retains recovery state.
 
 ### 1. Prepare the Namespace and OpenShell Workspace
 
