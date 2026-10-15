@@ -25,19 +25,41 @@ export function validateConnectedDatabaseUrl(value) {
   return value;
 }
 
+// The runner chooses where its service credential can go. The separate stack
+// manifest is checked against that choice, never used to select a credential file.
+export function takeConnectedControllerBinding(env) {
+  const serviceKey = env.OCC_TEST_EGRESS_CONNECTED_SERVICE_KEY;
+  delete env.OCC_TEST_EGRESS_CONNECTED_SERVICE_KEY; // Do not pass it to kubectl or other children.
+  assert.ok(
+    typeof serviceKey === "string" && serviceKey.length > 0 && !/\s/.test(serviceKey),
+    "the runner must supply the prepared controller service key",
+  );
+  const { apiOrigin, namespaceId, model, providerOrigin } = JSON.parse(
+    env.OCC_TEST_EGRESS_CONNECTED_CONTROLLER,
+  );
+  const api = new URL(apiOrigin);
+  assert.ok(
+    (api.protocol === "http:" || api.protocol === "https:") &&
+      api.hostname === "127.0.0.1" &&
+      Number(api.port) > 1024 &&
+      api.origin === apiOrigin,
+    "select the controller's exact 127.0.0.1 origin and explicit high port",
+  );
+  return { apiOrigin, namespaceId, model, providerOrigin, serviceKey };
+}
+
 // Inputs describe an already installed, disposable protected stack. They do not
 // authorize this test to install a gateway, change trust, or relax admission.
-export function validateConnectedInputs(input) {
-  assert.equal(input.version, 1);
+export function validateConnectedInputs(input, controller) {
+  assert.equal(input.version, 2);
+  assert.equal(input.apiOrigin, controller.apiOrigin, "controller origin disagrees with runner");
+  assert.equal(input.namespaceId, controller.namespaceId, "tenant disagrees with runner");
+  assert.equal(input.model, controller.model, "model disagrees with runner");
+  assert.equal(input.provider.origin, controller.providerOrigin, "fixture disagrees with runner");
+  assert.equal(input.serviceKeyPath, undefined, "manifest must not select a controller key file");
   assert.match(input.namespaceId ?? "", /^ns_[A-Za-z0-9_-]+$/);
   assert.match(input.model ?? "", /^[a-zA-Z0-9][a-zA-Z0-9._-]+$/);
-  const api = new URL(input.apiOrigin);
-  assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(api.hostname));
-  assert.ok(["http:", "https:"].includes(api.protocol));
-  assert.equal(api.origin, input.apiOrigin);
-  assert.equal(api.username + api.password, "");
   for (const path of [
-    input.serviceKeyPath,
     input.kubeconfigPath,
     input.provider?.certificatePath,
     input.provider?.privateKeyPath,
@@ -167,6 +189,20 @@ export function serializeConnectedRequest(method, path, body) {
     headers: body === undefined ? {} : { "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   };
+}
+
+export function sendConnectedRequest({ apiOrigin, serviceKey }, wire, signal) {
+  const url = new URL(wire.path, apiOrigin);
+  // Check what fetch will use. A leading slash alone does not rule out a URL
+  // authority after the URL parser normalizes backslashes and ASCII whitespace.
+  assert.equal(url.origin, apiOrigin, "the service key may only go to the selected controller");
+  return fetch(url, {
+    method: wire.method,
+    headers: { ...wire.headers, "x-api-key": serviceKey },
+    ...(wire.body === undefined ? {} : { body: wire.body }),
+    redirect: "error",
+    signal,
+  });
 }
 
 // Check the captured envelope, not a guessed client return shape. The same
