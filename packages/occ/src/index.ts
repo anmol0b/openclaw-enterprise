@@ -1,3 +1,4 @@
+import { EgressSendReceipts } from "./egress-send-receipts.ts";
 import type {
   StaticEgressSource,
   EgressPlan,
@@ -4515,8 +4516,7 @@ export class OpenClawController {
           materialId: secret.backendRef.uid,
         };
       },
-      reject: (evidence) =>
-        this.state.transact((state) => state.credentialSources.rejectEgressMaterial(evidence)),
+      receipts: new EgressSendReceipts(this.state),
     });
   }
 

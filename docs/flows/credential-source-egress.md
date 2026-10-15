@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-14"
-last_updated_session: authoring-run/a26c0140-0882-40ec-949d-c5fc6eecd0da
+last_updated_session: authoring-run/c11e8dcb-9e87-4682-b47e-e8640a65706d
 ---
 
 # Protected credential request flow
@@ -38,12 +38,15 @@ graph TD
   B -- "exact match" --> C{"<b>Fresh IAM unit 1</b><br/>Current receipt and permission"}
   C -- "denied" --> X
   C -- "allowed" --> D["<b>Read Secret version</b><br/>Capture material evidence"]
-  D --> E{"<b>Fresh IAM unit 2</b><br/>Receipt, permission and material"}
+  D --> P["<b>Persist possible send</b><br/>Exact instance and attempt"]
+  P -- "duplicate or unknown" --> X
+  P -- "committed new attempt" --> E{"<b>Fresh IAM unit 2</b><br/>Receipt, permission and material"}
   E -- "stale or denied" --> X
   E -- "allowed once" --> F["<b>Supervisor send</b><br/>Finite send-start bound"]
   F --> G{"<b>Protect whole response</b><br/>Complete JSON or finite SSE"}
-  G -- "safe" --> H["<b>Return response</b><br/>Erase request material"]
-  G -- "unsafe" --> I["<b>Block delivery</b><br/>Effects may already exist"]
+  G --> O["<b>Commit observation</b><br/>Fence actual rejection"]
+  O -- "safe and still live" --> H["<b>Return policy bytes</b><br/>Delivery unconfirmed"]
+  O -- "unsafe, late or failed" --> I["<b>Withhold response</b><br/>Effects may already exist"]
 ```
 
 The supervisor edges describe the required counterpart contract. Wire fixtures
@@ -152,8 +155,16 @@ request. It returns credential headers, opaque handle and nonsecret material
 evidence to the authenticated supervisor.
 
 The second RPC must echo the original deadline, evidence and injection digest.
-The registry consumes the handle before IAM I/O. A separate fresh check additionally
-validates material identity and the durable rejection fence. The allowed permit
+The registry reserves the handle, then uses
+`packages/occ/src/egress-send-receipts.ts:EgressSendReceipts.begin` to commit
+possible dispatch before permission. The key includes authenticated sender Ref,
+instance, stable request/use ID and attempt ID; the binding includes exact
+store-qualified material and original deadline. An existing attempt, failed write
+or unknown commit refuses permission, including after an authority restart.
+
+A separate fresh identity and policy check follows persistence and additionally
+validates material identity and the durable rejection fence. The registry checks
+cancellation, live handle ownership and deadline again after that check. The allowed permit
 expires at the earliest request/material/identity bound and within one second.
 Revocation can still race the subsequent send; the permit authorizes no retry.
 
@@ -171,10 +182,22 @@ text deltas joined across item IDs as exposed by the Codex consumer. Indexed
 events must belong to an unfinished item. Supported function-call arguments are
 parsed once as bounded JSON, including their completed delta accumulation, before
 release. This does not recursively decode arbitrary string encodings. No SSE event
-is released early. The original deadline and 4 MiB limit still apply. A provider
-401 persists a version-specific rejection. Material is removed after response
-handling or the original deadline. Restart loses handles and fails closed; no
-send outcome is reconstructed.
+is released early. The original deadline and 4 MiB limit still apply.
+
+Authenticated preflight claims one response stream. The provider classifier
+requires a structured 401 `invalid_api_key` / `invalid_request_error` error;
+status alone does not fence material. `EgressSendReceipts.observe` commits the
+safe response decision and exact rejection fence atomically before the adapter
+replies. Blocked responses can still establish rejection. Receipts contain no
+bodies, headers, material values or credential-bearing handles. Persistence
+failure withholds bytes, and the deadline/cancellation check repeats after commit.
+
+Observation is distinct from final supplier proof: the current best-effort
+`session_end` notification does not attest application of this decision.
+Therefore post-send outcomes remain uncertain and unsettled even after NORMAL;
+recovery reads the exact attempt and never retries. Material is erased after
+response handling or deadline. Pre-permission refusals can settle as undispatched;
+a possibly issued permission cannot become a refusal.
 
 ### 5. Configure the regular Harness caller
 
@@ -221,6 +244,8 @@ image compatibility.
 None.
 
 ## Changelog
+
+- 2026-10-14 21:54: Join durable sender receipts to the authority, separate response observations from supplier proof, and fence positive rejection atomically. (authoring-run/c11e8dcb-9e87-4682-b47e-e8640a65706d - fc20eb0174eaf8ae9d4ccb327ec65236c49ef4fb)
 
 - 2026-10-14 21:15: Bind protected provider enrollment to a dedicated admitted-revision literal in the accompanying source fix. (authoring-run/a26c0140-0882-40ec-949d-c5fc6eecd0da - 765f1ef22aeba3e98c58a739700c9a0ffba14af4)
 

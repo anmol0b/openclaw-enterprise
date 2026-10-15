@@ -1,3 +1,4 @@
+import type { EgressSendReceipts, SendAttempt, SendObservation } from "./egress-send-receipts.ts";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -51,7 +52,7 @@ export interface EgressAuthorityPorts {
     signal: AbortSignal,
     deadlineAt: string,
   ): Promise<VersionedSecretValue & { readonly materialId: string }>;
-  reject(evidence: StaticMaterialEvidence): Promise<void>;
+  readonly receipts: Pick<EgressSendReceipts, "begin" | "record" | "observe">;
 }
 
 export type EgressResolution =
@@ -73,9 +74,10 @@ interface OperationRecord {
   readonly provider: CredentialProviderDefinition;
   readonly source: StaticEgressSource;
   readonly evidence: StaticMaterialEvidence;
+  readonly attempt: SendAttempt;
   readonly digest: string;
   value: string;
-  phase: "resolved" | "checking" | "sent" | "protecting";
+  phase: "resolved" | "checking" | "permitted" | "protecting" | "observing";
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -233,7 +235,7 @@ export class EgressForwarder {
       return { kind: "refused", error: { kind: "deadline_exceeded" } };
     }
     const use = immutableCopy({
-      id: randomUUID(),
+      id: input.id,
       peer,
       installation,
       route,
@@ -296,6 +298,15 @@ export class EgressForwarder {
         source,
         evidence,
         digest,
+        attempt: immutableCopy({
+          sender: peer.sender,
+          instanceId: peer.instanceId,
+          useId: captured.id,
+          // OpenShell has one attempt per UUIDv7 use. Keep that ID across authority restarts.
+          attemptId: captured.id,
+          material: evidence,
+          deadlineAt: request.deadlineAt,
+        }),
         value: material.value,
         phase: "resolved",
       };
@@ -320,12 +331,14 @@ export class EgressForwarder {
     evidence: StaticMaterialEvidence,
     injectionDigest: string,
     deadlineAt: string,
+    signal: AbortSignal,
   ): Promise<EgressSendDecision> {
     this.prune();
     const record = this.records.get(handle);
     const peer = await this.ports.verifier.verify(authorization);
     if (
       !record ||
+      this.records.get(handle) !== record ||
       record.phase !== "resolved" ||
       !peer ||
       peer.sandboxId !== sandboxId ||
@@ -339,32 +352,64 @@ export class EgressForwarder {
     ) {
       return refuse("invalid_handle");
     }
-    // Consume before policy I/O: concurrent AuthorizeSend calls cannot both succeed.
+    // Reserve before any persistence/policy I/O. A duplicate or unknown commit never permits send.
     record.phase = "checking";
-    let decision: StaticEgressSource | EgressRefusal;
     try {
-      decision = await this.ports.check(record.use, record.evidence);
+      const begun = await this.ports.receipts.begin(peer.sender, record.attempt);
+      if (!begun.created) {
+        this.discard(handle, record);
+        return refuse("invalid_handle");
+      }
     } catch {
       this.discard(handle, record);
       return { kind: "refused", error: { kind: "unavailable", code: "authority" } };
     }
-    if (!("key" in decision) || !isDeepStrictEqual(decision, record.source)) {
+    const deny = async (error: EgressRefusal): Promise<EgressSendDecision> => {
       this.discard(handle, record);
-      return "key" in decision
-        ? refuse("stale_configuration")
-        : { kind: "refused", error: decision };
+      try {
+        await this.ports.receipts.record(peer.sender, record.attempt, {
+          kind: "refused",
+          dispatched: false,
+          error,
+        });
+        return { kind: "refused", error };
+      } catch {
+        return { kind: "refused", error: { kind: "unavailable", code: "authority" } };
+      }
+    };
+    if (signal.aborted) {
+      return deny({ kind: "cancelled" });
+    }
+    // Fresh transport and policy checks follow possibly slow durable persistence and exact selection.
+    let decision: StaticEgressSource | EgressRefusal;
+    let finalPeer: EgressPeer | undefined;
+    try {
+      finalPeer = await this.ports.verifier.verify(authorization);
+      if (!finalPeer || !isDeepStrictEqual(finalPeer, peer)) {
+        return deny({ kind: "denied", code: "identity" });
+      }
+      decision = await this.ports.check(record.use, record.evidence);
+    } catch {
+      return deny({ kind: "unavailable", code: "authority" });
+    }
+    if (!("key" in decision) || !isDeepStrictEqual(decision, record.source)) {
+      return deny("key" in decision ? { kind: "denied", code: "stale_configuration" } : decision);
+    }
+    if (signal.aborted) {
+      return deny({ kind: "cancelled" });
     }
     const now = this.ports.now();
     const sendStartBy = Math.min(
       now + 1000,
+      Date.parse(record.use.request.deadlineAt),
       Date.parse(record.evidence.usableUntil),
-      Date.parse(peer.expiresAt),
+      Date.parse(finalPeer.expiresAt),
     );
-    if (sendStartBy <= now) {
-      this.discard(handle, record);
-      return { kind: "refused", error: { kind: "deadline_exceeded" } };
+    if (sendStartBy <= now || this.records.get(handle) !== record || record.phase !== "checking") {
+      return deny({ kind: "deadline_exceeded" });
     }
-    record.phase = "sent";
+    // This means permission issued, NOT confirmed dispatch. The durable receipt stays possible.
+    record.phase = "permitted";
     return {
       kind: "allow",
       sendStartBy: new Date(sendStartBy).toISOString(),
@@ -372,20 +417,20 @@ export class EgressForwarder {
     };
   }
 
-  async protectResponse(
+  /** Claim exactly one authenticated response stream before its preflight decision. */
+  async beginResponse(
     authorization: string,
     sandboxId: string,
     requestId: string,
-    response: EgressResponse,
-  ): Promise<EgressResponse | undefined> {
+  ): Promise<string | undefined> {
     this.prune();
     const peer = await this.ports.verifier.verify(authorization);
-    if (!peer || peer.sandboxId !== sandboxId) {
+    if (!peer || peer.sandboxId !== sandboxId || Date.parse(peer.expiresAt) <= this.ports.now()) {
       return undefined;
     }
     const entry = [...this.records].find(
       ([, record]) =>
-        record.phase === "sent" &&
+        record.phase === "permitted" &&
         record.use.request.id === requestId &&
         record.use.peer.sandboxId === sandboxId &&
         record.use.peer.instanceId === peer.instanceId &&
@@ -396,22 +441,53 @@ export class EgressForwarder {
     }
     const [handle, record] = entry;
     record.phase = "protecting";
+    return handle;
+  }
+
+  /** Store only observation metadata. Returning policy bytes is not supplier application proof. */
+  async protectResponse(
+    handle: string,
+    response: EgressResponse,
+    signal: AbortSignal,
+    inspect = true,
+  ): Promise<EgressResponse | undefined> {
+    const record = this.records.get(handle);
+    if (!record || record.phase !== "protecting") {
+      return undefined;
+    }
+    // Consume even while persistence is pending; no second stream/body can reuse this response.
+    record.phase = "observing";
     try {
-      if (response.status === 401) {
-        await this.ports.reject(record.evidence);
-      }
-      if (Date.parse(record.use.request.deadlineAt) <= this.ports.now()) {
-        return undefined;
-      }
-      const protectedResponse = record.provider.protectResponse(
-        response,
-        record.value,
-        record.use.request,
-        record.use.operation,
+      const rejected = inspect && record.provider.credentialRejected(response);
+      const safe =
+        inspect && !signal.aborted && Date.parse(record.use.request.deadlineAt) > this.ports.now()
+          ? record.provider.protectResponse(
+              response,
+              record.value,
+              record.use.request,
+              record.use.operation,
+            )
+          : undefined;
+      const observed: SendObservation =
+        safe === undefined
+          ? { kind: "response_blocked", dispatch: "confirmed", code: "response_policy" }
+          : {
+              kind: rejected ? "provider_rejected" : "response",
+              dispatch: "confirmed",
+              status: safe.status,
+            };
+      await this.ports.receipts.observe(
+        record.use.peer.sender,
+        record.attempt,
+        observed,
+        rejected ? { classification: "credential_rejected", evidence: record.evidence } : undefined,
       );
-      return Date.parse(record.use.request.deadlineAt) <= this.ports.now()
-        ? undefined
-        : protectedResponse;
+      // Persistence may outlive the original deadline or cancellation. Never release late bytes.
+      return this.records.get(handle) === record &&
+        !signal.aborted &&
+        Date.parse(record.use.request.deadlineAt) > this.ports.now()
+        ? safe
+        : undefined;
     } finally {
       this.discard(handle, record);
     }

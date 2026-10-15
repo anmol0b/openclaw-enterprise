@@ -8,6 +8,11 @@ export function bindPlatformUnitOfWork(
   lifetime: RepositoryTransactionLifetime,
 ): PlatformUnitOfWork {
   return Object.freeze({
+    egressSendReceipts: bindRepository(repositories.egressSendReceipts, lifetime, [
+      "find",
+      "insert",
+      "save",
+    ]),
     installations: bindRepository(repositories.installations, lifetime, [
       "findInstallation",
       "getInstallation",

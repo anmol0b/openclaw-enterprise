@@ -379,6 +379,13 @@
       "when": 1787000000054,
       "tag": "0054_static_egress",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1787000000055,
+      "tag": "0055_egress_send_receipts",
+      "breakpoints": true
     }
   ]
 }

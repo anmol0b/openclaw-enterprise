@@ -1,3 +1,4 @@
+import { postgresEgressSendReceipts } from "./egress-send-receipts.ts";
 import type { StaticEgressSource, EgressInstallation } from "@openclaw-enterprise/contracts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
@@ -3987,6 +3988,7 @@ export class PostgresPlatformState implements PlatformStateStore {
       revisions,
       iamPolicy,
       repositorySessions: postgresRepositorySessions(client),
+      egressSendReceipts: postgresEgressSendReceipts(client),
       provisioning: {
         findByWorkId: async (workId) => {
           const found = rows(

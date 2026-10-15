@@ -112,6 +112,9 @@ function classifyReceipts(receipts, manifest) {
       ...manifest.entries.slice(providerCompleted.entries.length),
     ];
     if (receiptsMatchEntries(receipts, providerEntries)) {
+      if (receipts.length === 54) {
+        return "preSendReceipts";
+      }
       if (receipts.length === manifest.entries.length) {
         return "completed";
       }
@@ -194,6 +197,9 @@ function classifyReceipts(receipts, manifest) {
   }
   if (receipts.length === 25) {
     return "main";
+  }
+  if (receipts.length === 54) {
+    return "preSendReceipts";
   }
   if (receipts.length === manifest.entries.length) {
     return "completed";

@@ -29,7 +29,8 @@
     "tests/integration/postgres-repository-transactions.test.mjs",
     "tests/integration/postgres-controller-work-targets.test.mjs",
     "tests/integration/postgres-transaction-commit.test.mjs",
-    "tests/integration/postgres-static-egress.test.mjs"
+    "tests/integration/postgres-static-egress.test.mjs",
+    "tests/integration/postgres-egress-send-receipts.test.mjs"
   ],
   "files": [
     {
@@ -229,6 +230,15 @@
     },
     {
       "path": "tests/integration/postgres-static-egress.test.mjs"
+    },
+    {
+      "path": "tests/integration/postgres-egress-send-receipts.test.mjs",
+      "expectedTests": [
+        "PostgreSQL send receipts survive owner loss and fence exact static versions",
+        "after COMMIT and loss of the acknowledgment and caller process, recover the exact outcome and feedback",
+        "lost pre-send acknowledgment leaves possible evidence, never a retry verdict",
+        "closed outcomes, exact bindings, and concurrent duplicates preserve their original verdict"
+      ]
     }
   ]
 }

@@ -320,7 +320,16 @@ test("provider authentication rejection fences the exact material version and en
     (await exchange()).body_result.block_delivery,
     "decoding supported JSON function arguments cannot expose credential material",
   );
-  f.setResponse({ status: 401, body: { error: "invalid credential" } });
+  f.setResponse({
+    status: 401,
+    body: {
+      error: {
+        code: "invalid_api_key",
+        type: "invalid_request_error",
+        message: "Invalid credential",
+      },
+    },
+  });
   assert.ok((await exchange()).body_result.transform);
   const captured = f.capture();
   const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
@@ -995,7 +1004,9 @@ test(
           )
         ).allowed,
       );
-      assert.ok((await f.protect(captured, await f.send(captured, ready))).body_result.transform);
+      assert.ok(
+        (await f.protect(captured, await f.send(captured, ready), peer)).body_result.transform,
+      );
     }
     assert.equal(f.providerRequests.length, 4200);
     assert.ok(
@@ -1058,3 +1069,428 @@ test(
     assert.equal(f.providerRequests.length, 1);
   },
 );
+
+function receiptAttempt(f, captured, ready) {
+  return {
+    sender: f.egress.sourceControl.sender,
+    instanceId: f.installation.enforcement.instanceId,
+    useId: captured.request.context.request_id,
+    attemptId: captured.request.context.request_id,
+    material: JSON.parse(ready.evidence.authority_evidence.toString()),
+    deadlineAt: new Date(
+      Number(captured.deadline.seconds) * 1000 + captured.deadline.nanos / 1e6,
+    ).toISOString(),
+  };
+}
+
+const readReceipt = (f, input) =>
+  f.controller.transact((unit) => unit.egressSendReceipts.find(input));
+
+// Faults wrap the real state transaction owner: operations and rollback still run in the
+// actual memory adapter. Lost acknowledgments here are scheduling proof, not real PG proof.
+function receiptPersistenceFaults() {
+  let armed;
+  return {
+    arm(method, kind = "pause") {
+      const reached = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      armed = { method, kind, reached, release };
+      return { reached: reached.promise, release: () => release.resolve() };
+    },
+    wrap(state) {
+      return {
+        read: (work) => state.read(work),
+        async transact(work) {
+          let effect;
+          const intercept = (repository) =>
+            Object.fromEntries(
+              Object.entries(repository).map(([name, method]) => [
+                name,
+                async (...args) => {
+                  if (armed?.method === name) {
+                    effect = armed;
+                    armed = undefined;
+                    if (effect.kind === "reject") {
+                      throw new Error("receipt persistence unavailable");
+                    }
+                  }
+                  return method(...args);
+                },
+              ]),
+            );
+          const result = await state.transact((unit) =>
+            work({
+              ...unit,
+              egressSendReceipts: intercept(unit.egressSendReceipts),
+              credentialSources: intercept(unit.credentialSources),
+            }),
+          );
+          if (effect) {
+            effect.reached.resolve();
+            await effect.release.promise;
+            if (effect.kind === "lost_ack") {
+              throw new Error("receipt commit acknowledgment unavailable");
+            }
+          }
+          return result;
+        },
+      };
+    },
+  };
+}
+
+test("authenticated sender receipts survive authority restart without replay permission and distinguish observations", async (t) => {
+  const f = await staticEgressFixture(t);
+  const captured = f.capture();
+  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
+    .ready;
+  const input = receiptAttempt(f, captured, ready);
+  assert.ok(
+    (
+      await unary(
+        f.clients.HttpCredentialAccess,
+        "AuthorizeSend",
+        f.permitRequest(captured, ready),
+        f.metadata(),
+      )
+    ).allowed,
+  );
+  const possible = await readReceipt(f, input);
+  assert.deepEqual(possible.outcome, { kind: "uncertain", dispatch: "possible" });
+  assert.equal(possible.observation, null);
+  const response = await f.send(captured, ready);
+  // The claimed sender instance, not the request JSON alone, owns the response.
+  assert.ok(
+    (
+      await f.protect(
+        captured,
+        response,
+        f.metadata({ instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+      )
+    ).preflight_result.block_delivery,
+  );
+  const results = await Promise.all([f.protect(captured, response), f.protect(captured, response)]);
+  assert.equal(results.filter((result) => result.body_result?.transform).length, 1);
+  assert.equal(results.filter((result) => result.preflight_result?.block_delivery).length, 1);
+  const observed = await readReceipt(f, input);
+  assert.deepEqual(observed.observation, { kind: "response", dispatch: "confirmed", status: 200 });
+  assert.deepEqual(observed.outcome, possible.outcome);
+  assert.equal(
+    observed.settled,
+    false,
+    "body decision bytes are not final supplier application proof",
+  );
+  assert.equal(observed.feedback, null);
+  assert.deepEqual(
+    Object.keys(observed).sort(),
+    [
+      "sender",
+      "instanceId",
+      "useId",
+      "attemptId",
+      "material",
+      "deadlineAt",
+      "observation",
+      "outcome",
+      "settled",
+      "feedback",
+    ].sort(),
+  );
+  assert.ok(!JSON.stringify(observed).includes("synthetic-key-initial"));
+  await f.restartAuthority();
+  const replay = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
+    .ready;
+  assert.ok(replay, "restarted authority has no transient operation registry");
+  assert.ok(
+    (
+      await unary(
+        f.clients.HttpCredentialAccess,
+        "AuthorizeSend",
+        f.permitRequest(captured, replay),
+        f.metadata(),
+      )
+    ).refused,
+  );
+  assert.deepEqual(await readReceipt(f, input), observed);
+  assert.equal(f.providerRequests.length, 1, "recovery never dispatches another request");
+});
+
+test("receipt observation fences only positive credential rejection, including blocked provider responses", async (t) => {
+  const f = await staticEgressFixture(t);
+  async function exchange(status, body) {
+    f.setResponse({ status, body });
+    const captured = f.capture();
+    const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
+      .ready;
+    assert.ok(ready);
+    assert.ok(
+      (
+        await unary(
+          f.clients.HttpCredentialAccess,
+          "AuthorizeSend",
+          f.permitRequest(captured, ready),
+          f.metadata(),
+        )
+      ).allowed,
+    );
+    const result = await f.protect(captured, await f.send(captured, ready));
+    return { result, receipt: await readReceipt(f, receiptAttempt(f, captured, ready)) };
+  }
+  for (const [status, body] of [
+    [401, { error: "invalid credential" }],
+    [401, { error: { code: "insufficient_quota", type: "invalid_request_error" } }],
+    [403, { error: { code: "invalid_api_key", type: "invalid_request_error" } }],
+  ]) {
+    const value = await exchange(status, body);
+    assert.ok(value.result.body_result.transform);
+    assert.deepEqual(value.receipt.observation, {
+      kind: "response",
+      dispatch: "confirmed",
+      status,
+    });
+    assert.equal(value.receipt.feedback, null, "HTTP failure alone is not credential rejection");
+  }
+  // Even recognizable bytes in an unfinished supplier unit do not establish a
+  // complete provider rejection. Block the response without fencing the credential.
+  f.setResponse({
+    status: 401,
+    body: { error: { code: "invalid_api_key", type: "invalid_request_error" } },
+  });
+  const partialCapture = f.capture();
+  const partialReady = (
+    await unary(f.clients.HttpCredentialAccess, "Resolve", partialCapture, f.metadata())
+  ).ready;
+  assert.ok(
+    (
+      await unary(
+        f.clients.HttpCredentialAccess,
+        "AuthorizeSend",
+        f.permitRequest(partialCapture, partialReady),
+        f.metadata(),
+      )
+    ).allowed,
+  );
+  const partialResponse = await f.send(partialCapture, partialReady);
+  const stream = f.clients.HttpResponsePreReturn.Evaluate(f.metadata(), {
+    deadline: Date.now() + 5000,
+  });
+  const partialResult = new Promise((resolve, reject) => {
+    stream.on("error", reject);
+    stream.on("data", (message) => {
+      if (message.preflight_result?.inspect) {
+        stream.write({ body: { sequence: 1, data: partialResponse.body, end_of_stream: false } });
+      } else {
+        resolve(message);
+        stream.end();
+      }
+    });
+  });
+  stream.write({
+    preflight: {
+      context: partialCapture.request.context,
+      status_code: 401,
+      headers: partialResponse.headers,
+      permitted_body_modes: [2],
+    },
+  });
+  assert.ok((await partialResult).body_result.block_delivery);
+  const partialReceipt = await readReceipt(f, receiptAttempt(f, partialCapture, partialReady));
+  assert.equal(partialReceipt.observation.kind, "response_blocked");
+  assert.equal(partialReceipt.feedback, null);
+  const acceptedRejection = await exchange(401, {
+    error: { code: "invalid_api_key", type: "invalid_request_error" },
+  });
+  assert.ok(acceptedRejection.result.body_result.transform);
+  assert.deepEqual(acceptedRejection.receipt.observation, {
+    kind: "provider_rejected",
+    dispatch: "confirmed",
+    status: 401,
+  });
+  assert.equal(acceptedRejection.receipt.feedback, "fenced");
+  const rotated = await f.request("PATCH", `/namespaces/${f.namespace.id}/secrets/${f.secret.id}`, {
+    body: { value: "synthetic-key-next-version" },
+  });
+  assert.equal(rotated.status, 200);
+  const rejection = {
+    error: {
+      code: "invalid_api_key",
+      type: "invalid_request_error",
+      message: "synthetic-key-next-version",
+    },
+  };
+  const blocked = await exchange(401, rejection);
+  assert.ok(blocked.result.body_result.block_delivery);
+  assert.deepEqual(blocked.receipt.observation, {
+    kind: "response_blocked",
+    dispatch: "confirmed",
+    code: "response_policy",
+  });
+  assert.equal(
+    blocked.receipt.feedback,
+    "fenced",
+    "actual rejection fences even when response bytes cannot be returned",
+  );
+  assert.equal(blocked.receipt.settled, false);
+  assert.ok(!JSON.stringify(blocked.receipt).includes("synthetic-key-next-version"));
+  const next = f.capture();
+  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", next, f.metadata())).ready;
+  assert.ok(
+    (
+      await unary(
+        f.clients.HttpCredentialAccess,
+        "AuthorizeSend",
+        f.permitRequest(next, ready),
+        f.metadata(),
+      )
+    ).refused,
+  );
+  assert.equal(f.providerRequests.length, 6);
+});
+
+test("receipt persistence failure, lost acknowledgment and late authorization never grant send permission", async (t) => {
+  const { createConsoleAppFixture } = await import("../helpers/console-app.mjs");
+  for (const scenario of ["reject", "lost_ack", "revoke", "deadline", "check_deadline", "cancel"]) {
+    await t.test(scenario, async (t) => {
+      let elapsed = 0;
+      const fault = receiptPersistenceFaults();
+      const f = await staticEgressFixture(t, {
+        now: () => new Date(Date.now() + elapsed),
+        appFactory: (t, options) =>
+          createConsoleAppFixture(t, { ...options, wrapState: (state) => fault.wrap(state) }),
+      });
+      const captured = f.capture();
+      const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
+        .ready;
+      const input = receiptAttempt(f, captured, ready);
+      const gate = fault.arm(
+        scenario === "check_deadline" ? "isEgressMaterialRejected" : "insert",
+        ["reject", "lost_ack"].includes(scenario) ? scenario : "pause",
+      );
+      t.after(gate.release);
+      const result = unary(
+        f.clients.HttpCredentialAccess,
+        "AuthorizeSend",
+        f.permitRequest(captured, ready),
+        f.metadata(),
+        scenario === "cancel" ? 50 : 5000,
+      );
+      if (scenario !== "reject") {
+        const cancellation =
+          scenario === "cancel" ? assert.rejects(result, { code: 4 }) : undefined;
+        await gate.reached;
+        if (scenario === "revoke") {
+          await f.revoke();
+        }
+        if (scenario === "deadline" || scenario === "check_deadline") {
+          elapsed = 31_000;
+        }
+        if (scenario === "check_deadline") {
+          // The actual successful final policy transaction has committed. A new
+          // capture prunes the expired handle before that check returns to its owner.
+          assert.ok(
+            (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata()))
+              .ready,
+          );
+        }
+        if (cancellation) {
+          await cancellation;
+        }
+        gate.release();
+      }
+      if (scenario !== "cancel") {
+        assert.ok((await result).refused, scenario);
+      }
+      const stored = await readReceipt(f, input);
+      if (scenario === "reject") {
+        assert.equal(stored, undefined);
+      }
+      if (scenario === "lost_ack") {
+        assert.equal(stored.settled, false);
+        assert.deepEqual(stored.outcome, { kind: "uncertain", dispatch: "possible" });
+        await f.restartAuthority();
+        const replay = (
+          await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata())
+        ).ready;
+        assert.ok(
+          (
+            await unary(
+              f.clients.HttpCredentialAccess,
+              "AuthorizeSend",
+              f.permitRequest(captured, replay),
+              f.metadata(),
+            )
+          ).refused,
+        );
+      }
+      if (["revoke", "deadline", "check_deadline"].includes(scenario)) {
+        assert.equal(stored.outcome.kind, "refused");
+        assert.equal(stored.outcome.dispatched, false);
+      }
+      assert.equal(f.providerRequests.length, 0);
+    });
+  }
+});
+
+test("response persistence must commit its observation and fence before policy bytes are acknowledged", async (t) => {
+  const { createConsoleAppFixture } = await import("../helpers/console-app.mjs");
+  for (const scenario of ["reject", "lost_ack", "deadline"]) {
+    await t.test(scenario, async (t) => {
+      let elapsed = 0;
+      const fault = receiptPersistenceFaults();
+      const f = await staticEgressFixture(t, {
+        now: () => new Date(Date.now() + elapsed),
+        appFactory: (t, options) =>
+          createConsoleAppFixture(t, { ...options, wrapState: (state) => fault.wrap(state) }),
+      });
+      f.setResponse({
+        status: 401,
+        body: { error: { code: "invalid_api_key", type: "invalid_request_error" } },
+      });
+      const captured = f.capture();
+      const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
+        .ready;
+      const input = receiptAttempt(f, captured, ready);
+      assert.ok(
+        (
+          await unary(
+            f.clients.HttpCredentialAccess,
+            "AuthorizeSend",
+            f.permitRequest(captured, ready),
+            f.metadata(),
+          )
+        ).allowed,
+      );
+      const response = await f.send(captured, ready);
+      const gate = fault.arm("save", scenario === "deadline" ? "pause" : scenario);
+      t.after(gate.release);
+      const pending = f.protect(captured, response);
+      const failed = scenario === "deadline" ? undefined : assert.rejects(pending, { code: 14 });
+      if (scenario !== "reject") {
+        await gate.reached;
+        if (scenario === "deadline") {
+          elapsed = 31_000;
+        }
+        gate.release();
+      }
+      if (failed) {
+        await failed;
+      } else {
+        assert.ok((await pending).body_result.block_delivery);
+      }
+      const receipt = await readReceipt(f, input);
+      assert.deepEqual(receipt.outcome, { kind: "uncertain", dispatch: "possible" });
+      assert.equal(receipt.settled, false);
+      const fenced = await f.controller.transact((unit) =>
+        unit.credentialSources.isEgressMaterialRejected(input.material),
+      );
+      assert.equal(
+        fenced,
+        scenario !== "reject",
+        "observation and exact-version fence share one real state transaction",
+      );
+      assert.equal(receipt.feedback, fenced ? "fenced" : null);
+      assert.equal(receipt.observation?.kind, fenced ? "provider_rejected" : undefined);
+      assert.equal(f.providerRequests.length, 1);
+    });
+  }
+});

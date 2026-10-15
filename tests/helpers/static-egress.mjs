@@ -590,7 +590,7 @@ export async function staticEgressFixture(
     publicKey: keys.publicKey.export({ format: "pem", type: "spki" }),
     sender: egress.sourceControl.sender,
   });
-  const authority = createOpenShellEgressAuthority(
+  let authority = createOpenShellEgressAuthority(
     identity,
     app.controller.createEgressForwarder(identity),
   );
@@ -705,8 +705,8 @@ export async function staticEgressFixture(
       outgoing.end(captured.request.body);
     });
   }
-  async function protect(captured, response) {
-    const stream = clients.HttpResponsePreReturn.Evaluate(metadata());
+  async function protect(captured, response, peer = metadata()) {
+    const stream = clients.HttpResponsePreReturn.Evaluate(peer, { deadline: Date.now() + 5000 });
     const messages = [];
     return new Promise((resolve, reject) => {
       stream.on("error", reject);
@@ -714,11 +714,18 @@ export async function staticEgressFixture(
         messages.push(message);
         if (message.preflight_result?.inspect) {
           stream.write({ body: { sequence: 1, data: response.body, end_of_stream: true } });
+        } else if (message.body_result?.transform) {
+          stream.write({ trailers: { headers: [] } });
         } else {
+          // Exercise the supplier's complete documented exchange. NORMAL/DENIAL are
+          // best-effort notifications, not evidence that this policy decision was applied.
+          stream.write({ session_end: { reason: message.trailers_result ? 1 : 4 } });
           stream.end();
         }
       });
-      stream.on("end", () => resolve(messages.at(-1)));
+      stream.on("end", () =>
+        resolve(messages.find((message) => message.body_result) ?? messages.at(-1)),
+      );
       stream.write({
         preflight: {
           context: captured.request.context,
@@ -753,6 +760,21 @@ export async function staticEgressFixture(
     permitRequest,
     send,
     protect,
+    async restartAuthority() {
+      authority.forceShutdown();
+      authority = createOpenShellEgressAuthority(
+        identity,
+        app.controller.createEgressForwarder(identity),
+      );
+      await bindOpenShellEgressAuthority(authority, "127.0.0.1:" + authorityPort, cert, key);
+      for (const [name, client] of Object.entries(clients)) {
+        client.close();
+        clients[name] = new services[name](
+          "127.0.0.1:" + authorityPort,
+          grpc.credentials.createSsl(cert),
+        );
+      }
+    },
     providerRequests,
     setResponse(value) {
       providerResponse = value;

@@ -1,8 +1,7 @@
 # Verify protected static inference
 
-Use these checks to distinguish the OCE source and fixture paths from an installed
-OpenShell deployment and a real provider. Run them with the installed workspace
-dependencies; an individual suite's coverage does not establish a deployment result.
+Run these checks with installed workspace dependencies. OCE source and fixture
+coverage does not establish installed OpenShell or real-provider behavior.
 
 ## Authority and provider fixtures
 

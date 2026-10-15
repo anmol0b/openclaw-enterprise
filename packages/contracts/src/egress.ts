@@ -177,6 +177,8 @@ export interface CredentialProviderDefinition {
   routes(source: Readonly<CredentialSource>, binding: EgressBinding): readonly EgressRoute[];
   classify(route: EgressRoute, request: EgressRequest): InferenceOperation | undefined;
   inject(value: string): readonly (readonly [string, string])[];
+  /** Positive provider evidence only; status alone never identifies rejected credentials. */
+  credentialRejected(response: EgressResponse): boolean;
   protectResponse(
     response: EgressResponse,
     value: string,
