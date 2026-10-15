@@ -12,6 +12,7 @@ import {
 import { immutableCopy } from "@openclaw-enterprise/utils";
 import { isDeepStrictEqual } from "node:util";
 import { parseUnambiguousJson } from "./openai-json.ts";
+import { isGitHubWireCredential } from "../repo/github/credentials/wire-credential.ts";
 
 function closedRequest(route: EgressRoute, request: EgressRequest): boolean {
   const { grant } = route.binding;
@@ -107,7 +108,7 @@ export const githubMetadataProvider: CredentialProviderDefinition =
         : undefined;
     },
     inject(value) {
-      if (value.length < 8 || value.length > 8192 || /[^\x21-\x7e]/.test(value)) {
+      if (!isGitHubWireCredential(value)) {
         throw new Error("Invalid prepared GitHub installation credential.");
       }
       return [["authorization", "Bearer " + value]];

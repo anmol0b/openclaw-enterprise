@@ -9,6 +9,7 @@ import type {
 import type { ProviderResponse } from "../provider-transport.ts";
 import type { GitHubDriverState } from "./state.ts";
 import { providerClockSkewMs, tokenLifetimeMs } from "./lifetime.ts";
+import { isGitHubWireCredential } from "../wire-credential.ts";
 
 type AcquisitionObservation = Readonly<{
   packet: Record<string, unknown> | undefined;
@@ -128,7 +129,7 @@ export function validateInstallationTokenResponse<Credential>(
   }
   const expiry = typeof packet?.expires_at === "string" ? Date.parse(packet.expires_at) : NaN;
   const token = packet?.token;
-  if (typeof token !== "string" || !/^[\x21-\x7e]{1,16384}$/.test(token)) {
+  if (!isGitHubWireCredential(token)) {
     return { kind: "uncertain" };
   }
   const returned = packet?.permissions;

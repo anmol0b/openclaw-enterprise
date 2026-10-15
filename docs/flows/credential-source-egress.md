@@ -193,6 +193,10 @@ namespace verification, Secret GET and retries in one operation context. Within
 that bounded read, child scopes inherit cancellation and the earliest absolute deadline.
 Each HTTP dispatch rechecks that deadline even when the timer has not fired;
 invalid deadlines fail closed. Per-attempt timeouts cannot extend the read lifetime.
+GitHub acquisition validation, provider transport and metadata injection share
+`apps/controller/src/drivers/repo/github/credentials/wire-credential.ts:isGitHubWireCredential`:
+1–16,384 bytes of nonspace printable ASCII. This is a wire-format check, not authentication.
+
 The registry retains material only for this bounded request. It returns credential
 headers, an opaque handle and nonsecret material evidence to the authenticated supervisor.
 

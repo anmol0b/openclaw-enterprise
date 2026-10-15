@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { validateInstallationTokenResponse } from "../../apps/controller/src/drivers/repo/github/credentials/driver/acquisition-response.ts";
+import { githubMetadataProvider } from "../../apps/controller/src/drivers/egress-proxy/github-metadata.ts";
 import { captureMetadata, dispatchMetadata } from "../helpers/github-metadata-exchange.mjs";
 import { staticEgressFixture } from "../helpers/static-egress.mjs";
 import { createPreparedStore } from "../fixtures/repository-credentials/github/prepared-store.mjs";
@@ -196,4 +198,65 @@ test("consented protected repository read uses only exact, already prepared meta
   );
   assert.equal(sendChecks, 3);
   assert.equal(gh.issuesOfTokens.length, 1, "no request may renew or issue");
+});
+
+// Conformance only: synthetic strings exercise the shared wire envelope, not provider authentication.
+test("prepared GitHub metadata preserves the acquisition wire credential envelope", () => {
+  const observedWallMs = Date.parse("2026-10-15T12:00:00Z");
+  const policy = {
+    repositoryId: fixtureRepositoryId,
+    repository: fixtureRepository,
+    permissions: { metadata: "read" },
+    minimumValidityMs: 10000,
+  };
+  const cases = [
+    ...[1, 7, 8, 8192, 8193, 16384].map((length) => ({
+      label: `length ${length}`,
+      value: "x".repeat(length),
+      accepted: true,
+    })),
+    ...[
+      ["empty", ""],
+      ["over limit", "x".repeat(16385)],
+      ["embedded space", "xxxx xxxx"],
+      ["trailing space", "xxxxxxxx "],
+      ["embedded newline", "xxxx\nxxxx"],
+      ["trailing newline", "xxxxxxxx\n"],
+      ["control", "xxxx\u0000xxxx"],
+      ["non-ASCII", "xxxxéxxxx"],
+      ["non-string", 123],
+    ].map(([label, value]) => ({ label, value, accepted: false })),
+  ];
+  for (const { label, value, accepted } of cases) {
+    const decision = validateInstallationTokenResponse(
+      201,
+      {
+        token: value,
+        expires_at: "2026-10-15T13:00:00Z",
+        permissions: policy.permissions,
+        repositories: [{ id: Number(fixtureRepositoryId), full_name: fixtureRepository }],
+      },
+      "synthetic-custody-reference",
+      observedWallMs,
+      policy,
+    );
+    assert.equal(decision.kind, accepted ? "validated" : "uncertain", label);
+    if (accepted) {
+      const headers = githubMetadataProvider.inject(value);
+      // Compare booleans so a failure cannot dump a large credential header.
+      assert.equal(
+        headers.length === 1 &&
+          headers[0][0] === "authorization" &&
+          headers[0][1] === "Bearer " + value,
+        true,
+        label,
+      );
+    } else {
+      assert.throws(
+        () => githubMetadataProvider.inject(value),
+        /Invalid prepared GitHub installation credential/,
+        label,
+      );
+    }
+  }
 });
