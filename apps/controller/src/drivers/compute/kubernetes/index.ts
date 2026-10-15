@@ -1,4 +1,16 @@
 import {
+  assertExecutionAdmission,
+  preparedGitHubSourceFromRoute,
+  preparedGitHubProviderRef,
+} from "@openclaw-enterprise/contracts";
+import {
+  harnessEgressEnrollment,
+  COMPUTE_RELEASE_PUBLIC_KEY,
+  computeReleasePublicKey,
+  signComputeExecutionRelease,
+} from "../egress-enrollment.ts";
+import type { ConduitDriver } from "@openclaw-enterprise/contracts";
+import {
   normalizeOpenAiBaseUrl,
   openAiBaseUrlRewritesIpv4,
   openAiBaseUrlSpellingMessage,
@@ -10,10 +22,19 @@ import {
   isNonEmptyString,
   numericErrorStatus,
   readCappedBody,
+  publicCaBundle,
   sha256Hex,
   splitModelRef,
 } from "@openclaw-enterprise/utils";
-import { createHash, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  generateKeyPairSync,
+  randomBytes,
+  timingSafeEqual,
+  X509Certificate,
+  type KeyObject,
+} from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { isAbsolute, posix } from "node:path";
 import { isKubernetesNamespaceName, isKubernetesResourceName } from "./resource-name.ts";
@@ -67,6 +88,8 @@ import type {
   ComputePreflightResult,
   ComputePrepareRevisionFailureDiagnostic,
   ComputeRevisionContext,
+  EgressInstallation,
+  ConduitRevisionContext,
   ConfigurationValidationOptions,
   CredentialAttachmentStatus,
   CredentialGatewayDriver,
@@ -1068,6 +1091,14 @@ function prepareHarnessAuth(
     harness.mode === "dedicated" &&
     (harness.id === "codex" || harness.id === "openclaw")
   ) {
+    // Protected egress supplies material only to the supervisor. A nonsecret marker lets
+    // ordinary model clients construct their request; the authority replaces its header.
+    if (resolvedAuth.source.egress !== undefined) {
+      environment.push({
+        name: harnessModelAuthentication(configuration).environmentName,
+        value: "oce-protected-egress",
+      });
+    }
     // The paired Sandbox supplies the credential environment; no Secret is projected here.
     if (harness.id === "codex") {
       environment.push({ name: "CODEX_LOGIN_MODE", value: resolvedAuth.loginMode });
@@ -1115,6 +1146,9 @@ const CONFIGURATION_DIRECTORY = "/etc/openclaw";
 const WRITABLE_CONFIGURATION_PATH = "/home/node/.openclaw/openclaw.json";
 const CONFIGURATION_DOCUMENT = "openclaw.json";
 const CONFIGURATION_VOLUME = "openclaw-configuration";
+const HARNESS_TRUST_VOLUME = "harness-trust";
+const HARNESS_TRUST_DIRECTORY = "/etc/openclaw-harness-trust";
+const HARNESS_TRUST_FILE = "ca-bundle.pem";
 const PLUGIN_RUNTIME_VOLUME = "openclaw-plugin-runtime";
 export const PLUGIN_RUNTIME_STATUS_PORT = 18_791;
 const PLUGIN_RUNTIME_STATUS_PATH = "/openclaw/plugin-runtime/status";
@@ -1796,6 +1830,24 @@ function providerHarnessUrl(
     throw new ConfigurationFailure(
       "SandboxDriver Harness workspace root must be an absolute path without surrounding whitespace.",
     );
+  }
+  if (endpoint.tls !== undefined) {
+    if (
+      url.protocol !== "wss:" ||
+      asRecord(endpoint.tls) === undefined ||
+      Object.keys(endpoint.tls).some((key) => key !== "caBundle")
+    ) {
+      throw new ConfigurationFailure(
+        "SandboxDriver TLS trust requires a WSS endpoint and only a public CA bundle.",
+      );
+    }
+    try {
+      publicCaBundle(endpoint.tls.caBundle);
+    } catch {
+      throw new ConfigurationFailure(
+        "SandboxDriver TLS trust must contain only valid PEM CA certificates.",
+      );
+    }
   }
   return url;
 }
@@ -3079,6 +3131,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private readonly options: KubernetesComputeDriverOptions;
   private readonly sandboxDriver: SandboxDriver | undefined;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
+  private readonly conduitDriver: ConduitDriver | undefined;
   private readonly nodeEnrollment: GatewayNodeEnrollment | undefined;
   // How long, in total across passes, preparation may wait for one setup's node to pair.
   private workspaceNodePairingWaitMs = WORKSPACE_NODE_PAIRING_WAIT_MS;
@@ -3452,6 +3505,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       readonly lifecycleDrivers?: readonly Driver[];
       readonly sandboxDriver?: SandboxDriver;
       readonly credentialGatewayDriver?: CredentialGatewayDriver;
+      readonly conduitDriver?: ConduitDriver;
       readonly nodeEnrollment?: GatewayNodeEnrollment;
       readonly readNodeCa?: () => Promise<string | undefined>;
     } = {},
@@ -3473,6 +3527,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
     }
     this.credentialGatewayDriver = selection.credentialGatewayDriver;
+    this.conduitDriver = selection.conduitDriver;
     this.nodeEnrollment = selection.nodeEnrollment;
     this.readNodeCa = selection.readNodeCa;
     const lifecycleDrivers = selection.lifecycleDrivers ?? [];
@@ -3832,7 +3887,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
       : native
         ? "Dedicated OpenClaw"
         : "Dedicated Codex";
-    requireHarnessAuthMethod(kubernetesHarnessAuthMethods(topology), auth.method);
+    const protectedWithoutCredential =
+      codex && auth.method === "runtime" && this.conduitDriver !== undefined;
+    if (!protectedWithoutCredential) {
+      requireHarnessAuthMethod(kubernetesHarnessAuthMethods(topology), auth.method);
+    }
     // Reject here, before a deployment stops predecessors, not only during preparation. Only
     // Dedicated Codex reaches this with oauth.
     if (auth.method === "oauth" && this.sandboxDriver !== undefined) {
@@ -5267,6 +5326,80 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
   }
 
+  validateExecutionAdmission(
+    revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+  ): void {
+    assertExecutionAdmission(revision);
+    const plan = revision.egressPlan;
+    if (plan === undefined && this.conduitDriver === undefined) {
+      return;
+    }
+    const sandbox = this.sandboxDriver;
+    if (
+      plan === undefined ||
+      this.options.runtime === undefined ||
+      this.conduitDriver?.implementation !== "openshell" ||
+      this.conduitDriver.id !== plan.egressDriverId ||
+      sandbox?.implementation !== "openshell" ||
+      sandbox.id !== plan.sandboxDriverId ||
+      !sandbox.provisionHarness ||
+      !sandbox.enrollHarness ||
+      !sandbox.harnessEndpoint ||
+      !sandbox.harnessStatus
+    ) {
+      throw new DependencyUnavailableError(
+        "Protected execution is unavailable without its exact paired Compute release.",
+      );
+    }
+  }
+
+  private validateRevisionExecution(
+    revision: AgentRevision,
+    context?: ComputeRevisionContext,
+  ): void {
+    this.validateExecutionAdmission(revision);
+    const plan = revision.egressPlan;
+    if (!plan) {
+      return;
+    }
+    const execution = plan.execution;
+    if (
+      revision.harness.id !== "codex" ||
+      revision.harness.mode !== "dedicated" ||
+      revision.sandboxDriverId !== plan.sandboxDriverId ||
+      !context?.currentEgressInstallation ||
+      execution.agentId !== revision.agentId ||
+      execution.revisionId !== revision.id ||
+      execution.namespaceId !== revision.namespaceId ||
+      execution.servicePrincipalId !== revision.servicePrincipalId ||
+      plan.routes.some((route) => !isDeepStrictEqual(route.binding.execution, execution)) ||
+      (!harnessEgressEnrollment(plan).inference
+        ? revision.harnessAuth.method !== "runtime"
+        : revision.harnessAuth.method !== "credential_source")
+    ) {
+      throw new DependencyUnavailableError(
+        "Protected Compute release requires its dedicated Harness and current admitted installation.",
+      );
+    }
+  }
+
+  private validateExecutionOrWithdrawPublicGithubRead(
+    revision: AgentRevision,
+    context: ComputeRevisionContext | undefined,
+  ): "validated" | "withdraw-public-reader" {
+    assertExecutionAdmission(revision);
+    // A newly selected Conduit cannot prevent withdrawal of the old reader's own grant.
+    if (
+      revision.executionAdmission.mode === "unprotected" &&
+      this.hasPublicGithubReadAdmission(revision) &&
+      this.publicGithubReadForRevision(revision) === undefined
+    ) {
+      return "withdraw-public-reader";
+    }
+    this.validateRevisionExecution(revision, context);
+    return "validated";
+  }
+
   async prepareRevision(
     revision: AgentRevision,
     context?: ComputeRevisionContext,
@@ -5282,6 +5415,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): Promise<ComputeReadiness> {
+    const execution = this.validateExecutionOrWithdrawPublicGithubRead(revision, context);
     this.lifecycleStarted = true;
     const result = {
       namespaceId: revision.namespaceId,
@@ -5309,10 +5443,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     ) {
       throw new ConfigurationFailure("AgentRevision Configuration ownership is invalid.");
     }
-    if (
-      this.hasPublicGithubReadAdmission(revision) &&
-      this.publicGithubReadForRevision(revision) === undefined
-    ) {
+    if (execution === "withdraw-public-reader") {
       const { name: namespace, external } = await this.resolveNamespace(revision.namespaceId);
       const observed = await this.getNamespace(namespace);
       if (observed === undefined) {
@@ -5323,6 +5454,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
         return result;
       }
       await this.revokeUnavailablePublicGithubRead(revision, namespace);
+      // If the peer was restored while withdrawal was pending, revalidate before release.
+      this.validateRevisionExecution(revision, context);
     }
     const materialInput = this.repositoryMaterialInput(revision, context);
     const repositoryConsumer =
@@ -5807,6 +5940,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
         environment: Record<string, string>,
         providerEndpoint?: SandboxHarnessEndpoint,
       ) => {
+        await this.prepareRevisionStage("gateway_config_map", () =>
+          this.reconcileHarnessTrust(revision, providerEndpoint, gatewayNamespace),
+        );
         await this.prepareRevisionStage("gateway_channel_network_policy", () =>
           this.reconcileChannelNetworkPolicy(revision, channels, gatewayNamespace),
         );
@@ -6042,7 +6178,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         const sources = [
           ...(harnessAuth.credentialSource === undefined ? [] : [harnessAuth.credentialSource]),
           ...credentialSources,
-        ];
+        ].filter((source) => source.egress === undefined);
         const credentialContext =
           sources.length === 0
             ? undefined
@@ -6056,12 +6192,57 @@ export class KubernetesComputeDriver implements ComputeDriver {
           credentialContext === undefined
             ? []
             : await this.requireCredentialGateway().attachForRevision(credentialContext);
-        const requirements = this.harnessRequirementsFromDeployment(
+        const egressContext =
+          revision.egressPlan === undefined
+            ? undefined
+            : {
+                namespace: sandboxContext.namespace,
+                revision,
+                plan: revision.egressPlan,
+                signal: sandboxContext.signal,
+              };
+        if (
+          egressContext !== undefined &&
+          (this.conduitDriver?.id !== revision.egressPlan!.egressDriverId ||
+            context?.recordEgressInstallation === undefined ||
+            sandboxDriver.enrollHarness === undefined)
+        ) {
+          throw new DependencyUnavailableError(
+            "The admitted protected egress composition is unavailable.",
+          );
+        }
+        const conduitWiring =
+          egressContext === undefined
+            ? undefined
+            : await this.conduitDriver!.configureRevision(egressContext);
+        const harnessRequirements = this.harnessRequirementsFromDeployment(
           agentDeployment,
           harnessAuth.loginMode,
           attachments,
           this.sandboxWorkloadFiles(pluginRuntime),
         );
+        const releaseKey =
+          conduitWiring === undefined
+            ? undefined
+            : await this.executionReleaseKey(
+                revision,
+                await this.controlNamespace(revision.namespaceId),
+              );
+        const requirements = {
+          ...harnessRequirements,
+          ...(conduitWiring === undefined
+            ? {}
+            : {
+                conduitWiring,
+                // Bind enrollment to the immutable admitted revision without
+                // exposing Compute's private status identity to the provider.
+                environment: [
+                  ...harnessRequirements.environment,
+                  { name: "OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID", value: revision.id },
+                  { name: COMPUTE_RELEASE_PUBLIC_KEY, value: computeReleasePublicKey(releaseKey!) },
+                ],
+              }),
+        };
         const sandbox = await this.prepareRevisionStage("sandbox_provision", () =>
           sandboxDriver.provisionHarness!({
             ...sandboxContext,
@@ -6070,6 +6251,47 @@ export class KubernetesComputeDriver implements ComputeDriver {
           }),
         );
         this.verifySandboxResourceRef(sandbox, revision, namespace);
+        if (egressContext !== undefined) {
+          if (sandbox.conduitWiring === undefined) {
+            throw new DependencyUnavailableError(
+              "The paired Sandbox returned no exact protected egress configuration.",
+            );
+          }
+          const installed = await this.conduitDriver!.wiringStatus(
+            egressContext,
+            sandbox.conduitWiring,
+          );
+          if (installed === undefined || !(await this.preparedEgressReady(egressContext))) {
+            return incomplete();
+          }
+          await context!.recordEgressInstallation!(installed);
+          if (!(await this.conduitDriver!.verifyInstallation(egressContext, installed))) {
+            return incomplete();
+          }
+          const transportToken = await this.prepareRevisionStage("harness_auth", () =>
+            this.sandboxTransportTokenText(revision),
+          );
+          await this.prepareRevisionStage("sandbox_provision", () =>
+            sandboxDriver.enrollHarness!(
+              {
+                ...sandboxContext,
+                revision,
+                requirements,
+                transportToken,
+              },
+              installed,
+              async (startupId) => {
+                const committed = await this.verifiedReleaseInstallation(
+                  egressContext,
+                  context!,
+                  installed,
+                );
+                this.operationSignal().throwIfAborted();
+                return signComputeExecutionRelease(releaseKey!, startupId, committed);
+              },
+            ),
+          );
+        }
         if (this.options.runtime !== undefined) {
           // The Sandbox, and with it the supervisor's exact peer labels, exists only
           // now: admit that supervisor before waiting for its workspace node.
@@ -6327,6 +6549,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): Promise<void> {
+    const execution = this.validateExecutionOrWithdrawPublicGithubRead(revision, context);
     if (
       revision.compute.id !== this.id ||
       revision.compute.implementation !== this.implementation ||
@@ -6335,10 +6558,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     ) {
       throw new ConfigurationFailure("AgentRevision Compute ownership is invalid.");
     }
-    if (
-      this.hasPublicGithubReadAdmission(revision) &&
-      this.publicGithubReadForRevision(revision) === undefined
-    ) {
+    if (execution === "withdraw-public-reader") {
       const { name: namespace, external } = await this.resolveNamespace(revision.namespaceId);
       const observed = await this.getNamespace(namespace);
       if (observed === undefined || observed.status?.phase !== "Active") {
@@ -6346,6 +6566,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
       }
       this.verifyNamespaceOwnership(observed, { namespaceId: revision.namespaceId }, external);
       await this.revokeUnavailablePublicGithubRead(revision, namespace);
+      // If the peer was restored while withdrawal was pending, revalidate before release.
+      this.validateRevisionExecution(revision, context);
     }
     const materialInput = this.repositoryMaterialInput(revision, context);
     const repositoryConsumer =
@@ -6666,6 +6888,17 @@ export class KubernetesComputeDriver implements ComputeDriver {
           this.sandboxNamespaceForRevision(revision, namespace),
           namespace,
         );
+        if (revision.egressPlan !== undefined) {
+          await this.verifiedReleaseInstallation(
+            {
+              namespace: sandboxContext.namespace,
+              signal: sandboxContext.signal,
+              revision,
+              plan: revision.egressPlan,
+            },
+            context!,
+          );
+        }
         providerEndpoint = await sandboxDriver.harnessEndpoint({
           ...sandboxContext,
           revision,
@@ -6712,6 +6945,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       gatewayNamespace,
       gatewayOwnership,
     );
+    await this.reconcileHarnessTrust(revision, providerEndpoint, gatewayNamespace);
     await this.reconcile(
       this.deployment(
         gatewayName,
@@ -7014,6 +7248,28 @@ export class KubernetesComputeDriver implements ComputeDriver {
       external,
     );
     const sandboxNamespace = this.sandboxNamespaceForRevision(revision, namespace);
+    if (revision.egressPlan !== undefined && source.egress !== undefined) {
+      const egress = this.conduitDriver;
+      if (egress?.id !== revision.egressPlan.egressDriverId) {
+        throw new DependencyUnavailableError("The protected egress cleanup owner is unavailable.");
+      }
+      const binding = revision.egressPlan.routes.find(
+        (route) => route.binding.source.source.id === source.id,
+      )?.binding.binding;
+      if (!binding) {
+        throw new OwnershipFailure("The protected source has no admitted binding.");
+      }
+      const removed = await egress.withdrawBinding(
+        {
+          namespace: sandboxNamespace,
+          revision,
+          plan: revision.egressPlan,
+          signal: AbortSignal.timeout(30_000),
+        },
+        binding,
+      );
+      return { sourceId: source.id, state: removed ? "revoked" : "pending" };
+    }
     const sandbox = sandboxDriver.harnessResource({ namespace: sandboxNamespace, revision });
     this.verifySandboxResourceRef(sandbox, revision, namespace);
     const status = await this.requireCredentialGateway().withdraw({
@@ -7468,6 +7724,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
     await this.deleteOwnedNamespacedResource(
       "ConfigMap",
+      this.harnessTrustName(revision.agentId, revision.id),
+      this.pluginRuntimeOwnership(revision),
+      gatewayNamespace,
+    );
+    await this.deleteOwnedNamespacedResource(
+      "ConfigMap",
       `gateway-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
       { namespaceId: revision.namespaceId, agentId: revision.agentId },
       gatewayNamespace,
@@ -7484,6 +7746,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
         `plugin-runtime-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
         this.pluginRuntimeOwnership(revision),
         gatewayNamespace,
+      );
+    }
+    if (revision.egressPlan !== undefined) {
+      await this.deleteOwnedNamespacedResource(
+        "Secret",
+        this.executionReleaseSecretName(revision),
+        this.pluginRuntimeOwnership(revision),
+        await this.controlNamespace(revision.namespaceId),
       );
     }
     for (const name of [
@@ -12104,6 +12374,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     const reader = this.options.network.publicGithubRead;
     if (
       reader === undefined ||
+      revision.executionAdmission.mode !== "unprotected" ||
       this.options.runtime === undefined ||
       revision.harness.id !== "codex" ||
       revision.harness.mode !== "dedicated" ||
@@ -13293,7 +13564,11 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       ) {
         throw new OwnershipFailure("Harness credential source does not match the admitted source.");
       }
-    } else {
+    } else if (
+      auth.method !== "runtime" ||
+      !revision.egressPlan ||
+      harnessEgressEnrollment(revision.egressPlan).inference
+    ) {
       if (
         !isServiceAccountHarnessAuth(auth) ||
         !isDeepStrictEqual(auth, revision.harnessAuth) ||
@@ -13304,7 +13579,15 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         );
       }
     }
-    const prepared = prepareHarnessAuth(revision.harness, auth, revision.configuration);
+    const prepared: PreparedHarnessAuth =
+      auth.method === "runtime" &&
+      revision.egressPlan &&
+      !harnessEgressEnrollment(revision.egressPlan).inference
+        ? {
+            loginMode: "runtime",
+            environment: [{ name: "CODEX_LOGIN_MODE", value: "protected-no-inference" }],
+          }
+        : prepareHarnessAuth(revision.harness, auth, revision.configuration);
     const native = harnessModelAuthentication(revision.configuration);
     return {
       ...prepared,
@@ -14053,6 +14336,125 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     };
   }
 
+  /** The release signer is revision-owned in the control plane and is never projected into a workload. */
+  private async executionReleaseKey(
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<KeyObject> {
+    const name = this.executionReleaseSecretName(revision);
+    const ownership = this.pluginRuntimeOwnership(revision);
+    try {
+      let observed = await this.getOwned("Secret", name, namespace, ownership);
+      if (!observed) {
+        const key = generateKeyPairSync("ed25519").privateKey.export({
+          type: "pkcs8",
+          format: "der",
+        });
+        const clients = await this.clients(namespace.plane);
+        await this.request(
+          () =>
+            clients.core.createNamespacedSecret({
+              namespace: namespace.name,
+              body: {
+                ...this.manifest("v1", "Secret", name, ownership, namespace),
+                immutable: true,
+                type: "Opaque",
+                data: { signer: key.toString("base64") },
+              },
+            }),
+          { mutating: true },
+        );
+        observed = await this.getOwned("Secret", name, namespace, ownership);
+      }
+      if (
+        observed?.immutable !== true ||
+        !observed.metadata.uid ||
+        observed.metadata.deletionTimestamp ||
+        !observed.data?.signer
+      ) {
+        throw new Error("Incomplete Compute execution release key.");
+      }
+      const key = createPrivateKey({
+        key: Buffer.from(observed.data.signer, "base64"),
+        format: "der",
+        type: "pkcs8",
+      });
+      if (key.asymmetricKeyType !== "ed25519") {
+        throw new Error("Invalid Compute execution release key.");
+      }
+      return key;
+    } catch (error) {
+      this.operationSignal().throwIfAborted();
+      throw privateWriteFailure("Compute execution release key is unavailable.", error);
+    }
+  }
+
+  private executionReleaseSecretName(revision: AgentRevision): string {
+    return `compute-release-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`;
+  }
+
+  /** Cold/expired is pending for an ordinary later observation, never a request to prepare material. */
+  private async preparedEgressReady(egress: ConduitRevisionContext): Promise<boolean> {
+    for (const route of egress.plan.routes) {
+      if (route.binding.grant.kind !== "github_repository_metadata") {
+        continue;
+      }
+      const control = this.conduitDriver!.sourceControl;
+      const lifecycle = control.preparedGitHub;
+      const source = preparedGitHubSourceFromRoute(route, control);
+      if (
+        !source ||
+        !lifecycle ||
+        !isDeepStrictEqual(source.key.provider, preparedGitHubProviderRef)
+      ) {
+        throw new DependencyUnavailableError(
+          "Compute requires the exact prepared GitHub metadata lifecycle owner.",
+        );
+      }
+      // Bound even an owner whose observation ignores cancellation. No retry in this pass.
+      const signal = AbortSignal.any([egress.signal, AbortSignal.timeout(3_000)]);
+      let interrupted: () => void;
+      const promise = new Promise<boolean>((resolve) => {
+        interrupted = () => resolve(false);
+        signal.addEventListener("abort", interrupted, { once: true });
+      });
+      try {
+        egress.signal.throwIfAborted();
+        const ready = await Promise.race([promise, lifecycle.ready(source, signal)]);
+        egress.signal.throwIfAborted();
+        if (ready !== true || signal.aborted) {
+          return false;
+        }
+      } finally {
+        signal.removeEventListener("abort", interrupted!);
+      }
+    }
+    return true;
+  }
+
+  private async verifiedReleaseInstallation(
+    egress: ConduitRevisionContext,
+    context: ComputeRevisionContext,
+    observed?: EgressInstallation,
+  ): Promise<EgressInstallation> {
+    const current = await context.currentEgressInstallation!();
+    if (
+      !current ||
+      !isDeepStrictEqual(current.plan, egress.plan) ||
+      (observed &&
+        (observed.sandboxId !== current.sandboxId ||
+          !isDeepStrictEqual(current.sender, observed.sender) ||
+          !isDeepStrictEqual(current.enforcement, observed.enforcement))) ||
+      !(await this.conduitDriver!.verifyInstallation(egress, current)) ||
+      !(await this.preparedEgressReady(egress))
+    ) {
+      throw new DependencyUnavailableError(
+        "Compute release requires the exact current committed installation.",
+      );
+    }
+    return current;
+  }
+
   private async sandboxTransportVerifier(
     revision: AgentRevision,
   ): Promise<SandboxEnvironmentVariable> {
@@ -14214,6 +14616,52 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     }
   }
 
+  private harnessTrustName(agentId: string, revisionId: string): string {
+    return `harness-trust-${sha256Hex(agentId, 12)}-rev-${sha256Hex(revisionId, 12)}`;
+  }
+
+  private async reconcileHarnessTrust(
+    revision: AgentRevision,
+    endpoint: SandboxHarnessEndpoint | undefined,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<void> {
+    if (endpoint?.tls === undefined) {
+      return;
+    }
+    const network = this.options.network.providerHarness;
+    if (network === undefined) {
+      throw new ConfigurationFailure(
+        "SandboxDriver Harness endpoint requires an exact provider network route.",
+      );
+    }
+    providerHarnessUrl(endpoint, network);
+    // The endpoint arrives after the configuration snapshot. Keep its public
+    // trust separately revision-owned and immutable; drift requires a new revision.
+    const ownership = this.pluginRuntimeOwnership(revision);
+    await this.reconcile(
+      {
+        ...this.manifest(
+          "v1",
+          "ConfigMap",
+          this.harnessTrustName(revision.agentId, revision.id),
+          ownership,
+          namespace,
+        ),
+        immutable: true,
+        data: {
+          [HARNESS_TRUST_FILE]: [
+            publicCaBundle(endpoint.tls.caBundle),
+            this.options.executionCluster?.caBundle,
+          ]
+            .filter((bundle) => bundle !== undefined)
+            .join("\n"),
+        },
+      },
+      ownership,
+      namespace,
+    );
+  }
+
   private deployment(
     name: string,
     ownership: Ownership,
@@ -14297,6 +14745,33 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       pluginRuntime?.runtime.kind === "codex" && !embedded
         ? pluginRuntime.runtime.publicGithubRead
         : undefined;
+    if (providerEndpoint?.tls !== undefined) {
+      if (role !== "gateway" || !dedicated || configuration === undefined) {
+        throw new ConfigurationFailure(
+          "SandboxDriver TLS trust belongs only to its dedicated Agent Gateway.",
+        );
+      }
+      volumes.push({
+        name: HARNESS_TRUST_VOLUME,
+        configMap: {
+          name: this.harnessTrustName(
+            required(ownership.agentId, "Harness trust Agent ID"),
+            configuration.revisionId,
+          ),
+          items: [{ key: HARNESS_TRUST_FILE, path: HARNESS_TRUST_FILE }],
+          optional: false,
+        },
+      });
+      volumeMounts.push({
+        name: HARNESS_TRUST_VOLUME,
+        mountPath: HARNESS_TRUST_DIRECTORY,
+        readOnly: true,
+      });
+      variables.push({
+        name: "NODE_EXTRA_CA_CERTS",
+        value: `${HARNESS_TRUST_DIRECTORY}/${HARNESS_TRUST_FILE}`,
+      });
+    }
     const initContainers = privateHome
       ? [
           this.privateStateInitContainer(
@@ -14777,7 +15252,10 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
           name: "OPENCLAW_PEER_PLUGIN_STATUS_URL",
           value: `https://${this.options.executionCluster.harnessRouting.hostname}${this.harnessRoutePath(ownership)}/plugin-status`,
         });
-        if (this.options.executionCluster.caBundle !== undefined) {
+        if (
+          this.options.executionCluster.caBundle !== undefined &&
+          providerEndpoint?.tls === undefined
+        ) {
           variables.push({
             name: "NODE_EXTRA_CA_CERTS",
             value: `${configuration?.usesWritableNativeAdminConfig ? MANAGED_CONFIGURATION_DIRECTORY : CONFIGURATION_DIRECTORY}/execution-ca.pem`,

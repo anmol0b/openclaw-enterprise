@@ -159,8 +159,10 @@ Its closed `configuration` accepts:
   hosts in the gateway's namespace only when OCE knows it: from a bare or
   `<service>.<namespace>` `serviceName`, or a `serviceName` or `endpoint` host
   `<service>.<namespace>.svc[.<cluster domain>]`.
-- `auth`: `{ mode: unauthenticated }` or `{ mode: bearerTokenFile, path }` with
-  an absolute path.
+- `auth`: `{ mode: unauthenticated }`, `{ mode: bearerTokenFile, path }`, or
+  `{ mode: mtls, certificatePath, privateKeyPath }`. File paths must be absolute.
+  mTLS requires HTTPS and supplies the client certificate and key to gRPC only.
+  Service HTTP/WebSocket requests retain their separate scoped bearer identity.
 - `requestTimeoutMs`: the per-call deadline, from 1000 to 30000 ms. The bound
   limits how late a timed-out credential registration can land. Sandbox
   deletion has its own 120-second bound: OpenShell answers only after the
@@ -169,7 +171,8 @@ Its closed `configuration` accepts:
   `endpoint` at an IP address sends no TLS server name, so the gateway
   certificate must carry that IP address.
 - `insecureTransport: network-policy`: required when the connection lacks TLS or
-  bearer-token authentication, and rejected otherwise. It declares that
+  bearer/mTLS authentication, and rejected otherwise. It cannot enable plaintext
+  mTLS. It declares that
   NetworkPolicy restricts the gateway to the OCE API, worker, and OpenShell
   supervisors. Credential registration sends resolved values over this
   connection, and OCC cannot verify the NetworkPolicy itself.
@@ -181,9 +184,23 @@ Either `endpoint` or `serviceName` is required. Both `drivers.sandbox` and
 optional `drivers.credential_refresh` member must match the selected
 [Credential Refresh Driver](drivers/credential-refresh.md); OpenShell keeps
 refresh state on the gateway's provider records, so the two roles share this
-Backend. One OpenShell Backend is supported. Composition builds one gateway client object
-and injects it into both members, which cache one client per resolved endpoint.
-The API and the worker each construct it, so both need the token file and gateway access.
+Backend. Optional `drivers.conduit` selects the paired
+[protected static inference adapter](credential-sources/protected-inference.md).
+That path requires an authenticated HTTPS gateway and a negotiated credential
+access counterpart; legacy provider substitution cannot satisfy it.
+One OpenShell Backend is supported. Composition builds one gateway client object
+and injects it into its members, which cache one client per resolved endpoint.
+The API and the worker each construct it, so both need the selected authentication
+files and gateway access. Client certificates are loaded when the gRPC connection
+is created; restart these processes after replacing that material. IP endpoints
+still require the exact IP in the server certificate, including with mTLS.
+
+For native OpenShell mTLS, a verified client certificate's CN becomes the User
+subject and OU values become roles. Without an OIDC administrator role configured,
+an authenticated User has platform administrator authority. Treat the dedicated
+client CA and every certificate it signs as administrator credentials. Keep the
+client key in the trusted control plane, never an Agent or Sandbox. With OIDC
+configured, its administrator-role check still applies; mTLS does not bypass it.
 
 ## Driver and client contract
 

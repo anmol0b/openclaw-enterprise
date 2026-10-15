@@ -231,7 +231,7 @@ function createOpenClawConfiguration() {
     secrets: {
       providers: { teamstore: { source: "store" } },
       defaults: { store: "teamstore" },
-      egressProxy: { enabled: true },
+      conduit: { enabled: true },
     },
     agents: { defaults: { sandbox: { mode: "all" } } },
     plugins: {

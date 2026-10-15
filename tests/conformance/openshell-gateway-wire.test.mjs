@@ -8,8 +8,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { createSecureServer } from "node:http2";
+import { createServer as createHttpsServer, get as httpsGet } from "node:https";
 import test from "node:test";
 import {
   GrpcOpenShellGatewayClient,
@@ -366,10 +368,12 @@ test("OpenShell client serializes v0.1.3-pre.2 create-time service exposure", as
         assert.ok(error instanceof DependencyUnavailableError);
         assert.equal(error.grpcStatus, grpc.status.INVALID_ARGUMENT);
         assert.equal(error.code, undefined);
-        assert.equal(
-          error.message,
-          "OpenShell CreateSandbox failed with gRPC status 3: sandbox spec rejected by the Kubernetes driver",
-        );
+        assert.equal(error.message, "OpenShell CreateSandbox failed with gRPC status 3.");
+        assert.deepEqual(error.requestDiagnostic, {
+          method: "CreateSandbox",
+          grpcStatus: grpc.status.INVALID_ARGUMENT,
+          validationCategory: "UNKNOWN",
+        });
         return true;
       },
     );
@@ -1177,6 +1181,214 @@ test("OpenShell client verifies a TLS gateway at an IP endpoint against that IP 
       "an untrusting client never reaches the gateway over the trusting client's connection",
     );
   });
+});
+
+// Exercise the real grpc-js connector with signed client certificates. This proves
+// transport identity and isolation, not the supplier's application authorization.
+function signedClientCertificate(directory, name, ca) {
+  const keyPath = join(directory, `${name}.key`);
+  const certPath = join(directory, `${name}.crt`);
+  const csrPath = join(directory, `${name}.csr`);
+  for (const args of [
+    [
+      "req",
+      "-new",
+      "-newkey",
+      "ec",
+      "-pkeyopt",
+      "ec_paramgen_curve:prime256v1",
+      "-nodes",
+      "-keyout",
+      keyPath,
+      "-out",
+      csrPath,
+      "-subj",
+      "/CN=openshell-client/OU=openshell-user",
+    ],
+    [
+      "x509",
+      "-req",
+      "-in",
+      csrPath,
+      "-CA",
+      ca.certPath,
+      "-CAkey",
+      ca.keyPath,
+      "-set_serial",
+      "2",
+      "-days",
+      "1",
+      "-out",
+      certPath,
+    ],
+  ]) {
+    const generated = spawnSync("openssl", args, { encoding: "utf8" });
+    assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
+  }
+  return { mode: "mtls", certificatePath: certPath, privateKeyPath: keyPath };
+}
+
+test("OpenShell mTLS authenticates DNS and IP channels and refuses missing or foreign identities", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "openshell-mtls-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const serverIdentity = selfSignedCertificate(directory, "server", "DNS:localhost,IP:127.0.0.1");
+  const ca = selfSignedCertificate(directory, "client-ca", "DNS:client-ca.invalid");
+  const foreignCA = selfSignedCertificate(directory, "foreign-ca", "DNS:foreign.invalid");
+  const auth = signedClientCertificate(directory, "client", ca);
+  const foreign = signedClientCertificate(directory, "foreign", foreignCA);
+  const seen = [];
+  const server = createSecureServer({
+    key: readFileSync(serverIdentity.keyPath),
+    cert: readFileSync(serverIdentity.certPath),
+    ca: readFileSync(ca.certPath),
+    requestCert: true,
+    rejectUnauthorized: true,
+  });
+  server.on("stream", (stream, headers) => {
+    const socket = stream.session.socket;
+    seen.push({
+      authorized: socket.authorized,
+      subject: socket.getPeerCertificate().subject,
+      sni: socket.servername,
+      authorization: headers.authorization,
+    });
+    stream.respond(
+      { ":status": 200, "content-type": "application/grpc" },
+      { waitForTrailers: true },
+    );
+    stream.on("wantTrailers", () => stream.sendTrailers({ "grpc-status": "0" }));
+    stream.end(Buffer.from([0, 0, 0, 0, 2, 0x08, 0x01]));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  for (const host of ["localhost", "127.0.0.1"]) {
+    await t.test(host, async (t) => {
+      const makeClient = (clientAuth, rootCertificatePath = serverIdentity.certPath) => {
+        const client = new GrpcOpenShellGatewayClient({
+          endpoint: `https://${host}:${server.address().port}`,
+          rootCertificatePath,
+          auth: clientAuth,
+          requestTimeoutMs: 1_000,
+        });
+        t.after(() => client.close());
+        return client;
+      };
+      await makeClient(auth).health(AbortSignal.timeout(5_000));
+      assert.equal(seen.at(-1).authorized, true);
+      assert.equal(seen.at(-1).subject.CN, "openshell-client");
+      assert.equal(seen.at(-1).subject.OU, "openshell-user");
+      assert.equal(seen.at(-1).sni, host === "localhost" ? "localhost" : false);
+      assert.equal(seen.at(-1).authorization, undefined);
+      const count = seen.length;
+      // None may reuse the authenticated channel of the successful client.
+      for (const rejected of [
+        makeClient(undefined),
+        makeClient(foreign),
+        makeClient(auth, foreignCA.certPath),
+      ]) {
+        await assert.rejects(
+          rejected.health(AbortSignal.timeout(5_000)),
+          DependencyUnavailableError,
+        );
+      }
+      assert.equal(seen.length, count, "unverified peers never reach an RPC");
+      await assert.rejects(
+        makeClient({ ...auth, privateKeyPath: join(directory, "missing.key") }).health(
+          AbortSignal.timeout(5_000),
+        ),
+        { code: "ENOENT" },
+      );
+    });
+  }
+  assert.throws(
+    () => new GrpcOpenShellGatewayClient({ endpoint: "http://127.0.0.1:1", auth }),
+    /mTLS requires an HTTPS/,
+  );
+  assert.throws(
+    () =>
+      new GrpcOpenShellGatewayClient({
+        endpoint: "https://127.0.0.1:1",
+        auth: { ...auth, certificatePath: "relative.crt" },
+      }),
+    /paths must be absolute/,
+  );
+});
+
+test("OpenShell service transport never sends the administrator mTLS identity", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "openshell-service-identity-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const identity = selfSignedCertificate(directory, "server", "IP:127.0.0.1");
+  const ca = selfSignedCertificate(directory, "client-ca", "DNS:client-ca.invalid");
+  const auth = signedClientCertificate(directory, "client", ca);
+  const tls = { key: readFileSync(identity.keyPath), cert: readFileSync(identity.certPath) };
+  const listen = async (options, handler) => {
+    const server = createHttpsServer({ ...tls, ...options }, handler);
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    return server;
+  };
+  const serviceDocument = (server) => {
+    const client = new GrpcOpenShellGatewayClient({
+      endpoint: `https://127.0.0.1:${server.address().port}`,
+      rootCertificatePath: identity.certPath,
+      auth,
+    });
+    t.after(() => client.close());
+    return client.getServiceDocument(
+      "https://harness.example.invalid",
+      "/status",
+      "scoped-service-token",
+      AbortSignal.timeout(5_000),
+    );
+  };
+
+  // First prove that this listener requests and accepts the administrator certificate.
+  const peers = [];
+  const strict = await listen(
+    { ca: readFileSync(ca.certPath), requestCert: true, rejectUnauthorized: true },
+    (request, response) => {
+      peers.push(request.socket.getPeerCertificate().subject.CN);
+      response.writeHead(204).end();
+    },
+  );
+  const status = await new Promise((resolve, reject) => {
+    const request = httpsGet(
+      {
+        host: "127.0.0.1",
+        port: strict.address().port,
+        ca: tls.cert,
+        cert: readFileSync(auth.certificatePath),
+        key: readFileSync(auth.privateKeyPath),
+        agent: false,
+        signal: AbortSignal.timeout(5_000),
+      },
+      (response) => {
+        response.resume();
+        resolve(response.statusCode);
+      },
+    );
+    request.once("error", reject);
+  });
+  assert.equal(status, 204);
+  assert.deepEqual(peers, ["openshell-client"]);
+
+  // On the service path the same listener must see a missing certificate, not just
+  // an arbitrary connection failure. Sending the administrator identity would succeed.
+  const rejected = once(strict, "tlsClientError", { signal: AbortSignal.timeout(5_000) });
+  const [[error]] = await Promise.all([
+    rejected,
+    assert.rejects(serviceDocument(strict), DependencyUnavailableError),
+  ]);
+  assert.equal(error.code, "ERR_SSL_PEER_DID_NOT_RETURN_A_CERTIFICATE");
+  assert.equal(peers.length, 1, "the service request never reached an authenticated socket");
+
+  const requests = [];
+  const service = await listen({}, (request, response) => {
+    requests.push(request.headers.authorization);
+    response.writeHead(200, { "content-type": "application/json" }).end('{"ready":true}');
+  });
+  assert.deepEqual(await serviceDocument(service), { status: 200, json: { ready: true } });
+  assert.deepEqual(requests, ["Bearer scoped-service-token"]);
 });
 
 test("OpenShell client cancels an in-flight provider request", async () => {

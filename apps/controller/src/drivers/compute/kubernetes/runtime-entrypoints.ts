@@ -1,5 +1,6 @@
 import { PLUGIN_RUNTIME_TRANSLATOR_SOURCE } from "../../plugin/runtime-translator.ts";
 import { nodeProgramArguments } from "../node-program.ts";
+import { HARNESS_EGRESS_ENROLLMENT_HELPER } from "../egress-enrollment.ts";
 import { gatewayStateMigrationHelper, startupPhaseHelper } from "../runtime-startup.ts";
 
 // Match the pinned OpenClaw service stop budget: 315s drain, 10s cleanup,
@@ -1207,6 +1208,14 @@ function assertCodexPluginRuntime(runtime) {
   }
   if (!isPlainObject(runtime.manifest.selections ?? {})) {
     throw new Error("Codex plugin selections are invalid.");
+  }
+  if ((runtime.manifest.providerTools !== undefined || runtime.manifest.egressEnrollment !== undefined) &&
+      (runtime.manifest.providerTools !== "none" ||
+       !isPlainObject(runtime.manifest.egressEnrollment) ||
+       (runtime.manifest.egressEnrollment.inference !== false &&
+        (runtime.manifest.modelEndpoint?.modelProvider !== "openai-compatible" ||
+         typeof runtime.manifest.modelEndpoint.baseUrl !== "string")))) {
+    throw new Error("Codex protected inference profile is invalid.");
   }
 }
 
@@ -3333,6 +3342,7 @@ const { performance } = require("node:perf_hooks");
 ${PLUGIN_RUNTIME_HELPERS}
 ${AUTH_PROBE_FAILURE_HELPER}
 ${CODEX_STDERR_FILTER_HELPER}
+${HARNESS_EGRESS_ENROLLMENT_HELPER}
 ${startupPhaseHelper("agent")}
 
 function agentRuntimeReady() {
@@ -3402,7 +3412,7 @@ if (loginMode === "api_key") {
   if (apiKey !== undefined || accessToken !== undefined) {
     throw new Error("Codex OAuth authentication configuration is invalid.");
   }
-} else {
+} else if (loginMode !== "protected-no-inference") {
   throw new Error("Codex authentication mode is missing or unsupported.");
 }
 
@@ -3446,9 +3456,18 @@ function codexChildEnvironment() {
 function codexAuthenticationRejected(message) {
   return typeof message === "string" && /\bstatus 40[13] (Unauthorized|Forbidden)\b/.test(message);
 }
+const enrollment = pluginRuntime?.manifest.egressEnrollment;
+const noInference = loginMode === "protected-no-inference";
+if (noInference && (enrollment?.inference !== false || apiKey !== undefined || accessToken !== undefined)) {
+  throw new Error("Protected execution without inference requires its exact non-inference plan.");
+}
+// Protected startup runs no Codex process, login or model probe until Compute releases it.
+const startReleasedCodex = () => {
 const loginStartedAt = Date.now();
 let login;
-if (loginMode === "oauth") {
+if (noInference) {
+  login = { status: 0 };
+} else if (loginMode === "oauth") {
   try {
     const fs = require("node:fs");
     const receipt = JSON.parse(fs.readFileSync(process.env.CODEX_HOME + "/.oce-oauth.json", "utf8"));
@@ -3479,7 +3498,7 @@ if (loginMode === "oauth") {
     }
   }
 }
-logStartupPhase("codex-login", loginStartedAt, login.status !== 0 || login.error ? "failed" : "ok");
+if (!noInference) logStartupPhase("codex-login", loginStartedAt, login.status !== 0 || login.error ? "failed" : "ok");
 if (login.status !== 0 || login.error) {
   holdFailedAuthentication(
     "login",
@@ -3554,6 +3573,10 @@ function probeCodexAuthentication(timeout) {
         "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + '.wire_api="responses"',
         "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".requires_openai_auth=true",
         "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".supports_websockets=false",
+        ...(pluginRuntime.manifest.providerTools !== "none" ? [] : [
+          "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".request_max_retries=0",
+          "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".stream_max_retries=0",
+        ]),
       ]),
       "Reply only READY. Do not use tools.",
     ], {
@@ -3597,7 +3620,7 @@ function probeCodexAuthentication(timeout) {
     for (const event of events) {
       if (event.type === "turn.started") turnStarted = true;
       if (event.type === "error") {
-        if (!turnStarted || turnCompleted || !isRecoveredNativeStreamError(event) ||
+        if (pluginRuntime?.manifest.providerTools === "none" || !turnStarted || turnCompleted || !isRecoveredNativeStreamError(event) ||
           ++recoveredStreamErrors > MAX_RECOVERED_STREAM_RETRIES) return finish(codexProbeStatusFailure(event.message, "error-event"));
         continue;
       }
@@ -3636,8 +3659,9 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     holdFailedAuthentication("model-probe", "MODEL_PROBE_TIMEOUT");
     return;
   }
-  const result = probeCodexAuthentication(timeout);
-  console.error(JSON.stringify({
+  // An execution without an inference route may serve its local app protocol, but never probes a model.
+  const result = noInference ? {} : probeCodexAuthentication(timeout);
+  if (!noInference) console.error(JSON.stringify({
     event: "codex.model_probe",
     attempt,
     elapsedMs: Math.round(performance.now() - startedAt),
@@ -3648,7 +3672,7 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     providerStatus: result.providerStatus,
     providerCode: result.providerCode,
   }));
-  if (result.code === "MODEL_PROBE_TIMEOUT" && attempt === 1 && performance.now() + 1000 < deadline) {
+  if (pluginRuntime?.manifest.providerTools !== "none" && result.code === "MODEL_PROBE_TIMEOUT" && attempt === 1 && performance.now() + 1000 < deadline) {
     setTimeout(() => startAuthenticatedCodex(2, deadline), 1000);
     return;
   }
@@ -3657,7 +3681,7 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     holdFailedAuthentication("model-probe", result.code, result.cause);
     return;
   }
-  logStartupPhase("model-probe", modelProbeStartedAt);
+  if (!noInference) logStartupPhase("model-probe", modelProbeStartedAt);
 
 function forwardTermination(child) {
   let terminating = false;
@@ -3697,7 +3721,7 @@ if (digest === undefined) {
 const child = spawn(
   "codex",
   [
-    // The successful probe validated this model; native policy readback must see it too.
+    // Preserve the admitted model selection for native policy readback.
     "-c",
     "model=" + JSON.stringify(process.env.OPENCLAW_HARNESS_MODEL.slice(process.env.OPENCLAW_HARNESS_MODEL.indexOf("/") + 1)),
     "-c",
@@ -3758,8 +3782,24 @@ child.on("exit", (code, signal) => {
   }
 })();
 }
-const modelProbeStartedAt = Date.now();
+let modelProbeStartedAt = Date.now();
 startAuthenticatedCodex();
+}
+};
+const protectedStartup = enrollment !== undefined || noInference ||
+  process.env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID !== undefined ||
+  process.env.OPENCLAW_EGRESS_COMPUTE_RELEASE_PUBLIC_KEY !== undefined;
+if (!protectedStartup) {
+  startReleasedCodex();
+} else {
+  const enrollmentStartedAt = Date.now();
+  waitForHarnessEgressEnrollment(enrollment).then(() => {
+    logStartupPhase("egress-enrollment", enrollmentStartedAt);
+    startReleasedCodex();
+  }, () => {
+    logStartupPhase("egress-enrollment", enrollmentStartedAt, "failed");
+    holdFailedAuthentication("egress-enrollment", "UNAVAILABLE");
+  });
 }
 `;
 

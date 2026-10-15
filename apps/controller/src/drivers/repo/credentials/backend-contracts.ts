@@ -101,11 +101,13 @@ export interface ExchangeLimits {
   readonly stallMs: number;
   readonly connectMs: number;
 }
-export interface ResponsePolicy {
-  readonly body: "stream" | "bounded-json" | "bounded-raw";
+export type ResponsePolicy = {
   headers(status: number, headers: HeaderFields): HeaderFields;
   readonly rewriteJson: ((value: JsonValue) => JsonValue) | undefined;
-}
+} & (
+  | { readonly body: "stream"; readonly trailers?: never }
+  | { readonly body: "bounded-json" | "bounded-raw"; readonly trailers?: "forbid" }
+);
 export interface RequestPlan {
   readonly [planIdentity]: true;
   readonly origin: string;

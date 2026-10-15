@@ -14,6 +14,13 @@ The gateway holds Secret values; OCC stores metadata and references. Admission
 freezes identity in the AgentRevision; the worker passes the live record to Compute.
 [OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md) covers attachment and readiness.
 
+With `conduit` selected, new static sources instead admit live versioned
+Secret references. Existing sources need exact source-update opt-in while unbound.
+They skip legacy gateway registration; source readiness alone does not establish
+installed protection. The [protected request flow](credential-source-egress.md)
+owns that path and its runtime qualification limits. The gateway-copy trace below
+continues to describe sources without a protected descriptor.
+
 ## Entry Points
 
 - Trigger: `POST`, `PATCH`, or `DELETE /namespaces/:namespaceId/credential-sources[/:credentialSourceId]`,
@@ -265,28 +272,19 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 
 ## Debugging and Verification
 
-- `node --test tests/conformance/credential-source-occ.test.mjs` covers catalog
-  validation, grants, registration compensation and recovery, audit, deletion,
-  Namespace gating, admission snapshots, and Secret-backed method rejection,
-  with an in-process gateway double.
-- `node --test tests/integration/credential-source-api.test.mjs` exercises
-  Fastify, IAM, OCC, and the OpenShell Driver: invalid endpoint rejection without
-  residual records, invalid-row deletion recovery, profile isolation, and custom
-  endpoint lifecycle. Gateway storage and Compute placement are test doubles;
-  this does not prove OpenShell runtime execution.
-- `node --test tests/conformance/openshell-gateway-wire.test.mjs` checks the
-  provider, profile, update, detach, and recheck RPCs against the pinned `v0.1.3-pre.2`
-  wire fixture.
-- The credential withdrawal cases in
-  `tests/integration/postgres-worker-agent-revision.test.mjs` run the real queue
-  and worker against PostgreSQL with a Compute double: retries, outages, replays,
-  refusals, maintenance, denials, other revisions, lost grants, and late creates.
-- The real OpenShell test updates the source and withdraws a `bearer-token`
-  source (its placeholder stops reaching an echo service), then the model
-  source (the next model turn fails).
-- `OCC_TEST_OPENSHELL_K3D_REAL=1 node --env-file="$TEST_ENV_FILE" --test tests/integration/sandbox-driver-openshell-k3d-real.test.mjs`
-  registers the selected source through the production API and reads live gateway status;
-  [OpenShell tests](../testing/openshell.md) specifies PAT and API-key selection.
+- [OCC conformance](../../tests/conformance/credential-source-occ.test.mjs) covers
+  grants, registration recovery, audit and admission with a gateway double.
+- [API integration](../../tests/integration/credential-source-api.test.mjs) exercises
+  Fastify, IAM, OCC and the OpenShell Driver, with storage and Compute doubles.
+- [Wire conformance](../../tests/conformance/openshell-gateway-wire.test.mjs)
+  checks provider, profile, update, detach and recheck against `v0.1.3-pre.2`.
+- [Worker integration](../../tests/integration/postgres-worker-agent-revision.test.mjs)
+  exercises withdrawal, retries, refusals, replays, lost grants and late creates
+  against PostgreSQL, with a Compute double.
+- [Real OpenShell tests](../testing/openshell.md) specify PAT or API-key selection.
+  They register a source, read gateway status, withdraw the tool source (its
+  placeholder stops reaching the echo service), then withdraw the model source
+  (the next turn fails).
 - A source stuck in `deleting` returns `503` on delete until the gateway is
   reachable; `GET` shows its live `status`.
 - Worker reason codes `CREDENTIAL_GATEWAY_MISMATCH` and
@@ -314,6 +312,8 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
 - 2026-10-14 14:04: Scope PAT authentication and OpenShell prerequisites. (authoring-run/dba0a6cb-33d9-40fd-b38b-e20cddf4b75f - 96a2b79fa)
 
 - 2026-10-13 20:30: Document provider-managed Codex PAT authentication. (01a136ee-8824-7043-b9e2-49eccacac3bd - ed9018c09)
+- 2026-10-14 12:34: Distinguish protected source admission from legacy gateway copies. (authoring-run/fe204745-17c9-4662-82e0-e194d7c187cb - dc5648b67d2618cc43ef07562298e986a94674e7)
+
 - 2026-10-13 20:07: Check provider ownership before profile updates. (authoring-run/01a136d4-3550-7042-834c-cf11f51f41f2 - 146c80ef66b5860cb9bea296d2574156468a103c)
 
 - 2026-10-12 14:00: Every source, including `openai`, owns its OpenShell profile; no profile is shared by type. (claude-code/session_014fi7Uq1LyofgqwLrLoQ3yY - e0bb26d84)

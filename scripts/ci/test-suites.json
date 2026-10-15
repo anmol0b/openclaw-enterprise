@@ -42,7 +42,9 @@
     "k3d-observability-demo": "./test-suites/k3d-observability-demo.json",
     "runtime-image-fixture": "./test-suites/runtime-image-fixture.json",
     "qa-matrix": "./test-suites/qa-matrix.json",
-    "keycloak-oidc": "./test-suites/keycloak-oidc.json"
+    "keycloak-oidc": "./test-suites/keycloak-oidc.json",
+    "egress-connected": "./test-suites/egress-connected.json",
+    "egress-custody-installed": "./test-suites/egress-custody-installed.json"
   },
   "groups": {
     "ci": [

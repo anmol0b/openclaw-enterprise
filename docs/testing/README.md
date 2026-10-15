@@ -182,3 +182,7 @@ databases, or unrelated clusters.
 For production telemetry and the optional demo backends, select a
 [Kubernetes observability lane](metrics.md#kubernetes-observability-acceptance).
 Model-turn logs have separate prerequisites and protected execution.
+
+For the optional protected static credential path, see
+[static egress verification](static-egress.md). Its wire fixtures and PostgreSQL
+proof are separate from real supervisor and model qualification.

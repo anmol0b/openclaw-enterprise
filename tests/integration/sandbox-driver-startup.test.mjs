@@ -36,6 +36,7 @@ import {
 import { createInstallationDriverConfiguration as installation } from "../helpers/installation-driver-configuration.mjs";
 import { loadInstallationFile } from "../helpers/installation-file.mjs";
 import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
+import { harnessTlsFixture } from "../helpers/harness-tls.mjs";
 
 const controllerRequire = createRequire(
   new URL("../../apps/controller/package.json", import.meta.url),
@@ -518,12 +519,12 @@ test("startup requires protected OpenShell transport or an explicit NetworkPolic
   delete undeclared.backend[0].configuration.insecureTransport;
   await assert.rejects(
     load(undeclared),
-    /requires TLS with bearerTokenFile authentication, or insecureTransport: network-policy/,
+    /requires TLS with bearerTokenFile or mtls authentication, or insecureTransport: network-policy/,
   );
   // TLS alone is not enough; the gateway must also authenticate OCC.
   const tlsOnly = sandboxInstallation();
   tlsOnly.backend[0].configuration = { endpoint: "https://openshell-gateway.openshell.svc:8080" };
-  await assert.rejects(load(tlsOnly), /requires TLS with bearerTokenFile authentication/);
+  await assert.rejects(load(tlsOnly), /requires TLS with bearerTokenFile or mtls authentication/);
 
   const protectedTransport = sandboxInstallation();
   protectedTransport.backend[0].configuration = {
@@ -534,6 +535,29 @@ test("startup requires protected OpenShell transport or an explicit NetworkPolic
   // The declaration is only for unprotected transport, so it cannot mask a protected setup.
   protectedTransport.backend[0].configuration.insecureTransport = "network-policy";
   await assert.rejects(load(protectedTransport), /insecureTransport is only for unprotected/);
+
+  const mtls = sandboxInstallation();
+  mtls.backend[0].configuration = {
+    endpoint: "https://openshell-gateway.openshell.svc:8080",
+    auth: {
+      mode: "mtls",
+      certificatePath: "/etc/openclaw/openshell/tls.crt",
+      privateKeyPath: "/etc/openclaw/openshell/tls.key",
+    },
+  };
+  await load(mtls);
+  for (const change of [
+    { privateKeyPath: undefined },
+    { certificatePath: "relative.crt" },
+    { path: "/unexpected" },
+  ]) {
+    const invalid = structuredClone(mtls);
+    Object.assign(invalid.backend[0].configuration.auth, change);
+    await assert.rejects(load(invalid), /configuration.auth/);
+  }
+  mtls.backend[0].configuration.endpoint = "http://openshell-gateway.openshell.svc:8080";
+  mtls.backend[0].configuration.insecureTransport = "network-policy";
+  await assert.rejects(load(mtls), /mtls requires HTTPS/);
 
   // Every gateway call's deadline stays within the registration fence.
   const slow = sandboxInstallation();
@@ -1257,6 +1281,86 @@ test("OpenShell rejects projected Agent identity before gateway mutation", async
     return true;
   });
   assert.deepEqual(gatewayClient.calls, []);
+});
+
+test("OpenShell Harness endpoints expose only the Backend public CA", async (t) => {
+  const tls = await harnessTlsFixture(t);
+  const gatewayClient = workspaceGatewayClient();
+  gatewayClient.getService = async () => ({
+    targetPort: 8080,
+    authorizationMode: "SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH",
+    advertisedUrl: "https://harness.example.test:8080/",
+    url: "https://harness.example.test:8080/",
+  });
+  const endpoint = async (rootCertificatePath) => {
+    const backend = backendFor(gatewayClient);
+    backend.client = new OpenShellGateway(
+      {
+        endpoint: "https://gateway.example.test:8080/",
+        // Endpoint trust never reads or exports administrator authentication.
+        auth: { mode: "bearerTokenFile", path: join(tls.directory, "not-readable-admin-token") },
+        ...(rootCertificatePath === undefined ? {} : { rootCertificatePath }),
+      },
+      { gatewayClient },
+    );
+    const driver = new OpenShellSandboxDriver(sandboxInstallation().drivers.sandbox.configuration, {
+      id: "openshell-sandbox",
+      implementation: "openshell",
+      backend,
+    });
+    const { context, revision, requirements } = codexSandboxFixture(driver);
+    return driver.harnessEndpoint({ ...context, revision, requirements });
+  };
+  assert.deepEqual(await endpoint(tls.rootCertificatePath), {
+    url: "wss://harness.example.test:8080/",
+    workspaceRoot: "/sandbox/enterprise",
+    tls: { caBundle: tls.caBundle },
+  });
+  assert.equal((await endpoint()).tls, undefined, "unconfigured roots keep system trust");
+  const invalidRoot = join(tls.directory, "invalid-root.pem");
+  const begin = "-----BEGIN CERTIFICATE-----";
+  const end = "-----END CERTIFICATE-----";
+  for (const content of [
+    "",
+    tls.cert,
+    tls.caBundle + tls.key,
+    `${begin}\ninvalid\n${end}`,
+    `garbage\n${tls.caBundle}`,
+    `${tls.caBundle}\ngarbage`,
+    `${begin}\n${tls.caBundle}`,
+    `${tls.caBundle}\n${end}`,
+    // A valid first CA must not hide a malformed or unterminated second block.
+    `${tls.caBundle}\n${begin.repeat(1000)}`,
+    begin.repeat(1000),
+  ]) {
+    await writeFile(invalidRoot, content);
+    await assert.rejects(endpoint(invalidRoot), /readable public PEM CA certificate bundle/);
+  }
+  // Rotation bundles preserve canonical PEM, accepting whitespace and CRLF.
+  await writeFile(
+    invalidRoot,
+    ` \t\r\n${tls.caBundle.replaceAll("\n", "\r\n")}\n${tls.caBundle}\t`,
+  );
+  assert.equal((await endpoint(invalidRoot)).tls.caBundle, tls.caBundle + tls.caBundle);
+
+  // Bound this synchronous-parser regression in a child: a test timeout cannot interrupt ReDoS.
+  const parserUrl = new URL("../../packages/utils/src/tls.ts", import.meta.url).href;
+  const repeatedMarkers = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import assert from "node:assert/strict";
+       import { publicCaBundle } from ${JSON.stringify(parserUrl)};
+       assert.throws(() => publicCaBundle(${JSON.stringify(begin)}.repeat(100_000)),
+         /TLS trust must contain only PEM CA certificates/);`,
+    ],
+    { encoding: "utf8", timeout: 5000 },
+  );
+  assert.equal(repeatedMarkers.error, undefined, "unterminated CA markers must reject promptly");
+  assert.equal(repeatedMarkers.status, 0, repeatedMarkers.stderr);
+  await assert.rejects(endpoint("relative-ca.pem"), /absolute path/);
+  await assert.rejects(endpoint(join(tls.directory, "missing-root.pem")), /readable public PEM CA/);
 });
 
 test("OpenShell provisions dedicated Codex with bearer passthrough and provider files", async () => {

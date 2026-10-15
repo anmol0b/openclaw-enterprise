@@ -1,3 +1,12 @@
+import type { ConduitDriver } from "@openclaw-enterprise/contracts";
+import {
+  OpenShellConduitDriver,
+  type OpenShellConduitOptions,
+} from "../drivers/egress-proxy/openshell.ts";
+import {
+  egressAuthorityConfiguration,
+  type EgressAuthorityConfiguration,
+} from "./egress-authority.ts";
 import { readFile } from "node:fs/promises";
 import { X509Certificate } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -58,6 +67,7 @@ import {
 import { OCCPluginDriver, CodexPluginDriver } from "../drivers/plugin/index.ts";
 import { createGatewayNodeEnrollment } from "../gateway/node-enrollment-client.ts";
 import { readWorkspaceFilesApiKey } from "./workspace-files.ts";
+import { PostgresPreparedGitHubLifecycle } from "../drivers/repo/github/credentials/prepared-lifecycle.ts";
 import { GitHubRepoDriver } from "../drivers/repo/github/driver.ts";
 import { composeRepoDriver } from "./repository-credentials/platform.ts";
 import { createOpenShellBackend, type OpenShellGateway } from "../backends/openshell.ts";
@@ -101,6 +111,7 @@ export interface InstallationStartupConfiguration {
     readonly sandbox?: SelectedDriverConfiguration;
     readonly credential_gateway?: SelectedDriverConfiguration;
     readonly credential_refresh?: SelectedDriverConfiguration;
+    readonly conduit?: SelectedDriverConfiguration;
     readonly plugin?: SelectedDriverConfiguration;
     readonly service_account?: { readonly id: string };
     readonly repo?: SelectedDriverConfiguration;
@@ -125,6 +136,9 @@ export interface InstallationRuntimeDrivers {
   readonly sandboxDriver?: SandboxDriver;
   readonly credentialGatewayDriver?: CredentialGatewayDriver;
   readonly credentialRefreshDriver?: CredentialRefreshDriver;
+  readonly conduitDriver?: ConduitDriver;
+  readonly egressAuthority?: EgressAuthorityConfiguration;
+  readonly preparedGitHub?: PostgresPreparedGitHubLifecycle;
   readonly pluginDriver?: PluginDriver;
   readonly repoDriver?: RepoDriver;
   readonly repositoryReceipt?: Readonly<{
@@ -383,6 +397,7 @@ function selected(
     | "sandbox"
     | "credential_gateway"
     | "credential_refresh"
+    | "conduit"
     | "plugin"
     | "repo",
   implementation: string,
@@ -449,6 +464,10 @@ export async function readHarnessNodeCa(
   if (gatewayCaPath !== undefined && !isAbsolute(gatewayCaPath)) {
     throw new Error("OCC_GATEWAY_CA_PATH must identify an absolute mounted-file path.");
   }
+  return readPublicCaBundle(path);
+}
+
+async function readPublicCaBundle(path: string): Promise<string> {
   const bundle = await readFile(path, "utf8");
   const certificates = bundle.match(
     /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g,
@@ -457,7 +476,7 @@ export async function readHarnessNodeCa(
     certificates === null ||
     certificates.reduce((rest, certificate) => rest.replace(certificate, ""), bundle).trim()
   ) {
-    throw new Error("The Harness trust bundle must contain only public CA certificates.");
+    throw new Error("The trust bundle must contain only public CA certificates.");
   }
   return certificates.map((certificate) => new X509Certificate(certificate).toString()).join("\n");
 }
@@ -524,6 +543,7 @@ export async function loadInstallationConfiguration(options: {
       "sandbox",
       "credential_gateway",
       "credential_refresh",
+      "conduit",
       "plugin",
       "service_account",
       "repo",
@@ -568,6 +588,48 @@ export async function loadInstallationConfiguration(options: {
       "credential_refresh",
       "openshell",
       OpenShellCredentialRefreshDriver,
+    );
+  }
+  let conduit: SelectedDriverConfiguration | undefined;
+  let egressAuthority: EgressAuthorityConfiguration | undefined;
+  let preparedGitHubKeyPath: string | undefined;
+  let preparedGitHubOrigin: string | undefined;
+  let preparedGitHubCa: Buffer | undefined;
+  if (drivers.conduit !== undefined) {
+    const selection = object(drivers.conduit, "drivers.conduit");
+    closed(selection, ["id", "configuration"], "drivers.conduit");
+    const egress = object(selection.configuration, "drivers.conduit.configuration");
+    closed(
+      egress,
+      ["middlewareName", "authorityScope", "authority", "preparedGitHub"],
+      "drivers.conduit.configuration",
+    );
+    egressAuthority = egressAuthorityConfiguration(egress.authority, options.mode);
+    const { authority: _authority, preparedGitHub, ...policy } = egress;
+    if (preparedGitHub !== undefined) {
+      const prepared = object(preparedGitHub, "preparedGitHub");
+      closed(prepared, ["custodyKeyPath", "apiOrigin", "issuerCaPath"], "preparedGitHub");
+      preparedGitHubKeyPath = nonempty(prepared.custodyKeyPath, "preparedGitHub.custodyKeyPath");
+      // Installation-owned trust, never source, request or Agent-controlled endpoints.
+      if (!isAbsolute(preparedGitHubKeyPath)) {
+        throw new Error("preparedGitHub.custodyKeyPath requires an absolute mounted-file path.");
+      }
+      if (prepared.apiOrigin !== undefined) {
+        preparedGitHubOrigin = nonempty(prepared.apiOrigin, "preparedGitHub.apiOrigin");
+      }
+      if (prepared.issuerCaPath !== undefined) {
+        const path = nonempty(prepared.issuerCaPath, "preparedGitHub.issuerCaPath");
+        if (!isAbsolute(path)) {
+          throw new Error("preparedGitHub.issuerCaPath requires an absolute mounted-file path.");
+        }
+        preparedGitHubCa = Buffer.from(await readPublicCaBundle(path));
+      }
+    }
+    conduit = selected(
+      { ...selection, configuration: policy },
+      "conduit",
+      "openshell",
+      OpenShellConduitDriver,
     );
   }
   const backends = backendConfiguration(
@@ -762,6 +824,7 @@ export async function loadInstallationConfiguration(options: {
       ...(sandbox === undefined ? {} : { sandbox }),
       ...(credentialGateway === undefined ? {} : { credential_gateway: credentialGateway }),
       ...(credentialRefresh === undefined ? {} : { credential_refresh: credentialRefresh }),
+      ...(conduit === undefined ? {} : { conduit: conduit }),
       ...(plugin === undefined ? {} : { plugin }),
       ...(serviceAccount === undefined ? {} : { service_account: serviceAccount }),
       ...(repoSelection === undefined ? {} : { repo: repoSelection }),
@@ -790,11 +853,17 @@ export async function loadInstallationConfiguration(options: {
       : options.createSandboxDriver !== undefined
         ? validateCreatedSandboxDriver(options.createSandboxDriver(sandbox, openShell), sandbox)
         : sandboxPackage === undefined
-          ? new bundledSandboxPackage!.OpenShellSandboxDriver(sandbox.configuration, {
-              id: sandbox.id,
-              implementation: sandbox.implementation,
-              backend: openShell!,
-            })
+          ? new bundledSandboxPackage!.OpenShellSandboxDriver(
+              {
+                ...sandbox.configuration,
+                ...(conduit === undefined ? {} : { egress: conduit.configuration }),
+              },
+              {
+                id: sandbox.id,
+                implementation: sandbox.implementation,
+                backend: openShell!,
+              },
+            )
           : (createExternalDriver(sandboxPackage.module, sandbox, "sandbox") as SandboxDriver);
   const credentialGatewayDriver =
     credentialGateway === undefined
@@ -807,6 +876,43 @@ export async function loadInstallationConfiguration(options: {
             backend: openShell!,
           },
         );
+  if (
+    conduit !== undefined &&
+    (!openShell ||
+      !sandboxDriver ||
+      !kubernetesCompute ||
+      openShellBackend?.drivers.conduit !== conduit.id ||
+      openShellBackend.configuration.endpoint === undefined ||
+      !openShellBackend.configuration.endpoint.startsWith("https://") ||
+      (openShellBackend.configuration.auth?.mode !== "bearerTokenFile" &&
+        openShellBackend.configuration.auth?.mode !== "mtls"))
+  ) {
+    throw new Error(
+      "Protected egress requires paired Kubernetes/OpenShell Drivers and an authenticated TLS gateway endpoint.",
+    );
+  }
+  const secretDriver = new KubernetesSecretDriver(
+    secret.configuration as unknown as KubernetesSecretDriverOptions,
+    { id: secret.id, implementation: secret.implementation },
+  );
+  const preparedGitHub =
+    preparedGitHubKeyPath === undefined
+      ? undefined
+      : new PostgresPreparedGitHubLifecycle(
+          preparedGitHubKeyPath,
+          secretDriver,
+          preparedGitHubOrigin,
+          preparedGitHubCa,
+        );
+  const conduitDriver =
+    conduit === undefined
+      ? undefined
+      : new OpenShellConduitDriver(conduit.configuration as unknown as OpenShellConduitOptions, {
+          id: conduit.id,
+          backend: openShell!,
+          sandbox: sandboxDriver!,
+          ...(preparedGitHub ? { preparedGitHub } : {}),
+        });
   const credentialRefreshDriver =
     credentialRefresh === undefined
       ? undefined
@@ -840,6 +946,7 @@ export async function loadInstallationConfiguration(options: {
         lifecycleDrivers: [configurationDriver],
         ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
         ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
+        ...(conduitDriver === undefined ? {} : { conduitDriver }),
         nodeEnrollment: createGatewayNodeEnrollment(() =>
           readWorkspaceFilesApiKey(
             nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
@@ -849,10 +956,6 @@ export async function loadInstallationConfiguration(options: {
       },
     );
   }
-  const secretDriver = new KubernetesSecretDriver(
-    secret.configuration as unknown as KubernetesSecretDriverOptions,
-    { id: secret.id, implementation: secret.implementation },
-  );
   const createIAMDriver = (state: NativeIAMStateStore): IAMDriver => {
     return iamPackage === undefined
       ? new NativeIAMDriver(state, { id: iam.id, implementation: iam.implementation })
@@ -887,6 +990,9 @@ export async function loadInstallationConfiguration(options: {
     ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
     ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
     ...(credentialRefreshDriver === undefined ? {} : { credentialRefreshDriver }),
+    ...(conduitDriver === undefined ? {} : { conduitDriver }),
+    ...(egressAuthority === undefined ? {} : { egressAuthority }),
+    ...(preparedGitHub === undefined ? {} : { preparedGitHub }),
     createIAMDriver,
     ...(pluginDriver === undefined ? {} : { pluginDriver }),
     ...(repositoryRuntime ?? {}),

@@ -105,6 +105,19 @@ const reviewedImports = {
     "node:fs/promises": ["open", "stat"],
   },
   "drivers/repo/github/credentials/registry.ts": { "node:crypto": ["createHash"] },
+  // The prepared owner reads only the Installation custody mount. The App issuer comes
+  // through the admitted Secret Driver; grant hashing, comparison, claims and signing-key import stay here.
+  "drivers/repo/github/credentials/prepared-lifecycle.ts": {
+    "node:crypto": ["createHash", "createPrivateKey", "randomUUID"],
+    "node:fs/promises": ["readFile"],
+    "node:util": ["isDeepStrictEqual"],
+    "@openclaw-enterprise/contracts": ["githubMetadataGrant"],
+  },
+  // AES-GCM binds encrypted material to family and attempt; readiness selects no sealed bytes.
+  "drivers/repo/github/credentials/prepared-postgres.ts": {
+    "node:crypto": ["createCipheriv", "createDecipheriv", "randomBytes", "randomUUID"],
+    "node:util": ["isDeepStrictEqual"],
+  },
   // Standalone grants hash only nonsecret configuration/profile policy, never key material.
   "drivers/repo/github/credentials/grants.ts": { "node:crypto": ["createHash"] },
   "drivers/repo/github/driver.ts": {

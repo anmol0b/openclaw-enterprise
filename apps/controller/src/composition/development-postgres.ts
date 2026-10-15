@@ -1,3 +1,4 @@
+import { installEgressAuthority } from "./egress-authority.ts";
 import type { AuditEventFactory } from "@openclaw-enterprise/audit";
 import type {
   AuditEvent,
@@ -142,6 +143,8 @@ export async function composePostgresDevelopment(
     }
     const sandboxDriver = drivers?.sandboxDriver;
     const credentialGatewayDriver = drivers?.credentialGatewayDriver;
+    const conduitDriver = drivers?.conduitDriver;
+    const egressAuthority = drivers?.egressAuthority;
     const credentialRefreshDriver = drivers?.credentialRefreshDriver;
     const configurationDriver =
       options.configurationDriver ??
@@ -255,6 +258,10 @@ export async function composePostgresDevelopment(
       controller.registerDriver(sandboxDriver);
       controller.selectDriver("sandbox", sandboxDriver.id);
     }
+    if (conduitDriver !== undefined) {
+      controller.registerDriver(conduitDriver);
+      controller.selectDriver("conduit", conduitDriver.id);
+    }
     if (credentialGatewayDriver !== undefined) {
       controller.registerDriver(credentialGatewayDriver);
       controller.selectDriver("credential_gateway", credentialGatewayDriver.id);
@@ -351,16 +358,22 @@ export async function composePostgresDevelopment(
       },
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });
+    await drivers?.preparedGitHub?.connect(pool);
+    if (conduitDriver !== undefined && egressAuthority !== undefined) {
+      await installEgressAuthority(app, controller, conduitDriver, egressAuthority);
+    }
     app.get("/healthz", async () => ({ status: "ok" }));
     app.get("/readyz", async () => {
       await pool.query("SELECT 1");
       return { status: "ready" };
     });
     app.addHook("onClose", async () => {
+      await drivers?.preparedGitHub?.close();
       await state.close();
     });
     return app;
   } catch (error) {
+    await drivers?.preparedGitHub?.close();
     await pool.end();
     throw error;
   }

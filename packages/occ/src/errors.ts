@@ -92,9 +92,22 @@ export class DeletionRetryOwnedError extends AuthorizationDeniedError {
  * remaining distinguishable from explicit denials for HTTP and audit handling.
  */
 export class DependencyUnavailableError extends AuthorizationDeniedError {
-  constructor(message = "A required platform dependency is unavailable.") {
+  /** Fixed Driver-owned request diagnostics; never copy supplier text or request values here. */
+  readonly requestDiagnostic?: {
+    readonly method: string;
+    readonly grpcStatus: number;
+    readonly validationCategory: "POLICY_SAFETY" | "POLICY_MIDDLEWARE_VALIDATION" | "UNKNOWN";
+  };
+
+  constructor(
+    message = "A required platform dependency is unavailable.",
+    requestDiagnostic?: NonNullable<DependencyUnavailableError["requestDiagnostic"]>,
+  ) {
     super(message);
     this.name = "DependencyUnavailableError";
+    if (requestDiagnostic !== undefined) {
+      this.requestDiagnostic = Object.freeze({ ...requestDiagnostic });
+    }
   }
 }
 

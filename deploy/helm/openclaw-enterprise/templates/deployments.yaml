@@ -53,6 +53,28 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
+        {{- if $.Values.backend.openshell.clientSecretName }}
+        - name: openshell-client
+          secret:
+            secretName: {{ $.Values.backend.openshell.clientSecretName | quote }}
+            items:
+              - {key: ca.crt, path: ca.crt}
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        {{- end }}
+        {{- if and (eq $component "api") $.Values.egressAuthority.enabled }}
+        - name: egress-authority-tls
+          secret:
+            secretName: {{ $.Values.egressAuthority.tlsSecretName | quote }}
+            items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        - name: egress-authority-issuer
+          secret:
+            secretName: {{ $.Values.egressAuthority.issuerSecretName | quote }}
+            items:
+              - {key: public.pem, path: issuer.pub}
+        {{- end }}
         {{- if $oidcCa }}
         - name: oidc-ca
           secret:
@@ -135,6 +157,21 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        {{- end }}
+        {{- end }}
+        {{- if $.Values.preparedGitHub.custodySecretName }}
+        - name: prepared-github-custody
+          secret:
+            secretName: {{ $.Values.preparedGitHub.custodySecretName | quote }}
+            defaultMode: 288 # 0440, readable by the control-plane filesystem group
+            items:
+              - {key: custody.key, path: custody.key}
+        {{- if $.Values.preparedGitHub.issuerCaConfigMapName }}
+        - name: prepared-github-issuer-ca
+          configMap:
+            name: {{ $.Values.preparedGitHub.issuerCaConfigMapName | quote }}
+            items:
+              - {key: ca.crt, path: ca.crt}
         {{- end }}
         {{- end }}
         - name: installation-startup
@@ -392,6 +429,19 @@ spec:
               value: {{ include "openclaw.positiveSafeInteger" (dict "name" "worker.convergenceTimeoutMs" "value" $.Values.worker.convergenceTimeoutMs) | quote }}
             {{- end }}
           volumeMounts:
+            {{- if $.Values.backend.openshell.clientSecretName }}
+            - name: openshell-client
+              mountPath: /etc/openclaw/openshell
+              readOnly: true
+            {{- end }}
+            {{- if and (eq $component "api") $.Values.egressAuthority.enabled }}
+            - name: egress-authority-tls
+              mountPath: /etc/openclaw/egress/tls
+              readOnly: true
+            - name: egress-authority-issuer
+              mountPath: /etc/openclaw/egress/issuer
+              readOnly: true
+            {{- end }}
             {{- if $oidcCa }}
             - name: api-extra-ca
               mountPath: /etc/openclaw/api-extra-ca
@@ -415,6 +465,16 @@ spec:
               readOnly: true
             - name: repository-control
               mountPath: /run/openclaw/repository-control
+            {{- end }}
+            {{- end }}
+            {{- if $.Values.preparedGitHub.custodySecretName }}
+            - name: prepared-github-custody
+              mountPath: /etc/openclaw/prepared-github
+              readOnly: true
+            {{- if $.Values.preparedGitHub.issuerCaConfigMapName }}
+            - name: prepared-github-issuer-ca
+              mountPath: /etc/openclaw/prepared-github-issuer
+              readOnly: true
             {{- end }}
             {{- end }}
             - name: installation-startup
@@ -454,6 +514,10 @@ spec:
             {{- if eq $component "api" }}
             - name: http
               containerPort: {{ $.Values.api.port }}
+            {{- if $.Values.egressAuthority.enabled }}
+            - name: egress-tls
+              containerPort: {{ $.Values.egressAuthority.port }}
+            {{- end }}
             {{- end }}
           {{- end }}
           {{- if eq $component "api" }}

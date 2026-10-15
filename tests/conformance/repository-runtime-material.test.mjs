@@ -6,6 +6,7 @@ import {
   kubernetesNamespaceName,
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { SETUP_WRAPPER_COMMAND } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
+import { pluginRuntimeSpecForRevision } from "../../apps/controller/src/drivers/compute/plugin-runtime.ts";
 import { withYieldingComputeStop } from "../../apps/controller/src/drivers/compute/operation-context.ts";
 import { encodeRepositoryCredentialSessionFiles } from "../../apps/controller/src/drivers/repo/github/credentials/client/config.ts";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
@@ -172,6 +173,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
       secretDriverId: "kubernetes-secret",
     },
     compute: { id: driver.id, implementation: driver.implementation },
+    executionAdmission: { version: 2, mode: "unprotected" },
     servicePrincipalId: "principal-repository-material",
     createdAt: "2026-09-18T00:00:00.000Z",
     repositoryCredentials: {
@@ -1376,6 +1378,30 @@ test("enabling the reader cannot grant an already admitted revision during activ
   assert.equal(publicReaderPolicies(f).length, 0);
 });
 
+test("protected execution cannot acquire the anonymous reader or use it as a fallback", async () => {
+  const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
+  delete f.revision.repositoryCredentials;
+  f.revision.configuration.plugins.entries.codex.config.appServer.networkProxy = {
+    enabled: true,
+    domains: { [publicReader.address]: "allow" },
+  };
+  const admission = f.driver.admitRevision(f.revision);
+  assert.match(admission, /^public-github-read:v1:/, "unprotected control selects this exact peer");
+  const protectedRevision = {
+    ...f.revision,
+    executionAdmission: { version: 2, mode: "protected" },
+    egressPlan: { routes: [] },
+  };
+  assert.equal(f.driver.admitRevision(protectedRevision), undefined);
+  assert.throws(
+    () => pluginRuntimeSpecForRevision(protectedRevision, undefined, undefined, publicReader),
+    /public GitHub reader cannot be selected for protected execution/,
+  );
+  await assert.rejects(f.driver.prepareRevision(protectedRevision), /exact paired Compute release/);
+  assert.equal(publicReaderPolicies(f).length, 0);
+  assert.equal(f.deployments().length, 0);
+});
+
 test("withdrawing a selected reader narrows access and stops only its revision", async () => {
   for (const replacement of [undefined, { ...publicReader, podLabels: { app: "replacement" } }]) {
     const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
@@ -1406,6 +1432,14 @@ test("withdrawing a selected reader narrows access and stops only its revision",
     f.setPods([workloadPod(selected, f.namespace, "selected"), successorPod]);
     assert.equal(publicReaderPolicies(f).length, 1);
     f.driver.options.network.publicGithubRead = replacement;
+    // Selecting Conduit cannot convert the old grant, or block withdrawal of its owned workload.
+    if (replacement !== undefined) {
+      f.driver.conduitDriver = { id: "selected-after-reader-admission" };
+      await assert.rejects(
+        f.driver.prepareRevision(successor, context),
+        /exact paired Compute release/,
+      );
+    }
     const deleteDeployment = f.clients.apps.deleteNamespacedDeployment;
     const readDeployment = f.clients.apps.readNamespacedDeployment;
     let deleting = false;

@@ -1204,7 +1204,10 @@ function receiptsMatchEntries(receipts, entries) {
   );
 }
 
-async function seedCanonicalData(db, { preset = false } = {}) {
+async function seedCanonicalData(
+  db,
+  { preset = false, computeAdmission = false, executionAdmission = false } = {},
+) {
   const installation = `ins_${randomUUID()}`;
   const namespace = `ns_${randomUUID()}`;
   const configuration = `cfg_${randomUUID()}`;
@@ -1248,7 +1251,14 @@ async function seedCanonicalData(db, { preset = false } = {}) {
           draft_spec: {},
           harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
           harness_auth: { method: "runtime" },
-          compute: { id: "kubernetes", implementation: "test" },
+          ...(executionAdmission
+            ? { execution_admission: { version: 2, mode: "unprotected" } }
+            : {}),
+          compute: {
+            id: "kubernetes",
+            implementation: "test",
+            ...(computeAdmission ? { admission: `public-github-read:v1:${"a".repeat(64)}` } : {}),
+          },
         },
       ],
     );
@@ -1635,10 +1645,19 @@ test(
       [52, "preComputePreparationFailureEvidence"],
       [53, "preCredentialSourcePat"],
       [54, "preComputeRevisionAdmission"],
+      [55, "preStaticEgress"],
+      [56, "preSendReceipts"],
+      [57, "prePreparedGitHubCustody"],
+      [58, "prePreparedGitHubEgress"],
+      [59, "preCredentialFreeMetadata"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
-        await seedCanonicalData(db, { preset: prefix >= 25 });
+        await seedCanonicalData(db, {
+          preset: prefix >= 25,
+          computeAdmission: prefix >= 55,
+          executionAdmission: prefix >= 56,
+        });
         const before = await canonicalData(db);
         const receipts = await historyReceipts(db.migrator);
         assert.deepEqual(await runHistoryMigration(db, "production", true), {
@@ -1897,6 +1916,12 @@ test(
       [51, "preProvisioningDeploymentOutcome"],
       [52, "preComputePreparationFailureEvidence"],
       [53, "preCredentialSourcePat"],
+      [54, "preComputeRevisionAdmission"],
+      [55, "preStaticEgress"],
+      [56, "preSendReceipts"],
+      [57, "prePreparedGitHubCustody"],
+      [58, "prePreparedGitHubEgress"],
+      [59, "preCredentialFreeMetadata"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -1979,17 +2004,27 @@ test(
       [51, "preProvisioningDeploymentOutcome"],
       [52, "preComputePreparationFailureEvidence"],
       [53, "preCredentialSourcePat"],
+      [54, "preComputeRevisionAdmission"],
+      [55, "preStaticEgress"],
+      [56, "preSendReceipts"],
+      [57, "prePreparedGitHubCustody"],
+      [58, "prePreparedGitHubEgress"],
+      [59, "preCredentialFreeMetadata"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
         if (prefix) {
-          await seedCanonicalData(db, { preset: prefix >= 25 });
+          await seedCanonicalData(db, {
+            preset: prefix >= 25,
+            computeAdmission: prefix >= 55,
+            executionAdmission: prefix >= 56,
+          });
         }
         const before = await historySnapshot(db);
         const data = prefix ? await canonicalData(db) : undefined;
         // 0054 replaces the validator function; earlier prefixes also contain grants/indexes.
         let rejectedDdl = "CREATE FUNCTION";
-        if (prefix !== 53) {
+        if (prefix !== 53 && prefix !== 59) {
           rejectedDdl =
             prefix >= 50
               ? "GRANT"
