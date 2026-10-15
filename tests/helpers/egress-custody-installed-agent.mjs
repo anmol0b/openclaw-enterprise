@@ -21,7 +21,11 @@ export async function admitRepositoryAgent(
   const { controllerNamespace } = setup.input;
   const inspectOrigin = [
     'import { readFileSync } from "node:fs";',
-    'import { loadYaml } from "@kubernetes/client-node";',
+    'import { createRequire } from "node:module";',
+    'import { pathToFileURL } from "node:url";',
+    // The installed Node process runs from /app; the controller owns this dependency.
+    'const require = createRequire(new URL("./apps/controller/package.json", import.meta.url));',
+    'const { loadYaml } = await import(pathToFileURL(require.resolve("@kubernetes/client-node")));',
     'const startup = loadYaml(readFileSync(process.env.OCC_CONFIG_PATH, "utf8"));',
     "const p = startup.drivers.conduit.configuration.preparedGitHub;",
     "if (!p.apiOrigin || !p.issuerCaPath || !p.custodyKeyPath) process.exit(1);",
