@@ -1268,7 +1268,15 @@ test("receipt observation fences only positive credential rejection, including b
 
 test("receipt persistence failure, lost acknowledgment and late authorization never grant send permission", async (t) => {
   const { createConsoleAppFixture } = await import("../helpers/console-app.mjs");
-  for (const scenario of ["reject", "lost_ack", "revoke", "deadline", "check_deadline", "cancel"]) {
+  for (const scenario of [
+    "reject",
+    "lost_ack",
+    "revoke",
+    "deny_lost_ack",
+    "deadline",
+    "check_deadline",
+    "cancel",
+  ]) {
     await t.test(scenario, async (t) => {
       let elapsed = 0;
       const fault = receiptPersistenceFaults();
@@ -1296,8 +1304,14 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
         const cancellation =
           scenario === "cancel" ? assert.rejects(result, { code: 1 }) : undefined;
         await gate.reached;
-        if (scenario === "revoke") {
+        if (scenario === "revoke" || scenario === "deny_lost_ack") {
           await f.revoke();
+        }
+        // The refused settlement commits but its acknowledgment is lost: the sender sees
+        // unavailable, never an allow, and the receipt never reads as permitted.
+        const settlement = scenario === "deny_lost_ack" ? fault.arm("save", "lost_ack") : undefined;
+        if (settlement) {
+          t.after(settlement.release);
         }
         if (scenario === "deadline" || scenario === "check_deadline") {
           elapsed = 31_000;
@@ -1311,9 +1325,17 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
           await cancellation;
         }
         gate.release();
+        if (settlement) {
+          await settlement.reached;
+          settlement.release();
+        }
       }
       if (scenario !== "cancel") {
         assert.ok((await result).refused, scenario);
+      }
+      if (scenario === "deny_lost_ack") {
+        // HTTP_CREDENTIAL_REFUSAL_CODE_UNAVAILABLE, not the revocation's denied code.
+        assert.equal((await result).refused.code, 3);
       }
       const stored = await readReceipt(f, input);
       if (scenario === "reject") {
@@ -1333,6 +1355,14 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
       if (["revoke", "deadline", "check_deadline"].includes(scenario)) {
         assert.equal(stored.outcome.kind, "refused");
         assert.equal(stored.outcome.dispatched, false);
+      }
+      if (scenario === "deny_lost_ack") {
+        assert.ok(
+          stored.outcome.kind === "refused"
+            ? stored.outcome.dispatched === false
+            : stored.outcome.kind === "uncertain" && stored.outcome.dispatch === "possible",
+          JSON.stringify(stored.outcome),
+        );
       }
       assert.equal(f.providerRequests.length, 0);
     });
