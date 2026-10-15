@@ -3682,6 +3682,13 @@ export class PostgresPlatformState implements PlatformStateStore {
       },
       createRevision: async (revision) => {
         await this.requireInitialized(context);
+        try {
+          assertExecutionAdmission(revision);
+        } catch {
+          throw new ScopeViolationError(
+            "The AgentRevision execution admission is missing or inconsistent.",
+          );
+        }
         if (
           Object.hasOwn(revision, "serviceAccount") ||
           !validHarnessAuthSnapshot(revision.harnessAuth, revision.namespaceId) ||

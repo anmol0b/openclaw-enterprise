@@ -127,6 +127,9 @@ function classifyReceipts(receipts, manifest) {
       if (receipts.length === 59) {
         return "preCredentialFreeMetadata";
       }
+      if (receipts.length === 60) {
+        return "preRevisionHarnessAuthShape";
+      }
       if (receipts.length === manifest.entries.length) {
         return "completed";
       }
@@ -230,6 +233,9 @@ function classifyReceipts(receipts, manifest) {
   }
   if (receipts.length === 59) {
     return "preCredentialFreeMetadata";
+  }
+  if (receipts.length === 60) {
+    return "preRevisionHarnessAuthShape";
   }
   if (receipts.length === manifest.entries.length) {
     return "completed";

@@ -190,6 +190,21 @@ test(
       view.revisions.findRevision(f.namespace.id, f.agent.id, f.revision.id),
     );
     assert.deepEqual(revision.executionAdmission, { version: 2, mode: "protected" });
+    for (const executionAdmission of [
+      undefined,
+      { version: 1, mode: "protected" },
+      { version: 2, mode: "unprotected" },
+    ]) {
+      await assert.rejects(
+        state.transact((unit) =>
+          unit.revisions.createRevision({ ...revision, executionAdmission }),
+        ),
+        {
+          name: "ScopeViolationError",
+          message: "The AgentRevision execution admission is missing or inconsistent.",
+        },
+      );
+    }
     const {
       rows: [row],
     } = await f.pool.query("SELECT admitted_spec FROM occ.agent_revisions WHERE id = $1", [

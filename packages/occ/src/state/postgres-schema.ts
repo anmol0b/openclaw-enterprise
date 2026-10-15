@@ -753,7 +753,9 @@ export const agentRevisions = occSchema.table(
           NOT (${table.admittedSpec} ? 'secret_bindings')
           OR occ.secret_bindings_are_valid(${table.admittedSpec}->'secret_bindings', ${table.namespaceId})
         )
-        AND occ.harness_auth_is_valid((${table.admittedSpec}->'harness_auth') - 'protectedExecutionVersion', ${table.namespaceId}, true)
+        AND CASE WHEN jsonb_typeof(${table.admittedSpec}->'harness_auth') = 'object' THEN
+          occ.harness_auth_is_valid((${table.admittedSpec}->'harness_auth') - 'protectedExecutionVersion', ${table.namespaceId}, true)
+        ELSE false END
         AND (
           NOT (${table.admittedSpec} ? 'repository_credentials')
           OR occ.repository_credentials_are_valid(${table.admittedSpec}->'repository_credentials')

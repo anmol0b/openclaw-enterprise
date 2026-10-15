@@ -1650,6 +1650,7 @@ test(
       [57, "prePreparedGitHubCustody"],
       [58, "prePreparedGitHubEgress"],
       [59, "preCredentialFreeMetadata"],
+      [60, "preRevisionHarnessAuthShape"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -1922,6 +1923,7 @@ test(
       [57, "prePreparedGitHubCustody"],
       [58, "prePreparedGitHubEgress"],
       [59, "preCredentialFreeMetadata"],
+      [60, "preRevisionHarnessAuthShape"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -2010,6 +2012,7 @@ test(
       [57, "prePreparedGitHubCustody"],
       [58, "prePreparedGitHubEgress"],
       [59, "preCredentialFreeMetadata"],
+      [60, "preRevisionHarnessAuthShape"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
@@ -2024,7 +2027,9 @@ test(
         const data = prefix ? await canonicalData(db) : undefined;
         // 0054 replaces the validator function; earlier prefixes also contain grants/indexes.
         let rejectedDdl = "CREATE FUNCTION";
-        if (prefix !== 53 && prefix !== 59) {
+        if (prefix === 60) {
+          rejectedDdl = "ALTER TABLE";
+        } else if (prefix !== 53 && prefix !== 59) {
           rejectedDdl =
             prefix >= 50
               ? "GRANT"
