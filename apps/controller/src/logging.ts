@@ -54,6 +54,7 @@ const ALLOWED_FIELDS = new Set([
   "elapsedMs",
   "errorClass",
   "event",
+  "grpcStatus",
   "host",
   "keyHash",
   "lane",
@@ -84,6 +85,7 @@ const ALLOWED_FIELDS = new Set([
   "skippedUserIdsTruncated",
   "status",
   "step",
+  "validationCategory",
   "workId",
 ]);
 
@@ -211,6 +213,18 @@ function safeNumber(key: string, value: number): number | undefined {
 }
 
 function safeScalar(key: string, value: unknown): string | number | boolean | undefined {
+  if (key === "grpcStatus") {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 16
+      ? value
+      : undefined;
+  }
+  if (key === "validationCategory") {
+    return value === "POLICY_SAFETY" ||
+      value === "POLICY_MIDDLEWARE_VALIDATION" ||
+      value === "UNKNOWN"
+      ? value
+      : undefined;
+  }
   if (typeof value === "string") {
     return safeString(value);
   }

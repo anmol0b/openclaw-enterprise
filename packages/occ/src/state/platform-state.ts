@@ -1,3 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
+import type {
+  StaticEgressSource,
+  EgressInstallation,
+  StaticMaterialEvidence,
+} from "@openclaw-enterprise/contracts";
 import { RepositoryTransactionLifetime } from "../ports/transaction.ts";
 import { bindPlatformUnitOfWork } from "../ports/platform-unit-of-work.ts";
 import { createPlatformReadView } from "../ports/platform-read-view.ts";
@@ -338,6 +344,12 @@ export interface SecretRepository extends SecretReadRepository {
 }
 
 export interface CredentialSourceReadRepository {
+  isEgressMaterialRejected(evidence: StaticMaterialEvidence): Promise<boolean>;
+  findEgressInstallation(
+    senderId: string,
+    sandboxId: string,
+  ): Promise<Readonly<EgressInstallation> | undefined>;
+
   findCredentialSource(
     namespaceId: string,
     credentialSourceId: string,
@@ -357,6 +369,15 @@ export interface CredentialSourceReadRepository {
 export type CredentialSourceBlockingReference = "reference" | "withdrawal_work";
 
 export interface CredentialSourceRepository extends CredentialSourceReadRepository {
+  rejectEgressMaterial(evidence: StaticMaterialEvidence): Promise<void>;
+  recordEgressInstallation(installation: EgressInstallation): Promise<void>;
+  admitEgressSource(
+    namespaceId: string,
+    sourceId: string,
+    expectedGeneration: number,
+    egress: StaticEgressSource,
+  ): Promise<Readonly<CredentialSource> | undefined>;
+
   lockCredentialSource(
     namespaceId: string,
     credentialSourceId: string,
@@ -941,6 +962,8 @@ interface PlatformSnapshot {
   readonly secrets: Map<string, Readonly<Secret>>;
   readonly credentialSources: Map<string, Readonly<CredentialSource>>;
   readonly credentialWithdrawals: Map<string, Readonly<CredentialWithdrawal>>;
+  readonly egressInstallations: Map<string, Readonly<EgressInstallation>>;
+  readonly egressRejected: Set<string>;
   readonly serviceAccounts: Map<string, Readonly<ServiceAccount>>;
   readonly agents: Map<string, Readonly<Agent>>;
   readonly workspaceSetups: Map<string, Readonly<WorkspaceSetup>>;
@@ -1003,6 +1026,10 @@ function cloneSnapshot(snapshot: PlatformSnapshot): PlatformSnapshot {
     ),
     presets: new Map(Array.from(snapshot.presets, ([key, preset]) => [key, immutableCopy(preset)])),
     secrets: new Map(Array.from(snapshot.secrets, ([key, secret]) => [key, immutableCopy(secret)])),
+    egressRejected: new Set(snapshot.egressRejected),
+    egressInstallations: new Map(
+      Array.from(snapshot.egressInstallations, ([key, value]) => [key, immutableCopy(value)]),
+    ),
     credentialWithdrawals: new Map(
       Array.from(snapshot.credentialWithdrawals, ([key, withdrawal]) => [
         key,
@@ -1190,8 +1217,65 @@ function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function validEgressRef(value: unknown): boolean {
+  if (!isPlainRecord(value)) {
+    return false;
+  }
+  return (
+    Object.keys(value).length === 2 &&
+    typeof value.id === "string" &&
+    value.id.length >= 1 &&
+    value.id.length <= 200 &&
+    typeof value.generation === "number" &&
+    /^[1-9][0-9]{0,14}$/.test(String(value.generation))
+  );
+}
+
+/** Mirrors static_egress_source_is_valid; persisted sources have one closed supported shape. */
+function assertStaticEgressSource(
+  value: StaticEgressSource,
+  namespaceId: string,
+  sourceId: string,
+): void {
+  const key = value?.key;
+  const secret = value?.secret;
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).length !== 9 ||
+    value.schemaVersion !== 1 ||
+    value.adoption !== "live" ||
+    value.retention !== "none" ||
+    typeof value.materialRefId !== "string" ||
+    value.materialRefId.length < 1 ||
+    value.materialRefId.length > 200 ||
+    !isPlainRecord(key) ||
+    Object.keys(key).length !== 5 ||
+    !/^ins_[0-9a-f-]{36}$/.test(key.installationId) ||
+    key.namespaceId !== namespaceId ||
+    key.source?.id !== sourceId ||
+    ![
+      key.source,
+      key.backend,
+      key.provider,
+      value.secretDriver,
+      value.sender,
+      value.resolver,
+    ].every(validEgressRef) ||
+    !isPlainRecord(secret) ||
+    Object.keys(secret).length !== 3 ||
+    secret.kind !== "secret" ||
+    secret.namespaceId !== namespaceId ||
+    !/^sec_[0-9a-f-]{36}$/.test(secret.id)
+  ) {
+    throw new ScopeViolationError("The protected source schema or scope is invalid.");
+  }
+}
+
 /** Mirrors the PostgreSQL credential source constraints for the in-memory adapter. */
 function assertCredentialSource(source: CredentialSource): void {
+  if (source.egress !== undefined) {
+    assertStaticEgressSource(source.egress, source.namespaceId, source.id);
+  }
   const config: unknown = source.config;
   const secretInputs: unknown = source.secrets;
   if (
@@ -1763,7 +1847,81 @@ function repositories(
     return found === undefined || !liveWithdrawal(found) ? undefined : immutableCopy(found);
   };
 
+  const materialKey = (evidence: StaticMaterialEvidence) =>
+    JSON.stringify([
+      evidence.source.namespaceId,
+      evidence.secretDriver.id,
+      evidence.materialId,
+      evidence.materialVersion,
+    ]);
   const credentialSources: CredentialSourceRepository = {
+    isEgressMaterialRejected: async (evidence) =>
+      snapshot.egressRejected.has(materialKey(evidence)),
+    rejectEgressMaterial: async (evidence) => {
+      snapshot.egressRejected.add(materialKey(evidence));
+    },
+    findEgressInstallation: async (senderId, sandboxId) => {
+      const found = snapshot.egressInstallations.get(JSON.stringify([senderId, sandboxId]));
+      return found === undefined ||
+        !(
+          snapshot.revisions.get(
+            agentKey(found.plan.execution.namespaceId, found.plan.execution.agentId),
+          ) ?? []
+        ).some((revision) => revision.id === found.plan.execution.revisionId)
+        ? undefined
+        : immutableCopy(found);
+    },
+    recordEgressInstallation: async (installation) => {
+      const execution = installation.plan.execution;
+      const revision = (
+        snapshot.revisions.get(agentKey(execution.namespaceId, execution.agentId)) ?? []
+      ).find((item) => item.id === execution.revisionId);
+      if (!revision || !isDeepStrictEqual(revision.egressPlan, installation.plan)) {
+        throw new ScopeViolationError("Egress installation does not match an admitted revision.");
+      }
+      const key = JSON.stringify([installation.sender.id, installation.sandboxId]);
+      const prior = snapshot.egressInstallations.get(key);
+      if (
+        prior !== undefined &&
+        (!isDeepStrictEqual(prior.plan, installation.plan) ||
+          !isDeepStrictEqual(prior.sender, installation.sender) ||
+          !isDeepStrictEqual(prior.enforcement, installation.enforcement))
+      ) {
+        throw new ResourceStateConflictError("Egress execution identity is already bound.");
+      }
+      if (
+        Array.from(snapshot.egressInstallations.entries()).some(
+          ([otherKey, other]) =>
+            otherKey !== key &&
+            other.plan.execution.namespaceId === execution.namespaceId &&
+            other.plan.execution.revisionId === execution.revisionId,
+        )
+      ) {
+        throw new ResourceStateConflictError("Egress revision already has an installed execution.");
+      }
+      snapshot.egressInstallations.set(key, prior ?? immutableCopy(installation));
+    },
+    admitEgressSource: async (namespaceId, sourceId, expectedGeneration, egress) => {
+      const current = await findCredentialSource(namespaceId, sourceId);
+      if (
+        !current ||
+        current.state !== "ready" ||
+        (current.egress?.key.source.generation ?? 0) !== expectedGeneration
+      ) {
+        return undefined;
+      }
+      if (
+        egress.key.source.id !== sourceId ||
+        egress.key.namespaceId !== namespaceId ||
+        egress.key.source.generation !== expectedGeneration + 1
+      ) {
+        throw new ScopeViolationError("Egress source generation or scope is invalid.");
+      }
+      assertStaticEgressSource(egress, namespaceId, sourceId);
+      const saved = immutableCopy({ ...current, egress });
+      snapshot.credentialSources.set(agentKey(namespaceId, sourceId), saved);
+      return saved;
+    },
     findCredentialSource,
     findCredentialWithdrawal,
     listCredentialWithdrawals: async (namespaceId, revisionId) =>
@@ -3102,6 +3260,8 @@ export class InMemoryPlatformState implements PlatformStateStore {
     secrets: new Map(),
     credentialSources: new Map(),
     credentialWithdrawals: new Map(),
+    egressInstallations: new Map(),
+    egressRejected: new Set(),
     serviceAccounts: new Map(),
     agents: new Map(),
     workspaceSetups: new Map(),

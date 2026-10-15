@@ -54,6 +54,8 @@ export function bindPlatformUnitOfWork(
       "hasReferences",
     ]),
     credentialSources: bindRepository(repositories.credentialSources, lifetime, [
+      "findEgressInstallation",
+      "isEgressMaterialRejected",
       "findCredentialSource",
       "listCredentialSources",
       "lockCredentialSource",
@@ -61,6 +63,9 @@ export function bindPlatformUnitOfWork(
       "markCredentialSourceDeleting",
       "markCredentialSourceReady",
       "replaceCredentialSourceSecrets",
+      "recordEgressInstallation",
+      "rejectEgressMaterial",
+      "admitEgressSource",
       "deleteCredentialSource",
       "hasReferences",
       "findBlockingReference",

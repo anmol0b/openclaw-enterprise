@@ -128,9 +128,27 @@ Stores credential sources registered with the selected Credential Gateway; the g
 - `name`
 - `type`
 - `config`
+- `egress` (optional admitted static source and versioned resolver references)
 - `driver_id`
 - `state`
 - `created_at`
+
+### `egress_installations`
+
+Binds authenticated supervisor/Sandbox identity and an immutable loaded-enforcement
+instance/configuration fingerprint to the exact admitted revision plan.
+See [protected inference](../credential-sources/protected-inference.md).
+
+- `sender_id`, `sandbox_id`
+- `namespace_id`, `agent_id`, `revision_id`
+- `installation`
+
+### `egress_rejected_material`
+
+Fences a provider-rejected version independently of later authoritative rereads.
+
+- `namespace_id`, `secret_driver_id`
+- `material_id`, `material_version`
 
 ### `agent_credential_sources`
 

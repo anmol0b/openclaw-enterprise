@@ -1,0 +1,157 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createPostgresAgentApp } from "../helpers/postgres-agent-app.mjs";
+import { requiresPostgres } from "../helpers/postgres-database.mjs";
+import { staticEgressFixture, unary } from "../helpers/static-egress.mjs";
+import { PostgresPlatformState } from "../../packages/occ/src/index.ts";
+
+async function postgresApp(t, options) {
+  const p = await createPostgresAgentApp(t, {
+    label: "static-egress",
+    authSecret: "static-egress-fixture-session-secret-2026",
+    appOptions: { secretDriver: options.secretDriver, computeDriver: options.computeDriver },
+  });
+  for (const driver of [options.secretDriver, options.computeDriver]) {
+    p.controller.registerDriver(driver);
+    p.controller.selectDriver(driver.capability, driver.id);
+  }
+  const request = async (method, path, { body } = {}) => {
+    const result = await p.inject(method, path, body);
+    const payload = result.statusCode === 204 ? {} : result.json();
+    return { status: result.statusCode, body: payload, data: payload.data };
+  };
+  return {
+    ...p,
+    request,
+    async bootstrap() {}, // createPostgresAgentApp bootstraps through the real development command.
+    async createNamespace(name) {
+      const result = await request("POST", "/namespaces", { body: { name } });
+      assert.equal(result.status, 201, JSON.stringify(result.body));
+      await p.controller.handleNamespaceLifecycle(p.principal.id, result.data.id, "ready");
+      return (await request("GET", `/namespaces/${result.data.id}`)).data;
+    },
+    async createConfiguration(namespaceId, values) {
+      const result = await request("POST", `/namespaces/${namespaceId}/configurations`, {
+        body: { kind: "agent", values },
+      });
+      assert.equal(result.status, 201, JSON.stringify(result.body));
+      return result.data;
+    },
+    async deployAgent(namespaceId, agentId) {
+      const result = await request("POST", `/namespaces/${namespaceId}/agents/${agentId}/deploy`);
+      assert.equal(result.status, 202, JSON.stringify(result.body));
+      return result.data;
+    },
+    async activateRevision(namespaceId, agentId, revisionId) {
+      assert.ok(
+        await p.state.transact((unit) =>
+          unit.agents.compareAndSetActiveRevision(namespaceId, agentId, undefined, revisionId),
+        ),
+      );
+    },
+  };
+}
+
+test(
+  "PostgreSQL egress admission, installation and selected-version fencing persist with fresh native IAM checks",
+  requiresPostgres,
+  async (t) => {
+    const f = await staticEgressFixture(t, { appFactory: postgresApp });
+    const freshState = new PostgresPlatformState(f.pool);
+    const plan = f.revision.egressPlan;
+    const installed = await freshState.read((view) =>
+      view.credentialSources.findEgressInstallation(
+        f.egress.sourceControl.sender.id,
+        f.observed.sandbox.id,
+      ),
+    );
+    assert.deepEqual(installed.plan, plan);
+    // Reconciliation must not move the recorded installation time or break captured requests.
+    await f.controller.transact((unit) =>
+      unit.credentialSources.recordEgressInstallation({
+        ...installed,
+        installedAt: new Date().toISOString(),
+      }),
+    );
+    assert.deepEqual(
+      await freshState.read((view) =>
+        view.credentialSources.findEgressInstallation(installed.sender.id, installed.sandboxId),
+      ),
+      installed,
+    );
+    // Re-observation cannot turn a replacement supervisor into the previously admitted execution.
+    await assert.rejects(
+      f.controller.transact((unit) =>
+        unit.credentialSources.recordEgressInstallation({
+          ...installed,
+          enforcement: {
+            ...installed.enforcement,
+            instanceId: "10000000-0000-4000-8000-000000000001",
+          },
+        }),
+      ),
+      (error) => error.name === "ResourceStateConflictError",
+    );
+    await assert.rejects(
+      f.pool.query(
+        "UPDATE occ.credential_sources SET egress = jsonb_set(egress, '{secret,namespaceId}', '\"other-namespace\"') WHERE id = $1",
+        [f.source.id],
+      ),
+      (error) => error.code === "23514",
+    );
+    await assert.rejects(
+      f.controller.transact((unit) =>
+        unit.credentialSources.recordEgressInstallation({
+          ...installed,
+          sandboxId: "another-execution",
+        }),
+      ),
+      (error) => error.name === "ResourceConflictError",
+    );
+    const capture = f.capture();
+    const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", capture, f.metadata()))
+      .ready;
+    assert.ok(ready);
+    assert.ok(
+      (
+        await unary(
+          f.clients.HttpCredentialAccess,
+          "AuthorizeSend",
+          f.permitRequest(capture, ready),
+          f.metadata(),
+        )
+      ).allowed,
+    );
+    f.setResponse({ status: 401, body: { error: "invalid credential" } });
+    await f.protect(capture, await f.send(capture, ready));
+    const evidence = JSON.parse(ready.evidence.authority_evidence);
+    assert.equal(
+      await freshState.read((view) => view.credentialSources.isEgressMaterialRejected(evidence)),
+      true,
+    );
+    const pending = f.capture();
+    const next = (await unary(f.clients.HttpCredentialAccess, "Resolve", pending, f.metadata()))
+      .ready;
+    await f.revoke();
+    assert.ok(
+      (
+        await unary(
+          f.clients.HttpCredentialAccess,
+          "AuthorizeSend",
+          f.permitRequest(pending, next),
+          f.metadata(),
+        )
+      ).refused,
+    );
+    const denials = await f.pool.query(
+      "SELECT details FROM occ.audit_events WHERE action = 'openclaw.egress.authorize' AND namespace_id = $1",
+      [f.namespace.id],
+    );
+    assert.ok(
+      denials.rows.some(
+        (row) => row.details.code === "unauthorized" && row.details.phase === "before_send",
+      ),
+    );
+    assert.equal(f.providerRequests.length, 1);
+  },
+);

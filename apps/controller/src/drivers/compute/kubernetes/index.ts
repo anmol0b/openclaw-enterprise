@@ -1,3 +1,4 @@
+import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
 import {
   normalizeOpenAiBaseUrl,
   openAiBaseUrlRewritesIpv4,
@@ -8,6 +9,7 @@ import {
   asRecord,
   isNonEmptyString,
   numericErrorStatus,
+  publicCaBundle,
   sha256Hex,
   splitModelRef,
 } from "@openclaw-enterprise/utils";
@@ -1026,6 +1028,14 @@ function prepareHarnessAuth(
     harness.mode === "dedicated" &&
     (harness.id === "codex" || harness.id === "openclaw")
   ) {
+    // Protected egress supplies material only to the supervisor. A nonsecret marker lets
+    // ordinary model clients construct their request; the authority replaces its header.
+    if (resolvedAuth.source.egress !== undefined) {
+      environment.push({
+        name: harnessModelAuthentication(configuration).environmentName,
+        value: "oce-protected-egress",
+      });
+    }
     // The paired Sandbox supplies the credential environment; no Secret is projected here.
     if (harness.id === "codex") {
       environment.push({ name: "CODEX_LOGIN_MODE", value: resolvedAuth.loginMode });
@@ -1070,6 +1080,9 @@ const CONFIGURATION_DIRECTORY = "/etc/openclaw";
 const WRITABLE_CONFIGURATION_PATH = "/home/node/.openclaw/openclaw.json";
 const CONFIGURATION_DOCUMENT = "openclaw.json";
 const CONFIGURATION_VOLUME = "openclaw-configuration";
+const HARNESS_TRUST_VOLUME = "harness-trust";
+const HARNESS_TRUST_DIRECTORY = "/etc/openclaw-harness-trust";
+const HARNESS_TRUST_FILE = "ca-bundle.pem";
 const PLUGIN_RUNTIME_VOLUME = "openclaw-plugin-runtime";
 export const PLUGIN_RUNTIME_STATUS_PORT = 18_791;
 const PLUGIN_RUNTIME_STATUS_PATH = "/openclaw/plugin-runtime/status";
@@ -1657,6 +1670,24 @@ function providerHarnessUrl(
     throw new ConfigurationFailure(
       "SandboxDriver Harness workspace root must be an absolute path without surrounding whitespace.",
     );
+  }
+  if (endpoint.tls !== undefined) {
+    if (
+      url.protocol !== "wss:" ||
+      asRecord(endpoint.tls) === undefined ||
+      Object.keys(endpoint.tls).some((key) => key !== "caBundle")
+    ) {
+      throw new ConfigurationFailure(
+        "SandboxDriver TLS trust requires a WSS endpoint and only a public CA bundle.",
+      );
+    }
+    try {
+      publicCaBundle(endpoint.tls.caBundle);
+    } catch {
+      throw new ConfigurationFailure(
+        "SandboxDriver TLS trust must contain only valid PEM CA certificates.",
+      );
+    }
   }
   return url;
 }
@@ -2934,6 +2965,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private readonly options: KubernetesComputeDriverOptions;
   private readonly sandboxDriver: SandboxDriver | undefined;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
+  private readonly egressProxyDriver: EgressProxyDriver | undefined;
   private readonly nodeEnrollment: GatewayNodeEnrollment | undefined;
   // How long, in total across passes, preparation may wait for one setup's node to pair.
   private workspaceNodePairingWaitMs = WORKSPACE_NODE_PAIRING_WAIT_MS;
@@ -3298,6 +3330,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       readonly lifecycleDrivers?: readonly Driver[];
       readonly sandboxDriver?: SandboxDriver;
       readonly credentialGatewayDriver?: CredentialGatewayDriver;
+      readonly egressProxyDriver?: EgressProxyDriver;
       readonly nodeEnrollment?: GatewayNodeEnrollment;
       readonly readNodeCa?: () => Promise<string | undefined>;
     } = {},
@@ -3319,6 +3352,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
     }
     this.credentialGatewayDriver = selection.credentialGatewayDriver;
+    this.egressProxyDriver = selection.egressProxyDriver;
     this.nodeEnrollment = selection.nodeEnrollment;
     this.readNodeCa = selection.readNodeCa;
     const lifecycleDrivers = selection.lifecycleDrivers ?? [];
@@ -5567,6 +5601,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
         environment: Record<string, string>,
         providerEndpoint?: SandboxHarnessEndpoint,
       ) => {
+        await this.prepareRevisionStage("gateway_config_map", () =>
+          this.reconcileHarnessTrust(revision, providerEndpoint, gatewayNamespace),
+        );
         await this.prepareRevisionStage("gateway_channel_network_policy", () =>
           this.reconcileChannelNetworkPolicy(revision, channels, gatewayNamespace),
         );
@@ -5801,7 +5838,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         const sources = [
           ...(harnessAuth.credentialSource === undefined ? [] : [harnessAuth.credentialSource]),
           ...credentialSources,
-        ];
+        ].filter((source) => source.egress === undefined);
         const credentialContext =
           sources.length === 0
             ? undefined
@@ -5815,12 +5852,49 @@ export class KubernetesComputeDriver implements ComputeDriver {
           credentialContext === undefined
             ? []
             : await this.requireCredentialGateway().attachForRevision(credentialContext);
-        const requirements = this.harnessRequirementsFromDeployment(
+        const egressContext =
+          revision.egressPlan === undefined
+            ? undefined
+            : {
+                namespace: sandboxContext.namespace,
+                revision,
+                plan: revision.egressPlan,
+                signal: sandboxContext.signal,
+              };
+        if (
+          egressContext !== undefined &&
+          (this.egressProxyDriver?.id !== revision.egressPlan!.egressDriverId ||
+            context?.recordEgressInstallation === undefined ||
+            sandboxDriver.enrollHarness === undefined)
+        ) {
+          throw new DependencyUnavailableError(
+            "The admitted protected egress composition is unavailable.",
+          );
+        }
+        const egressAttachment =
+          egressContext === undefined
+            ? undefined
+            : await this.egressProxyDriver!.configureRevision(egressContext);
+        const harnessRequirements = this.harnessRequirementsFromDeployment(
           agentDeployment,
           harnessAuth.loginMode,
           attachments,
           this.sandboxWorkloadFiles(pluginRuntime),
         );
+        const requirements = {
+          ...harnessRequirements,
+          ...(egressAttachment === undefined
+            ? {}
+            : {
+                egressAttachment,
+                // Bind enrollment to the immutable admitted revision without
+                // exposing Compute's private status identity to the provider.
+                environment: [
+                  ...harnessRequirements.environment,
+                  { name: "OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID", value: revision.id },
+                ],
+              }),
+        };
         const sandbox = await this.prepareRevisionStage("sandbox_provision", () =>
           sandboxDriver.provisionHarness!({
             ...sandboxContext,
@@ -5829,6 +5903,38 @@ export class KubernetesComputeDriver implements ComputeDriver {
           }),
         );
         this.verifySandboxResourceRef(sandbox, revision, namespace);
+        if (egressContext !== undefined) {
+          if (sandbox.egressAttachment === undefined) {
+            throw new DependencyUnavailableError(
+              "The paired Sandbox returned no exact protected egress configuration.",
+            );
+          }
+          const installed = await this.egressProxyDriver!.attachmentStatus(
+            egressContext,
+            sandbox.egressAttachment,
+          );
+          if (installed === undefined) {
+            return incomplete();
+          }
+          await context!.recordEgressInstallation!(installed);
+          if (!(await this.egressProxyDriver!.verifyInstallation(egressContext, installed))) {
+            return incomplete();
+          }
+          const transportToken = await this.prepareRevisionStage("harness_auth", () =>
+            this.sandboxTransportTokenText(revision),
+          );
+          await this.prepareRevisionStage("sandbox_provision", () =>
+            sandboxDriver.enrollHarness!(
+              {
+                ...sandboxContext,
+                revision,
+                requirements,
+                transportToken,
+              },
+              installed,
+            ),
+          );
+        }
         if (this.options.runtime !== undefined) {
           // The Sandbox, and with it the supervisor's exact peer labels, exists only
           // now: admit that supervisor before waiting for its workspace node.
@@ -6450,6 +6556,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       gatewayNamespace,
       gatewayOwnership,
     );
+    await this.reconcileHarnessTrust(revision, providerEndpoint, gatewayNamespace);
     await this.reconcile(
       this.deployment(
         gatewayName,
@@ -6692,6 +6799,28 @@ export class KubernetesComputeDriver implements ComputeDriver {
       external,
     );
     const sandboxNamespace = this.sandboxNamespaceForRevision(revision, namespace);
+    if (revision.egressPlan !== undefined && source.egress !== undefined) {
+      const egress = this.egressProxyDriver;
+      if (egress?.id !== revision.egressPlan.egressDriverId) {
+        throw new DependencyUnavailableError("The protected egress cleanup owner is unavailable.");
+      }
+      const binding = revision.egressPlan.routes.find(
+        (route) => route.binding.source.source.id === source.id,
+      )?.binding.binding;
+      if (!binding) {
+        throw new OwnershipFailure("The protected source has no admitted binding.");
+      }
+      const removed = await egress.withdrawBinding(
+        {
+          namespace: sandboxNamespace,
+          revision,
+          plan: revision.egressPlan,
+          signal: AbortSignal.timeout(30_000),
+        },
+        binding,
+      );
+      return { sourceId: source.id, state: removed ? "revoked" : "pending" };
+    }
     const sandbox = sandboxDriver.harnessResource({ namespace: sandboxNamespace, revision });
     this.verifySandboxResourceRef(sandbox, revision, namespace);
     const status = await this.requireCredentialGateway().withdraw({
@@ -7104,6 +7233,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
     namespace: KubernetesNamespaceAddress,
   ): Promise<void> {
     const gatewayNamespace = this.gatewayNamespace(revision, namespace);
+    await this.deleteOwnedNamespacedResource(
+      "ConfigMap",
+      this.harnessTrustName(revision.agentId, revision.id),
+      this.pluginRuntimeOwnership(revision),
+      gatewayNamespace,
+    );
     await this.deleteOwnedNamespacedResource(
       "ConfigMap",
       `gateway-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
@@ -13668,6 +13803,52 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     }
   }
 
+  private harnessTrustName(agentId: string, revisionId: string): string {
+    return `harness-trust-${sha256Hex(agentId, 12)}-rev-${sha256Hex(revisionId, 12)}`;
+  }
+
+  private async reconcileHarnessTrust(
+    revision: AgentRevision,
+    endpoint: SandboxHarnessEndpoint | undefined,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<void> {
+    if (endpoint?.tls === undefined) {
+      return;
+    }
+    const network = this.options.network.providerHarness;
+    if (network === undefined) {
+      throw new ConfigurationFailure(
+        "SandboxDriver Harness endpoint requires an exact provider network route.",
+      );
+    }
+    providerHarnessUrl(endpoint, network);
+    // The endpoint arrives after the configuration snapshot. Keep its public
+    // trust separately revision-owned and immutable; drift requires a new revision.
+    const ownership = this.pluginRuntimeOwnership(revision);
+    await this.reconcile(
+      {
+        ...this.manifest(
+          "v1",
+          "ConfigMap",
+          this.harnessTrustName(revision.agentId, revision.id),
+          ownership,
+          namespace,
+        ),
+        immutable: true,
+        data: {
+          [HARNESS_TRUST_FILE]: [
+            publicCaBundle(endpoint.tls.caBundle),
+            this.options.executionCluster?.caBundle,
+          ]
+            .filter((bundle) => bundle !== undefined)
+            .join("\n"),
+        },
+      },
+      ownership,
+      namespace,
+    );
+  }
+
   private deployment(
     name: string,
     ownership: Ownership,
@@ -13747,6 +13928,33 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       providerEndpoint === undefined
         ? undefined
         : providerHarnessUrl(providerEndpoint, providerNetwork!);
+    if (providerEndpoint?.tls !== undefined) {
+      if (role !== "gateway" || !dedicated || configuration === undefined) {
+        throw new ConfigurationFailure(
+          "SandboxDriver TLS trust belongs only to its dedicated Agent Gateway.",
+        );
+      }
+      volumes.push({
+        name: HARNESS_TRUST_VOLUME,
+        configMap: {
+          name: this.harnessTrustName(
+            required(ownership.agentId, "Harness trust Agent ID"),
+            configuration.revisionId,
+          ),
+          items: [{ key: HARNESS_TRUST_FILE, path: HARNESS_TRUST_FILE }],
+          optional: false,
+        },
+      });
+      volumeMounts.push({
+        name: HARNESS_TRUST_VOLUME,
+        mountPath: HARNESS_TRUST_DIRECTORY,
+        readOnly: true,
+      });
+      variables.push({
+        name: "NODE_EXTRA_CA_CERTS",
+        value: `${HARNESS_TRUST_DIRECTORY}/${HARNESS_TRUST_FILE}`,
+      });
+    }
     const initContainers = privateHome
       ? [this.privateStateInitContainer(role, image, embedded, writableConfiguration)]
       : [];
@@ -14206,7 +14414,10 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
           name: "OPENCLAW_PEER_PLUGIN_STATUS_URL",
           value: `https://${this.options.executionCluster.harnessRouting.hostname}${this.harnessRoutePath(ownership)}/plugin-status`,
         });
-        if (this.options.executionCluster.caBundle !== undefined) {
+        if (
+          this.options.executionCluster.caBundle !== undefined &&
+          providerEndpoint?.tls === undefined
+        ) {
           variables.push({
             name: "NODE_EXTRA_CA_CERTS",
             value: `${configuration?.usesWritableNativeAdminConfig ? MANAGED_CONFIGURATION_DIRECTORY : CONFIGURATION_DIRECTORY}/execution-ca.pem`,

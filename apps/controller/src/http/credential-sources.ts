@@ -17,6 +17,7 @@ function clientCredentialSource(
     config: source.config,
     secrets: source.secrets,
     state: source.state,
+    ...(source.egress === undefined ? {} : { egress: source.egress }),
     ref: source.ref,
     ...(source.status === undefined ? {} : { status: source.status }),
   };
@@ -98,6 +99,7 @@ export const credentialSourceHandlers = {
         {
           namespaceId,
           credentialSourceId,
+          ...(body?.adoption === undefined ? {} : { adoption: body.adoption as "live" }),
           ...(body?.secrets === undefined
             ? {}
             : { secrets: body.secrets as Record<string, SecretReference> }),

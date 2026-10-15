@@ -1,3 +1,4 @@
+import { installEgressAuthority } from "./egress-authority.ts";
 import type { AuditEvent } from "@openclaw-enterprise/contracts";
 import {
   validateAuthAccountPrincipalSeed,
@@ -85,6 +86,8 @@ export async function composeProduction(config: ProductionConfig) {
     sandboxDriver,
     credentialGatewayDriver,
     credentialRefreshDriver,
+    egressProxyDriver,
+    egressAuthority,
     pluginDriver,
     repoDriver,
     createIAMDriver,
@@ -285,6 +288,10 @@ export async function composeProduction(config: ProductionConfig) {
       controller.registerDriver(sandboxDriver);
       controller.selectDriver("sandbox", sandboxDriver.id);
     }
+    if (egressProxyDriver !== undefined) {
+      controller.registerDriver(egressProxyDriver);
+      controller.selectDriver("egress_proxy", egressProxyDriver.id);
+    }
     if (credentialGatewayDriver !== undefined) {
       controller.registerDriver(credentialGatewayDriver);
       controller.selectDriver("credential_gateway", credentialGatewayDriver.id);
@@ -364,6 +371,9 @@ export async function composeProduction(config: ProductionConfig) {
       ...(config.clientAddress === undefined ? {} : { trustedProxies: config.clientAddress }),
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });
+    if (egressProxyDriver !== undefined && egressAuthority !== undefined) {
+      await installEgressAuthority(app, controller, egressProxyDriver, egressAuthority);
+    }
     app.get("/healthz", async () => ({ status: "ok" }));
     app.get("/readyz", async () => {
       await pool.query("SELECT 1");

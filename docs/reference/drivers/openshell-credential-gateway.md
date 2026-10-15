@@ -1,17 +1,19 @@
 # OpenShell Credential Gateway
 
-The bundled OpenShell Credential Gateway stores OCC
-[credential sources](../credential-sources.md) as OpenShell providers. The
-OpenShell supervisor applies them at its egress proxy, so the dedicated Codex
-Harness never receives the real model key. It implements the
-[CredentialGatewayDriver contract](credential-gateway.md) and works only with the
-[OpenShell SandboxDriver](openshell-sandbox.md), through one shared `openshell`
+The bundled Driver stores [credential sources](../credential-sources.md) as
+OpenShell providers. Its supervisor substitutes credentials without giving the
+Harness the real key. It implements [CredentialGatewayDriver](credential-gateway.md)
+with the paired [SandboxDriver](openshell-sandbox.md) and shared
 [Backend](../backends.md#openshell-gateway).
 
 **This Driver does not make OpenShell a supported production path.** It removes
 the model API key from the Harness. Workload identity, writable state, gateway
 authentication, admission, and provider-file proof remain subject to the
 [OpenShell qualification contract](openshell-sandbox.md#qualification-contract).
+
+The separate [protected static inference path](../credential-sources/protected-inference.md)
+requires a new authenticated credential-access counterpart. Selecting this legacy
+Driver alone does not enable that path.
 
 ## Configure the Driver
 
@@ -94,10 +96,8 @@ Startup rejects the selection when:
 - `drivers.credential_refresh` is selected without `drivers.credential_gateway`; or
 - the configuration has any key other than `binaries` and `toolBinaries`.
 
-Both the API and the worker connect to the gateway with the Backend's
-credentials. The API registers and deletes providers; the worker creates
-Sandboxes, updates provider profiles, and reads attachment status. Allow both to
-reach the gateway.
+Allow API and worker gateway access with the Backend credential: the API owns
+providers; the worker provisions Sandboxes and checks attachments.
 
 ## Source-type catalog
 
@@ -289,12 +289,10 @@ revision:
 
 ## Verification
 
-The [OpenShell real Sandbox suite](../../testing/openshell.md#openshell-sandbox)
-registers a source through the API, deploys a dedicated Codex Agent that uses it,
-and checks that every Harness process sees only the placeholder. It also binds a
-`bearer-token` source to an in-cluster endpoint, proves the substituted token
-arrives, and withdraws it from the running Agent while model turns continue. The Sandbox
-Driver startup integration covers Backend membership and selection rules.
+The [real Sandbox suite](../../testing/openshell.md#openshell-sandbox) covers API
+registration, dedicated Agent deployment, placeholder-only Harness environments,
+substituted tool tokens and withdrawal while model turns continue. Startup
+integration covers Backend membership and selection.
 
 ## Troubleshooting
 
