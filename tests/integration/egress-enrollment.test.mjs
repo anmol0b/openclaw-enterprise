@@ -397,6 +397,12 @@ test("zero-route admission has no business allow and an older supplier cannot cl
     "fresh gateway, old loaded supervisor",
   );
   assert.equal(await f.egress.verifyInstallation(context, installed), false);
+  observed.evidence.enforced_capabilities = [...current].sort();
+  assert.equal(
+    await f.egress.wiringStatus(context, attachment),
+    undefined,
+    "loaded enforcement evidence must retain its canonical order",
+  );
   observed.evidence.enforced_capabilities = current;
   const widened = {
     ...policy,
@@ -406,9 +412,12 @@ test("zero-route admission has no business allow and an older supplier cannot cl
     f.egress.wiringStatus(context, { plan, configuration: widened }),
     /changed protected egress routes/,
   );
-  observed.capabilities = old;
-  await assert.rejects(
-    f.egress.configureRevision(context),
-    /no negotiated protected egress authority/,
-  );
+  const assertAvailable = () => f.egress.sourceControl.assertAvailable(AbortSignal.timeout(5000));
+  await assertAvailable();
+  const unavailable = /no negotiated protected egress authority/;
+  observed.requiredCapabilities = old;
+  await assert.rejects(assertAvailable, unavailable, "complete supported, incomplete required");
+  delete observed.requiredCapabilities;
+  observed.supportedCapabilities = [...current, current[0]];
+  await assert.rejects(assertAvailable, unavailable, "complete required, duplicate in supported");
 });

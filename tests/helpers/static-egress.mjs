@@ -220,6 +220,8 @@ export async function staticEgressFixture(
   const Gateway = grpc.loadPackageDefinition(gatewayDefinition).openshell.v1.OpenShell;
   const gateway = new grpc.Server();
   const observed = { available: true, sandbox: undefined, policy: undefined, deleted: [] };
+  // OpenShell reports negotiated capabilities in lexical order, including the base contract.
+  const gatewayCapabilities = ["openshell.supervisor-middleware.contract", ...capabilities].sort();
   const profiles = new Map();
   const providers = new Map();
   gateway.addService(Gateway.service, {
@@ -257,8 +259,8 @@ export async function staticEgressFixture(
                 kind: 4,
                 configured_name: "oce-authority",
                 protocol_major: 1,
-                supported_capabilities: observed.capabilities ?? capabilities,
-                required_capabilities: observed.capabilities ?? capabilities,
+                supported_capabilities: observed.supportedCapabilities ?? gatewayCapabilities,
+                required_capabilities: observed.requiredCapabilities ?? gatewayCapabilities,
               },
             ]
           : [],
@@ -600,7 +602,7 @@ export async function staticEgressFixture(
     policy_hash: observed.policyHash,
     config_revision: "17395563786422799999",
     provider_env_revision: "9019556378642279999",
-    enforced_capabilities: observed.capabilities ?? capabilities,
+    enforced_capabilities: capabilities,
   };
   const effectivePolicy = structuredClone(observed.policy);
   const ruleName = inertProviderRule

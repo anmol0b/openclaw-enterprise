@@ -8,9 +8,11 @@ does not run this qualification. Preserve exact build, image selection, installe
 configuration and independent network-enforcement evidence with the result.
 
 Use the [version 2 connected inputs](./static-egress.md#select-the-prepared-connected-lane), with `authorityProfile` set to
-`fresh-whole-execution` and no `credentialConnector`. The supplier must actually
-report, in order, credential access, installation exchange, response custody,
-execution authority and protected no-material support. Configure its fixture bridge and valid TLS trust for both
+`fresh-whole-execution` and no `credentialConnector`. In gateway discovery, the supplier must list
+each of these capabilities exactly once in both its required and supported lists, in any order:
+credential access, installation exchange, response custody, execution authority and protected
+no-material support. Installed enforcement evidence must report them in the order shown.
+Configure its fixture bridge and valid TLS trust for both
 ordinary workload clients. Select the fixture HTTPS origin (without `/v1`) in
 `drivers.conduit.configuration.preparedGitHub.apiOrigin` in the Installation.
 Supply `issuerCaPath: /etc/openclaw/prepared-github-issuer/ca.crt` and
