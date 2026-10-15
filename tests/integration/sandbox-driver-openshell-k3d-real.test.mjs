@@ -4526,6 +4526,23 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
       )}).`,
     );
     assert.notEqual(deniedConfigRequest.exitCode, 0);
+    const diagnosticOutput = String(deniedConfigRequest.aggregatedOutput ?? "");
+    process.stderr.write(
+      `OpenShell forbidden-backend diagnostic: ${JSON.stringify({
+        status: deniedConfigRequest.status,
+        exitCode: deniedConfigRequest.exitCode,
+        signals: [
+          ["policy_denied", /policy_denied/i],
+          ["tls_error", /certificate|tls|ssl/i],
+          ["missing_file", /no such file|not found/i],
+          ["configuration", /configuration|config error/i],
+          ["permission_denied", /permission denied/i],
+          ["syntax_error", /syntax error|unexpected token/i],
+        ]
+          .filter(([, pattern]) => pattern.test(diagnosticOutput))
+          .map(([label]) => label),
+      })}\n`,
+    );
     // A provider 404 or an unrelated CLI failure is insufficient: the real supervisor
     // must record its L7 denial of this exact native-Codex request. Unmatched paths
     // use the relay reason, not the generic HTTP policy-denial response text.
