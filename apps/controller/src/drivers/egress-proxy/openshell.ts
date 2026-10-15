@@ -111,9 +111,11 @@ function enforcementEvidence(
     observation.source_policy_hash !== revision.policy_hash ||
     revisionNumber(evidence.config_revision) === undefined ||
     revisionNumber(evidence.provider_env_revision) === undefined ||
-    authority?.execution_authority !== true || authority.credential_authority !== true ||
+    authority?.execution_authority !== true ||
+    authority.credential_authority !== true ||
     authority.middleware !== options.middlewareName ||
-    (Array.isArray(authority.credential_connectors) && authority.credential_connectors.length !== 0) ||
+    (authority.credential_connectors !== undefined &&
+      !isDeepStrictEqual(authority.credential_connectors, [])) ||
     !isDeepStrictEqual(evidence.enforced_capabilities, capabilities)
   ) {
     return undefined;
@@ -131,12 +133,11 @@ function enforcementEvidence(
     }
   } else {
     const expectedName = `_provider_oce_runtime_${sha256Hex(revisionId, 16)}`;
-    const sourceRules = asRecord(source.network_policies);
+    const sourceRules = asRecord(source.network_policies) ?? {};
     const effectiveRules = asRecord(effective.network_policies);
     if (
       inertRule !== expectedName ||
       evidence.policy_hash === revision.policy_hash ||
-      !sourceRules ||
       !effectiveRules ||
       Object.hasOwn(sourceRules, expectedName) ||
       !isDeepStrictEqual(wirePolicy(effectiveRules[expectedName]), { name: expectedName }) ||
@@ -185,16 +186,16 @@ export function openShellEgressConfiguration(
   plan: EgressPlan,
   options: OpenShellEgressOptions,
 ): Readonly<Record<string, unknown>> {
-  if (
-    new Set(plan.routes.map((route) => route.binding.binding.id)).size > 1
-  ) {
+  if (new Set(plan.routes.map((route) => route.binding.binding.id)).size > 1) {
     throw new Error("The protected inference slice permits at most one binding.");
   }
   OpenShellEgressProxyDriver.validateConfiguration(options);
   const hosts = [...new Set(plan.routes.map((route) => new URL(route.origin).hostname))];
   // Keep the authority installed for a zero-route plan. The selector names no
   // reachable rule: network_policies below remains empty, never a wildcard.
-  if (!hosts.length) hosts.push("deny-egress.invalid");
+  if (!hosts.length) {
+    hosts.push("deny-egress.invalid");
+  }
   if (hosts.length !== 1 || !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(hosts[0]!)) {
     throw new Error("Protected egress requires one literal host.");
   }
@@ -365,8 +366,8 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     const expectedPolicies = asRecord(expected.network_policies);
     if (
       !expectedPolicies ||
-      Object.keys(expectedPolicies).some((key) =>
-        !key.startsWith("oce-egress-") && key !== "workspace-node-enrollment",
+      Object.keys(expectedPolicies).some(
+        (key) => !key.startsWith("oce-egress-") && key !== "workspace-node-enrollment",
       ) ||
       !isDeepStrictEqual(
         wirePolicy(expected.network_middlewares),
@@ -389,7 +390,8 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     if (
       !revision ||
       !policy ||
-      !policies ||
+      // Protobuf omits the map when deny-all has no rules (even auxiliary rules).
+      (Object.keys(expectedPolicies).length > 0 && !policies) ||
       Number(status.active_version) !== context.plan.generation ||
       Number(revision.version) !== context.plan.generation ||
       ![2, "POLICY_STATUS_LOADED"].includes(revision.status as string | number) ||

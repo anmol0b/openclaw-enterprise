@@ -353,6 +353,11 @@ export interface CredentialSourceReadRepository {
     sandboxId: string,
   ): Promise<Readonly<EgressInstallation> | undefined>;
 
+  findRevisionEgressInstallation(
+    namespaceId: string,
+    revisionId: string,
+  ): Promise<Readonly<EgressInstallation> | undefined>;
+
   findCredentialSource(
     namespaceId: string,
     credentialSourceId: string,
@@ -1878,6 +1883,11 @@ function repositories(
         ? undefined
         : immutableCopy(found);
     },
+    findRevisionEgressInstallation: async (namespaceId, revisionId) =>
+      [...snapshot.egressInstallations.values()].find(
+        ({ plan: { execution } }) =>
+          execution.namespaceId === namespaceId && execution.revisionId === revisionId,
+      ),
     recordEgressInstallation: async (installation) => {
       const execution = installation.plan.execution;
       const revision = (

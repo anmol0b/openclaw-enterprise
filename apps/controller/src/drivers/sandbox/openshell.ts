@@ -58,6 +58,7 @@ import {
 import { RUNTIME_WRAPPER_COMMAND } from "../compute/kubernetes/runtime-entrypoints.ts";
 import { nodeProgramArguments } from "../compute/node-program.ts";
 import {
+  COMPUTE_RELEASE_PROFILE,
   HARNESS_EGRESS_ENROLLMENT_PATH,
   harnessEgressEnrollment,
 } from "../compute/egress-enrollment.ts";
@@ -2317,6 +2318,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   async enrollHarness(
     context: SandboxHarnessStatusContext,
     installation: EgressInstallation,
+    release: (startupId: string) => Promise<Readonly<Record<string, unknown>>>,
   ): Promise<void> {
     if (
       !context.revision.egressPlan ||
@@ -2340,11 +2342,6 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         "Harness enrollment must match the installed Sandbox.",
       );
     }
-    if (
-      await client.serviceWebSocketHandshake(service.url, context.transportToken, context.signal)
-    ) {
-      return;
-    }
     const document = await client.getServiceDocument(
       service.url,
       HARNESS_EGRESS_ENROLLMENT_PATH,
@@ -2357,9 +2354,10 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       return;
     }
     const challenge = asRecord(document.json);
-    const { startupId, ...binding } = challenge ?? {};
+    const { profile, startupId, ...binding } = challenge ?? {};
     if (
       !challenge ||
+      profile !== COMPUTE_RELEASE_PROFILE ||
       typeof startupId !== "string" ||
       !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(startupId) ||
       !isDeepStrictEqual(binding, harnessEgressEnrollment(installation.plan))
@@ -2372,7 +2370,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       service.url,
       HARNESS_EGRESS_ENROLLMENT_PATH,
       context.transportToken,
-      challenge,
+      await release(startupId),
       context.signal,
     );
     // A restarted Harness refuses the old challenge. The next reconcile observes

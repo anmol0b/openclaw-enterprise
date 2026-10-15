@@ -1393,7 +1393,7 @@ export class ControllerWorker {
       throw new Error(`The selected production Compute Driver requires ${operation}.`);
     }
     if (operation === "activateRevision") {
-      assertExecutionReleaseAllowed(revision);
+      this.validateExecutionAdmission(revision);
       this.stoppedPredecessors.delete(revision.id);
     }
     await stage.call(this.compute, revision, context);
@@ -1544,7 +1544,7 @@ export class ControllerWorker {
     revision: Readonly<AgentRevision>,
     context: ComputeRevisionContext,
   ): Promise<{ readonly observation: ComputeReadiness; readonly context: ComputeRevisionContext }> {
-    assertExecutionReleaseAllowed(revision);
+    this.validateExecutionAdmission(revision);
     const timing = this.deployTimings.get(claim.idempotencyKey);
     const started = Date.now();
     try {
@@ -4102,13 +4102,21 @@ export class ControllerWorker {
     });
   }
 
+  private validateExecutionAdmission(revision: AgentRevision): void {
+    if (this.compute.validateExecutionAdmission === undefined) {
+      assertExecutionReleaseAllowed(revision);
+    } else {
+      this.compute.validateExecutionAdmission(revision);
+    }
+  }
+
   private async resolveRevisionSecretContext(
     revision: Readonly<AgentRevision>,
   ): Promise<
     { readonly context: ComputeRevisionContext } | { readonly result: RevisionDispatchResult }
   > {
     try {
-      assertExecutionReleaseAllowed(revision);
+      this.validateExecutionAdmission(revision);
     } catch {
       return { result: { outcome: "permanent", code: "EXECUTION_ADMISSION_UNAVAILABLE" } };
     }
@@ -4287,6 +4295,28 @@ export class ControllerWorker {
                   state.credentialSources.recordEgressInstallation(installation),
                 );
               },
+              currentEgressInstallation: () =>
+                this.state.read(async (view) => {
+                  const { namespaceId, agentId, servicePrincipalId, id } = revision;
+                  const namespace = await view.namespaces.findNamespace(namespaceId);
+                  const agent = await view.agents.findAgent(namespaceId, agentId);
+                  const newest = (
+                    await view.revisions.listRevisionMetadata(namespaceId, agentId)
+                  ).at(-1);
+                  const current = await view.revisions.findRevision(namespaceId, agentId, id);
+                  if (
+                    namespace?.status !== "ready" ||
+                    agent?.status !== "active" ||
+                    agent.desiredRuntimeState !== "running" ||
+                    agent.servicePrincipalId !== servicePrincipalId ||
+                    newest?.id !== id ||
+                    current?.executionAdmission.mode !== "protected" ||
+                    !isDeepStrictEqual(current.egressPlan, revision.egressPlan)
+                  ) {
+                    return undefined;
+                  }
+                  return view.credentialSources.findRevisionEgressInstallation(namespaceId, id);
+                }),
             }),
         secretEnvironment: Object.freeze(resolved),
         harnessAuth,

@@ -255,16 +255,14 @@ export function assertExecutionAdmission(
   }
 }
 
-/** Current shipped execution cutoff; ordinary Agent authentication cannot release it. */
+/** Default cutoff for Compute implementations without protected installation and release. */
 export function assertExecutionReleaseAllowed(
   revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
 ): void {
   assertExecutionAdmission(revision);
   if (revision.executionAdmission.mode === "protected") {
-    // TODO(M1): enable only after Compute-owned release, installed deny-all for empty
-    // plans, and an old-reader fence are proven together. No runtime flag bypass.
     throw new Error(
-      "Protected execution is unavailable until Compute release and old-reader fencing are proven.",
+      "Protected execution is unavailable on a Compute without exact installation and release.",
     );
   }
 }

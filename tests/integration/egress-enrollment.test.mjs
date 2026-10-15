@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -9,13 +10,18 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { AGENT_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
-import { HARNESS_EGRESS_ENROLLMENT_PATH } from "../../apps/controller/src/drivers/compute/egress-enrollment.ts";
+import {
+  HARNESS_EGRESS_ENROLLMENT_PATH,
+  COMPUTE_RELEASE_PUBLIC_KEY,
+  computeReleasePublicKey,
+  signComputeExecutionRelease,
+} from "../../apps/controller/src/drivers/compute/egress-enrollment.ts";
 import {
   pluginRuntimeEnvironment,
   pluginRuntimeSpecForRevision,
 } from "../../apps/controller/src/drivers/compute/plugin-runtime.ts";
 import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
-import { staticEgressFixture, unary } from "../helpers/static-egress.mjs";
+import { staticEgressFixture } from "../helpers/static-egress.mjs";
 
 const token = "synthetic-harness-transport";
 const serviceUrl = "http://fixture-harness.example.test/";
@@ -106,6 +112,7 @@ test(
       },
     };
     let businessRequests = 0;
+    let businessError;
     const model = createServer(async (request, response) => {
       businessRequests++;
       try {
@@ -114,27 +121,18 @@ test(
           chunks.push(chunk);
         }
         const captured = f.capture(JSON.parse(Buffer.concat(chunks)));
-        const resolved = await unary(
-          f.clients.HttpCredentialAccess,
-          "Resolve",
-          captured,
-          f.metadata(),
-        );
+        const resolved = await f.resolve(captured);
         assert.ok(
           resolved.ready,
           "the first business request must find genuine committed enrollment",
         );
-        const permit = await unary(
-          f.clients.HttpCredentialAccess,
-          "AuthorizeSend",
-          f.permitRequest(captured, resolved.ready),
-          f.metadata(),
-        );
+        const permit = await f.authorize(f.permitRequest(captured, resolved.ready));
         assert.ok(permit.allowed);
         const protectedResponse = await f.protect(captured, await f.send(captured, resolved.ready));
-        assert.ok(protectedResponse.body_result.transform);
-        response.writeHead(200).end(protectedResponse.body_result.transform.data);
-      } catch {
+        assert.ok(protectedResponse.body);
+        response.writeHead(200).end(protectedResponse.body);
+      } catch (error) {
+        businessError = error.message;
         response.writeHead(503).end();
       }
     });
@@ -154,7 +152,9 @@ test(
       undefined,
       "https://provider.example.test/v1",
     );
+    const { privateKey } = generateKeyPairSync("ed25519");
     const environment = {
+      [COMPUTE_RELEASE_PUBLIC_KEY]: computeReleasePublicKey(privateKey),
       PATH: `${directory}:${dirname(process.execPath)}`,
       HOME: directory,
       TMPDIR: directory,
@@ -221,7 +221,7 @@ test(
     const oldChallenge = await getChallenge();
     assert.equal(oldChallenge.execution.executionId, f.revision.egressPlan.execution.executionId);
     assert.equal(businessRequests, 0);
-    assert.equal((await calls()).filter((args) => args.includes("exec")).length, 0);
+    assert.equal((await calls()).length, 0, "no Codex, login or probe is started before release");
     assert.equal(f.providerRequests.length, 0);
     assert.equal(
       await f.controller.transact((unit) =>
@@ -236,6 +236,11 @@ test(
     const post = (body, bearer = token) =>
       transport.postServiceDocument(serviceUrl, path, bearer, body, AbortSignal.timeout(2000));
     assert.equal((await post(oldChallenge, "wrong-token")).status, 401);
+    assert.equal(
+      (await post(oldChallenge)).status,
+      409,
+      "an Agent bearer cannot echo a challenge to release",
+    );
     assert.equal(
       (
         await post({
@@ -318,7 +323,20 @@ test(
       0,
       "a different installed instance or execution cannot release startup",
     );
-    await f.sandboxDriver.enrollHarness(enrollmentContext, installed);
+    const release = async (startupId) => {
+      const current = await f.controller.transact((state) =>
+        state.credentialSources.findRevisionEgressInstallation(f.namespace.id, f.revision.id),
+      );
+      assert.deepEqual(current, installed);
+      assert.equal(await f.egress.verifyInstallation(f.context, current), true);
+      return signComputeExecutionRelease(privateKey, startupId, current);
+    };
+    assert.equal(
+      (await post(await release(oldChallenge.startupId))).status,
+      409,
+      "signed old startup cannot release its replacement",
+    );
+    await f.sandboxDriver.enrollHarness(enrollmentContext, installed, release);
     await waitFor("authenticated app-server", async () => {
       try {
         return await transport.serviceWebSocketHandshake(
@@ -329,7 +347,9 @@ test(
       } catch {
         return false;
       }
-    });
+    }).catch((error) =>
+      assert.fail([error.message, businessError, second.diagnostics()].filter(Boolean).join("\n")),
+    );
     assert.equal(businessRequests, 1, second.diagnostics());
     assert.equal(f.providerRequests.length, 1);
     const probes = (await calls()).filter((args) => args.includes("exec"));
@@ -338,9 +358,57 @@ test(
     assert.ok(probes[0].includes("model_providers.openai-compatible.stream_max_retries=0"));
     // A repeated reconciliation observes the already-serving Harness and cannot
     // replay either the release or the first model request.
-    await f.sandboxDriver.enrollHarness(enrollmentContext, installed);
+    await f.sandboxDriver.enrollHarness(enrollmentContext, installed, () =>
+      assert.fail("already serving; no release requested"),
+    );
     assert.equal(businessRequests, 1);
     assert.equal((await calls()).filter((args) => args.includes("exec")).length, 1);
     await stop(second);
   },
 );
+
+test("zero-route admission has no business allow and an older supplier cannot claim its execution authority", async (t) => {
+  const f = await staticEgressFixture(t, { recordInstallation: false });
+  const plan = { ...f.context.plan, routes: [] };
+  const context = { ...f.context, plan, revision: { ...f.revision, egressPlan: plan } };
+  const { configuration } = await f.egress.configureRevision(context);
+  assert.deepEqual(
+    configuration.network_policies,
+    {},
+    "empty protected routes do not select an unprotected default",
+  );
+  const middleware = configuration.network_middlewares["oce-egress"];
+  assert.equal(middleware.execution_authority, true);
+  assert.deepEqual(middleware.endpoints.include, ["deny-egress.invalid"]);
+  const policy = { ...f.attachment.configuration, ...configuration };
+  const attachment = { plan, configuration: policy };
+  const observed = f.observed;
+  observed.policy = policy;
+  observed.observation.effective_policy = policy;
+  const installed = await f.egress.attachmentStatus(context, attachment);
+  assert.equal(installed?.enforcement.authorityScope, "execution");
+  assert.ok(await f.egress.verifyInstallation(context, installed));
+  const current = observed.evidence.enforced_capabilities;
+  const old = current.filter((cap) => !cap.endsWith(".execution-authority.v1"));
+  observed.evidence.enforced_capabilities = old;
+  assert.equal(
+    await f.egress.attachmentStatus(context, attachment),
+    undefined,
+    "fresh gateway, old loaded supervisor",
+  );
+  assert.equal(await f.egress.verifyInstallation(context, installed), false);
+  observed.evidence.enforced_capabilities = current;
+  const widened = {
+    ...policy,
+    network_policies: { unexpected: { endpoints: [{ host: "deny-egress.invalid" }] } },
+  };
+  await assert.rejects(
+    f.egress.attachmentStatus(context, { plan, configuration: widened }),
+    /changed protected egress routes/,
+  );
+  observed.capabilities = old;
+  await assert.rejects(
+    f.egress.configureRevision(context),
+    /no negotiated protected egress authority/,
+  );
+});

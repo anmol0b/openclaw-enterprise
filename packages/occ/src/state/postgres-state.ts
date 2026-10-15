@@ -2630,6 +2630,16 @@ export class PostgresPlatformState implements PlatformStateStore {
           ? undefined
           : immutableCopy(jsonObject(row.installation) as unknown as EgressInstallation);
       },
+      findRevisionEgressInstallation: async (namespaceId, revisionId) => {
+        const result = await client.query(
+          "SELECT installation FROM occ.egress_installations WHERE namespace_id = $1 AND revision_id = $2",
+          [namespaceId, revisionId],
+        );
+        const row = rows(result.rows)[0];
+        return row === undefined
+          ? undefined
+          : immutableCopy(jsonObject(row.installation) as unknown as EgressInstallation);
+      },
       recordEgressInstallation: async (installation) => {
         const execution = installation.plan.execution;
         const inserted = await client.query(
