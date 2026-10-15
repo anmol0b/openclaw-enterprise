@@ -26,49 +26,6 @@ export function faultObserver(socket, command = "status") {
   });
 }
 
-// Read the complete selected supervisor log. A truncated/missing log or a previous
-// container cannot masquerade as no permits; the refusal event is affirmative.
-export async function supplierEvents(setup, placement, supervisor) {
-  const pod = await setup.f.resource("pod", supervisor.metadata.name, placement);
-  assert.equal(pod.metadata.uid, supervisor.metadata.uid);
-  const [container] = pod.status.containerStatuses;
-  assert.equal(container.restartCount, 0);
-  const log = await setup.f.kubectl(
-    "logs",
-    pod.metadata.name,
-    "-n",
-    placement,
-    "-c",
-    container.name,
-  );
-  const events = [];
-  for (const line of log.split("\n")) {
-    if (!line.includes("response_custody_event")) {
-      continue;
-    }
-    const [, event] = /response_custody_event[" :=]+([a-z_]+)\b/.exec(line) ?? [];
-    const [, id] =
-      /request_id[" :=]+([a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\b/.exec(
-        line,
-      ) ?? [];
-    assert.ok(event && id, "supplier reported an unjoinable custody transition");
-    events.push({ event, id });
-  }
-  return events;
-}
-
-export function exactTransitions(events, before, expected) {
-  assert.deepEqual(events.slice(0, before.length), before, "complete supplier log continuity");
-  const fresh = events.slice(before.length);
-  const ids = new Set(fresh.map(({ id }) => id));
-  assert.equal(ids.size, 1, "one actual supplier operation, no retry or ambiguous observation");
-  assert.deepEqual(
-    fresh.map(({ event }) => event),
-    expected,
-  );
-  return fresh[0].id;
-}
-
 // Deliberately project truth predicates, never return a proof, custody nonce,
 // credential, or provider response. use_id joins the real supplier request ID.
 export async function receipts(pool, installation, selection = "prepared_github") {

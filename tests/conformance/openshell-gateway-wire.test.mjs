@@ -26,6 +26,7 @@ import {
 import { TransientDependencyError } from "../../packages/occ/src/index.ts";
 import { DependencyUnavailableError } from "../../packages/occ/src/errors.ts";
 import { createManagedWorkloadExec } from "../helpers/egress-managed-workload-exec.mjs";
+import { createCustodyTransitions } from "../helpers/egress-supplier-custody-transitions.mjs";
 import { agentClients } from "../helpers/egress-custody-observations.mjs";
 
 const require = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
@@ -1645,6 +1646,161 @@ test("OpenShell client reads v0.1.3-pre.2 sandbox logs with nanosecond times", a
   } finally {
     client.close();
     await new Promise((resolve) => server.tryShutdown(resolve));
+  }
+});
+
+test("installed custody observer follows the supplier's structured push shape through GetSandboxLogs", async (t) => {
+  const proto = await loader.load(
+    join(import.meta.dirname, "../fixtures/openshell-v0.1.3-pre.2-wire.proto"),
+    { keepCase: true, longs: String, enums: String, defaults: false, oneofs: true },
+  );
+  const workspace = "tenant-workspace";
+  const sandbox = "selected-enrolled-sandbox";
+  const sandboxId = "immutable-sandbox-id";
+  const supervisor = {
+    metadata: {
+      uid: "supervisor-uid",
+      namespace: workspace,
+      labels: {
+        "openshell.ai/sandbox-id": sandboxId,
+        "openshell.ai/boundary-role": "supervisor",
+      },
+    },
+    status: { containerStatuses: [{ containerID: "supervisor-container-id", restartCount: 0 }] },
+  };
+  // Shape produced by the Rust LogPushLayer, with source and sandbox ID set by
+  // the gateway. Exercise real protobuf and the production client's mapped fields.
+  const id = "0199f07b-a105-7001-8900-0123456789ab";
+  const entry = (event, changes) => ({
+    sandbox_id: sandboxId,
+    source: "sandbox",
+    level: "INFO",
+    target: "openshell_supervisor_network::l7::rest::credentials",
+    message: "Protected response custody transition",
+    event_time: { seconds: "1790000000", nanos: 123_000_000 },
+    fields: { request_id: id, response_custody_event: event },
+    ...changes,
+  });
+  const initial = entry(null, {
+    source: "gateway",
+    target: "ocsf",
+    message: "startup",
+    fields: {},
+  });
+  let reply;
+  const server = new grpc.Server();
+  const service = grpc.loadPackageDefinition(proto).openshell.v1.OpenShell.service;
+  server.addService(service, {
+    GetSandboxLogs(call, callback) {
+      assert.deepEqual(call.request, {
+        sandbox,
+        workspace_scope: { workspace, selection: "workspace" },
+        lines: 2000,
+      });
+      const [logs, buffer_total = logs.length] = reply();
+      callback(null, { logs, buffer_total });
+    },
+  });
+  const port = await bindWireServer(server);
+  const gatewayClient = new GrpcOpenShellGatewayClient({ endpoint: `127.0.0.1:${port}` });
+  t.after(() => {
+    gatewayClient.close();
+    server.forceShutdown();
+  });
+  const start = async (deliveryTimeoutMs = 3000) => {
+    reply = () => [[initial]];
+    const custody = createCustodyTransitions(
+      {
+        gatewayClient,
+        workspace,
+        sandbox,
+        sandboxId,
+        supervisor,
+        readSupervisor: async () => supervisor,
+      },
+      { deliveryTimeoutMs, pollIntervalMs: 5 },
+    );
+    return { custody, before: await custody.snapshot() };
+  };
+  await t.test(
+    "partial batch at origin hold then terminal batch through FIN, same operation",
+    async () => {
+      const { custody, before } = await start();
+      const events = ["resolve_accepted", "permit_accepted"];
+      let n = 0;
+      reply = () => [[initial, ...events.slice(0, n++).map((event) => entry(event))]];
+      assert.equal(await custody.expectAfter(before, events), id);
+      events.push("response_released");
+      assert.equal(await custody.expectAfter(before, events), id);
+    },
+  );
+  const denied = ["resolve_refused", "no_permit", "response_blocked"];
+  const lines = denied.map((event) => entry(event));
+  await t.test(
+    "negative requires affirmative no_permit, not silence or a missing prefix",
+    async () => {
+      const { custody, before } = await start(250);
+      await assert.rejects(
+        custody.expectAfter(before, denied),
+        /unobservable before delivery deadline/,
+      );
+      reply = () => [[initial, ...lines.slice(1)]];
+      await assert.rejects(custody.expectAfter(before, denied), /missing, or ambiguous/);
+      // Use a fresh observer; the damaged sequence above cannot be repaired by polling.
+      const fresh = await start();
+      reply = () => [[initial, ...lines]];
+      assert.equal(await fresh.custody.expectAfter(fresh.before, denied), id);
+    },
+  );
+  for (const [name, logs, error, bufferTotal] of [
+    [
+      "foreign source",
+      [initial, entry(denied[0], { source: "gateway" })],
+      /not the selected supervisor INFO/,
+    ],
+    [
+      "foreign target",
+      [initial, entry(denied[0], { target: "other" })],
+      /not the selected supervisor INFO/,
+    ],
+    ["foreign sandbox", [initial, entry(denied[0], { sandbox_id: "other" })], /foreign Sandbox/],
+    [
+      "invalid request ID",
+      [
+        initial,
+        entry(denied[0], {
+          fields: {
+            response_custody_event: denied[0],
+            request_id: "malformed",
+          },
+        }),
+      ],
+      /malformed supplier custody/,
+    ],
+    ["unknown transition", [initial, entry("future_transition")], /malformed supplier custody/],
+    [
+      "mixed request IDs",
+      [
+        initial,
+        lines[0],
+        entry(denied[1], {
+          fields: {
+            request_id: id.replace(/ab$/, "cd"),
+            response_custody_event: denied[1],
+          },
+        }),
+      ],
+      /missing, or ambiguous/,
+    ],
+    ["lost baseline", lines, /supplier log prefix changed/],
+    ["full ring could conceal loss", Array(2000).fill(initial), /incomplete supplier log ring/],
+    ["ambiguous or truncated ring", [initial, ...lines], /incomplete supplier log ring/, 2000],
+  ]) {
+    await t.test("reject " + name, async () => {
+      const { custody, before } = await start();
+      reply = () => [logs, bufferTotal];
+      await assert.rejects(custody.expectAfter(before, denied), error);
+    });
   }
 });
 

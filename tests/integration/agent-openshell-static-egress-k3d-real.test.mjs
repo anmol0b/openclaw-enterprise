@@ -20,11 +20,7 @@ import {
   registerCleanupAndStartProvider,
   observeInstalledProtection,
 } from "../helpers/egress-installed-agent.mjs";
-import {
-  exactTransitions,
-  supplierEvents,
-  tryDirectTcp,
-} from "../helpers/egress-custody-observations.mjs";
+import { tryDirectTcp } from "../helpers/egress-custody-observations.mjs";
 import {
   encodeSyntheticEvents,
   syntheticResponsesEvents,
@@ -80,7 +76,7 @@ test(
       const installed = await observeInstalledProtection(setup, stack, evidence, deployment);
       const turns = await observeRunningAgent(setup, stack, evidence, owned, deployment, installed);
 
-      await verifyManagedClientsAndDirectBypass(setup, stack, evidence, owned, installed, turns);
+      await verifyManagedClientsAndDirectBypass(setup, evidence, owned, installed, turns);
       await revokeExactGrantAndObserveDenial(stack, evidence, owned, deployment, turns);
       await regrantAndObserveRecovery(owned, deployment, turns);
       const rotatedSecret = await rotateSecretOnly(setup, stack, evidence, deployment, turns);
@@ -284,9 +280,8 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
       nonce,
       upstreamBefore: provider.observations.length,
     });
-    const { supervisor } = installed;
-    const events = () => supplierEvents(setup, placement, supervisor);
-    const before = await events();
+    const { custodyTransitions } = installed;
+    const before = await custodyTransitions.snapshot();
     const result = await f.requestCodexTurnFromGatewayPod({
       namespace: placement,
       gatewayPod: gatewayPods[0].metadata.name,
@@ -322,7 +317,7 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
           "permit_accepted",
           expected === "completed" ? "response_released" : "response_blocked",
         ];
-    const requestId = exactTransitions(await events(), before, transitions);
+    const requestId = await custodyTransitions.expectAfter(before, transitions);
     assert.deepEqual(provider.errors, [], "synthetic provider failed independently of enforcement");
     await checkpoint("turn-complete", {
       phase,
@@ -355,22 +350,13 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
 
 /**
  * @param {Prerequisites} setup
- * @param {PreparedStack} stack
  * @param {RunEvidence} evidence
  * @param {OwnedResources} owned
  * @param {InstalledProtection} installed
  * @param {AgentTurns} turns
  */
-async function verifyManagedClientsAndDirectBypass(
-  setup,
-  stack,
-  evidence,
-  owned,
-  installed,
-  turns,
-) {
+async function verifyManagedClientsAndDirectBypass(setup, evidence, owned, installed, turns) {
   const { controller } = setup;
-  const { placement } = stack;
   const { checkpoint } = evidence;
   const { provider } = owned;
   const { inAgent } = installed;
@@ -390,7 +376,7 @@ async function verifyManagedClientsAndDirectBypass(
     ),
   );
   await checkpoint("startup-provider-traffic", { sends: provider.observations.length });
-  const { installation, supervisor } = installed;
+  const { installation, custodyTransitions } = installed;
   assert.equal(installation.enforcement.authorityScope, "execution");
   for (const { binding } of installation.plan.routes) {
     assert.equal(binding.source.source.generation, 2, "install the explicitly adopted generation");
@@ -401,10 +387,9 @@ async function verifyManagedClientsAndDirectBypass(
       providerTools: "none",
     });
   }
-  const events = () => supplierEvents(setup, placement, supervisor);
   const released = ["resolve_accepted", "permit_accepted", "response_released"];
   const codexRequest = await successfulTurn("permitted", "initial");
-  const beforeSibling = await events();
+  const beforeSibling = await custodyTransitions.snapshot();
 
   // An ordinary sibling, with no credential, caller claim or binding header,
   // gets the same managed operation. A Codex-only allowlist fails this control.
@@ -437,8 +422,7 @@ async function verifyManagedClientsAndDirectBypass(
   const [sent, ...extra] = provider.observations.slice(before);
   assert.ok(sent?.nonce === nonce && sent.status === 200 && sent.credentialVersion === "initial");
   assert.equal(extra.length, 0, "one authenticated sibling request at the independent origin");
-  const afterSibling = await events();
-  const siblingRequest = exactTransitions(afterSibling, beforeSibling, released);
+  const siblingRequest = await custodyTransitions.expectAfter(beforeSibling, released);
   assert.notEqual(siblingRequest, codexRequest, "distinct protected exchanges from two callers");
   await checkpoint("managed-sibling-received", { codexRequest, siblingRequest, providerSends: 1 });
 

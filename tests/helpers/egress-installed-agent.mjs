@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createCustodyTransitions } from "./egress-supplier-custody-transitions.mjs";
 import { createOpenShellKubernetesFixture } from "./openshell-kubernetes-real.mjs";
 import { connectedReceiptRevision, assertConnectedResponse } from "./egress-connected-inputs.mjs";
 import { startSyntheticEgressProvider } from "../fixtures/synthetic-egress-provider.mjs";
@@ -339,9 +340,19 @@ export async function observeInstalledProtection(
   );
   assert.equal(supervisors.length, 1, "a separate selected supervisor must own forwarding");
   assert.ok(supervisors[0].spec.containers.some(({ image }) => image === input.images.supervisor));
+  const [supervisor] = supervisors;
+  const custodyTransitions = createCustodyTransitions({
+    gatewayClient,
+    workspace: placement,
+    sandbox: sandboxName,
+    sandboxId: observedSandbox.id,
+    supervisor,
+    readSupervisor: () => f.resource("pod", supervisor.metadata.name, placement),
+  });
   return {
     harness,
     sandboxName,
+    custodyTransitions,
     inAgent: async (...command) => {
       const { stdout } = await stack.execWorkload({ sandboxName, sandboxId }, command);
       return stdout.toString("utf8");
@@ -350,6 +361,6 @@ export async function observeInstalledProtection(
     receipt,
     gatewayPods,
     installation: installed,
-    supervisor: supervisors[0],
+    supervisor,
   };
 }

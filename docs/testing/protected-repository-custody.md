@@ -36,6 +36,15 @@ inherit the launcher's mediation. If the terminal `Exit` is missing or the suppl
 reports an execution timeout, reconcile that launch ID without resubmitting the client.
 The supervisor's later egress request ID identifies a separate operation.
 
+Observe custody while the enrolled Sandbox still exists. The supervisor pushes structured
+INFO events in batches. Its console output omits the request ID and transition fields.
+The test reads the full supplier log with `GetSandboxLogs` (workspace User, `sandbox:read`),
+checks the Sandbox ID, supervisor Pod UID, container and log continuity, then joins the
+reported request ID to the dispatch receipt and the independently observed origin request.
+A refusal requires an explicit `no_permit` event. If delivery is incomplete, ambiguous or
+late, report custody as unobservable and preserve the other evidence without repeating the
+workload request. The log supplies evidence about that request, never permission to send it.
+
 Before installing the disposable API controller, start the following observer on
 its owner host. Use the same limited disposable database selected for the test.
 The directory must not already exist. Keep the Unix socket on this host. Route

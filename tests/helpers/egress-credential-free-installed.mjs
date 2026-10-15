@@ -5,10 +5,8 @@ import { activateRepositoryAgent } from "./egress-custody-installed-agent.mjs";
 import {
   agentClients,
   assertIdentityResponse,
-  exactTransitions,
   receipts,
   refusal,
-  supplierEvents,
 } from "./egress-custody-observations.mjs";
 
 // Use the same owned Agent, but a fresh source, grant, revision, enrollment and response sink.
@@ -63,7 +61,7 @@ export async function verifyCredentialFreeReadAndWithdrawal({
     source,
     binding,
   });
-  const events = () => supplierEvents(setup, placement, installed.supervisor);
+  const { custodyTransitions: custody } = installed;
   const rows = () => receipts(pool, installed.installation, "no_material_required");
   const { curl } = agentClients(
     installed,
@@ -72,11 +70,11 @@ export async function verifyCredentialFreeReadAndWithdrawal({
   );
   const reads = provider.observations.length;
   const issues = provider.issues;
-  const before = await events();
+  const before = await custody.snapshot();
+  const preparse = provider.wireRequests;
   assert.deepEqual(await rows(), [], "newly enrolled recipient");
   assertIdentityResponse(await curl(), repository);
-  const resolved = await events();
-  const id = exactTransitions(resolved, before, [
+  const id = await custody.expectAfter(before, [
     "resolve_no_material_accepted",
     "permit_no_material_accepted",
     "response_released",
@@ -96,6 +94,11 @@ export async function verifyCredentialFreeReadAndWithdrawal({
     "exact bodyless credential-free request at the origin",
   );
   assert.deepEqual(extra, []);
+  assert.equal(
+    provider.wireRequests,
+    preparse + 1,
+    "one credential-free request at pre-parse origin",
+  );
   assert.equal(provider.issues, issues, "no new provider credential issued");
   await checkpoint("explicit-credential-free-repository-read", {
     requestId: id,
@@ -107,18 +110,24 @@ export async function verifyCredentialFreeReadAndWithdrawal({
   });
 
   // The positive control above proves that this actual recipient can receive the provider response.
+  const resolved = await custody.snapshot();
   await api("DELETE", namespacePath + "/iam/access-bindings/" + binding.id, undefined, 204);
   assert.ok(
     (await curl()) === refusal,
     "withdrawing the last authorization gives the fixed local denial only",
   );
-  const deniedId = exactTransitions(await events(), resolved, [
+  const deniedId = await custody.expectAfter(resolved, [
     "resolve_refused",
     "no_permit",
     "response_blocked",
   ]);
   assert.notEqual(deniedId, id);
   assert.deepEqual(await rows(), selected, "no dispatch reserved on refusal");
+  assert.equal(
+    provider.wireRequests,
+    preparse + 1,
+    "refusal sent no request to the pre-parse origin",
+  );
   const sourceRoute = route + "/credential-sources/" + source.id;
   await api("POST", sourceRoute + "/withdraw", undefined, 202);
   await f.waitFor(

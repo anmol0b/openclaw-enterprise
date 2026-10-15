@@ -3,11 +3,7 @@ import {
   admitRepositoryAgent,
   activateRepositoryAgent,
 } from "./egress-custody-installed-agent.mjs";
-import {
-  assertIdentityResponse,
-  exactTransitions,
-  refusal,
-} from "./egress-custody-observations.mjs";
+import { assertIdentityResponse, refusal } from "./egress-custody-observations.mjs";
 
 // A workload cannot sign or inject a supervisor opening. Here we control *actual*
 // provider timing and identify each installed recipient by its complete, deliberately
@@ -20,7 +16,6 @@ export async function verifyLiveRecipients({
   installed: a,
   clientFor,
   rows,
-  events,
 }) {
   const { provider } = owned;
   const admittedB = await admitRepositoryAgent(
@@ -97,7 +92,7 @@ export async function verifyLiveRecipients({
     return r;
   }
   async function open(i, shape) {
-    const before = await events(i);
+    const before = await i.custodyTransitions.snapshot();
     const prior = await rows(i);
     const gate = provider.holdNext(shape);
     // Both recipients read through FIN: ordinary curl at A, an independent Node TLS client at B.
@@ -110,7 +105,10 @@ export async function verifyLiveRecipients({
       read.then(() => assert.fail("recipient ended before origin hold")),
     ]);
     assert.ok(entry.exactRead && !entry.finished);
-    const id = exactTransitions(await events(i), before, ["resolve_accepted", "permit_accepted"]);
+    const id = await i.custodyTransitions.expectAfter(before, [
+      "resolve_accepted",
+      "permit_accepted",
+    ]);
     const newRows = (await rows(i)).filter((r) => !prior.some((p) => p.id === r.id));
     assert.equal(newRows.length, 1);
     assert.ok(
@@ -129,7 +127,11 @@ export async function verifyLiveRecipients({
     }
     const last = allow ? "response_released" : "response_blocked";
     assert.equal(
-      exactTransitions(await events(p.i), p.before, ["resolve_accepted", "permit_accepted", last]),
+      await p.i.custodyTransitions.expectAfter(p.before, [
+        "resolve_accepted",
+        "permit_accepted",
+        last,
+      ]),
       p.id,
     );
     assert.ok(

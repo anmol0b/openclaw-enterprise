@@ -22,11 +22,9 @@ import {
 import {
   agentClients,
   assertIdentityResponse,
-  exactTransitions,
   faultObserver,
   receipts,
   refusal,
-  supplierEvents,
   tryDirectTcp,
 } from "../helpers/egress-custody-observations.mjs";
 
@@ -100,17 +98,17 @@ test(
       const installed = await activate();
       const clientFor = (recipient) => agentClients(recipient, provider.businessOrigin);
       const { curl, node, inAgent } = clientFor(installed);
-      const events = (i = installed) => supplierEvents(setup, stack.placement, i.supervisor);
+      const { custodyTransitions: custody } = installed;
       const rows = (i = installed) => receipts(stack.pool, i.installation);
       const { checkpoint } = evidence;
 
       const exchange = async (client, expected, getResponse) => {
-        const before = await events();
+        const before = await custody.snapshot();
         const origin = provider.observations.length;
         const prior = await rows();
         const raw = await client();
         getResponse(raw);
-        const id = exactTransitions(await events(), before, expected);
+        const id = await custody.expectAfter(before, expected);
         const fresh = (await rows()).filter((row) => !prior.some((old) => old.id === row.id));
         assert.equal(fresh.length, 1, "one dispatch authorization for exactly this request");
         const [receipt] = fresh;
@@ -234,7 +232,7 @@ test(
           assert.equal(receipt.settled, false);
           const before = provider.observations.length;
           const original = await rows();
-          const transitions = await events();
+          const transitions = await custody.snapshot();
           await checkpoint("exact-dispatch-commit-ack-consumed", {
             requestId: id,
             supplierNoPermit: 1,
@@ -246,7 +244,7 @@ test(
             original,
             "restart preserves uncertain dispatch, no repair/replay",
           );
-          assert.deepEqual(await events(), transitions);
+          assert.deepEqual(await custody.snapshot(), transitions);
           assert.equal(
             provider.wireRequests,
             preparse,
@@ -290,7 +288,6 @@ test(
             installed,
             clientFor,
             rows,
-            events,
           }),
       );
 
@@ -304,7 +301,6 @@ test(
             clientFor,
             curl,
             evidence,
-            events,
             installed,
             owned,
             rows,
@@ -331,7 +327,6 @@ async function verifyReplacement({
   clientFor,
   curl,
   evidence,
-  events,
   installed,
   owned,
   rows,
@@ -341,7 +336,9 @@ async function verifyReplacement({
   const { provider } = owned;
   const held = provider.holdNext();
   const count = provider.observations.length;
-  const baseline = await events();
+  const { custodyTransitions: custody } = installed;
+  const baseline = await custody.snapshot();
+  const preparse = provider.wireRequests;
   const start = Date.now();
   // Keep the *real* provider response unresolved across replacement. A transport
   // closing during rollout is safe; it must never be reassociated with the new sink.
@@ -361,7 +358,7 @@ async function verifyReplacement({
     atOrigin?.exactRead && !atOrigin.finished,
     "old authorized read actually pending at provider",
   );
-  const old = exactTransitions(await events(), baseline, ["resolve_accepted", "permit_accepted"]);
+  const old = await custody.expectAfter(baseline, ["resolve_accepted", "permit_accepted"]);
   assert.ok((await rows()).some((r) => r.id === old && r.exact && !r.observation));
   await checkpoint("old-response-suspended-at-origin", { requestId: old, originReads: 1 });
 
@@ -382,7 +379,8 @@ async function verifyReplacement({
   // B stays authorized *through A's late release*. B's own accepted, pending read will
   // have a single forbidden trailer. If A's valid late response is delivered to B, the
   // exact refusal through FIN below fails. A's destroyed sink need not receive anything.
-  const beforeB = await events(replacement);
+  const { custodyTransitions: replacementCustody } = replacement;
+  const beforeB = await replacementCustody.snapshot();
   const gateB = provider.holdNext("forbidden-final");
   const { throughFin } = clientFor(replacement);
   const pendingB = throughFin();
@@ -392,7 +390,7 @@ async function verifyReplacement({
   ]);
   assert.ok(atB.exactRead && !atB.finished && !atOrigin.finished);
   const authorized = ["resolve_accepted", "permit_accepted"];
-  const crossed = exactTransitions(await events(replacement), beforeB, authorized);
+  const crossed = await replacementCustody.expectAfter(beforeB, authorized);
   const pendingReceipt = (await rows(replacement)).find((r) => r.id === crossed);
   assert.ok(
     pendingReceipt?.exact && pendingReceipt.observation === null,
@@ -407,18 +405,15 @@ async function verifyReplacement({
     "authorized B sees only local refusal through FIN, never A's late bytes",
   );
   assert.equal(
-    exactTransitions(await events(replacement), beforeB, [...authorized, "response_blocked"]),
+    await replacementCustody.expectAfter(beforeB, [...authorized, "response_blocked"]),
     crossed,
   );
   const blocked = (await rows(replacement)).find((r) => r.id === crossed);
   assert.ok(atB.finished && blocked?.exact && blocked.observation?.code === "response_policy");
 
-  const priorB = await events(replacement);
+  const priorB = await replacementCustody.snapshot();
   assertIdentityResponse(await throughFin());
-  const own = exactTransitions(await events(replacement), priorB, [
-    ...authorized,
-    "response_released",
-  ]);
+  const own = await replacementCustody.expectAfter(priorB, [...authorized, "response_released"]);
   assert.ok(own !== crossed && own !== old);
   const reads = provider.observations.slice(count);
   assert.equal(reads.length, 3);
@@ -441,14 +436,14 @@ async function verifyReplacement({
     undefined,
     204,
   );
-  const first = await events(replacement);
+  const first = await replacementCustody.snapshot();
   const prior = await rows(replacement);
   const raw = await throughFin();
   assert.ok(
     raw === refusal,
     "replacement client receives complete fixed local error and zero old provider bytes",
   );
-  const id = exactTransitions(await events(replacement), first, [
+  const id = await replacementCustody.expectAfter(first, [
     "resolve_refused",
     "no_permit",
     "response_blocked",
@@ -458,6 +453,11 @@ async function verifyReplacement({
     provider.observations.length,
     count + 3,
     "only old read and two authorized B controls reached origin; no inherited request or retry",
+  );
+  assert.equal(
+    provider.wireRequests,
+    preparse + 3,
+    "no retry or denied request at pre-parse origin",
   );
   assert.deepEqual(
     await rows(replacement),
