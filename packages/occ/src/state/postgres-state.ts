@@ -19,6 +19,7 @@ import type {
   AgentMetadata,
   AgentRead,
   AgentRevisionMetadata,
+  AgentRevisionSummary,
   AgentRevisionRead,
   ConfigurationReadError,
   WorkspaceSetup,
@@ -612,6 +613,32 @@ function revisionMetadataFromRow(row: PostgresRow): Readonly<AgentRevisionMetada
     revision,
     backendId: row.backend_id === null ? null : text(row, "backend_id"),
     createdAt: timestamp(row, "admitted_at"),
+  });
+}
+
+function revisionSummaryFromRow(row: PostgresRow): Readonly<AgentRevisionSummary> {
+  const metadata = revisionMetadataFromRow(row);
+  const rawGeneration = row.configuration_generation;
+  const configurationGeneration =
+    typeof rawGeneration === "string" ? Number(rawGeneration) : rawGeneration;
+  const harness = row.harness as Record<string, unknown> | null;
+  if (
+    typeof configurationGeneration !== "number" ||
+    !Number.isSafeInteger(configurationGeneration) ||
+    configurationGeneration <= 0 ||
+    typeof harness !== "object" ||
+    harness === null ||
+    typeof harness.id !== "string" ||
+    typeof harness.version !== "string" ||
+    (harness.mode !== "embedded" && harness.mode !== "dedicated")
+  ) {
+    throw new DependencyUnavailableError("Persisted AgentRevision summary is invalid.");
+  }
+  return immutableCopy({
+    ...metadata,
+    configurationId: text(row, "configuration_id"),
+    configurationGeneration,
+    harness: { id: harness.id, version: harness.version, mode: harness.mode },
   });
 }
 
@@ -2110,6 +2137,27 @@ export class PostgresPlatformState implements PlatformStateStore {
     };
     const presets: PresetRepository = {
       findPreset,
+      listPresetSummaries: async (namespaceId) =>
+        Object.freeze(
+          rows(
+            (
+              await client.query(
+                `SELECT p.id, p.namespace_id, p.name, p.created_at
+         FROM occ.presets AS p
+         JOIN occ.namespaces AS n ON n.id = p.namespace_id AND n.deleted_at IS NULL
+         WHERE p.namespace_id = $1 ORDER BY p.id`,
+                [namespaceId],
+              )
+            ).rows,
+          ).map((row) =>
+            immutableCopy({
+              id: text(row, "id"),
+              namespaceId: text(row, "namespace_id"),
+              name: text(row, "name"),
+              createdAt: timestamp(row, "created_at"),
+            }),
+          ),
+        ),
       listPresets: async (namespaceId) =>
         Object.freeze(
           rows(
@@ -3492,6 +3540,39 @@ export class PostgresPlatformState implements PlatformStateStore {
             ).rows,
           ).map(revisionMetadataFromRow),
         ),
+      pageRevisionSummaries: async (namespaceId, agentId, { before, limit }) => {
+        // The inner query picks the page, plus one row that tells whether older revisions
+        // remain; only those rows open their snapshot, once each, for the few top-level fields
+        // a summary carries. The admitted_spec CHECK constraint guarantees their shape.
+        const found = rows(
+          (
+            await client.query(
+              `SELECT p.id, p.namespace_id, p.agent_id, p.revision_number, p.backend_id,
+                      p.admitted_at, s.configuration_id, s.configuration_generation, s.harness
+               FROM (
+                 SELECT r.id, r.namespace_id, r.agent_id, r.revision_number, r.backend_id,
+                        r.admitted_at, r.admitted_spec
+                 FROM occ.agent_revisions AS r
+                 JOIN occ.agents AS a ON a.namespace_id = r.namespace_id AND a.id = r.agent_id
+                 JOIN occ.namespaces AS n ON n.id = r.namespace_id AND n.deleted_at IS NULL
+                 WHERE r.namespace_id = $1 AND r.agent_id = $2
+                   AND ($3::bigint IS NULL OR r.revision_number < $3::bigint)
+                 ORDER BY r.revision_number DESC
+                 LIMIT $4
+               ) AS p
+               CROSS JOIN LATERAL jsonb_to_record(p.admitted_spec)
+                 AS s(configuration_id text, configuration_generation bigint, harness jsonb)
+               ORDER BY p.revision_number DESC`,
+              [namespaceId, agentId, before ?? null, limit + 1],
+            )
+          ).rows,
+        ).map(revisionSummaryFromRow);
+        const page = found.slice(0, limit);
+        return Object.freeze({
+          revisions: Object.freeze(page),
+          ...(found.length > limit ? { nextBefore: page.at(-1)!.revision } : {}),
+        });
+      },
       createRevision: async (revision) => {
         await this.requireInitialized(context);
         if (
@@ -4500,7 +4581,14 @@ export class PostgresPlatformState implements PlatformStateStore {
 		                   SET status = 'cancelled',
 		                       progress = provisioning.progress || jsonb_build_object(
 		                         'error', jsonb_build_object('code', $3::text, 'message', $4::text)
-		                       ),
+		                       ) || CASE
+		                         -- The live claim's attempt may still be writing until its lease
+		                         -- runs out: its worker stops issuing requests by then.
+		                         WHEN owner.state = 'claimed' THEN jsonb_build_object(
+		                           'cancelledClaimExpiresAt', to_jsonb(owner.lease_expires_at)
+		                         )
+		                         ELSE '{}'::jsonb
+		                       END,
 		                       updated_at = clock_timestamp()
                    FROM owner
                    WHERE provisioning.work_id = owner.idempotency_key
@@ -4525,6 +4613,50 @@ export class PostgresPlatformState implements PlatformStateStore {
             ).rows,
           );
           return cancelled[0] === undefined ? undefined : provisioningRecordFromRow(cancelled[0]);
+        },
+        settleAbandonedEffect: async (namespaceId, agentId) => {
+          // A cancelled job never runs again (finding 1384). Once the claim that began its
+          // transport write has lapsed, its worker has stopped issuing requests, so the exact
+          // pending effect is recorded as settled, as Agent deletion does (a request already sent
+          // may still land; the write creates only absent Secrets). A receipt that already
+          // exists, or malformed evidence, matches nothing and stays fail-closed.
+          const settled = rows(
+            (
+              await client.query(
+                `WITH matched AS MATERIALIZED (
+                   SELECT provisioning.work_id,
+                          provisioning.progress -> 'pendingEffect' ->> 'owner' AS owner
+                   FROM occ.agent_provisioning_work AS provisioning
+                   WHERE provisioning.namespace_id = $1
+                     AND provisioning.agent_id = $2
+                     AND provisioning.status = 'cancelled'
+                     AND provisioning.revision_id IS NULL
+                     AND provisioning.progress -> 'pendingEffect' ->> 'kind' = 'transport'
+                     AND provisioning.progress -> 'pendingEffect' ->> 'targetId' = $2
+                     AND COALESCE(provisioning.progress -> 'pendingEffect' ->> 'owner', '') <> ''
+                     AND NOT (provisioning.progress ? 'effectReceipt')
+                     AND COALESCE(
+                       (provisioning.progress ->> 'cancelledClaimExpiresAt')::timestamptz
+                         <= clock_timestamp(),
+                       true
+                     )
+                   FOR UPDATE
+                 )
+                 UPDATE occ.agent_provisioning_work AS provisioning
+                 SET progress = provisioning.progress || jsonb_build_object(
+                       'effectReceipt', jsonb_build_object(
+                         'kind', 'transport', 'owner', matched.owner, 'targetId', $2::text
+                       )
+                     ),
+                     updated_at = clock_timestamp()
+                 FROM matched
+                 WHERE provisioning.work_id = matched.work_id
+                 RETURNING provisioning.*`,
+                [namespaceId, agentId],
+              )
+            ).rows,
+          );
+          return settled[0] === undefined ? undefined : provisioningRecordFromRow(settled[0]);
         },
         retryByWorkId: async (namespaceId, workId, actorId) => {
           const retried = rows(

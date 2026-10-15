@@ -6,8 +6,10 @@ import {
 import { compareResourceQuantities } from "./resource-quantities.ts";
 import {
   asRecord,
+  hasControlCharacter,
   isNonEmptyString,
   numericErrorStatus,
+  readCappedBody,
   sha256Hex,
   splitModelRef,
 } from "@openclaw-enterprise/utils";
@@ -25,7 +27,9 @@ import type {
   DiscoveryV1Api,
   KubernetesObject,
   KubernetesObjectApi,
+  ConfigurationOptions,
   NetworkingV1Api,
+  ResponseContext,
   VersionApi,
   V1ConfigMap,
   V1EnvVar,
@@ -120,6 +124,7 @@ import {
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsForbiddenByClusterError,
   runtimeFailureCause,
+  SandboxNamespaceRefusedError,
   ServiceAccountCredentialSecretExistsError,
   TransientDependencyError,
   validRuntimeLogFrontierTime,
@@ -127,6 +132,7 @@ import {
 import {
   createKubernetesClientConfiguration,
   KubernetesApiUnavailableError,
+  nonRedirectingHttpLibrary,
 } from "../../kubernetes/client.ts";
 import {
   HARNESS_WORKSPACE,
@@ -659,16 +665,46 @@ function preparationFailure(
       }
     }
   }
+  // A request timeout is the failure itself. Its cause is whatever the in-flight call threw once
+  // the deadline lapsed, usually the deadline's DOMException (finding 1386). Another
+  // dependency's transient failure, such as the Agent Gateway's, is classified already: its
+  // cause is that dependency's socket error, not a Kubernetes API failure (finding 1391).
   const cause = asRecord(error)?.cause;
-  return cause === undefined
+  return cause === undefined ||
+    error instanceof KubernetesRequestTimeout ||
+    nonKubernetesTransientFailure(error)
     ? { stage: "prepare_revision", error }
     : preparationFailure(cause, depth + 1);
+}
+
+/**
+ * A transient failure of a dependency other than the Kubernetes API. A Kubernetes API one
+ * keeps the walk going: its cause is the API failure, whose status the diagnostic reports.
+ */
+function nonKubernetesTransientFailure(error: unknown): error is TransientDependencyError {
+  return error instanceof TransientDependencyError && error.dependency !== "kubernetes_api";
+}
+
+/** The worker's bound on a diagnostic message: at most 256 printable characters. */
+function diagnosticMessage(message: string): boolean {
+  return message.length <= 256 && !hasControlCharacter(message);
 }
 
 function preparationFailureDiagnostic(error: unknown): ComputePrepareRevisionFailureDiagnostic {
   const failure = preparationFailure(error);
   const cause = privateWriteEvidence(failure.error) ?? failure.error;
   const status = numericErrorStatus(cause);
+  if (nonKubernetesTransientFailure(cause)) {
+    // The code names the dependency (AGENT_GATEWAY_UNAVAILABLE); the message is the
+    // controller's own text, kept only while the worker would accept it: a message it
+    // refuses would drop the whole diagnostic.
+    return {
+      code: cause.code,
+      stage: failure.stage,
+      errorClass: "TransientDependencyError",
+      ...(diagnosticMessage(cause.message) ? { message: cause.message } : {}),
+    };
+  }
   if (cause instanceof ConfigurationFailure || cause instanceof ConfigurationHarnessError) {
     return {
       code: "KUBERNETES_CONFIGURATION_INVALID",
@@ -854,9 +890,8 @@ function kubernetesApiFailureEvidence(
   if (socket !== undefined) {
     return new KubernetesApiFailureEvidence(socket);
   }
-  // Only an HTTP status counts: a DOMException abort also carries a numeric code.
   const status = numericErrorStatus(error);
-  return status === undefined || status < 100 || status > 599
+  return status === undefined
     ? undefined
     : new KubernetesApiFailureEvidence(status, kubernetesStatusReason(error));
 }
@@ -1152,6 +1187,83 @@ const SERVICE_ACCOUNT_TOKEN_KEY = "token";
 const CODEX_ACCESS_TOKEN = "CODEX_ACCESS_TOKEN";
 const MAX_RUNTIME_CREDENTIAL_BYTES = 65_536;
 const MAX_RUNTIME_STATUS_RESPONSE_BYTES = 65_536;
+
+class RuntimeStatusOversized extends Error {}
+class RuntimeStatusRedirected extends Error {}
+
+/**
+ * undici's refusal of an interim answer the request never asked for: a `100 Continue`
+ * ("bad response") or a `101` without an upgrade request ("bad upgrade"). The peer chose that
+ * answer, so unlike a dropped or reset connection, a retry gets the same one (finding 1355).
+ * The texts are undici's (`lib/dispatcher/client-h1.js` `onHeadersComplete`, undici 8.11.2):
+ * recheck them when undici changes, or these answers fall back to the generic retry.
+ */
+function unsolicitedInterimResponse(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    if (
+      (current as { readonly code?: unknown }).code === "UND_ERR_SOCKET" &&
+      (current.message === "bad response" || current.message === "bad upgrade")
+    ) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
+ * Reads a Pod proxy response up to the status limit instead of buffering all of it.
+ * Error bodies are capped too: the client reads them unbounded for its exception.
+ */
+async function limitRuntimeStatusBody(response: ResponseContext): Promise<ResponseContext> {
+  const stream = response.body.stream();
+  if (response.httpStatusCode >= 300 && response.httpStatusCode <= 399) {
+    // The status is already decisive; do not wait for an untrusted redirect body.
+    try {
+      if (stream !== null) {
+        void stream.cancel().catch(() => {});
+      }
+    } catch {
+      // A cancellation failure must not make this redirect retryable.
+    }
+    throw new RuntimeStatusRedirected();
+  }
+  if (stream !== null) {
+    let bytes = await readCappedBody(stream, MAX_RUNTIME_STATUS_RESPONSE_BYTES);
+    if (bytes === undefined) {
+      // An error answer is judged by its status code (404/503 read as not serving), not its body.
+      if (response.httpStatusCode < 200 || response.httpStatusCode > 299) {
+        bytes = Buffer.alloc(0);
+      } else {
+        throw new RuntimeStatusOversized();
+      }
+    }
+    response.body = {
+      text: async () => new TextDecoder().decode(bytes),
+      binary: async () => bytes,
+      stream: () => null,
+    };
+  }
+  return response;
+}
+
+let runtimeStatusRequestOptions: Promise<ConfigurationOptions> | undefined;
+
+function runtimeStatusOptions(): Promise<ConfigurationOptions> {
+  runtimeStatusRequestOptions ??= import("@kubernetes/client-node").then((sdk) => ({
+    // The shared clients already refuse redirects; the Pod-written read does not rely on that.
+    httpApi: nonRedirectingHttpLibrary(sdk),
+    middleware: [
+      {
+        pre: (request) => new sdk.Observable(Promise.resolve(request)),
+        post: (response) => new sdk.Observable(limitRuntimeStatusBody(response)),
+      },
+    ],
+    middlewareMergeStrategy: "append",
+  }));
+  return runtimeStatusRequestOptions;
+}
 const RUNTIME_STATUS_IDENTIFIER = /^[A-Za-z0-9._~:@-]{1,64}$/u;
 const RUNTIME_DIAGNOSTIC_TIMESTAMP =
   /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$/u;
@@ -1407,6 +1519,7 @@ function failure(error: unknown): "retryable" | "permanent" {
   return error instanceof OwnershipFailure ||
     error instanceof ConfigurationFailure ||
     error instanceof ConfigurationHarnessError ||
+    error instanceof SandboxNamespaceRefusedError ||
     [400, 401, 403, 422].includes(numericErrorStatus(error) ?? 0)
     ? "permanent"
     : "retryable";
@@ -1417,8 +1530,9 @@ const MAX_NAMESPACE_FAILURE_REASON_LENGTH = 256;
 /**
  * The operator reason for a failed Namespace ensure. Only this Driver's own refusal texts
  * pass through: they name this Namespace's own ID and Kubernetes placement, and a foreign
- * marker or object only by its key or kind. Anything else (Kubernetes response bodies,
- * lifecycle hooks, the Sandbox Driver) gets a fixed text, so no response text and no
+ * marker or object only by its key or kind. A Sandbox Driver's refusal of the controller's
+ * identity names only the provider's refusal code. Anything else (Kubernetes response bodies,
+ * lifecycle hooks, other Sandbox Driver errors) gets a fixed text, so no response text and no
  * value of another tenant reaches the worker log. GatewaySettingFailure names settings the
  * caller submitted, so it never passes through. Characters the worker log refuses become
  * `_`, so the log keeps the reason instead of dropping it.
@@ -1427,7 +1541,8 @@ function namespaceFailureReason(error: unknown): string {
   if (
     (error instanceof OwnershipFailure ||
       error instanceof ConfigurationFailure ||
-      error instanceof KubernetesRequestTimeout) &&
+      error instanceof KubernetesRequestTimeout ||
+      error instanceof SandboxNamespaceRefusedError) &&
     !(error instanceof GatewaySettingFailure)
   ) {
     const cleaned = error.message.replace(/[^A-Za-z0-9._: /@-]/gu, "_");
@@ -1872,20 +1987,17 @@ function channelProxy(
   }
   // The URL parser rewrites octal, shorthand, integer, and hex IPv4 hosts.
   // Egress must name the host that was written, so only four decimal octets
-  // with no leading zeros are accepted. IPv6 is unchanged. Leading C0
-  // controls and spaces are not part of that host; new URL strips them.
+  // from 0 to 255 with no leading zeros are accepted. isIP accepts only that spelling and
+  // the parser always serializes an IPv4 host that way, so a written host
+  // equal to the parsed one is already four such octets. IPv6 is unchanged.
+  // Leading C0 controls and spaces are not part of that host; new URL strips them.
   if (isIP(address) === 4) {
     let hostSource = raw;
     while (hostSource.charCodeAt(0) <= 0x20) {
       hostSource = hostSource.slice(1);
     }
     const writtenHost = /^https?:\/\/([^:/?#\\]+)/i.exec(hostSource)?.[1];
-    if (
-      writtenHost === undefined ||
-      writtenHost !== parsed.hostname ||
-      !/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(writtenHost) ||
-      writtenHost.split(".").some((octet) => Number(octet) > 255)
-    ) {
+    if (writtenHost === undefined || writtenHost !== parsed.hostname) {
       throw new ConfigurationFailure(
         "Channel proxy URL IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
       );
@@ -8798,22 +8910,56 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const clients = await this.clients(namespace.plane);
     // 404/503 mean the status port is not serving yet: an answer, not an outage to retry.
     const notServing = Symbol("not serving");
+    const oversized = Symbol("oversized");
+    const redirected = Symbol("redirected");
+    const interim = Symbol("interim");
+    const options = await runtimeStatusOptions();
     const raw = await this.request(async () => {
       try {
-        return await clients.core.connectGetNamespacedPodProxyWithPath({
-          name: `${podName}:${PLUGIN_RUNTIME_STATUS_PORT}`,
-          namespace: namespace.name,
-          path: path.slice(1),
-        });
+        return await clients.core.connectGetNamespacedPodProxyWithPath(
+          {
+            name: `${podName}:${PLUGIN_RUNTIME_STATUS_PORT}`,
+            namespace: namespace.name,
+            path: path.slice(1),
+          },
+          options,
+        );
       } catch (error) {
+        // An oversized 2xx is not retried: the next read would be just as large.
+        if (error instanceof RuntimeStatusOversized) {
+          return oversized;
+        }
+        if (error instanceof RuntimeStatusRedirected) {
+          return redirected;
+        }
+        if (unsolicitedInterimResponse(error)) {
+          return interim;
+        }
         if (numericErrorStatus(error) === 404 || numericErrorStatus(error) === 503) {
           return notServing;
+        }
+        // The client never follows a redirect (finding 1347). Any 3xx here was written by the
+        // Pod: the status is unreadable, and a retry would get the same answer.
+        const status = numericErrorStatus(error);
+        if (status !== undefined && status >= 300 && status <= 399) {
+          return redirected;
         }
         throw error;
       }
     });
     if (raw === notServing) {
       return undefined;
+    }
+    if (raw === oversized) {
+      throw new DependencyUnavailableError("Runtime status returned oversized data.");
+    }
+    if (raw === redirected) {
+      throw new DependencyUnavailableError("Runtime status answered with a redirect.");
+    }
+    if (raw === interim) {
+      throw new DependencyUnavailableError(
+        "Runtime status answered with an unrequested 1xx status.",
+      );
     }
     const parsed = this.boundedRuntimeStatusResponse(raw);
     const latestPods = (await this.revisionPods(revision, namespace, container)).filter(
