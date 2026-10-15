@@ -12,7 +12,7 @@ import {
   type sendUnaryData,
   type ServerDuplexStream,
 } from "@grpc/grpc-js";
-import type { EgressMaterialEvidence } from "@openclaw-enterprise/contracts";
+import type { EgressMaterialEvidence, EgressRefusal } from "@openclaw-enterprise/contracts";
 import type { OpenClawController } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 import { OpenShellEgressIdentity } from "./openshell-identity.ts";
@@ -62,15 +62,16 @@ function wireTimestamp(value: string): Wire {
   return { seconds: Math.floor(time / 1000), nanos: (time % 1000) * 1_000_000 };
 }
 
-function refused(kind: string): Wire {
-  const codes: Record<string, number> = {
-    denied: 1,
-    not_ready: 2,
-    unavailable: 3,
-    cancelled: 4,
-    deadline_exceeded: 5,
-  };
-  return { refused: { code: codes[kind] ?? 1 } };
+const refusalCodes = {
+  denied: 1,
+  not_ready: 2,
+  unavailable: 3,
+  cancelled: 4,
+  deadline_exceeded: 5,
+} satisfies Record<EgressRefusal["kind"], number>;
+
+function refused(kind: EgressRefusal["kind"]): Wire {
+  return { refused: { code: refusalCodes[kind] ?? refusalCodes.denied } };
 }
 
 /** Actual gRPC adapter for the supervisor's exclusive static-credential authority. */

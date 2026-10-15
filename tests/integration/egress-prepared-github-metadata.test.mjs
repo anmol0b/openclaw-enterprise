@@ -145,7 +145,11 @@ test("consented protected repository read uses only exact, already prepared meta
   assert.equal(f.attachment.configuration.network_policies["oce-egress-0"].binaries, undefined);
   const signal = new AbortController().signal;
   const resolve = (changed) => f.resolve(captureMetadata(f, changed));
-  assert.equal((await resolve()).refused.code, 2, "cold material must return not ready");
+  assert.equal(
+    (await resolve()).refused.code,
+    f.refusalCode("NOT_READY"),
+    "cold material must return not ready",
+  );
   assert.equal(reads, 1);
   assert.equal(gh.issuesOfTokens.length, 0, "cold capture must not issue or schedule");
   for (const changed of [
@@ -159,7 +163,7 @@ test("consented protected repository read uses only exact, already prepared meta
       "/fixture/repository.git/git-receive-pack",
     ].map((path) => ({ target: { path } })),
   ]) {
-    assert.equal((await resolve(changed)).refused.code, 1);
+    assert.equal((await resolve(changed)).refused.code, f.refusalCode("DENIED"));
   }
   assert.equal(reads, 1, "wrong body, target or method touched prepared material");
   assert.equal(
@@ -186,7 +190,10 @@ test("consented protected repository read uses only exact, already prepared meta
   await store.transact(admission.familyId, (row) => {
     row.enabled = false;
   });
-  assert.equal((await f.authorize(f.permitRequest(captured, ready))).refused.code, 1);
+  assert.equal(
+    (await f.authorize(f.permitRequest(captured, ready))).refused.code,
+    f.refusalCode("DENIED"),
+  );
   assert.equal(sendChecks, 3);
   assert.equal(gh.issuesOfTokens.length, 1, "no request may renew or issue");
 });

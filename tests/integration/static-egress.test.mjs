@@ -3,8 +3,10 @@ import test from "node:test";
 import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { readFileSync } from "node:fs";
-import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createRequire } from "node:module";
+import { EgressSendReceipts } from "../../packages/occ/src/egress-send-receipts.ts";
+import { InMemoryPlatformState } from "../../packages/occ/src/state/platform-state.ts";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
 import { CredentialProxy, egressInjectionDigest } from "../../packages/occ/src/credential-proxy.ts";
 import { deploymentErrorForWork } from "../../packages/occ/src/state/controller-work.ts";
@@ -973,6 +975,21 @@ test(
   },
 );
 
+test("send receipt records the digest of the accepted request", async (t) => {
+  const receipts = new EgressSendReceipts(new InMemoryPlatformState());
+  const f = await syntheticDispatchFixture(t, receipts);
+  // In this request, body precedes deadlineAt. Moving it to the end while copying the
+  // request must not silently change the digest we commit to the authorization receipt.
+  const accepted = { ...f.request, body: f.request.body.toString("base64") };
+  const expectedDigest = createHash("sha256").update(JSON.stringify(accepted)).digest("hex");
+
+  assert.equal((await f.resolve()).kind, "ready");
+  assert.equal((await f.authorizeSend()).kind, "allow");
+  const stored = await receipts.recover(f.sender, f.attempt());
+  assert.equal(stored.authorization.requestDigest, expectedDigest);
+  assert.equal(f.arrivals, 0, "committing the authorization is not evidence of a send");
+});
+
 for (const bodyType of ["Uint8Array", "Buffer"]) {
   test(`credential proxy detaches ${bodyType} and request fields before identity verification`, async (t) => {
     const f = await syntheticDispatchFixture(t);
@@ -1512,7 +1529,7 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
         const { refused } = await result;
         assert.ok(refused, scenario);
         if (scenario === "deny_lost_ack") {
-          assert.equal(refused.code, 3, "sender sees HTTP_CREDENTIAL_REFUSAL_CODE_UNAVAILABLE");
+          assert.equal(refused.code, f.refusalCode("UNAVAILABLE"));
         }
       }
       const stored = await readReceipt(f, input);

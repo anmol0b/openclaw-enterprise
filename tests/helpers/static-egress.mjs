@@ -666,6 +666,13 @@ export async function staticEgressFixture(
     ).pathname,
     { keepCase: true, longs: String, enums: Number, defaults: false, oneofs: true },
   );
+  const refusalCode = (name) => {
+    const entry = definition["openshell.middleware.v1.HttpCredentialRefusalCode"].type.value.find(
+      (value) => value.name === `HTTP_CREDENTIAL_REFUSAL_CODE_${name}`,
+    );
+    assert.ok(entry, `Unknown HTTP credential refusal code: ${name}`);
+    return entry.number;
+  };
   const services = grpc.loadPackageDefinition(definition).openshell.middleware.v1;
   const clients = Object.fromEntries(
     [
@@ -908,6 +915,7 @@ export async function staticEgressFixture(
     ...app,
     namespace,
     runtimeNamespace,
+    refusalCode,
     secret,
     source,
     legacySource,
@@ -1126,6 +1134,19 @@ export async function syntheticDispatchFixture(t, receipts) {
     },
   };
   let forwarder = new CredentialProxy(ports);
+  const authorizeSend = (signal = new AbortController().signal) => {
+    assert.equal(ready.kind, "ready");
+    return forwarder.authorizeSend(
+      "synthetic-peer",
+      peer.sandboxId,
+      request.id,
+      ready.handle,
+      ready.evidence,
+      ready.injectionDigest,
+      request.deadlineAt,
+      signal,
+    );
+  };
   return {
     startedAt: new Date(now).toISOString(),
     get reads() {
@@ -1159,18 +1180,9 @@ export async function syntheticDispatchFixture(t, receipts) {
       );
       return ready;
     },
-    async dispatch(signal = new AbortController().signal) {
-      assert.equal(ready.kind, "ready");
-      const decision = await forwarder.authorizeSend(
-        "synthetic-peer",
-        peer.sandboxId,
-        request.id,
-        ready.handle,
-        ready.evidence,
-        ready.injectionDigest,
-        request.deadlineAt,
-        signal,
-      );
+    authorizeSend,
+    async dispatch(signal) {
+      const decision = await authorizeSend(signal);
       if (decision.kind !== "allow") {
         return decision;
       }

@@ -174,7 +174,11 @@ test(
             assert.equal(open.mock.callCount(), 1);
           } else {
             // Once signed access expires, the request deadline wins over material readiness.
-            assert.equal(result.refused?.code, 5, arm + ": deadline exceeded, no send handle");
+            assert.equal(
+              result.refused?.code,
+              f.refusalCode("DEADLINE_EXCEEDED"),
+              arm + ": deadline exceeded, no send handle",
+            );
             const queried = arm !== "after metadata";
             assert.equal(
               queryInTime,

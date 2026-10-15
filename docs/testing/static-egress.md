@@ -5,55 +5,71 @@ the current installation before signing the workload release. Other Compute Driv
 refuse protected admission. [Qualify the installed pair](#installed-runtime-and-provider-qualification)
 before relying on [this boundary](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
 
-Run source checks with installed workspace dependencies.
+## Check a Credential Proxy change
+
+With installed workspace dependencies, run the focused source suites:
+
+```sh
+pnpm test:files -- tests/integration/static-egress.test.mjs \
+  tests/integration/egress-prepared-github-metadata.test.mjs \
+  tests/integration/egress-installation-exchange.test.mjs
+```
+
+This selects literal files; it does not provision dependencies or guarantee
+that cases ran without skips. For strict PostgreSQL coverage, use the broader
+`postgres-platform` lane with local Docker. No provider or cluster credentials
+are needed:
+
+```sh
+(
+  set -eu
+  umask 077
+  PG_PLATFORM_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oce-postgres-platform.XXXXXX")"
+  printf 'PostgreSQL run directory: %s\n' "$PG_PLATFORM_RUN_DIR"
+  trap 'pg_run_status=$?; node scripts/ci/cleanup.mjs --state "$PG_PLATFORM_RUN_DIR/state.json" || pg_run_status=1; exit "$pg_run_status"' EXIT
+
+  node scripts/ci/prepare.mjs --lane postgres-platform \
+    --state "$PG_PLATFORM_RUN_DIR/state.json" \
+    --github-env "$PG_PLATFORM_RUN_DIR/owner.env"
+  node scripts/ci/run-tests.mjs run postgres-platform \
+    --state "$PG_PLATFORM_RUN_DIR/state.json" \
+    --results "$PG_PLATFORM_RUN_DIR/results.json"
+)
+```
+
+The runner rejects unexpected skips and missing cases; cleanup failures also
+fail this recipe. Keep the printed state/results directory for diagnosis and
+[cleanup recovery](postgresql.md). Source and database
+checks do not replace [installed qualification](#installed-runtime-and-provider-qualification).
 
 ## Authority and provider fixtures
 
-The authority fixtures use a synthetic trusted acceptance profile. Test
-[installation-bound exchange and response custody](protected-repository-custody.md)
-on the candidate pair separately.
+The focused suites above use synthetic acceptance. Test [installation-bound exchange
+and response custody](protected-repository-custody.md) on the candidate pair separately.
 
-`tests/integration/postgres-egress-send-receipts.test.mjs` runs the real Forwarder
-and PostgreSQL receipt transactions with a loopback byte-counting origin. With a
-migrated disposable `OCC_TEST_DATABASE_URL`, it suppresses the second COMMIT reply
-after observing reservation, verifies no permit or origin arrival, and reconstructs
-the Forwarder before the original deadline to prove no replacement. Policy, material
-and acceptance inputs in that dispatch case are synthetic; the transactions, fault
-proxy and sender socket are real. It also tests expiry, cancellation and lost custody
-after the authorized record commits.
+`static-egress.test.mjs` exercises Fastify authentication, source and Agent admission,
+native IAM, controller transactions, OpenShell adapters, Ed25519 identity, TLS gRPC
+and an HTTPS provider fixture. The Kubernetes Secret Driver reads UID and resourceVersion
+over TLS; one case deliberately gives logical and runtime Namespaces different names.
+No Sandbox, model service or cluster runs here.
 
-Run the bounded authority integration:
+Gateway policy and V1 loaded-policy observations match the supplier protobuf, but
+do not prove supervisor enforcement. Missing observations refuse even with LOADED
+and legacy field 3. We check current evidence at access and send, admitting only
+the exact name-only rule. Source and effective hashes are distinct synthetic values, not computed supplier policy hashes.
+Extra endpoints, binaries, changed policy and stale identities refuse before Secret reads.
 
-```sh
-node --test tests/integration/static-egress.test.mjs
-```
+Forged identities and unsupported operations refuse before credential access. Cases also
+cover permission revoked between checks, material rotation, replay, selection mismatch,
+credential reflection, rejection fencing and withdrawal. Sequential requests exceed 4,096 reservations using the test clock;
+blocked Secret reads fill the 1,024 active slots, which delivery releases.
 
-It exercises real Fastify authentication, source and Agent admission, native IAM,
-controller transactions, OpenShell adapters, Ed25519 extension identity, TLS gRPC
-and HTTPS provider request/response bytes. The Kubernetes Secret Driver uses its
-actual SDK against a TLS storage fixture that supplies UID/resourceVersion.
-Gateway policies and V1 loaded-policy observations are passive fixtures matching
-the supplier protobuf contract. The suite checks missing observations refuse even
-with LOADED and legacy field 3 present, then
-records only the installation returned by the actual Driver consumer. It tests
-current evidence again at access and send, including replacement and stale records.
-The source/effective case admits the exact name-only runtime rule with distinct
-fixture hashes. Extra endpoints, binaries, policy changes and stale identities
-refuse before Secret reads. Fixture hashes are synthetic identities, not computed
-supplier policy hashes.
-These fixtures do not establish that a supervisor produced or enforced a receipt.
-The physical-placement case uses the selected Kubernetes Compute resolver against
-the TLS fixture, with logical and runtime Namespace names deliberately different.
-No real Sandbox, model service or cluster is launched by this suite.
-
-The cases protect separate failures: current permission revoked between the two
-checks; authoritative material rotation; forged identity and unsupported operation
-refused before access; replay and selected-material mismatch; credential reflection;
-provider rejection fencing; missing counterpart, altered installed policy and
-owned withdrawal. Sustained sequential requests cross the 4,096 reservation count
-using the supported clock port, without waiting for JWT expiry. Concurrent blocked
-Secret reads exhaust the 1,024 active budget before completion and release capacity
-on delivery. The provider is a genuine HTTPS wire fixture, not a model turn.
+The fast digest regression reads the committed authorization from the in-memory receipt
+store; it sends no request. `postgres-egress-send-receipts.test.mjs` uses real PostgreSQL
+transactions, a fault proxy and a byte-counting origin. It drops the second COMMIT reply
+after reservation, verifies no permit or origin arrival, and reconstructs the Forwarder
+before the deadline to rule out a replacement send. Policy, material and acceptance remain
+synthetic. The suite also covers expiry, cancellation and lost custody after authorization.
 
 `tests/fixtures/static-egress/codex-responses.json` preserves a selected Codex
 0.163.0-alpha.2 packaged CLI request and finite synthetic SSE response consumed by
