@@ -198,7 +198,33 @@ test(
 
     const sqlFiles = (await readdir(outputDirectory)).filter((name) => name.endsWith(".sql"));
     assert.equal(sqlFiles.length, 1, "Generation must produce one initial SQL migration.");
-    assert.ok((await readFile(join(outputDirectory, sqlFiles[0]), "utf8")).trim().length > 0);
+    const sql = await readFile(join(outputDirectory, sqlFiles[0]), "utf8");
+    const createReceipts = 'CREATE TABLE "occ"."egress_send_receipts"';
+    const receipts = sql
+      .split("--> statement-breakpoint")
+      .find((ddl) => ddl.includes(createReceipts));
+    assert.ok(receipts, "Generated SQL must include the send receipts table.");
+
+    // Execute the generated receipt DDL, then compare the dispatch check PostgreSQL installed
+    // with the authored migration. Only the table destination changes; the constraints are verbatim.
+    const client = new pg.Client({ connectionString: fixture.migrationUrl });
+    await client.connect();
+    try {
+      await client.query(
+        receipts.replace(createReceipts, "CREATE TEMP TABLE egress_send_receipts"),
+      );
+      const checks = await client.query(`
+        SELECT pg_get_constraintdef(oid) AS definition
+          FROM pg_constraint
+         WHERE conname = 'egress_send_receipts_check_17'
+           AND conrelid IN ('pg_temp.egress_send_receipts'::regclass, 'occ.egress_send_receipts'::regclass)
+      `);
+      assert.equal(checks.rowCount, 2, "Both receipt tables must have the dispatch check.");
+      assert.equal(checks.rows[0].definition, checks.rows[1].definition);
+    } finally {
+      await client.end();
+    }
+
     const metadataDirectory = join(outputDirectory, "meta");
     const snapshots = (await readdir(metadataDirectory)).filter((name) =>
       name.endsWith("_snapshot.json"),

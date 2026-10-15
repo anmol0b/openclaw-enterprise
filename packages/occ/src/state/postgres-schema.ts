@@ -1772,7 +1772,7 @@ export const egressSendReceipts = occSchema.table(
     ),
     check(
       "egress_send_receipts_check_17",
-      sql`aauthorized_dispatch IS NULL OR (
+      sql`authorized_dispatch IS NULL OR (
     jsonb_typeof(authorized_dispatch) = 'object'
     AND authorized_dispatch #>> '{association,installation,instanceId}' = instance_id
     AND authorized_dispatch #>> '{association,execution,installationId}' = binding #>> '{material,source,installationId}'
