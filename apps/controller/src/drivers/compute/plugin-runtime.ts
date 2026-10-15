@@ -203,7 +203,8 @@ function protectedProviderTools(revision: Readonly<AgentRevision>): "none" {
     routes.some(({ binding: { grant } }) =>
       grant.kind === "inference"
         ? grant.providerTools !== "none"
-        : grant.kind !== "github_repository_metadata",
+        : grant.kind !== "github_repository_metadata" &&
+          grant.kind !== "credential_free_repository_metadata",
     )
   ) {
     throw new Error("Unsupported protected inference tool grant.");

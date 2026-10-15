@@ -5383,6 +5383,40 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
   }
 
+  rejectedExecutionWithdrawal(
+    revision: Readonly<AgentRevision>,
+  ): (() => Promise<void>) | undefined {
+    // Only the selected Conduit cutoff of an admitted ordinary reader qualifies. In particular,
+    // a pre-cutoff row without durable execution admission belongs to its original release.
+    try {
+      assertExecutionAdmission(revision);
+    } catch {
+      return undefined;
+    }
+    if (
+      this.conduitDriver === undefined ||
+      revision.executionAdmission.mode !== "unprotected" ||
+      revision.compute.id !== this.id ||
+      revision.compute.implementation !== this.implementation ||
+      revision.harness.id !== "codex" ||
+      revision.harness.mode !== "dedicated" ||
+      !this.hasPublicGithubReadAdmission(revision)
+    ) {
+      return undefined;
+    }
+    // A restored peer cannot undo the release refusal or leave an interrupted withdrawal open.
+    // This operation can only close this revision's grant; it never enters preparation.
+    return async () => {
+      const { name: namespace, external } = await this.resolveNamespace(revision.namespaceId);
+      const observed = await this.getNamespace(namespace);
+      if (observed === undefined || observed.status?.phase !== "Active") {
+        throw new DependencyUnavailableError("The AgentRevision Namespace is unavailable.");
+      }
+      this.verifyNamespaceOwnership(observed, { namespaceId: revision.namespaceId }, external);
+      await this.withdrawAdmittedPublicGithubRead(revision, namespace);
+    };
+  }
+
   private validateExecutionOrWithdrawPublicGithubRead(
     revision: AgentRevision,
     context: ComputeRevisionContext | undefined,
@@ -12428,43 +12462,50 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       this.hasPublicGithubReadAdmission(revision) &&
       this.publicGithubReadForRevision(revision) === undefined
     ) {
-      // Removing the grant first prevents new connections, but a CNI may retain existing ones.
-      await this.deleteOwnedNamespacedResource(
-        "NetworkPolicy",
-        this.publicGithubReadNetworkPolicyName(revision),
-        this.pluginRuntimeOwnership(revision),
-        namespace,
-      );
-      // Admission is issued only to a Compute-owned Harness; current Sandbox
-      // configuration may have changed since that immutable decision.
-      await this.deleteRevisionAgentDeployment(revision, namespace, {
-        waitForRemoval: true,
-        owner: "admitted-public-reader",
-      });
-      await this.waitForRevisionPodsToTerminate(revision, namespace, "agent");
-      if (
-        (await this.getOwned(
-          "Deployment",
-          `agent-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
-          namespace,
-          this.pluginRuntimeOwnership(revision),
-        )) !== undefined
-      ) {
-        throw new DependencyUnavailableError("The withdrawn AgentRevision workload reappeared.");
-      }
-      if (
-        (await this.getOwned(
-          "NetworkPolicy",
-          this.publicGithubReadNetworkPolicyName(revision),
-          namespace,
-          this.pluginRuntimeOwnership(revision),
-        )) !== undefined
-      ) {
-        throw new DependencyUnavailableError("The withdrawn reader policy reappeared.");
-      }
+      await this.withdrawAdmittedPublicGithubRead(revision, namespace);
       throw new ConfigurationFailure(
         "Public GitHub reader peer was withdrawn; deploy a new AgentRevision.",
       );
+    }
+  }
+
+  private async withdrawAdmittedPublicGithubRead(
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<void> {
+    // Removing the grant first prevents new connections, but a CNI may retain existing ones.
+    await this.deleteOwnedNamespacedResource(
+      "NetworkPolicy",
+      this.publicGithubReadNetworkPolicyName(revision),
+      this.pluginRuntimeOwnership(revision),
+      namespace,
+    );
+    // Admission is issued only to a Compute-owned Harness; current Sandbox
+    // configuration may have changed since that immutable decision.
+    await this.deleteRevisionAgentDeployment(revision, namespace, {
+      waitForRemoval: true,
+      owner: "admitted-public-reader",
+    });
+    await this.waitForRevisionPodsToTerminate(revision, namespace, "agent");
+    if (
+      (await this.getOwned(
+        "Deployment",
+        `agent-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
+        namespace,
+        this.pluginRuntimeOwnership(revision),
+      )) !== undefined
+    ) {
+      throw new DependencyUnavailableError("The withdrawn AgentRevision workload reappeared.");
+    }
+    if (
+      (await this.getOwned(
+        "NetworkPolicy",
+        this.publicGithubReadNetworkPolicyName(revision),
+        namespace,
+        this.pluginRuntimeOwnership(revision),
+      )) !== undefined
+    ) {
+      throw new DependencyUnavailableError("The withdrawn reader policy reappeared.");
     }
   }
 

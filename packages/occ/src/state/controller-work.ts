@@ -87,6 +87,11 @@ export function deploymentProgressForWork(
       code = attempt.code;
       message = "A dependency was unavailable. The controller will retry.";
       break;
+    case "EXECUTION_ADMISSION_WITHDRAWAL_PENDING":
+      code = attempt.code;
+      message =
+        "This version can no longer run with its admitted access. The controller will keep checking that access is closed and the workload has stopped.";
+      break;
     case "REFUSED_CANDIDATE_STOP_PENDING":
       // The refusal is the code this deployment's `error` carries once the stop succeeds,
       // unless a newer revision supersedes it first.
@@ -622,6 +627,8 @@ function deploymentErrorMessage(code: string): string {
       return "Deployment runtime could not sign in to the model provider. Check the Agent's model credential (for an OAuth login, sign in again) and that the runtime can reach the provider, then deploy a new version.";
     case "RUNTIME_STARTUP_FAILED":
       return "Deployment runtime failed a startup check. Check this version's logs for the failed check and correct its cause, then deploy a new version.";
+    case "EXECUTION_ADMISSION_WITHDRAWN":
+      return "This version can no longer run with its admitted access. The controller closed that access and observed the workload stopped. Deploy a new version to use the current installation.";
     case "REVISION_SUPERSEDED":
       return "Deployment was superseded by a newer revision.";
     case "REVISION_STOPPED":

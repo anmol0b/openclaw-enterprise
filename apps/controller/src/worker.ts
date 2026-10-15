@@ -394,6 +394,8 @@ interface RevisionDispatchResult extends DispatchResult {
    * candidate serving with nothing left to stop it.
    */
   readonly refusedCandidate?: string;
+  /** A refused active release is terminal only after observing its admitted grant withdrawn. */
+  readonly rejectedExecutionWithdrawal?: "pending" | "withdrawn";
   /** How long the refused candidate's unfinished stop took; it lengthens the recheck. */
   readonly refusedStopMs?: number;
   /** That stop yielded to other Work; later rechecks do not count it as a failure. */
@@ -3667,6 +3669,12 @@ export class ControllerWorker {
       const secretContext = await this.resolveRevisionSecretContext(revision);
       if ("result" in secretContext) {
         if (agent.activeRevisionId === revision.id) {
+          if (
+            secretContext.result.code === "EXECUTION_ADMISSION_UNAVAILABLE" &&
+            (await this.withdrawRejectedActiveExecution(claim, revision))
+          ) {
+            return;
+          }
           await this.finalizeActiveRevision(claim, revision, secretContext.result.code);
         } else {
           await this.finalizeRevision(claim, secretContext.result);
@@ -4106,6 +4114,65 @@ export class ControllerWorker {
     });
   }
 
+  private async withdrawRejectedActiveExecution(
+    claim: ClaimedWork,
+    revision: Readonly<AgentRevision>,
+  ): Promise<boolean> {
+    // processRevision checked the exact revision, selected Compute, IAM and backend, and
+    // refused release. Only its own reconcile or maintenance claim can withdraw that grant.
+    const prefix = `agent_revision:${revision.id}:`;
+    const action = claim.idempotencyKey.slice(prefix.length);
+    if (
+      !claim.idempotencyKey.startsWith(prefix) ||
+      !/^(reconcile|maintenance:(0|[1-9][0-9]*))$/.test(action)
+    ) {
+      return false;
+    }
+    const withdraw = this.compute.rejectedExecutionWithdrawal?.(revision);
+    if (withdraw === undefined) {
+      return false;
+    }
+    let failureLogFields: Readonly<Record<string, string | number>> | undefined;
+    const withdrawal = await this.withClaimHeartbeat(claim, async () => {
+      const agent = await this.state.read((view) =>
+        view.agents.findAgent(revision.namespaceId, revision.agentId),
+      );
+      if (
+        agent?.activeRevisionId !== revision.id ||
+        agent.servicePrincipalId !== revision.servicePrincipalId ||
+        agent.desiredRuntimeState !== "running"
+      ) {
+        return undefined;
+      }
+      try {
+        await withdraw();
+        return "withdrawn";
+      } catch (error) {
+        if (error instanceof WorkClaimLostError) {
+          throw error;
+        }
+        failureLogFields = revisionFailureLogFields(error);
+        return "pending";
+      }
+    });
+    if (withdrawal === undefined) {
+      return false;
+    }
+    await this.finalizeRevision(
+      claim,
+      {
+        outcome: withdrawal === "withdrawn" ? "permanent" : "pending",
+        code:
+          withdrawal === "withdrawn"
+            ? "EXECUTION_ADMISSION_WITHDRAWN"
+            : "EXECUTION_ADMISSION_WITHDRAWAL_PENDING",
+        rejectedExecutionWithdrawal: withdrawal,
+      },
+      failureLogFields,
+    );
+    return true;
+  }
+
   private validateExecutionAdmission(revision: AgentRevision): void {
     if (this.compute.validateExecutionAdmission === undefined) {
       assertExecutionReleaseAllowed(revision);
@@ -4519,6 +4586,7 @@ export class ControllerWorker {
     const expired =
       result.outcome === "pending" &&
       result.refusedCandidate === undefined &&
+      result.rejectedExecutionWithdrawal !== "pending" &&
       !isStopYieldedCode(result.code) &&
       this.workAgeMs(claim) >= this.convergenceTimeoutMs;
     // Runtime entrypoints publish a runtime failure only after their own retries
@@ -4596,7 +4664,8 @@ export class ControllerWorker {
       heldFailureCode === undefined &&
       !expired &&
       resolved.cleanupFailedPreparation !== true &&
-      resolved.refusedCandidateStopped !== true
+      resolved.refusedCandidateStopped !== true &&
+      resolved.rejectedExecutionWithdrawal !== "withdrawn"
     ) {
       await this.stopRefusedCandidate(claim, resolved.code);
     }
@@ -4697,7 +4766,8 @@ export class ControllerWorker {
           isStopYieldedCode(resolved.code)
             ? { delayMs: this.stopYieldRecheckMs(claim) }
             : resolved.dependencyFailure !== undefined ||
-                REVISION_READINESS_CODES.has(resolved.code)
+                REVISION_READINESS_CODES.has(resolved.code) ||
+                resolved.rejectedExecutionWithdrawal === "pending"
               ? { delayMs: revisionReadinessRecheckMs(ageMs) }
               : {},
         );
