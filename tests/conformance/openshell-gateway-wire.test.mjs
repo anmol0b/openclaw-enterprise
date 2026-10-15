@@ -8,6 +8,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { createSecureServer } from "node:http2";
 import { createServer as createHttpsServer } from "node:https";
@@ -1237,6 +1238,7 @@ test("OpenShell mTLS authenticates DNS and IP channels and refuses missing or fo
   const foreign = signedClientCertificate(directory, "foreign", foreignCA);
   const seen = [];
   const server = createSecureServer({
+    allowHTTP1: true,
     key: readFileSync(serverIdentity.keyPath),
     cert: readFileSync(serverIdentity.certPath),
     ca: readFileSync(ca.certPath),
@@ -1272,13 +1274,32 @@ test("OpenShell mTLS authenticates DNS and IP channels and refuses missing or fo
         t.after(() => client.close());
         return client;
       };
-      await makeClient(auth).health(AbortSignal.timeout(5_000));
+      const administrator = makeClient(auth);
+      await administrator.health(AbortSignal.timeout(5_000));
       assert.equal(seen.at(-1).authorized, true);
       assert.equal(seen.at(-1).subject.CN, "openshell-client");
       assert.equal(seen.at(-1).subject.OU, "openshell-user");
       assert.equal(seen.at(-1).sni, host === "localhost" ? "localhost" : false);
       assert.equal(seen.at(-1).authorization, undefined);
       const count = seen.length;
+
+      // The same client and listener authenticate the control RPC above. A service
+      // request instead must fail specifically because it sent no client certificate.
+      const rejected = once(server, "tlsClientError", { signal: AbortSignal.timeout(5_000) });
+      const [[error]] = await Promise.all([
+        rejected,
+        assert.rejects(
+          administrator.getServiceDocument(
+            "https://harness.example.invalid",
+            "/status",
+            "scoped-service-token",
+            AbortSignal.timeout(5_000),
+          ),
+          DependencyUnavailableError,
+        ),
+      ]);
+      assert.equal(error.code, "ERR_SSL_PEER_DID_NOT_RETURN_A_CERTIFICATE");
+
       // None may reuse the authenticated channel of the successful client.
       for (const rejected of [
         makeClient(undefined),
@@ -1313,50 +1334,34 @@ test("OpenShell mTLS authenticates DNS and IP channels and refuses missing or fo
   );
 });
 
-test("OpenShell service transport never sends the administrator mTLS identity", async (t) => {
+test("OpenShell service transport uses its scoped bearer over verified TLS", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "openshell-service-identity-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const identity = selfSignedCertificate(directory, "server", "IP:127.0.0.1");
-  const ca = selfSignedCertificate(directory, "client-ca", "DNS:client-ca.invalid");
-  const auth = signedClientCertificate(directory, "client", ca);
   const requests = [];
-  const server = createHttpsServer(
-    {
-      key: readFileSync(identity.keyPath),
-      cert: readFileSync(identity.certPath),
-      ca: readFileSync(ca.certPath),
-      requestCert: true,
-      rejectUnauthorized: false,
-    },
+  const service = createHttpsServer(
+    { key: readFileSync(identity.keyPath), cert: readFileSync(identity.certPath) },
     (request, response) => {
-      requests.push({
-        subject: request.socket.getPeerCertificate().subject,
-        authorization: request.headers.authorization,
-      });
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end('{"ready":true}');
+      requests.push(request.headers.authorization);
+      response.writeHead(200, { "content-type": "application/json" }).end('{"ready":true}');
     },
   );
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  await new Promise((resolve) => service.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => service.close(resolve)));
+
   const client = new GrpcOpenShellGatewayClient({
-    endpoint: `https://127.0.0.1:${server.address().port}`,
+    endpoint: `https://127.0.0.1:${service.address().port}`,
     rootCertificatePath: identity.certPath,
-    auth,
   });
   t.after(() => client.close());
-  assert.deepEqual(
-    await client.getServiceDocument(
-      "https://harness.example.invalid",
-      "/status",
-      "scoped-service-token",
-      AbortSignal.timeout(5_000),
-    ),
-    { status: 200, json: { ready: true } },
+  const document = await client.getServiceDocument(
+    "https://harness.example.invalid",
+    "/status",
+    "scoped-service-token",
+    AbortSignal.timeout(5_000),
   );
-  assert.deepEqual(requests, [
-    { subject: undefined, authorization: "Bearer scoped-service-token" },
-  ]);
+  assert.deepEqual(document, { status: 200, json: { ready: true } });
+  assert.deepEqual(requests, ["Bearer scoped-service-token"]);
 });
 
 test("OpenShell client cancels an in-flight provider request", async () => {

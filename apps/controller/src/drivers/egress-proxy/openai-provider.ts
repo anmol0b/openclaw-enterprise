@@ -6,7 +6,8 @@ import type {
 } from "@openclaw-enterprise/contracts";
 import { asRecord, immutableCopy } from "@openclaw-enterprise/utils";
 import { normalizeOpenAiBaseUrl } from "../openai-endpoint.ts";
-import { validResponsesRequest, validResponsesEvent } from "./openai-responses.ts";
+import { validResponsesRequest } from "./openai-responses.ts";
+import { protectedResponseOutput, protectedResponsesStream } from "./openai-responses-stream.ts";
 import { parseUnambiguousJson } from "./openai-json.ts";
 
 const maximumResponseBytes = 4 * 1024 * 1024;
@@ -83,15 +84,15 @@ function protectedResponse(
       Buffer.from(credential).toString("base64"),
       Buffer.from(credential).toString("base64url"),
     ];
-    const leaked = (value: unknown): boolean =>
-      typeof value === "string" && encodings.some((candidate) => value.includes(candidate));
+    const leaked = (value: string): boolean =>
+      encodings.some((candidate) => value.includes(candidate));
     // Keep parsed-string scans bounded, including decoded data split across SSE deltas.
     const scan = (root: unknown): boolean => {
       const pending = [{ value: root, depth: 0 }];
       let nodes = 0;
       while (pending.length) {
         const { value, depth } = pending.pop()!;
-        if (++nodes > 100_000 || depth > 64 || leaked(value)) {
+        if (++nodes > 100_000 || depth > 64 || (typeof value === "string" && leaked(value))) {
           return false;
         }
         if (value !== null && typeof value === "object") {
@@ -111,13 +112,11 @@ function protectedResponse(
     }
     if (sse) {
       if (
-        !protectedEvents(
-          body,
-          operation.model,
+        !protectedResponsesStream(body, operation.model, {
           scan,
           leaked,
-          Math.max(...encodings.map((value) => value.length)),
-        )
+          fragmentOverlap: Math.max(1, ...encodings.map((value) => value.length - 1)),
+        })
       ) {
         return undefined;
       }
@@ -135,209 +134,6 @@ function protectedResponse(
   } catch {
     return undefined;
   }
-}
-
-// Decode exactly the JSON layer defined for function arguments. Strings inside
-// that object remain strings; this is not a general-purpose encoding decoder.
-function protectedArguments(value: unknown, scan: (value: unknown) => boolean): boolean {
-  if (typeof value !== "string" || Buffer.byteLength(value) > 1024 * 1024) {
-    return false;
-  }
-  const parsed = parseUnambiguousJson(value);
-  return asRecord(parsed) !== undefined && scan(parsed);
-}
-
-function protectedResponseOutput(value: unknown, scan: (value: unknown) => boolean): boolean {
-  const output = asRecord(value)?.output;
-  return (
-    !Array.isArray(output) ||
-    output.every(
-      (item) =>
-        asRecord(item)?.type !== "function_call" || protectedArguments(item.arguments, scan),
-    )
-  );
-}
-
-interface ResponseItemState {
-  readonly id: string;
-  readonly type: string;
-  done: boolean;
-  readonly arguments: string[];
-  argumentBytes: number;
-  argumentsDone: boolean;
-}
-
-function protectedEvents(
-  body: string,
-  model: string,
-  scan: (value: unknown) => boolean,
-  leaked: (value: unknown) => boolean,
-  maximumEncodingLength: number,
-): boolean {
-  const normalized = body.replaceAll("\r\n", "\n");
-  if (normalized.includes("\r") || !normalized.endsWith("\n\n")) {
-    return false;
-  }
-  let terminal = false;
-  let responseId: string | undefined;
-  let sequence = -1;
-  let count = 0;
-  const fragments = new Map<string, string>();
-  const items = new Map<number, ResponseItemState>();
-  const itemIds = new Set<string>();
-  for (const block of normalized.split("\n\n")) {
-    if (!block) {
-      continue;
-    }
-    let eventName: string | undefined;
-    const data: string[] = [];
-    for (const line of block.split("\n")) {
-      if (line.startsWith(":")) {
-        continue;
-      }
-      if (line.startsWith("event:") && eventName === undefined) {
-        eventName = line.slice(6).replace(/^ /, "");
-      } else if (line.startsWith("data:")) {
-        data.push(line.slice(5).replace(/^ /, ""));
-      } else {
-        return false;
-      }
-    }
-    if (data.length === 0) {
-      if (eventName !== undefined) {
-        return false;
-      }
-      continue;
-    }
-    // Responses completion is explicit JSON. An opaque terminator is never evidence.
-    if (terminal || ++count > 16_384) {
-      return false;
-    }
-    const event = asRecord(parseUnambiguousJson(data.join("\n")));
-    if (
-      !event ||
-      !validResponsesEvent(event, model) ||
-      !scan(event) ||
-      (eventName !== undefined && eventName !== event.type)
-    ) {
-      return false;
-    }
-    if (event.sequence_number !== undefined) {
-      if (Number(event.sequence_number) <= sequence) {
-        return false;
-      }
-      sequence = Number(event.sequence_number);
-    }
-    const response = asRecord(event.response);
-    if (response) {
-      if (responseId !== undefined && response.id !== responseId) {
-        return false;
-      }
-      responseId = String(response.id);
-      if (!protectedResponseOutput(response, scan)) {
-        return false;
-      }
-    }
-    const item = asRecord(event.item);
-    const outputIndex = Number(event.output_index);
-    if (event.type === "response.output_item.added") {
-      if (
-        typeof item?.id !== "string" ||
-        items.has(outputIndex) ||
-        itemIds.has(item.id) ||
-        items.size >= 4096
-      ) {
-        return false;
-      }
-      itemIds.add(item.id);
-      items.set(outputIndex, {
-        id: item.id,
-        type: String(item.type),
-        done: false,
-        arguments: [],
-        argumentBytes: 0,
-        argumentsDone: false,
-      });
-      if (
-        item.type === "function_call" &&
-        item.arguments !== "" &&
-        !protectedArguments(item.arguments, scan)
-      ) {
-        return false;
-      }
-    } else if (event.output_index !== undefined) {
-      const state = items.get(outputIndex);
-      if (!state || state.done || (item?.id ?? event.item_id) !== state.id) {
-        return false;
-      }
-      if (event.type === "response.output_item.done") {
-        if (
-          item?.type !== state.type ||
-          (state.type === "function_call" &&
-            (!protectedArguments(item.arguments, scan) ||
-              (state.arguments.length > 0 && state.arguments.join("") !== item.arguments)))
-        ) {
-          return false;
-        }
-        state.done = true;
-      } else if (String(event.type).startsWith("response.function_call_arguments.")) {
-        if (state.type !== "function_call" || state.argumentsDone) {
-          return false;
-        }
-        if (typeof event.delta === "string") {
-          state.argumentBytes += Buffer.byteLength(event.delta);
-          if (state.argumentBytes > 1024 * 1024) {
-            return false;
-          }
-          state.arguments.push(event.delta);
-        } else {
-          const accumulated = state.arguments.join("");
-          if (
-            !protectedArguments(event.arguments, scan) ||
-            (state.arguments.length > 0 &&
-              (!protectedArguments(accumulated, scan) || accumulated !== event.arguments))
-          ) {
-            return false;
-          }
-          state.argumentsDone = true;
-        }
-      } else {
-        let expectedType = "message";
-        if (String(event.type).startsWith("response.reasoning_")) {
-          expectedType = "reasoning";
-        } else if (String(event.type).startsWith("response.custom_tool_call_input.")) {
-          expectedType = "custom_tool_call";
-        }
-        if (state.type !== expectedType) {
-          return false;
-        }
-      }
-    }
-    if (typeof event.delta === "string") {
-      // The selected Codex consumer emits OutputTextDelta(delta), dropping item
-      // IDs. Scan that observable concatenation even across valid item lifecycles.
-      const key = String(event.type);
-      const joined = (fragments.get(key) ?? "") + event.delta;
-      if (leaked(joined)) {
-        return false;
-      }
-      // Retain only a possible cross-event prefix, avoiding quadratic growth on long streams.
-      fragments.set(key, joined.slice(-Math.max(1, maximumEncodingLength - 1)));
-    }
-    terminal = ["response.completed", "response.failed", "response.incomplete"].includes(
-      String(event.type),
-    );
-  }
-  // Complete accumulated arguments must be decoded even if a provider omitted
-  // their .done event or supplied a different terminal snapshot.
-  return (
-    terminal &&
-    [...items.values()].every(
-      (item) =>
-        item.done &&
-        (item.arguments.length === 0 || protectedArguments(item.arguments.join(""), scan)),
-    )
-  );
 }
 
 /** Bounded inference with Harness-local tools and complete finite Responses SSE custody. */
