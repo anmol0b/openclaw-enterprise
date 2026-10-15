@@ -98,11 +98,11 @@ func TestDevelopmentDatabaseSelectorIsDisposable(t *testing.T) {
 // Run the normal release coordinator with command-boundary fixtures. The ordering,
 // readiness-gate, PKI, TLS and database assertions always run. When the tools are
 // present, the resulting Installation is also loaded by real controller
-// composition (node) and the OCE chart is rendered by real Helm; the supplier chart
-// is rendered only when OCC_TEST_OPENSHELL_CHART selects it. This proves
-// packaging/order, not Kubernetes or PostgreSQL.
+// composition (Node) and the OCE chart is rendered by real Helm. Selecting a
+// supplier chart with OCC_TEST_OPENSHELL_CHART requires both tools and renders
+// both charts. This proves packaging/order, not Kubernetes or PostgreSQL.
 func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *testing.T) {
-	// Resolve optional tools before PATH is replaced by the command fixtures.
+	// Resolve the real tools before PATH is replaced by the command fixtures.
 	supplierChart := os.Getenv("OCC_TEST_OPENSHELL_CHART")
 	gatewayChart := supplierChart
 	if gatewayChart == "" {
@@ -112,8 +112,9 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 	realNode, nodeErr := exec.LookPath("node")
 	helm := os.Getenv("OCC_HELM_BIN")
 	if helm == "" {
-		helm, _ = exec.LookPath("helm")
+		helm = "helm"
 	}
+	helm, helmErr := exec.LookPath(helm)
 	state := kubernetesOnlyOpenShellState(t)
 	state.ProtectedEgress = true
 	state.DatabaseName = "openclaw_k8s_connected"
@@ -179,6 +180,9 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 
 	// Use the actual startup parser/Driver composition, without provider or cluster I/O.
 	if nodeErr != nil {
+		if supplierChart != "" {
+			t.Fatalf("OCC_TEST_OPENSHELL_CHART requires Node to parse the generated Installation: %v", nodeErr)
+		}
 		t.Log("node not found; skipping the real startup parse of the generated Installation")
 	} else {
 		parseGeneratedInstallation(t, realNode, state)
@@ -228,7 +232,10 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 	if selectedGateway["server"].(map[string]any)["hostGatewayIP"] != state.OpenShellHostGatewayIP {
 		t.Fatal("selected owned host did not reach the supplier chart input")
 	}
-	if helm == "" {
+	if helmErr != nil {
+		if supplierChart != "" {
+			t.Fatalf("OCC_TEST_OPENSHELL_CHART requires Helm to render both charts (set OCC_HELM_BIN): %v", helmErr)
+		}
 		t.Log("helm not found (set OCC_HELM_BIN); skipping chart renders")
 		return
 	}

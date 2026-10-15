@@ -1309,7 +1309,7 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
           await f.revoke();
         }
         // The refused settlement commits but its acknowledgment is lost: the sender sees
-        // unavailable, never an allow, and the receipt never reads as permitted.
+        // unavailable, while the receipt records the committed refusal.
         const settlement = scenario === "deny_lost_ack" ? fault.arm("save", "lost_ack") : undefined;
         if (settlement) {
           t.after(settlement.release);
@@ -1332,11 +1332,11 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
         }
       }
       if (scenario !== "cancel") {
-        assert.ok((await result).refused, scenario);
-      }
-      if (scenario === "deny_lost_ack") {
-        // HTTP_CREDENTIAL_REFUSAL_CODE_UNAVAILABLE, not the revocation's denied code.
-        assert.equal((await result).refused.code, 3);
+        const { refused } = await result;
+        assert.ok(refused, scenario);
+        if (scenario === "deny_lost_ack") {
+          assert.equal(refused.code, 3, "sender sees HTTP_CREDENTIAL_REFUSAL_CODE_UNAVAILABLE");
+        }
       }
       const stored = await readReceipt(f, input);
       if (scenario === "reject") {
@@ -1358,12 +1358,13 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
         assert.equal(stored.outcome.dispatched, false);
       }
       if (scenario === "deny_lost_ack") {
-        assert.ok(
-          stored.outcome.kind === "refused"
-            ? stored.outcome.dispatched === false
-            : stored.outcome.kind === "uncertain" && stored.outcome.dispatch === "possible",
-          JSON.stringify(stored.outcome),
-        );
+        assert.equal(stored.settled, true, "refusal committed before its acknowledgment was lost");
+        assert.equal(stored.authorization, null);
+        assert.deepEqual(stored.outcome, {
+          kind: "refused",
+          dispatched: false,
+          error: { kind: "denied", code: "unauthorized" },
+        });
       }
       assert.equal(f.providerRequests.length, 0);
     });
