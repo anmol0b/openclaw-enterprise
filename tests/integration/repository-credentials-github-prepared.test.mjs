@@ -202,6 +202,9 @@ test("provider scope and expiry are verified without invented lifetime", async (
     "permissions",
     "missing-permission",
     "repositories",
+    "repository-selection-all",
+    "repository-selection-unknown",
+    "repository-selection-null",
     "missing-expiry",
     "invalid-expiry",
     "ambiguous-expiry",
@@ -218,6 +221,14 @@ test("provider scope and expiry are verified without invented lifetime", async (
           }
           if (variation === "repositories") {
             packet.repositories.push({ id: 999, full_name: "other/repo" });
+          }
+          if (variation.startsWith("repository-selection-")) {
+            packet.repository_selection =
+              variation === "repository-selection-all"
+                ? "all"
+                : variation === "repository-selection-null"
+                  ? null
+                  : "unknown";
           }
           if (variation === "missing-expiry") {
             delete packet.expires_at;
@@ -236,10 +247,31 @@ test("provider scope and expiry are verified without invented lifetime", async (
       });
       assert.equal(await f.owner().run("invalid", f.bounds()), "quarantined");
       assert.equal((await f.reader.readWarm(f.admission)).kind, "not_ready");
+      if (variation.startsWith("repository-selection-")) {
+        const row = await f.store.readCurrent(f.admission.familyId, (current) => current);
+        const candidate = row.attempts[0].candidate;
+        assert.ok(candidate, "the rejected token retains a cleanup owner");
+        assert.equal(f.github.authorize(`Bearer ${Buffer.from(candidate).toString()}`), true);
+        candidate.fill(0);
+      }
       assert.equal(await f.owner().run("retry", f.bounds()), "blocked");
       assert.equal(f.github.issuesOfTokens.length, 1);
     });
   }
+});
+
+test("an omitted optional repository selection preserves a valid single-repository grant", async (t) => {
+  const f = await setup(t, {
+    tokenResponse(packet) {
+      delete packet.repository_selection;
+      return packet;
+    },
+  });
+  assert.equal(await f.owner().run("optional-selection", f.bounds()), "committed");
+  const warm = await f.reader.readWarm(f.admission);
+  assert.equal(warm.kind, "warm");
+  assert.equal(await readRepository(f.github, warm.material), 200);
+  warm.material.bytes.fill(0);
 });
 
 test("lost transaction receipts never replay issuance and readiness requires committed material", async (t) => {

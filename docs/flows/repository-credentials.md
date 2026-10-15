@@ -225,7 +225,8 @@ usable lifetime. Invalid UTF-8, malformed JSON or any duplicate member name
 disqualifies the response as evidence. With duplicate permission fields, retain
 the token only for cleanup. With duplicate root token fields, never guess which
 token to revoke, even if the values match. Recheck admission synchronously before
-accepting a validated credential.
+accepting a credential. Repository and permissions must match exactly; optional
+`repository_selection` must be `selected`.
 
 Its bounded credential transport,
 `apps/controller/src/drivers/repo/github/credentials/provider-transport.ts:createProviderTransport`,

@@ -163,6 +163,8 @@ export function validateInstallationTokenResponse<Credential>(
     Object.entries(permissions).every(
       ([name, value]) => (returned as Record<string, unknown>)[name] === value,
     ) &&
+    (!Object.hasOwn(packet ?? {}, "repository_selection") ||
+      packet?.repository_selection === "selected") &&
     Array.isArray(repositories) &&
     repositories.length === 1 &&
     repositories[0]?.id === Number(repositoryId) &&
