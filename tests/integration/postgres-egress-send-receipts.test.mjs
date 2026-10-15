@@ -443,3 +443,123 @@ test("legacy peer identity cannot substitute for trusted acceptance", async (t) 
   assert.equal(f.permits, 0);
   assert.equal(f.arrivals, 0);
 });
+
+// Exercise the actual application-role receipt constraints, not the in-memory repository.
+test(
+  "PostgreSQL authorizes exact prepared GitHub evidence and rejects a different reply association",
+  requiresPostgres,
+  async (t) => {
+    const { postgresEgressSendReceipts } =
+      await import("../../packages/occ/src/state/egress-send-receipts.ts");
+    const pool = new pg.Pool({ connectionString: databaseUrl });
+    t.after(() => pool.end());
+    const repository = postgresEgressSendReceipts(pool);
+    const ref = () => ({ id: randomUUID(), generation: 1 });
+    const execution = {
+      installationId: "ins_" + randomUUID(),
+      namespaceId: "ns_" + randomUUID(),
+      agentId: "agt_" + randomUUID(),
+      revisionId: randomUUID(),
+      executionId: randomUUID(),
+      servicePrincipalId: randomUUID(),
+    };
+    const now = Date.now();
+    const instant = (delay) => new Date(now + delay).toISOString();
+    const digest = createHash("sha256").update(randomUUID()).digest("hex");
+    const material = {
+      kind: "prepared_github",
+      source: {
+        installationId: execution.installationId,
+        namespaceId: execution.namespaceId,
+        source: ref(),
+        backend: ref(),
+        provider: { id: "github-app-metadata", generation: 1 },
+      },
+      binding: ref(),
+      grantHash: digest,
+      isolationId: execution.agentId,
+      family: ref(),
+      ownerEpoch: 1,
+      inputVersion: "key-input-1",
+      preparationAttemptId: randomUUID(),
+      materialId: randomUUID(),
+      materialVersion: "N",
+      providerExpiresAt: instant(120000),
+      usableUntil: instant(20000),
+    };
+    const input = {
+      sender: ref(),
+      instanceId: randomUUID(),
+      useId: randomUUID(),
+      attemptId: randomUUID(),
+      material,
+      deadlineAt: instant(20000),
+    };
+    const association = {
+      execution,
+      installation: {
+        sandboxId: randomUUID(),
+        instanceId: input.instanceId,
+        configurationId: randomUUID(),
+        peerKeyId: Buffer.alloc(32, 7).toString("base64url"),
+        plan: ref(),
+      },
+      exchangeId: randomUUID(),
+      responseId: randomUUID(),
+      custodyId: randomUUID(),
+    };
+    const authorization = {
+      association,
+      requestDigest: digest,
+      injectionDigest: digest,
+      authorizedAt: instant(0),
+      sendStartBy: instant(1000),
+    };
+    assert.equal(await repository.insert(input), true);
+    assert.equal(await repository.authorize(input, authorization), true);
+    assert.equal(
+      await repository.authorize(input, authorization),
+      false,
+      "a stored authorization is never a permit to replay",
+    );
+    assert.deepEqual((await repository.find(input)).authorization, authorization);
+
+    // Bypass only the caller's closed parser so the test reaches the named database guard.
+    for (const [evidence, assoc] of [
+      [material, { ...association, execution: { ...execution, agentId: "agt_" + randomUUID() } }],
+      [
+        material,
+        {
+          ...association,
+          installation: { ...association.installation, peerKeyId: "not an enrolled key" },
+        },
+      ],
+      [material, { ...association, custodyId: "" }],
+      [{ ...material, extra: "forbidden evidence" }, association],
+      [{ ...material, usableUntil: instant(200000) }, association],
+    ]) {
+      const other = { ...input, attemptId: randomUUID(), material: evidence };
+      await pool.query(
+        `INSERT INTO occ.egress_send_receipts
+      (sender_id, sender_generation, instance_id, use_id, attempt_id, binding, outcome)
+      VALUES ($1,$2,$3,$4,$5,$6,'{"kind":"uncertain","dispatch":"possible"}'::jsonb)`,
+        [
+          other.sender.id,
+          other.sender.generation,
+          other.instanceId,
+          other.useId,
+          other.attemptId,
+          other,
+        ],
+      );
+      await assert.rejects(
+        pool.query(
+          `UPDATE occ.egress_send_receipts SET authorized_dispatch=$1
+      WHERE sender_id=$2 AND attempt_id=$3 AND authorized_dispatch IS NULL`,
+          [{ ...authorization, association: assoc }, other.sender.id, other.attemptId],
+        ),
+        { code: "23514", constraint: "egress_send_receipts_check_17" },
+      );
+    }
+  },
+);
