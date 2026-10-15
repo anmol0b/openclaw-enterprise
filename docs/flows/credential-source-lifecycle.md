@@ -14,7 +14,7 @@ The gateway holds Secret values; OCC stores metadata and references. Admission
 freezes identity in the AgentRevision; the worker passes the live record to Compute.
 [OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md) covers attachment and readiness.
 
-With `conduit` selected, new static sources instead admit live versioned
+With `credential_proxy` selected, new static sources instead admit live versioned
 Secret references. Existing sources need exact source-update opt-in while unbound.
 They skip legacy gateway registration; source readiness alone does not establish
 installed protection. The [protected request flow](credential-source-egress.md)

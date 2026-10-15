@@ -100,7 +100,7 @@ export interface EgressRoute {
   readonly deadlineMs: number;
 }
 
-export interface ConduitPlan {
+export interface ProxyPlan {
   readonly id: string;
   readonly generation: number;
   readonly execution: EgressExecution;
@@ -111,7 +111,7 @@ export interface ConduitPlan {
 
 /** Recorded only from authenticated adapter observation of the exact installed policy. */
 export interface EgressInstallation {
-  readonly plan: ConduitPlan;
+  readonly plan: ProxyPlan;
   readonly sandboxId: string;
   readonly sender: EgressRef;
   readonly installedAt: string;
@@ -234,34 +234,34 @@ export interface CredentialSourceControl {
   assertAvailable(signal: AbortSignal): Promise<void>;
 }
 
-export interface SandboxConduitWiring {
-  readonly plan: ConduitPlan;
+export interface ProxyWiring {
+  readonly plan: ProxyPlan;
   /** Nonsecret adapter-owned configuration; only the paired Sandbox interprets it. */
   readonly configuration: Readonly<Record<string, unknown>>;
 }
 
-export interface ConduitRevisionContext {
+export interface ProxyRevisionContext {
   readonly namespace: Readonly<Namespace>;
   readonly revision: Readonly<AgentRevision>;
-  readonly plan: ConduitPlan;
+  readonly plan: ProxyPlan;
   readonly signal: AbortSignal;
 }
 
-export interface ConduitDriver extends Driver {
-  readonly capability: "conduit";
+export interface CredentialProxyDriver extends Driver {
+  readonly capability: "credential_proxy";
   readonly sourceControl: CredentialSourceControl;
-  configureRevision(context: ConduitRevisionContext): Promise<SandboxConduitWiring>;
+  configureRevision(context: ProxyRevisionContext): Promise<ProxyWiring>;
   wiringStatus(
-    context: ConduitRevisionContext,
-    prepared: SandboxConduitWiring,
+    context: ProxyRevisionContext,
+    prepared: ProxyWiring,
   ): Promise<EgressInstallation | undefined>;
   /** Query the counterpart again; persisted installation records are not readiness leases. */
   verifyInstallation(
-    context: ConduitRevisionContext,
+    context: ProxyRevisionContext,
     installation: EgressInstallation,
   ): Promise<boolean>;
-  withdrawBinding(context: ConduitRevisionContext, binding: EgressRef): Promise<boolean>;
-  removeRevision(context: ConduitRevisionContext): Promise<boolean>;
+  withdrawBinding(context: ProxyRevisionContext, binding: EgressRef): Promise<boolean>;
+  removeRevision(context: ProxyRevisionContext): Promise<boolean>;
 }
 
 /** Durable admission semantics, independent of credential bindings and route count. */

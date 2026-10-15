@@ -31,7 +31,7 @@ Use this order when keeping a development database:
    Verify that the previous migration command accepts the restored catalog; keep its matching
    controller, runtime, supplier and configuration revisions.
 3. **Migrate once; retain the old Agent for inspection.** Start the matching API and workers
-   with `conduit` unselected. The revision list preserves the old identity; revision detail
+   with `credential_proxy` unselected. The revision list preserves the old identity; revision detail
    reports `SAVED_CONFIGURATION_UNREADABLE` because 0055 recorded no execution admission.
    Deployment reads _all_ revisions so it can stop or retire them; on this Agent it returns 503
    without creating a revision or queuing work. Do not delete the history or invent an
@@ -63,11 +63,11 @@ selection cannot authorize this principal. Keep its existing restrictions until
 an authorized binder admits the broader access.
 
 Keep the existing [OpenShell Backend and Sandbox configuration](../../reference/drivers/openshell-credential-gateway.md).
-Add the same egress Driver ID to `backend[].drivers.conduit` and select:
+Add the same egress Driver ID to `backend[].drivers.credential_proxy` and select:
 
 ```yaml
 drivers:
-  conduit:
+  credential_proxy:
     id: openshell-egress
     configuration:
       middlewareName: oce-authority

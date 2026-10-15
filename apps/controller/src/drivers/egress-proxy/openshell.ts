@@ -5,12 +5,12 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   Backend,
   CredentialSourceControl,
-  SandboxConduitWiring,
+  ProxyWiring,
   EgressInstallation,
-  ConduitPlan,
-  ConduitDriver,
+  ProxyPlan,
+  CredentialProxyDriver,
   EgressRef,
-  ConduitRevisionContext,
+  ProxyRevisionContext,
   SandboxDriver,
 } from "@openclaw-enterprise/contracts";
 import { DependencyUnavailableError } from "@openclaw-enterprise/occ";
@@ -22,7 +22,7 @@ import {
 } from "./openshell-exchange-capabilities.ts";
 import { openAiStaticProvider } from "./openai-provider.ts";
 
-export interface OpenShellConduitOptions {
+export interface OpenShellProxyOptions {
   readonly middlewareName: string;
   readonly authorityScope: "execution";
 }
@@ -83,7 +83,7 @@ function enforcementEvidence(
   sandboxId: string,
   policyVersion: number,
   revisionId: string,
-  options: OpenShellConduitOptions,
+  options: OpenShellProxyOptions,
 ): EgressInstallation["enforcement"] | undefined {
   const revision = asRecord(status.revision);
   const observation = asRecord(status.loaded_policy_observation);
@@ -188,13 +188,13 @@ function enforcementEvidence(
 
 /** Nonsecret, exact routing consumed and independently checked by the paired Sandbox. */
 export function openShellEgressConfiguration(
-  plan: ConduitPlan,
-  options: OpenShellConduitOptions,
+  plan: ProxyPlan,
+  options: OpenShellProxyOptions,
 ): Readonly<Record<string, unknown>> {
   if (new Set(plan.routes.map((route) => route.binding.binding.id)).size > 1) {
     throw new Error("The protected execution permits at most one binding.");
   }
-  OpenShellConduitDriver.validateConfiguration(options);
+  OpenShellCredentialProxyDriver.validateConfiguration(options);
   const hosts = [...new Set(plan.routes.map((route) => new URL(route.origin).hostname))];
   // Keep the authority installed for a zero-route plan. The selector names no
   // reachable rule: network_policies below remains empty, never a wildcard.
@@ -239,14 +239,14 @@ export function openShellEgressConfiguration(
   });
 }
 
-export class OpenShellConduitDriver implements ConduitDriver {
-  readonly capability = "conduit" as const;
+export class OpenShellCredentialProxyDriver implements CredentialProxyDriver {
+  readonly capability = "credential_proxy" as const;
   readonly implementation = "openshell";
   readonly id: string;
   readonly sourceControl: CredentialSourceControl;
   private readonly backend: Backend<OpenShellGateway>;
   private readonly sandbox: SandboxDriver;
-  private readonly options: OpenShellConduitOptions;
+  private readonly options: OpenShellProxyOptions;
 
   static readonly configurationSchema = {
     type: "object",
@@ -272,7 +272,7 @@ export class OpenShellConduitDriver implements ConduitDriver {
   }
 
   constructor(
-    options: OpenShellConduitOptions,
+    options: OpenShellProxyOptions,
     selection: {
       readonly id: string;
       readonly backend: Backend<OpenShellGateway>;
@@ -280,7 +280,7 @@ export class OpenShellConduitDriver implements ConduitDriver {
       readonly preparedGitHub?: PreparedGitHubEgressLifecycle;
     },
   ) {
-    OpenShellConduitDriver.validateConfiguration(options);
+    OpenShellCredentialProxyDriver.validateConfiguration(options);
     if (selection.sandbox.harnessResource === undefined) {
       throw new Error("Invalid protected OpenShell egress configuration.");
     }
@@ -326,7 +326,7 @@ export class OpenShellConduitDriver implements ConduitDriver {
     });
   }
 
-  async configureRevision(context: ConduitRevisionContext): Promise<SandboxConduitWiring> {
+  async configureRevision(context: ProxyRevisionContext): Promise<ProxyWiring> {
     this.assertPlan(context);
     await this.sourceControl.assertAvailable(context.signal);
     return immutableCopy({
@@ -336,8 +336,8 @@ export class OpenShellConduitDriver implements ConduitDriver {
   }
 
   async wiringStatus(
-    context: ConduitRevisionContext,
-    prepared: SandboxConduitWiring,
+    context: ProxyRevisionContext,
+    prepared: ProxyWiring,
   ): Promise<EgressInstallation | undefined> {
     this.assertPlan(context);
     if (!isDeepStrictEqual(prepared.plan, context.plan)) {
@@ -431,7 +431,7 @@ export class OpenShellConduitDriver implements ConduitDriver {
   }
 
   async verifyInstallation(
-    context: ConduitRevisionContext,
+    context: ProxyRevisionContext,
     installation: EgressInstallation,
   ): Promise<boolean> {
     this.assertPlan(context);
@@ -472,7 +472,7 @@ export class OpenShellConduitDriver implements ConduitDriver {
     );
   }
 
-  async withdrawBinding(context: ConduitRevisionContext, binding: EgressRef): Promise<boolean> {
+  async withdrawBinding(context: ProxyRevisionContext, binding: EgressRef): Promise<boolean> {
     if (!context.plan.routes.some((route) => isDeepStrictEqual(route.binding.binding, binding))) {
       throw new Error("Unknown egress withdrawal binding.");
     }
@@ -481,7 +481,7 @@ export class OpenShellConduitDriver implements ConduitDriver {
     return this.removeRevision(context);
   }
 
-  async removeRevision(context: ConduitRevisionContext): Promise<boolean> {
+  async removeRevision(context: ProxyRevisionContext): Promise<boolean> {
     this.assertPlan(context);
     const ref = this.sandbox.harnessResource!(context);
     const client = this.backend.client.clientForNamespace(ref.namespaceName);
@@ -498,7 +498,7 @@ export class OpenShellConduitDriver implements ConduitDriver {
     return (await client.getSandbox(selector, context.signal)) === undefined;
   }
 
-  private assertPlan(context: ConduitRevisionContext): void {
+  private assertPlan(context: ProxyRevisionContext): void {
     if (
       !isDeepStrictEqual(context.plan, context.revision.egressPlan) ||
       context.plan.egressDriverId !== this.id ||
@@ -512,7 +512,7 @@ export class OpenShellConduitDriver implements ConduitDriver {
 
   private assertOwned(
     annotations: Readonly<Record<string, string>>,
-    context: ConduitRevisionContext,
+    context: ProxyRevisionContext,
   ): void {
     if (
       annotations["openclaw.dev/namespace-id"] !== context.namespace.id ||

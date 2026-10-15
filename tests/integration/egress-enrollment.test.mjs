@@ -277,7 +277,7 @@ test(
         command: ["node", script],
         workspaceMounts: [],
         credentialAttachments: [],
-        conduitWiring: f.attachment,
+        proxyWiring: f.attachment,
         labels: { "openclaw.dev/revision": f.revision.id },
         files: [],
         environment: Object.entries(environment).map(([name, value]) => ({ name, value })),

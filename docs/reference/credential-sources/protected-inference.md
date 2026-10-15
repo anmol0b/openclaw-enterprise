@@ -1,6 +1,6 @@
 # Protected static inference
 
-Select the Conduit Driver only with a Kubernetes Compute and OpenShell pair that
+Select the Credential Proxy Driver only with a Kubernetes Compute and OpenShell pair that
 enforces the whole-execution profile below. The security principal is one freshly
 admitted Agent execution. Its parent, a sibling and an ordinary client can use the
 same allowed operation. A different execution, even of the same Agent, cannot
@@ -34,7 +34,7 @@ Only the preparation worker can warm the family; startup, readiness and requests
 
 The OpenShell Gateway and trusted supervisor must report credential access,
 installation exchange, response custody and whole-execution authority, in that order.
-Conduit compares the current source and effective policies, installation and
+Credential Proxy compares the current source and effective policies, installation and
 supervisor identity. A loaded policy, executable-scoped capability, bearer or
 historical receipt cannot establish this authority.
 
@@ -62,7 +62,7 @@ requires an unbound source and an explicitly admitted new binding. Leave an exis
 approved copy available until its owner can make that transition safely.
 
 The supervisor withholds the complete bounded response, including the last trailer,
-until Conduit permits its release. Policy can remove or block provider bytes even
+until Credential Proxy permits its release. Policy can remove or block provider bytes even
 after the origin acted. A positive credential rejection fences only that material
 version. An observed response or a decision to release bytes does not prove delivery
 to the Agent and cannot authorize a replay.
@@ -71,7 +71,10 @@ to the Agent and cannot authorize a replay.
 
 Use the [protected local launch profile](../../guides/deploy/local-openshell-images.md#select-the-protected-profile)
 and the [OpenShell Backend and Sandbox configuration](../drivers/openshell-credential-gateway.md).
-Select the same Driver ID in the Backend and the Installation's Conduit selection.
+Select the same Driver ID in `backend[].drivers.credential_proxy` and the
+Installation's `drivers.credential_proxy` selection. Startup rejects the retired
+`drivers.conduit` key at either boundary, including when both keys are present;
+use `drivers.credential_proxy` instead.
 Set its middleware name and `authorityScope: execution`. Provide an authenticated
 HTTPS Gateway, the authority's TLS identity and trusted Gateway issuer public key.
 Keep the single authority process reachable for the whole exchange.

@@ -86,7 +86,7 @@ export async function composeProduction(config: ProductionConfig) {
     sandboxDriver,
     credentialGatewayDriver,
     credentialRefreshDriver,
-    conduitDriver,
+    proxyDriver,
     egressAuthority,
     preparedGitHub,
     pluginDriver,
@@ -289,9 +289,9 @@ export async function composeProduction(config: ProductionConfig) {
       controller.registerDriver(sandboxDriver);
       controller.selectDriver("sandbox", sandboxDriver.id);
     }
-    if (conduitDriver !== undefined) {
-      controller.registerDriver(conduitDriver);
-      controller.selectDriver("conduit", conduitDriver.id);
+    if (proxyDriver !== undefined) {
+      controller.registerDriver(proxyDriver);
+      controller.selectDriver("credential_proxy", proxyDriver.id);
     }
     if (credentialGatewayDriver !== undefined) {
       controller.registerDriver(credentialGatewayDriver);
@@ -373,8 +373,8 @@ export async function composeProduction(config: ProductionConfig) {
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });
     await preparedGitHub?.connect(pool);
-    if (conduitDriver !== undefined && egressAuthority !== undefined) {
-      await installEgressAuthority(app, controller, conduitDriver, egressAuthority);
+    if (proxyDriver !== undefined && egressAuthority !== undefined) {
+      await installEgressAuthority(app, controller, proxyDriver, egressAuthority);
     }
     app.get("/healthz", async () => ({ status: "ok" }));
     app.get("/readyz", async () => {

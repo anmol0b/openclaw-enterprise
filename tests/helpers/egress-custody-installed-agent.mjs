@@ -28,7 +28,7 @@ export async function admitRepositoryAgent(
     'const require = createRequire(new URL("./apps/controller/package.json", import.meta.url));',
     'const { loadYaml } = await import(pathToFileURL(require.resolve("@kubernetes/client-node")));',
     'const startup = loadYaml(readFileSync(process.env.OCC_CONFIG_PATH, "utf8"));',
-    "const p = startup.drivers.conduit.configuration.preparedGitHub;",
+    "const p = startup.drivers.credential_proxy.configuration.preparedGitHub;",
     "if (!p.apiOrigin || !p.issuerCaPath || !p.custodyKeyPath) process.exit(1);",
     "process.stdout.write(p.apiOrigin);",
   ].join("\n");

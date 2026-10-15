@@ -15,7 +15,7 @@ import { createOpenShellBackend } from "../../apps/controller/src/backends/opens
 import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
 import { OpenShellSandboxDriver } from "../../apps/controller/src/drivers/sandbox/openshell.ts";
 import { OpenShellCredentialGatewayDriver } from "../../apps/controller/src/drivers/credential-gateway/openshell.ts";
-import { OpenShellConduitDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
+import { OpenShellCredentialProxyDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
 import {
   createOpenShellEgressAuthority,
@@ -359,7 +359,7 @@ export async function staticEgressFixture(
       drivers: {
         sandbox: "openshell-sandbox",
         credential_gateway: "openshell-credentials",
-        conduit: "openshell-egress",
+        credential_proxy: "openshell-egress",
       },
     },
     { gatewayClient },
@@ -392,7 +392,7 @@ export async function staticEgressFixture(
     },
     { id: "openshell-sandbox", backend },
   );
-  const egress = new OpenShellConduitDriver(egressOptions, {
+  const egress = new OpenShellCredentialProxyDriver(egressOptions, {
     id: "openshell-egress",
     preparedGitHub: createPreparedGitHub
       ? await createPreparedGitHub({ secretDriver })
@@ -476,7 +476,7 @@ export async function staticEgressFixture(
     legacySource = legacy.data;
   }
   app.controller.registerDriver(egress);
-  app.controller.selectDriver("conduit", egress.id);
+  app.controller.selectDriver("credential_proxy", egress.id);
   const created = await app.request("POST", path, {
     body: {
       name: "inference",
@@ -642,8 +642,8 @@ export async function staticEgressFixture(
   // actual duplex was closed. It cannot substitute an identity, owner or result.
   const authorityController = resolutionFinished
     ? {
-        createConduit(...args) {
-          const forwarder = app.controller.createConduit(...args);
+        createCredentialProxy(...args) {
+          const forwarder = app.controller.createCredentialProxy(...args);
           const resolve = forwarder.resolve.bind(forwarder);
           forwarder.resolve = async (...input) => {
             const result = await resolve(...input);
@@ -972,7 +972,7 @@ export async function staticEgressFixture(
 export async function syntheticDispatchFixture(t, receipts) {
   const { createServer, connect } = await import("node:net");
   const { once } = await import("node:events");
-  const { Conduit } = await import("../../packages/occ/src/conduit.ts");
+  const { CredentialProxy } = await import("../../packages/occ/src/credential-proxy.ts");
   const { openAiStaticProvider } =
     await import("../../apps/controller/src/drivers/egress-proxy/openai-provider.ts");
   const ref = () => ({ id: randomUUID(), generation: 1 });
@@ -1108,7 +1108,7 @@ export async function syntheticDispatchFixture(t, receipts) {
       };
     },
   };
-  let forwarder = new Conduit(ports);
+  let forwarder = new CredentialProxy(ports);
   return {
     startedAt: new Date(now).toISOString(),
     get reads() {
@@ -1131,7 +1131,7 @@ export async function syntheticDispatchFixture(t, receipts) {
       current = false;
     },
     restart() {
-      forwarder = new Conduit(ports);
+      forwarder = new CredentialProxy(ports);
     },
     async resolve() {
       ready = await forwarder.resolve(

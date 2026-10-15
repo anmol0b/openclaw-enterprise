@@ -6,7 +6,7 @@ import {
   kubernetesNamespaceName,
 } from "../../apps/controller/src/drivers/compute/kubernetes/index.ts";
 import { ControllerWorker } from "../../apps/controller/src/worker.ts";
-import { OpenShellConduitDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
+import { OpenShellCredentialProxyDriver } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
 import { staticEgressFixture } from "../helpers/static-egress.mjs";
 import { SETUP_WRAPPER_COMMAND } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { pluginRuntimeSpecForRevision } from "../../apps/controller/src/drivers/compute/plugin-runtime.ts";
@@ -1407,7 +1407,7 @@ test("protected execution cannot acquire the anonymous reader or use it as a fal
 
 // Exercise Worker.process and the shipping Drivers. Only state, IAM decisions, the queue and
 // the Kubernetes transport are local fixtures; a successful prepare alone missed this cutover.
-test("the owning active reconcile withdraws its admitted reader across the Conduit cutoff", async () => {
+test("the owning active reconcile withdraws its admitted reader across the Credential Proxy cutoff", async () => {
   const f = await fixture("dedicated", undefined, { publicGithubRead: publicReader });
   const { revision, driver } = f;
   delete revision.repositoryCredentials;
@@ -1427,7 +1427,7 @@ test("the owning active reconcile withdraws its admitted reader across the Condu
   f.setPods([workloadPod(deployment, f.namespace, "selected-agent")]);
 
   driver.options.network.publicGithubRead = undefined;
-  driver.conduitDriver = new OpenShellConduitDriver(
+  driver.proxyDriver = new OpenShellCredentialProxyDriver(
     { middlewareName: "oce-authority", authorityScope: "execution" },
     {
       id: "openshell-egress",
@@ -1493,7 +1493,7 @@ test("the owning active reconcile withdraws its admitted reader across the Condu
     drivers: {
       installation: { drivers: { iam, compute: driver } },
       computeDriver: driver,
-      conduitDriver: driver.conduitDriver,
+      proxyDriver: driver.proxyDriver,
       createIAMDriver: () => iam,
     },
   });
@@ -1623,7 +1623,7 @@ test("API-admitted protected credential-free metadata projects no inference tool
   });
   const driver = new KubernetesComputeDriver(ordinary.options, {
     sandboxDriver: f.sandboxDriver,
-    conduitDriver: f.egress,
+    proxyDriver: f.egress,
   });
   // The production Compute release gate and the exact projection prepareRevisionWorkloads uses.
   driver.validateRevisionExecution(r, { currentEgressInstallation: async () => f.installation });
@@ -1679,9 +1679,9 @@ test("withdrawing a selected reader narrows access and stops only its revision",
     f.setPods([workloadPod(selected, f.namespace, "selected"), successorPod]);
     assert.equal(publicReaderPolicies(f).length, 1);
     f.driver.options.network.publicGithubRead = replacement;
-    // Selecting Conduit cannot convert the old grant, or block withdrawal of its owned workload.
+    // Selecting Credential Proxy cannot convert the old grant, or block withdrawal of its owned workload.
     if (replacement !== undefined) {
-      f.driver.conduitDriver = { id: "selected-after-reader-admission" };
+      f.driver.proxyDriver = { id: "selected-after-reader-admission" };
       await assert.rejects(
         f.driver.prepareRevision(successor, context),
         /exact paired Compute release/,

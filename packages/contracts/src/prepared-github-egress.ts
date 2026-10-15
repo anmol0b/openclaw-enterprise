@@ -4,7 +4,7 @@ import type {
   EgressRef,
   EgressRoute,
   EgressSourceKey,
-} from "./conduit.ts";
+} from "./credential-proxy.ts";
 
 export const preparedGitHubType = "github-app-metadata";
 export const preparedGitHubProviderRef = { id: preparedGitHubType, generation: 1 } as const;

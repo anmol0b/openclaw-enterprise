@@ -3,10 +3,10 @@ import type {
   ProtectedEgressSource,
   CredentialInputRead,
   VersionedSecretValue,
-  ConduitPlan,
-  SandboxConduitWiring,
+  ProxyPlan,
+  ProxyWiring,
   EgressInstallation,
-} from "./conduit.ts";
+} from "./credential-proxy.ts";
 
 export type {
   EgressRef,
@@ -19,7 +19,7 @@ export type {
   InferenceGrant,
   EgressBinding,
   EgressRoute,
-  ConduitPlan,
+  ProxyPlan,
   EgressInstallation,
   EgressRequest,
   InferenceOperation,
@@ -30,15 +30,15 @@ export type {
   EgressSelectionEvidence,
   EgressRefusal,
   EgressResponse,
-  SandboxConduitWiring,
-  ConduitRevisionContext,
+  ProxyWiring,
+  ProxyRevisionContext,
   CredentialProviderDefinition,
   CredentialSourceControl,
-  ConduitDriver,
-} from "./conduit.ts";
+  CredentialProxyDriver,
+} from "./credential-proxy.ts";
 export * from "./prepared-github-egress.ts";
 export * from "./credential-free-metadata.ts";
-export { assertExecutionAdmission, assertExecutionReleaseAllowed } from "./conduit.ts";
+export { assertExecutionAdmission, assertExecutionReleaseAllowed } from "./credential-proxy.ts";
 import type { WorkspaceSetup } from "./workspace-setup.ts";
 
 export type { ComputePreparationFailureEvidence } from "./compute-preparation.ts";
@@ -134,7 +134,7 @@ export const DRIVER_CAPABILITIES = Object.freeze([
   "repo",
   "credential_gateway",
   "credential_refresh",
-  "conduit",
+  "credential_proxy",
 ] as const);
 
 export type DriverCapability = (typeof DRIVER_CAPABILITIES)[number];
@@ -196,7 +196,7 @@ export interface OpenShellBackendDefinition {
   readonly drivers: {
     readonly sandbox: string;
     readonly credential_gateway: string;
-    readonly conduit?: string;
+    readonly credential_proxy?: string;
     /** Refreshes the gateway's refresh-type sources; absent when none are offered. */
     readonly credential_refresh?: string;
   };
@@ -837,7 +837,7 @@ export interface RevisionHarnessDescriptor extends HarnessDescriptor {
 
 export interface AgentRevision extends Scope {
   readonly executionAdmission: ExecutionAdmission;
-  readonly egressPlan?: ConduitPlan;
+  readonly egressPlan?: ProxyPlan;
   readonly id: string;
   readonly namespaceId: string;
   readonly agentId: string;
@@ -1157,13 +1157,13 @@ export interface HarnessWorkloadRequirements {
   readonly files: readonly SandboxWorkloadFile[];
   /** Credential Gateway attachments the paired Sandbox must consume in full. */
   readonly credentialAttachments: readonly CredentialSourceAttachment[];
-  readonly conduitWiring?: SandboxConduitWiring;
+  readonly proxyWiring?: ProxyWiring;
   readonly labels: Readonly<Record<string, string>>;
 }
 
 export interface SandboxResourceRef {
   /** Trusted Sandbox output, including its exact auxiliary rules, for independent observation. */
-  readonly conduitWiring?: SandboxConduitWiring;
+  readonly proxyWiring?: ProxyWiring;
   readonly namespaceName: string;
   readonly resourceName: string;
   readonly agentId: string;

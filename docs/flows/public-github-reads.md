@@ -90,7 +90,7 @@ the admitted Compute-owned Harness before resolving the current Sandbox; an
 unavailable or changed Sandbox still leaves ancillary cleanup unfinished and
 reports an error. A new revision is needed to select a replacement peer.
 
-When the installation selects protected Conduit, the active revision's own authorized
+When the installation selects protected Credential Proxy, the active revision's own authorized
 reconcile or maintenance claim may find that Compute refuses release before preparation.
 For a revision with durable unprotected execution admission and this reader grant,
 `rejectedExecutionWithdrawal` lets that claim close the same policy and observe the

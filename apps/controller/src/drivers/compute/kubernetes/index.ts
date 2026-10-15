@@ -9,7 +9,7 @@ import {
   computeReleasePublicKey,
   signComputeExecutionRelease,
 } from "../egress-enrollment.ts";
-import type { ConduitDriver } from "@openclaw-enterprise/contracts";
+import type { CredentialProxyDriver } from "@openclaw-enterprise/contracts";
 import {
   normalizeOpenAiBaseUrl,
   openAiBaseUrlRewritesIpv4,
@@ -89,7 +89,7 @@ import type {
   ComputePrepareRevisionFailureDiagnostic,
   ComputeRevisionContext,
   EgressInstallation,
-  ConduitRevisionContext,
+  ProxyRevisionContext,
   ConfigurationValidationOptions,
   CredentialAttachmentStatus,
   CredentialGatewayDriver,
@@ -3131,7 +3131,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private readonly options: KubernetesComputeDriverOptions;
   private readonly sandboxDriver: SandboxDriver | undefined;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
-  private readonly conduitDriver: ConduitDriver | undefined;
+  private readonly proxyDriver: CredentialProxyDriver | undefined;
   private readonly nodeEnrollment: GatewayNodeEnrollment | undefined;
   // How long, in total across passes, preparation may wait for one setup's node to pair.
   private workspaceNodePairingWaitMs = WORKSPACE_NODE_PAIRING_WAIT_MS;
@@ -3505,7 +3505,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       readonly lifecycleDrivers?: readonly Driver[];
       readonly sandboxDriver?: SandboxDriver;
       readonly credentialGatewayDriver?: CredentialGatewayDriver;
-      readonly conduitDriver?: ConduitDriver;
+      readonly proxyDriver?: CredentialProxyDriver;
       readonly nodeEnrollment?: GatewayNodeEnrollment;
       readonly readNodeCa?: () => Promise<string | undefined>;
     } = {},
@@ -3527,7 +3527,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
     }
     this.credentialGatewayDriver = selection.credentialGatewayDriver;
-    this.conduitDriver = selection.conduitDriver;
+    this.proxyDriver = selection.proxyDriver;
     this.nodeEnrollment = selection.nodeEnrollment;
     this.readNodeCa = selection.readNodeCa;
     const lifecycleDrivers = selection.lifecycleDrivers ?? [];
@@ -3888,7 +3888,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         ? "Dedicated OpenClaw"
         : "Dedicated Codex";
     const protectedWithoutCredential =
-      codex && auth.method === "runtime" && this.conduitDriver !== undefined;
+      codex && auth.method === "runtime" && this.proxyDriver !== undefined;
     if (!protectedWithoutCredential) {
       requireHarnessAuthMethod(kubernetesHarnessAuthMethods(topology), auth.method);
     }
@@ -5331,15 +5331,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
   ): void {
     assertExecutionAdmission(revision);
     const plan = revision.egressPlan;
-    if (plan === undefined && this.conduitDriver === undefined) {
+    if (plan === undefined && this.proxyDriver === undefined) {
       return;
     }
     const sandbox = this.sandboxDriver;
     if (
       plan === undefined ||
       this.options.runtime === undefined ||
-      this.conduitDriver?.implementation !== "openshell" ||
-      this.conduitDriver.id !== plan.egressDriverId ||
+      this.proxyDriver?.implementation !== "openshell" ||
+      this.proxyDriver.id !== plan.egressDriverId ||
       sandbox?.implementation !== "openshell" ||
       sandbox.id !== plan.sandboxDriverId ||
       !sandbox.provisionHarness ||
@@ -5386,7 +5386,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   rejectedExecutionWithdrawal(
     revision: Readonly<AgentRevision>,
   ): (() => Promise<void>) | undefined {
-    // Only the selected Conduit cutoff of an admitted ordinary reader qualifies. In particular,
+    // Only the selected Credential Proxy cutoff of an admitted ordinary reader qualifies. In particular,
     // a pre-cutoff row without durable execution admission belongs to its original release.
     try {
       assertExecutionAdmission(revision);
@@ -5394,7 +5394,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       return undefined;
     }
     if (
-      this.conduitDriver === undefined ||
+      this.proxyDriver === undefined ||
       revision.executionAdmission.mode !== "unprotected" ||
       revision.compute.id !== this.id ||
       revision.compute.implementation !== this.implementation ||
@@ -5422,7 +5422,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     context: ComputeRevisionContext | undefined,
   ): "validated" | "withdraw-public-reader" {
     assertExecutionAdmission(revision);
-    // A newly selected Conduit cannot prevent withdrawal of the old reader's own grant.
+    // A newly selected Credential Proxy cannot prevent withdrawal of the old reader's own grant.
     if (
       revision.executionAdmission.mode === "unprotected" &&
       this.hasPublicGithubReadAdmission(revision) &&
@@ -6237,7 +6237,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
               };
         if (
           egressContext !== undefined &&
-          (this.conduitDriver?.id !== revision.egressPlan!.egressDriverId ||
+          (this.proxyDriver?.id !== revision.egressPlan!.egressDriverId ||
             context?.recordEgressInstallation === undefined ||
             sandboxDriver.enrollHarness === undefined)
         ) {
@@ -6245,10 +6245,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
             "The admitted protected egress composition is unavailable.",
           );
         }
-        const conduitWiring =
+        const proxyWiring =
           egressContext === undefined
             ? undefined
-            : await this.conduitDriver!.configureRevision(egressContext);
+            : await this.proxyDriver!.configureRevision(egressContext);
         const harnessRequirements = this.harnessRequirementsFromDeployment(
           agentDeployment,
           harnessAuth.loginMode,
@@ -6256,7 +6256,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           this.sandboxWorkloadFiles(pluginRuntime),
         );
         const releaseKey =
-          conduitWiring === undefined
+          proxyWiring === undefined
             ? undefined
             : await this.executionReleaseKey(
                 revision,
@@ -6264,10 +6264,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
               );
         const requirements = {
           ...harnessRequirements,
-          ...(conduitWiring === undefined
+          ...(proxyWiring === undefined
             ? {}
             : {
-                conduitWiring,
+                proxyWiring,
                 // Bind enrollment to the immutable admitted revision without
                 // exposing Compute's private status identity to the provider.
                 environment: [
@@ -6286,20 +6286,20 @@ export class KubernetesComputeDriver implements ComputeDriver {
         );
         this.verifySandboxResourceRef(sandbox, revision, namespace);
         if (egressContext !== undefined) {
-          if (sandbox.conduitWiring === undefined) {
+          if (sandbox.proxyWiring === undefined) {
             throw new DependencyUnavailableError(
               "The paired Sandbox returned no exact protected egress configuration.",
             );
           }
-          const installed = await this.conduitDriver!.wiringStatus(
+          const installed = await this.proxyDriver!.wiringStatus(
             egressContext,
-            sandbox.conduitWiring,
+            sandbox.proxyWiring,
           );
           if (installed === undefined || !(await this.preparedEgressReady(egressContext))) {
             return incomplete();
           }
           await context!.recordEgressInstallation!(installed);
-          if (!(await this.conduitDriver!.verifyInstallation(egressContext, installed))) {
+          if (!(await this.proxyDriver!.verifyInstallation(egressContext, installed))) {
             return incomplete();
           }
           const transportToken = await this.prepareRevisionStage("harness_auth", () =>
@@ -7283,7 +7283,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     );
     const sandboxNamespace = this.sandboxNamespaceForRevision(revision, namespace);
     if (revision.egressPlan !== undefined && source.egress !== undefined) {
-      const egress = this.conduitDriver;
+      const egress = this.proxyDriver;
       if (egress?.id !== revision.egressPlan.egressDriverId) {
         throw new DependencyUnavailableError("The protected egress cleanup owner is unavailable.");
       }
@@ -14435,12 +14435,12 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
   }
 
   /** Cold/expired is pending for an ordinary later observation, never a request to prepare material. */
-  private async preparedEgressReady(egress: ConduitRevisionContext): Promise<boolean> {
+  private async preparedEgressReady(egress: ProxyRevisionContext): Promise<boolean> {
     for (const route of egress.plan.routes) {
       if (route.binding.grant.kind !== "github_repository_metadata") {
         continue;
       }
-      const control = this.conduitDriver!.sourceControl;
+      const control = this.proxyDriver!.sourceControl;
       const lifecycle = control.preparedGitHub;
       const source = preparedGitHubSourceFromRoute(route, control);
       if (
@@ -14474,7 +14474,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
   }
 
   private async verifiedReleaseInstallation(
-    egress: ConduitRevisionContext,
+    egress: ProxyRevisionContext,
     context: ComputeRevisionContext,
     observed?: EgressInstallation,
   ): Promise<EgressInstallation> {
@@ -14486,7 +14486,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         (observed.sandboxId !== current.sandboxId ||
           !isDeepStrictEqual(current.sender, observed.sender) ||
           !isDeepStrictEqual(current.enforcement, observed.enforcement))) ||
-      !(await this.conduitDriver!.verifyInstallation(egress, current)) ||
+      !(await this.proxyDriver!.verifyInstallation(egress, current)) ||
       !(await this.preparedEgressReady(egress))
     ) {
       throw new DependencyUnavailableError(

@@ -143,7 +143,7 @@ export async function composePostgresDevelopment(
     }
     const sandboxDriver = drivers?.sandboxDriver;
     const credentialGatewayDriver = drivers?.credentialGatewayDriver;
-    const conduitDriver = drivers?.conduitDriver;
+    const proxyDriver = drivers?.proxyDriver;
     const egressAuthority = drivers?.egressAuthority;
     const credentialRefreshDriver = drivers?.credentialRefreshDriver;
     const configurationDriver =
@@ -258,9 +258,9 @@ export async function composePostgresDevelopment(
       controller.registerDriver(sandboxDriver);
       controller.selectDriver("sandbox", sandboxDriver.id);
     }
-    if (conduitDriver !== undefined) {
-      controller.registerDriver(conduitDriver);
-      controller.selectDriver("conduit", conduitDriver.id);
+    if (proxyDriver !== undefined) {
+      controller.registerDriver(proxyDriver);
+      controller.selectDriver("credential_proxy", proxyDriver.id);
     }
     if (credentialGatewayDriver !== undefined) {
       controller.registerDriver(credentialGatewayDriver);
@@ -359,8 +359,8 @@ export async function composePostgresDevelopment(
       ...(workspaceFilesAccess === undefined ? {} : { workspaceFilesAccess }),
     });
     await drivers?.preparedGitHub?.connect(pool);
-    if (conduitDriver !== undefined && egressAuthority !== undefined) {
-      await installEgressAuthority(app, controller, conduitDriver, egressAuthority);
+    if (proxyDriver !== undefined && egressAuthority !== undefined) {
+      await installEgressAuthority(app, controller, proxyDriver, egressAuthority);
     }
     app.get("/healthz", async () => ({ status: "ok" }));
     app.get("/readyz", async () => {

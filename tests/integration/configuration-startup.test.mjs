@@ -46,6 +46,100 @@ async function fixture(t, configuration = installation()) {
   return path;
 }
 
+test("Credential Proxy startup preserves the selection and refuses retired keys", async (t) => {
+  const configuration = installation();
+  configuration.backend = [
+    {
+      id: "openshell",
+      type: "openshell",
+      configuration: {
+        endpoint: "https://openshell.example.test:8080",
+        auth: { mode: "bearerTokenFile", path: "/etc/openclaw/openshell/token" },
+      },
+      drivers: {
+        sandbox: "openshell-sandbox",
+        credential_gateway: "openshell-credentials",
+        credential_proxy: "openshell-egress",
+      },
+    },
+  ];
+  configuration.drivers.sandbox = {
+    id: "openshell-sandbox",
+    configuration: {
+      gateway: { workspaceMode: "operator" },
+      kubernetes: {
+        runtimeClassName: "openshell-sandbox",
+        serviceAccount: { mode: "gatewayConfigured" },
+        sandboxDataMount: {
+          subPath: "workspace",
+          mountPath: "/sandbox/enterprise",
+          readOnly: false,
+        },
+      },
+      policy: {
+        process: { runAsUser: "1000", runAsGroup: "1000" },
+        networkPolicies: [
+          {
+            name: "inference",
+            endpoints: [{ host: "provider.example.test", ports: [443] }],
+            binaries: [{ path: "/usr/bin/model-client" }],
+          },
+        ],
+      },
+    },
+  };
+  configuration.drivers.credential_gateway = {
+    id: "openshell-credentials",
+    configuration: { binaries: ["/usr/bin/model-client"] },
+  };
+  configuration.drivers.credential_proxy = {
+    id: "openshell-egress",
+    configuration: {
+      middlewareName: "oce-authority",
+      authorityScope: "execution",
+      authority: {
+        host: "127.0.0.1",
+        port: 9444,
+        certificatePath: "/etc/openclaw/egress/tls/tls.crt",
+        privateKeyPath: "/etc/openclaw/egress/tls/tls.key",
+        issuerPublicKeyPath: "/etc/openclaw/egress/issuer/issuer.pub",
+        issuer: "openshell-gateway:openshell-gateway",
+        audience: "oce-egress",
+        keyId: "current",
+      },
+    },
+  };
+  const path = await fixture(t, configuration);
+  const load = () =>
+    loadInstallationConfiguration({
+      mode: "development",
+      environment: { OCC_CONFIG_PATH: path },
+    });
+  // This is real startup composition; no gateway connection or listener is started.
+  const loaded = await load();
+  assert.equal(loaded.proxyDriver.capability, "credential_proxy");
+  assert.equal(loaded.proxyDriver.id, "openshell-egress");
+  assert.equal(loaded.installation.drivers.credential_proxy.id, loaded.proxyDriver.id);
+  assert.equal(loaded.installation.backend[0].drivers.credential_proxy, loaded.proxyDriver.id);
+  assert.equal(loaded.egressAuthority.port, 9444);
+
+  for (const boundary of ["installation", "backend"]) {
+    for (const scenario of ["retired only", "both", "null retired"]) {
+      await t.test(`${boundary}: ${scenario}`, async () => {
+        const invalid = structuredClone(configuration);
+        const drivers = boundary === "installation" ? invalid.drivers : invalid.backend[0].drivers;
+        // Even a null retired key must not silently disable or override protection.
+        drivers.conduit = scenario === "null retired" ? null : drivers.credential_proxy;
+        if (scenario !== "both") {
+          delete drivers.credential_proxy;
+        }
+        await writeFile(path, JSON.stringify(invalid));
+        await assert.rejects(load(), /drivers\.conduit is retired; use drivers\.credential_proxy/);
+      });
+    }
+  }
+});
+
 test("Installation startup validates the optional external observability URL", async (t) => {
   const configuration = installation();
   configuration.observability = { url: "https://metrics.example.test/d/operations" };

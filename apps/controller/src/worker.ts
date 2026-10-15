@@ -1,5 +1,5 @@
 import { assertExecutionReleaseAllowed } from "@openclaw-enterprise/contracts";
-import type { ConduitDriver } from "@openclaw-enterprise/contracts";
+import type { CredentialProxyDriver } from "@openclaw-enterprise/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { isSecretHarnessAuth, isServiceAccountHarnessAuth } from "@openclaw-enterprise/contracts";
 import { isPositiveSafeInteger } from "@openclaw-enterprise/utils";
@@ -136,7 +136,7 @@ export interface ControllerWorkerOptions {
   readonly computeDriver?: ComputeDriver;
   readonly sandboxDriver?: SandboxDriver;
   readonly credentialGatewayDriver?: CredentialGatewayDriver;
-  readonly conduitDriver?: ConduitDriver;
+  readonly proxyDriver?: CredentialProxyDriver;
   readonly pollIntervalMs?: number;
   readonly leaseDurationMs?: number;
   readonly maxAttempts?: number;
@@ -927,7 +927,7 @@ export class ControllerWorker {
   private provisioningController: OpenClawController | undefined;
   private readonly sandbox: SandboxDriver | undefined;
   private readonly credentialGateway: CredentialGatewayDriver | undefined;
-  private readonly conduit: ConduitDriver | undefined;
+  private readonly proxyDriver: CredentialProxyDriver | undefined;
   private readonly backends: readonly BackendDefinition[];
   private readonly backendMap: ReadonlyMap<string, BackendDefinition>;
   private readonly requireComputePreflight: boolean;
@@ -1053,7 +1053,7 @@ export class ControllerWorker {
     }
     this.sandbox = drivers?.sandboxDriver ?? options.sandboxDriver;
     this.credentialGateway = drivers?.credentialGatewayDriver ?? options.credentialGatewayDriver;
-    this.conduit = drivers?.conduitDriver ?? options.conduitDriver;
+    this.proxyDriver = drivers?.proxyDriver ?? options.proxyDriver;
     if (
       (drivers?.installation.drivers.credential_gateway === undefined) !==
       (drivers?.credentialGatewayDriver === undefined)
@@ -1143,7 +1143,7 @@ export class ControllerWorker {
       this.configuration,
       this.sandbox,
       this.credentialGateway,
-      this.conduit,
+      this.proxyDriver,
       this.iam,
       this.secretDriver,
       this.repoDriver,
@@ -4291,7 +4291,7 @@ export class ControllerWorker {
         return { result: { outcome: "permanent", code: "HARNESS_AUTH_SOURCE_UNAVAILABLE" } };
       }
       if (source.egress !== undefined) {
-        const control = this.conduit?.sourceControl;
+        const control = this.proxyDriver?.sourceControl;
         const provider = control?.providers.find((entry) =>
           isDeepStrictEqual(entry.ref, source.egress!.key.provider),
         );

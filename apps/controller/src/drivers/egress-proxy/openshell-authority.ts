@@ -76,11 +76,11 @@ function refused(kind: string): Wire {
 /** Actual gRPC adapter for the supervisor's exclusive static-credential authority. */
 export function createOpenShellEgressAuthority(
   identity: OpenShellEgressIdentity,
-  controller: Pick<OpenClawController, "createConduit">,
+  controller: Pick<OpenClawController, "createCredentialProxy">,
 ): Server {
   // The verifier owns acceptance on the actual stream. No separate synthetic owner,
   // bearer-only profile or caller-selected response destination can enter this composition.
-  const forwarder = controller.createConduit(identity, identity);
+  const forwarder = controller.createCredentialProxy(identity, identity);
   const definition = loadSync(
     fileURLToPath(new URL("./proto/supervisor_middleware.proto", import.meta.url)),
     { keepCase: true, longs: String, enums: Number, defaults: false, oneofs: true },

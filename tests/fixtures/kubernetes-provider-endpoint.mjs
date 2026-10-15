@@ -42,9 +42,9 @@ export function providerEndpointFixture({
         resourceName: "provider-sandbox",
         agentId: context.revision.agentId,
         revisionId: context.revision.id,
-        ...(context.requirements.conduitWiring === undefined
+        ...(context.requirements.proxyWiring === undefined
           ? {}
-          : { conduitWiring: context.requirements.conduitWiring }),
+          : { proxyWiring: context.requirements.proxyWiring }),
       };
     },
     async harnessEndpoint(context) {

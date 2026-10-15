@@ -1,7 +1,7 @@
-import type { ConduitDriver } from "@openclaw-enterprise/contracts";
+import type { CredentialProxyDriver } from "@openclaw-enterprise/contracts";
 import {
-  OpenShellConduitDriver,
-  type OpenShellConduitOptions,
+  OpenShellCredentialProxyDriver,
+  type OpenShellProxyOptions,
 } from "../drivers/egress-proxy/openshell.ts";
 import {
   egressAuthorityConfiguration,
@@ -111,7 +111,7 @@ export interface InstallationStartupConfiguration {
     readonly sandbox?: SelectedDriverConfiguration;
     readonly credential_gateway?: SelectedDriverConfiguration;
     readonly credential_refresh?: SelectedDriverConfiguration;
-    readonly conduit?: SelectedDriverConfiguration;
+    readonly credential_proxy?: SelectedDriverConfiguration;
     readonly plugin?: SelectedDriverConfiguration;
     readonly service_account?: { readonly id: string };
     readonly repo?: SelectedDriverConfiguration;
@@ -136,7 +136,7 @@ export interface InstallationRuntimeDrivers {
   readonly sandboxDriver?: SandboxDriver;
   readonly credentialGatewayDriver?: CredentialGatewayDriver;
   readonly credentialRefreshDriver?: CredentialRefreshDriver;
-  readonly conduitDriver?: ConduitDriver;
+  readonly proxyDriver?: CredentialProxyDriver;
   readonly egressAuthority?: EgressAuthorityConfiguration;
   readonly preparedGitHub?: PostgresPreparedGitHubLifecycle;
   readonly pluginDriver?: PluginDriver;
@@ -397,7 +397,7 @@ function selected(
     | "sandbox"
     | "credential_gateway"
     | "credential_refresh"
-    | "conduit"
+    | "credential_proxy"
     | "plugin"
     | "repo",
   implementation: string,
@@ -533,6 +533,9 @@ export async function loadInstallationConfiguration(options: {
   const observability = observabilityConfiguration(configuration.observability);
   const runtime = runtimeConfiguration(configuration.runtime);
   const drivers = object(configuration.drivers, "drivers");
+  if (Object.hasOwn(drivers, "conduit")) {
+    throw new Error("drivers.conduit is retired; use drivers.credential_proxy instead.");
+  }
   closed(
     drivers,
     [
@@ -543,7 +546,7 @@ export async function loadInstallationConfiguration(options: {
       "sandbox",
       "credential_gateway",
       "credential_refresh",
-      "conduit",
+      "credential_proxy",
       "plugin",
       "service_account",
       "repo",
@@ -590,19 +593,19 @@ export async function loadInstallationConfiguration(options: {
       OpenShellCredentialRefreshDriver,
     );
   }
-  let conduit: SelectedDriverConfiguration | undefined;
+  let proxySelection: SelectedDriverConfiguration | undefined;
   let egressAuthority: EgressAuthorityConfiguration | undefined;
   let preparedGitHubKeyPath: string | undefined;
   let preparedGitHubOrigin: string | undefined;
   let preparedGitHubCa: Buffer | undefined;
-  if (drivers.conduit !== undefined) {
-    const selection = object(drivers.conduit, "drivers.conduit");
-    closed(selection, ["id", "configuration"], "drivers.conduit");
-    const egress = object(selection.configuration, "drivers.conduit.configuration");
+  if (drivers.credential_proxy !== undefined) {
+    const selection = object(drivers.credential_proxy, "drivers.credential_proxy");
+    closed(selection, ["id", "configuration"], "drivers.credential_proxy");
+    const egress = object(selection.configuration, "drivers.credential_proxy.configuration");
     closed(
       egress,
       ["middlewareName", "authorityScope", "authority", "preparedGitHub"],
-      "drivers.conduit.configuration",
+      "drivers.credential_proxy.configuration",
     );
     egressAuthority = egressAuthorityConfiguration(egress.authority, options.mode);
     const { authority: _authority, preparedGitHub, ...policy } = egress;
@@ -625,11 +628,11 @@ export async function loadInstallationConfiguration(options: {
         preparedGitHubCa = Buffer.from(await readPublicCaBundle(path));
       }
     }
-    conduit = selected(
+    proxySelection = selected(
       { ...selection, configuration: policy },
-      "conduit",
+      "credential_proxy",
       "openshell",
-      OpenShellConduitDriver,
+      OpenShellCredentialProxyDriver,
     );
   }
   const backends = backendConfiguration(
@@ -824,7 +827,7 @@ export async function loadInstallationConfiguration(options: {
       ...(sandbox === undefined ? {} : { sandbox }),
       ...(credentialGateway === undefined ? {} : { credential_gateway: credentialGateway }),
       ...(credentialRefresh === undefined ? {} : { credential_refresh: credentialRefresh }),
-      ...(conduit === undefined ? {} : { conduit: conduit }),
+      ...(proxySelection === undefined ? {} : { credential_proxy: proxySelection }),
       ...(plugin === undefined ? {} : { plugin }),
       ...(serviceAccount === undefined ? {} : { service_account: serviceAccount }),
       ...(repoSelection === undefined ? {} : { repo: repoSelection }),
@@ -856,7 +859,7 @@ export async function loadInstallationConfiguration(options: {
           ? new bundledSandboxPackage!.OpenShellSandboxDriver(
               {
                 ...sandbox.configuration,
-                ...(conduit === undefined ? {} : { egress: conduit.configuration }),
+                ...(proxySelection === undefined ? {} : { egress: proxySelection.configuration }),
               },
               {
                 id: sandbox.id,
@@ -877,11 +880,11 @@ export async function loadInstallationConfiguration(options: {
           },
         );
   if (
-    conduit !== undefined &&
+    proxySelection !== undefined &&
     (!openShell ||
       !sandboxDriver ||
       !kubernetesCompute ||
-      openShellBackend?.drivers.conduit !== conduit.id ||
+      openShellBackend?.drivers.credential_proxy !== proxySelection.id ||
       openShellBackend.configuration.endpoint === undefined ||
       !openShellBackend.configuration.endpoint.startsWith("https://") ||
       (openShellBackend.configuration.auth?.mode !== "bearerTokenFile" &&
@@ -904,15 +907,18 @@ export async function loadInstallationConfiguration(options: {
           preparedGitHubOrigin,
           preparedGitHubCa,
         );
-  const conduitDriver =
-    conduit === undefined
+  const proxyDriver =
+    proxySelection === undefined
       ? undefined
-      : new OpenShellConduitDriver(conduit.configuration as unknown as OpenShellConduitOptions, {
-          id: conduit.id,
-          backend: openShell!,
-          sandbox: sandboxDriver!,
-          ...(preparedGitHub ? { preparedGitHub } : {}),
-        });
+      : new OpenShellCredentialProxyDriver(
+          proxySelection.configuration as unknown as OpenShellProxyOptions,
+          {
+            id: proxySelection.id,
+            backend: openShell!,
+            sandbox: sandboxDriver!,
+            ...(preparedGitHub ? { preparedGitHub } : {}),
+          },
+        );
   const credentialRefreshDriver =
     credentialRefresh === undefined
       ? undefined
@@ -946,7 +952,7 @@ export async function loadInstallationConfiguration(options: {
         lifecycleDrivers: [configurationDriver],
         ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
         ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
-        ...(conduitDriver === undefined ? {} : { conduitDriver }),
+        ...(proxyDriver === undefined ? {} : { proxyDriver }),
         nodeEnrollment: createGatewayNodeEnrollment(() =>
           readWorkspaceFilesApiKey(
             nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
@@ -990,7 +996,7 @@ export async function loadInstallationConfiguration(options: {
     ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
     ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
     ...(credentialRefreshDriver === undefined ? {} : { credentialRefreshDriver }),
-    ...(conduitDriver === undefined ? {} : { conduitDriver }),
+    ...(proxyDriver === undefined ? {} : { proxyDriver }),
     ...(egressAuthority === undefined ? {} : { egressAuthority }),
     ...(preparedGitHub === undefined ? {} : { preparedGitHub }),
     createIAMDriver,

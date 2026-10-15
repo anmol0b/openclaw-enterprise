@@ -14,7 +14,7 @@ credential access, installation exchange, response custody, execution authority 
 no-material support. Installed enforcement evidence must report them in the order shown.
 Configure its fixture bridge and valid TLS trust for both
 ordinary workload clients. Select the fixture HTTPS origin (without `/v1`) in
-`drivers.conduit.configuration.preparedGitHub.apiOrigin` in the Installation.
+`drivers.credential_proxy.configuration.preparedGitHub.apiOrigin` in the Installation.
 Supply `issuerCaPath: /etc/openclaw/prepared-github-issuer/ca.crt` and
 `custodyKeyPath: /etc/openclaw/prepared-github/custody.key`. In the chart select
 `preparedGitHub.custodySecretName`, `issuerCaConfigMapName`, exact `issuerCidrs`

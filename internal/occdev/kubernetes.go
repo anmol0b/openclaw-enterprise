@@ -402,7 +402,7 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 			if s.egressKeyID == "" {
 				return fmt.Errorf("protected egress requires the generated OpenShell JWT key identifier")
 			}
-			config["drivers"].(map[string]any)["conduit"] = developmentEgressConfiguration(s)
+			config["drivers"].(map[string]any)["credential_proxy"] = developmentEgressConfiguration(s)
 			sandbox := config["drivers"].(map[string]any)["sandbox"].(map[string]any)["configuration"].(map[string]any)
 			gateway := sandbox["gateway"].(map[string]any)
 			gateway["networkPolicyResources"] = append(gateway["networkPolicyResources"].([]any), developmentAuthorityEgressPolicy(s))
@@ -441,7 +441,7 @@ func openShellBackendConfiguration(s *developmentState) map[string]any {
 				"rootCertificatePath": "/etc/openclaw/openshell/ca.crt", "requestTimeoutMs": 30000,
 				"auth": map[string]string{"mode": "mtls", "certificatePath": "/etc/openclaw/openshell/tls.crt", "privateKeyPath": "/etc/openclaw/openshell/tls.key"},
 			},
-			"drivers": map[string]string{"sandbox": openShellSandboxID, "credential_gateway": openShellCredentialGatewayID, "conduit": developmentEgressDriver},
+			"drivers": map[string]string{"sandbox": openShellSandboxID, "credential_gateway": openShellCredentialGatewayID, "credential_proxy": developmentEgressDriver},
 		}
 	}
 	endpoint := fmt.Sprintf("http://k3d-%s-server-0:%d", s.Cluster, openShellNodePort)

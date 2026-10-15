@@ -88,6 +88,11 @@ function validateBackendDefinition(value: unknown, index: number): BackendDefini
   if (drivers === undefined) {
     throw new ScopeViolationError(path(id, "drivers") + " must be one object.");
   }
+  if (Object.hasOwn(drivers, "conduit")) {
+    throw new ScopeViolationError(
+      path(id, "drivers.conduit") + " is retired; use drivers.credential_proxy instead.",
+    );
+  }
   if (candidate.type === "openshell") {
     return validateOpenShellBackend(id, configuration, drivers);
   }
@@ -365,7 +370,7 @@ function validateOpenShellBackend(
       key !== "sandbox" &&
       key !== "credential_gateway" &&
       key !== "credential_refresh" &&
-      key !== "conduit"
+      key !== "credential_proxy"
     ) {
       throw new ScopeViolationError(path(id, `drivers.${key}`) + " is unsupported.");
     }
@@ -396,9 +401,9 @@ function validateOpenShellBackend(
     drivers: {
       sandbox: drivers.sandbox,
       credential_gateway: drivers.credential_gateway,
-      ...(drivers.conduit === undefined
+      ...(drivers.credential_proxy === undefined
         ? {}
-        : { conduit: backendId(drivers.conduit, "Egress Driver ID") }),
+        : { credential_proxy: backendId(drivers.credential_proxy, "Egress Driver ID") }),
       ...(drivers.credential_refresh === undefined
         ? {}
         : { credential_refresh: drivers.credential_refresh as string }),

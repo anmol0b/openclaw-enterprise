@@ -2,7 +2,7 @@ import { createPublicKey, sign, type KeyObject } from "node:crypto";
 import type {
   EgressExecution,
   EgressInstallation,
-  ConduitPlan,
+  ProxyPlan,
   EgressRef,
 } from "@openclaw-enterprise/contracts";
 
@@ -15,7 +15,7 @@ export interface HarnessEgressEnrollment {
   readonly execution: EgressExecution;
 }
 
-export function harnessEgressEnrollment(plan: ConduitPlan): HarnessEgressEnrollment {
+export function harnessEgressEnrollment(plan: ProxyPlan): HarnessEgressEnrollment {
   // Project keys in wire order: PostgreSQL JSONB does not preserve insertion order.
   const { installationId, namespaceId, agentId, servicePrincipalId, revisionId, executionId } =
     plan.execution;

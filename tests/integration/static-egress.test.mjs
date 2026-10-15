@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createRequire } from "node:module";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
-import { Conduit, egressInjectionDigest } from "../../packages/occ/src/conduit.ts";
+import { CredentialProxy, egressInjectionDigest } from "../../packages/occ/src/credential-proxy.ts";
 import { deploymentErrorForWork } from "../../packages/occ/src/state/controller-work.ts";
 import {
   pluginRuntimeSpecForRevision,
@@ -981,7 +981,7 @@ test("in-flight Secret selection and outstanding handles consume the same bounde
   let reads = 0;
   const full = Promise.withResolvers();
   const gate = Promise.withResolvers();
-  const forwarder = new Conduit({
+  const forwarder = new CredentialProxy({
     ...f.ports,
     acceptance: {
       capture: (use) => {

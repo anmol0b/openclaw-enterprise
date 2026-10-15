@@ -817,7 +817,7 @@ test("provider Harness protected execution is released only on current signed in
   let observation = installed;
   let current = true;
   driver.credentialGatewayDriver.listSourceTypes = async () => [openAiStaticProvider.sourceType];
-  driver.conduitDriver = {
+  driver.proxyDriver = {
     id: plan.egressDriverId,
     implementation: "openshell",
     async configureRevision() {
@@ -1099,7 +1099,7 @@ test("provider Harness protected execution is released only on current signed in
       });
       const zeroInstalled = { ...installed, plan: zeroPlan };
       observation = zeroInstalled;
-      driver.conduitDriver.configureRevision = async ({ plan }) => ({ ...attachment, plan });
+      driver.proxyDriver.configureRevision = async ({ plan }) => ({ ...attachment, plan });
       let zeroRequirements;
       let authorizeZero;
       fixture.sandbox.enrollHarness = async ({ requirements }, receipt, release) => {
@@ -1237,7 +1237,7 @@ test("provider Harness protected execution is released only on current signed in
           return warmth === "ignore-abort" ? new Promise(() => {}) : warmth;
         },
       };
-      driver.conduitDriver.sourceControl = {
+      driver.proxyDriver.sourceControl = {
         sender: installed.sender,
         resolver: { id: "resolver", generation: 1 },
         preparedGitHub: lifecycle,

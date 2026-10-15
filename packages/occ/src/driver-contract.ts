@@ -54,7 +54,7 @@ export function driverHasCapabilityContract(driver: Driver): boolean {
         typeof candidate.readCredentialInput === "function")
     );
   }
-  if (driver.capability === "conduit") {
+  if (driver.capability === "credential_proxy") {
     const control = asRecord(candidate.sourceControl);
     return (
       control !== undefined &&

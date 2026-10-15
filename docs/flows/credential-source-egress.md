@@ -16,7 +16,7 @@ owns injection and the business send.
 
 Kubernetes Compute can release the fresh protected execution only after signing its
 startup challenge for the exact current installation. Other Computes refuse it.
-Production Conduit owns private response acceptance on the authenticated installation
+Production Credential Proxy owns private response acceptance on the authenticated installation
 exchange. This requires a matching supervisor, not the bundled legacy release. See
 the [profile and release cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
 
@@ -30,7 +30,7 @@ supported operations and configuration.
 - Trigger: an installed supervisor sends `HttpCredentialAccess.Resolve`, followed
   by `AuthorizeSend` and `HttpResponsePreReturn.Evaluate` over authenticated TLS.
 - Source: `apps/controller/src/drivers/egress-proxy/openshell-authority.ts:createOpenShellEgressAuthority`
-- Source: `packages/occ/src/index.ts:createConduit`
+- Source: `packages/occ/src/index.ts:createCredentialProxy`
 - Assumptions: source admission and Agent deployment produced an exact plan;
   a current verified loaded-enforcement receipt permits installation; the Agent is
   running; its service principal holds exact source `operate` permission.
@@ -65,7 +65,7 @@ exercise that contract; deployed enforcement remains a separate qualification.
 ### 1. Admit source and install the revision plan
 
 `packages/occ/src/index.ts:admitStaticEgressSource`,
-`packages/occ/src/index.ts:admitConduitPlan`
+`packages/occ/src/index.ts:admitProxyPlan`
 
 New protected sources store a closed live/static descriptor after source/Secret
 permission checks and candidate validation. Existing sources require explicit
@@ -74,7 +74,7 @@ from the selected egress capability, independently of bindings. Protected plans
 freeze execution, source generation, grant and route identities. Empty routes
 retain protected semantics and require deny-all.
 
-`packages/contracts/src/conduit.ts:assertExecutionReleaseAllowed`,
+`packages/contracts/src/credential-proxy.ts:assertExecutionReleaseAllowed`,
 `apps/controller/src/worker.ts:resolveRevisionSecretContext`
 
 OCC calls Compute's validator before admitting the revision. The worker and Compute
@@ -135,7 +135,7 @@ see the [supported recovery boundary](../reference/credential-sources/protected-
 ### 2. Capture identity, operation and first authority decision
 
 `apps/controller/src/drivers/egress-proxy/openshell-identity.ts:verify`,
-`packages/occ/src/conduit.ts:resolve`
+`packages/occ/src/credential-proxy.ts:resolve`
 
 The TLS adapter accepts one operation on `HttpInstallationExchange.Exchange`.
 It issues a random 32-byte challenge on that actual stream. Before asynchronous
@@ -180,7 +180,7 @@ without material.
 ### 3. Resolve versioned material and authorize its sole send
 
 `apps/controller/src/drivers/secret/kubernetes/index.ts:readCredentialInput`,
-`packages/occ/src/conduit.ts:authorizeSend`
+`packages/occ/src/credential-proxy.ts:authorizeSend`
 
 The selected Secret Driver verifies ownership and reads UID/resourceVersion from
 the authoritative API. The registry retains material only for this bounded
@@ -213,7 +213,7 @@ to repeat the business request.
 
 ### 4. Protect response and finish
 
-`packages/occ/src/conduit.ts:protectResponse`,
+`packages/occ/src/credential-proxy.ts:protectResponse`,
 `apps/controller/src/drivers/egress-proxy/openai-provider.ts:protectedEvents`,
 `apps/controller/src/drivers/egress-proxy/openai-responses.ts:validResponsesEvent`
 
