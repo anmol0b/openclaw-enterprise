@@ -3,15 +3,22 @@ import test from "node:test";
 import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { readFileSync } from "node:fs";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { createRequire } from "node:module";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
-import { egressInjectionDigest } from "../../packages/occ/src/egress.ts";
+import { EgressForwarder, egressInjectionDigest } from "../../packages/occ/src/egress.ts";
 import {
   pluginRuntimeSpecForRevision,
   pluginRuntimeConfigMapData,
 } from "../../apps/controller/src/drivers/compute/plugin-runtime.ts";
-import { staticEgressFixture, unary, wireTime } from "../helpers/static-egress.mjs";
+import { openShellExchangeCapabilities } from "../../apps/controller/src/drivers/egress-proxy/openshell-exchange-capabilities.ts";
+import {
+  staticEgressFixture,
+  syntheticDispatchFixture,
+  requestId,
+  unary,
+  wireTime,
+} from "../helpers/static-egress.mjs";
 
 test("credential header digest uses ordered UTF-8 bytes and u64 lengths", () => {
   assert.equal(
@@ -63,10 +70,15 @@ test("supplier-produced receipt protobuf and registered-instance claims decode t
     const signed = `${header}.${payload}`;
     return `Bearer ${signed}.${sign(null, Buffer.from(signed), keys.privateKey).toString("base64url")}`;
   };
-  const peer = await identity.verify(token(claims));
+  const peer = identity.supervisor(token(claims));
+  assert.equal(
+    await identity.verify(token(claims)),
+    undefined,
+    "a valid bearer is not an exchange",
+  );
   assert.equal(peer.instanceId, receipt.instance_id);
   assert.equal(peer.sandboxId, receipt.sandbox_id);
-  assert.equal(await identity.verify(token({ ...claims, instance_id: undefined })), undefined);
+  assert.equal(identity.supervisor(token({ ...claims, instance_id: undefined })), undefined);
 });
 
 test("protected inference uses real admission, fresh IAM, versioned Secret reads and TLS authority/provider wires", async (t) => {
@@ -125,12 +137,10 @@ test("protected inference uses real admission, fresh IAM, versioned Secret reads
     /web_search/,
   );
   const capture = f.capture();
-  const result = await unary(f.clients.HttpCredentialAccess, "Resolve", capture, f.metadata());
+  const result = await f.resolve(capture);
   assert.ok(result.ready, JSON.stringify(result));
   const permit = f.permitRequest(capture, result.ready);
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "AuthorizeSend", permit, f.metadata())).allowed,
-  );
+  assert.ok((await f.authorize(permit)).allowed);
   const response = await f.send(capture, result.ready);
   assert.deepEqual(f.providerRequests[0].body, {
     model: "fixture-model",
@@ -139,12 +149,12 @@ test("protected inference uses real admission, fresh IAM, versioned Secret reads
   });
   assert.equal(f.providerRequests[0].authorization, "Bearer synthetic-key-initial");
   const protectedResponse = await f.protect(capture, response);
-  assert.deepEqual(JSON.parse(protectedResponse.body_result.transform.data), {
+  assert.deepEqual(JSON.parse(protectedResponse.body), {
     output: "fixture answer",
   });
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "AuthorizeSend", permit, f.metadata())).refused,
-  );
+  const replay = await f.beginExchange();
+  replay.stream.write({ authorize: permit });
+  await assert.rejects(replay.next(), { code: 7 });
 
   // Rotation changes material version without replacing source configuration or grants.
   const updated = await f.request("PATCH", `/namespaces/${f.namespace.id}/secrets/${f.secret.id}`, {
@@ -152,27 +162,18 @@ test("protected inference uses real admission, fresh IAM, versioned Secret reads
   });
   assert.equal(updated.status, 200, JSON.stringify(updated.body));
   const next = f.capture();
-  const resolved = await unary(f.clients.HttpCredentialAccess, "Resolve", next, f.metadata());
+  const resolved = await f.resolve(next);
   assert.ok(resolved.ready, JSON.stringify(resolved));
   assert.notEqual(resolved.ready.evidence.material_version, result.ready.evidence.material_version);
   assert.equal(resolved.ready.credential_headers[0].value, "Bearer synthetic-key-rotated");
   await f.revoke();
   assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(next, resolved.ready),
-        f.metadata(),
-      )
-    ).refused,
+    (await f.authorize(f.permitRequest(next, resolved.ready))).refused,
     "revocation after access must deny selected material at send",
   );
   assert.equal(f.providerRequests.length, 1);
   const beforeReads = f.secretReads;
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
-  );
+  assert.ok((await f.resolve(f.capture())).refused);
   assert.equal(f.secretReads, beforeReads, "current IAM denial must precede Secret access");
   const denials = (await f.controller.transact((unit) => unit.audit.list())).filter(
     (event) => event.action === "openclaw.egress.authorize",
@@ -203,88 +204,61 @@ test("protected authority refuses forged execution, unsupported operations, repl
     { model: "fixture-model", input: "hello", store: false, stream: "true" },
     { model: "fixture-model", input: "hello", store: false, tools: [{ type: "web_search" }] },
   ]) {
-    assert.ok(
-      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(body), f.metadata()))
-        .refused,
-    );
+    assert.ok((await f.resolve(f.capture(body))).refused);
   }
   const ambiguous = f.capture();
   ambiguous.request.body = Buffer.from(
     '{"model":"other-model","model":"fixture-model","input":"hello","store":false}',
   );
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", ambiguous, f.metadata())).refused,
-  );
+  assert.ok((await f.resolve(ambiguous)).refused);
   const wrongPeer = f.metadata({
     sandbox_id: "other-sandbox",
     sub: "spiffe://openshell/sandbox/other-sandbox",
   });
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), wrongPeer)).refused,
-  );
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "Resolve",
-        f.capture(),
-        f.metadata({ aud: "different-authority" }),
-      )
-    ).refused,
-  );
+  await assert.rejects(f.resolve(f.capture(), wrongPeer), { code: 7 });
+  await assert.rejects(f.resolve(f.capture(), f.metadata({ aud: "different-authority" })), {
+    code: 7,
+  });
   assert.equal(
     f.secretReads,
     before,
     "identity and operation refusals must not touch credential material",
   );
   const captured = f.capture();
-  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-    .ready;
+  const ready = (await f.resolve(captured)).ready;
   assert.ok(ready);
   assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata())).refused,
+    (await f.resolve({ ...captured, response_custody: randomBytes(32) })).refused,
+    "a new signed opening and custody cannot replay the captured use",
   );
+  for (const change of [
+    (p) => {
+      p.evidence.material_version = "not-selected";
+    },
+    (p) => {
+      p.deadline.seconds = String(Number(p.deadline.seconds) + 1);
+    },
+    (p) => {
+      p.credential_headers_sha256 = Buffer.alloc(32);
+    },
+    (p) => {
+      p.context.verified_credential_connector = { path: "/usr/bin/not-authority" };
+    },
+  ]) {
+    // A malformed authorization consumes the one exchange. Start the next negative
+    // with a genuinely resolved sibling so it reaches the specific evidence guard.
+    const sibling = f.capture();
+    const resolved = await f.resolve(sibling);
+    const permit = f.permitRequest(sibling, resolved.ready);
+    change(permit);
+    assert.ok((await f.authorize(permit)).refused);
+  }
   const permit = f.permitRequest(captured, ready);
+  const decisions = await Promise.allSettled([f.authorize(permit), f.authorize(permit)]);
+  assert.ok(decisions.filter((d) => d.value?.allowed).length <= 1);
   assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        { ...permit, evidence: { ...permit.evidence, material_version: "not-selected" } },
-        f.metadata(),
-      )
-    ).refused,
-  );
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        {
-          ...permit,
-          deadline: { ...permit.deadline, seconds: String(Number(permit.deadline.seconds) + 1) },
-        },
-        f.metadata(),
-      )
-    ).refused,
-  );
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        { ...permit, credential_headers_sha256: Buffer.alloc(32) },
-        f.metadata(),
-      )
-    ).refused,
-  );
-  const decisions = await Promise.all(
-    [1, 2].map(() => unary(f.clients.HttpCredentialAccess, "AuthorizeSend", permit, f.metadata())),
-  );
-  assert.equal(
-    decisions.filter((decision) => decision.allowed).length,
-    1,
-    "concurrent final checks cannot duplicate a send permit",
+    decisions.some((d) => d.status === "rejected" && d.reason.code === 7),
+    "pipelined authorizations are refused on the actual exchange",
   );
   assert.equal(f.providerRequests.length, 0);
 });
@@ -293,19 +267,9 @@ test("provider authentication rejection fences the exact material version and en
   const f = await staticEgressFixture(t);
   async function exchange() {
     const captured = f.capture();
-    const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-      .ready;
+    const ready = (await f.resolve(captured)).ready;
     assert.ok(ready);
-    assert.ok(
-      (
-        await unary(
-          f.clients.HttpCredentialAccess,
-          "AuthorizeSend",
-          f.permitRequest(captured, ready),
-          f.metadata(),
-        )
-      ).allowed,
-    );
+    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
     return f.protect(captured, await f.send(captured, ready));
   }
   f.setResponse({
@@ -313,7 +277,7 @@ test("provider authentication rejection fences the exact material version and en
     body: { output: Buffer.from("synthetic-key-initial").toString("base64") },
   });
   assert.ok(
-    (await exchange()).body_result.block_delivery,
+    (await exchange()).blocked,
     "the actual provider response must pass conservative protection",
   );
   f.setResponse({
@@ -321,7 +285,7 @@ test("provider authentication rejection fences the exact material version and en
     rawBody: '{"output":"synthetic-key-initial","output":"hidden duplicate"}',
   });
   assert.ok(
-    (await exchange()).body_result.block_delivery,
+    (await exchange()).blocked,
     "duplicate JSON keys cannot conceal reflected material from parsing",
   );
   // Function arguments have their own protocol-defined JSON layer. Ordinary tool
@@ -344,7 +308,7 @@ test("provider authentication rejection fences the exact material version and en
     },
   });
   assert.ok(
-    (await exchange()).body_result.block_delivery,
+    (await exchange()).blocked,
     "decoding supported JSON function arguments cannot expose credential material",
   );
   f.setResponse({
@@ -357,20 +321,12 @@ test("provider authentication rejection fences the exact material version and en
       },
     },
   });
-  assert.ok((await exchange()).body_result.transform);
+  assert.ok((await exchange()).body);
   const captured = f.capture();
-  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-    .ready;
+  const ready = (await f.resolve(captured)).ready;
   assert.ok(ready);
   assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(captured, ready),
-        f.metadata(),
-      )
-    ).refused,
+    (await f.authorize(f.permitRequest(captured, ready))).refused,
     "authoritative reread cannot resurrect a rejected version",
   );
   const updated = await f.request("PATCH", `/namespaces/${f.namespace.id}/secrets/${f.secret.id}`, {
@@ -379,7 +335,7 @@ test("provider authentication rejection fences the exact material version and en
   assert.equal(updated.status, 200);
   f.setResponse({ status: 200, body: { output: "after rotation" } });
   assert.ok(
-    (await exchange()).body_result.transform,
+    (await exchange()).body,
     "new authoritative version does not inherit the old rejection",
   );
 });
@@ -443,7 +399,11 @@ test("protected admission requires the actual counterpart and exact loaded polic
     f.clients.SupervisorMiddleware,
     "Describe",
     {
-      gateway: { protocol_version: { major: 1 }, supported_capabilities: [contract, capability] },
+      gateway: {
+        protocol_version: { major: 1 },
+        supported_capabilities: [contract, ...openShellExchangeCapabilities],
+        required_capabilities: [contract],
+      },
     },
     f.metadata(),
   );
@@ -534,11 +494,17 @@ test("legacy approved copies survive Secret rotation and failed live adoption; o
     "editing the input Secret must not reinterpret a legacy approved copy as live",
   );
   f.observed.available = false;
-  assert.equal((await f.request("PATCH", path, { body: { adoption: "live" } })).status, 503);
+  const consent = { adoption: "live", authorityScope: "execution" };
+  assert.equal(
+    (await f.request("PATCH", path, { body: { adoption: "live" } })).status,
+    409,
+    "live reads alone are not consent to whole-execution authority",
+  );
+  assert.equal((await f.request("PATCH", path, { body: consent })).status, 503);
   assert.equal((await f.request("GET", path)).data.egress, undefined);
   assert.deepEqual([...f.providers.values()], before);
   f.observed.available = true;
-  const adopted = await f.request("PATCH", path, { body: { adoption: "live" } });
+  const adopted = await f.request("PATCH", path, { body: consent });
   assert.equal(adopted.status, 200, JSON.stringify(adopted.body));
   assert.deepEqual(adopted.data.egress, { adoption: "live", retention: "none" });
   assert.deepEqual(
@@ -546,6 +512,24 @@ test("legacy approved copies survive Secret rotation and failed live adoption; o
     before,
     "adoption never overwrites the previous gateway material",
   );
+  // Restore a fixture in the *persisted* prior narrow provider generation. An
+  // old PATCH must not be able to turn that approval into whole-execution use.
+  const { id, namespaceId } = f.legacySource;
+  await f.controller.transact(async ({ credentialSources: sources }) => {
+    const { egress } = await sources.findCredentialSource(namespaceId, id);
+    assert.equal(egress.key.provider.generation, 2);
+    const key = {
+      ...egress.key,
+      source: { id, generation: egress.key.source.generation + 1 },
+      provider: { ...egress.key.provider, generation: 1 },
+    };
+    await sources.admitEgressSource(namespaceId, id, egress.key.source.generation, {
+      ...egress,
+      key,
+    });
+  });
+  assert.equal((await f.request("PATCH", path, { body: { adoption: "live" } })).status, 409);
+  assert.equal((await f.request("PATCH", path, { body: consent })).status, 200);
   const bound = await f.request("PATCH", `${f.path}/${f.source.id}`, {
     body: { adoption: "live" },
   });
@@ -560,9 +544,7 @@ test("current supplier evidence is required at access and send; stored receipts 
   delete f.observed.observation;
   // LOADED and valid legacy field 3 remain present; neither substitutes for V1.
   assert.equal(await f.egress.attachmentStatus(f.context, f.attachment), undefined);
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
-  );
+  assert.ok((await f.resolve(f.capture())).refused);
   assert.equal(f.secretReads, beforeLegacy);
   f.observed.observation = observation;
   // Proto3 scalar zeros can be omitted on the wire; both encodings have one fingerprint.
@@ -588,28 +570,16 @@ test("current supplier evidence is required at access and send; stored receipts 
     { ...original, instance_id: "10000000-0000-4000-8000-000000000001" },
   ]) {
     f.observed.evidence = evidence;
-    assert.ok(
-      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
-    );
+    assert.ok((await f.resolve(f.capture())).refused);
     assert.equal(f.secretReads, reads, "historical installation must not permit credential access");
   }
   f.observed.evidence = original;
   const captured = f.capture();
-  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-    .ready;
+  const ready = (await f.resolve(captured)).ready;
   assert.ok(ready, "restoring the original current observation permits a new operation");
   // Replacement happens after material access, while the operation still holds the old receipt.
   f.observed.evidence = { ...original, instance_id: "10000000-0000-4000-8000-000000000001" };
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(captured, ready),
-        f.metadata(),
-      )
-    ).refused,
-  );
+  assert.ok((await f.authorize(f.permitRequest(captured, ready))).refused);
   assert.equal(f.providerRequests.length, 0);
   const replacement = await f.egress.attachmentStatus(f.context, f.attachment);
   assert.ok(replacement);
@@ -630,19 +600,9 @@ test("V1 permits only the exact inert runtime rule and fences both policies befo
   assert.deepEqual(observation.effective_policy.network_policies[ruleName], { name: ruleName });
   assert.equal(await f.egress.verifyInstallation(f.context, f.installation), true);
   const capture = f.capture();
-  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", capture, f.metadata()))
-    .ready;
+  const ready = (await f.resolve(capture)).ready;
   assert.ok(ready, "the real consumer accepts the passive source != effective wire fixture");
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(capture, ready),
-        f.metadata(),
-      )
-    ).allowed,
-  );
+  assert.ok((await f.authorize(f.permitRequest(capture, ready))).allowed);
   const reads = f.secretReads;
   // Each independently malformed derivation must refuse installation and current
   // authority before the versioned Secret Driver is called.
@@ -712,9 +672,7 @@ test("V1 permits only the exact inert runtime rule and fences both policies befo
     f.observed.observation = structuredClone(observation);
     change(f.observed.observation);
     assert.equal(await f.egress.attachmentStatus(f.context, f.attachment), undefined);
-    assert.ok(
-      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
-    );
+    assert.ok((await f.resolve(f.capture())).refused);
     assert.equal(f.secretReads, reads, "a widened or stale observation cannot read a Secret");
   }
   f.observed.observation = structuredClone(observation);
@@ -734,9 +692,7 @@ test("V1 permits only the exact inert runtime rule and fences both policies befo
     },
   ]) {
     change();
-    assert.ok(
-      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).refused,
-    );
+    assert.ok((await f.resolve(f.capture())).refused);
     assert.equal(f.secretReads, reads);
     f.observed.evidence = structuredClone(originalEvidence);
     f.observed.policyHash = observation.source_policy_hash;
@@ -745,9 +701,7 @@ test("V1 permits only the exact inert runtime rule and fences both policies befo
   }
   assert.equal(await f.egress.verifyInstallation(f.context, f.installation), true);
   const sendCapture = f.capture();
-  const sendReady = (
-    await unary(f.clients.HttpCredentialAccess, "Resolve", sendCapture, f.metadata())
-  ).ready;
+  const sendReady = (await f.resolve(sendCapture)).ready;
   assert.ok(sendReady, "Resolve succeeds while the runtime rule is still inert");
   // Widen after material resolution: the fresh send check must reject a usable
   // endpoint even though this operation already holds valid access evidence.
@@ -755,16 +709,7 @@ test("V1 permits only the exact inert runtime rule and fences both policies befo
   const protectedRule = source.network_policies["oce-egress-0"];
   widenedRule.endpoints = structuredClone(protectedRule.endpoints);
   widenedRule.binaries = structuredClone(protectedRule.binaries);
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(sendCapture, sendReady),
-        f.metadata(),
-      )
-    ).refused,
-  );
+  assert.ok((await f.authorize(f.permitRequest(sendCapture, sendReady))).refused);
   assert.equal(f.providerRequests.length, 0, "send-side widening must not permit a provider send");
 });
 
@@ -779,28 +724,18 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
     events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
   async function exchange(rawBody) {
     const captured = f.capture(wire.request);
-    const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-      .ready;
+    const ready = (await f.resolve(captured)).ready;
     assert.ok(ready);
-    assert.ok(
-      (
-        await unary(
-          f.clients.HttpCredentialAccess,
-          "AuthorizeSend",
-          f.permitRequest(captured, ready),
-          f.metadata(),
-        )
-      ).allowed,
-    );
+    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
     f.setResponse({ status: 200, contentType: "text/event-stream", rawBody });
     return f.protect(captured, await f.send(captured, ready));
   }
   const body = encode(wire.responseEvents);
   const delivered = await exchange(body);
-  assert.equal(delivered.body_result.transform.data.toString(), body);
+  assert.equal(delivered.body.toString(), body);
   assert.deepEqual(f.providerRequests[0].body, wire.request);
   const crlf = body.replaceAll("\n", "\r\n");
-  assert.equal((await exchange(crlf)).body_result.transform.data.toString(), crlf);
+  assert.equal((await exchange(crlf)).body.toString(), crlf);
   const beforeReads = f.secretReads;
   for (const body of [
     { ...wire.request, tools: [...wire.request.tools, ...wire.refusedTools] },
@@ -819,10 +754,7 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
     },
     { ...wire.request, client_metadata: { namespace_id: f.namespace.id } },
   ]) {
-    assert.ok(
-      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(body), f.metadata()))
-        .refused,
-    );
+    assert.ok((await f.resolve(f.capture(body))).refused);
   }
   assert.equal(
     f.secretReads,
@@ -854,7 +786,7 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
   switched.splice(1, switched.length - 2, ...firstMessage, ...secondMessage);
   switched.at(-1).response.output = [firstMessage.at(-1).item, secondMessage.at(-1).item];
   assert.ok(
-    (await exchange(encode(switched))).body_result.block_delivery,
+    (await exchange(encode(switched))).blocked,
     "OutputTextDelta drops item IDs, so the consumer-observable concatenation must be scanned",
   );
   // Function arguments have a protocol-defined JSON layer, including when
@@ -897,17 +829,17 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
   };
   const safeFunction = functionEvents('{"cmd":"printf READY"}');
   assert.ok(
-    (await exchange(encode(safeFunction))).body_result.transform,
+    (await exchange(encode(safeFunction))).body,
     "ordinary Harness-local function tools remain supported",
   );
   // Providers can omit argument deltas. The two completion events must still agree
   // on which arguments the Harness would execute.
   const withoutDeltas = structuredClone(safeFunction);
   withoutDeltas.splice(2, 2);
-  assert.ok((await exchange(encode(withoutDeltas))).body_result.transform);
+  assert.ok((await exchange(encode(withoutDeltas))).body);
   withoutDeltas[2].arguments = '{"cmd":"different arguments"}';
   assert.ok(
-    (await exchange(encode(withoutDeltas))).body_result.block_delivery,
+    (await exchange(encode(withoutDeltas))).blocked,
     "function_call_arguments.done and output_item.done cannot disagree about the arguments",
   );
   const escapedCredential = [..."synthetic-key-initial"]
@@ -931,7 +863,7 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
     functionEvents('{"cmd":"ok","cmd":"other"}'),
   ]) {
     assert.ok(
-      (await exchange(encode(events))).body_result.block_delivery,
+      (await exchange(encode(events))).blocked,
       "argument decoding, item association and completion all precede release",
     );
   }
@@ -952,7 +884,7 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
     body.replace(/\n\n$/, "\n"),
   ]) {
     assert.ok(
-      (await exchange(unsafe)).body_result.block_delivery,
+      (await exchange(unsafe)).blocked,
       "the whole finite stream must pass response policy before any delivery",
     );
   }
@@ -980,45 +912,37 @@ test("signed supervisor instance and UUIDv7 creation horizon refuse old callers 
   const historical = f.capture();
   historical.request.context.request_id = operation.request_context.request_id;
   historical.deadline = operation.deadline;
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", historical, f.metadata())).refused,
-  );
+  assert.ok((await f.resolve(historical)).refused);
   assert.equal(f.secretReads, reads);
   for (const claims of [
     { instance_id: undefined },
     { instance_id: "10000000-0000-4000-8000-000000000001" },
     { instance_id: f.namespace.id },
   ]) {
-    assert.ok(
-      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata(claims)))
-        .refused,
-    );
+    if (claims.instance_id?.startsWith("10000000-")) {
+      assert.ok((await f.resolve(f.capture(), f.metadata(claims))).refused);
+    } else {
+      await assert.rejects(f.resolve(f.capture(), f.metadata(claims)), { code: 7 });
+    }
   }
   assert.equal(f.secretReads, reads);
   const captured = f.capture();
   captured.deadline = wireTime(now().getTime() + 1000);
-  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-    .ready;
+  const ready = (await f.resolve(captured)).ready;
   assert.ok(ready);
   // A short submitted deadline does not shorten replay retention for this immutable operation ID.
   elapsed = 2000;
   captured.deadline = wireTime(now().getTime() + 20_000);
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata())).refused,
-  );
+  assert.ok((await f.resolve({ ...captured, response_custody: randomBytes(32) })).refused);
   elapsed = 31_000;
   captured.deadline = wireTime(now().getTime() + 1000);
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata())).refused,
-  );
+  assert.ok((await f.resolve({ ...captured, response_custody: randomBytes(32) })).refused);
   assert.equal(
     f.secretReads,
     reads + 1,
     "eviction cannot make an expired UUID into a new operation",
   );
-  assert.ok(
-    (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata())).ready,
-  );
+  assert.ok((await f.resolve(f.capture())).ready);
 });
 
 test(
@@ -1034,21 +958,10 @@ test(
     for (let i = 0; i < 4200; i += 1) {
       elapsed += 25;
       const captured = f.capture();
-      const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, peer)).ready;
+      const ready = (await f.resolve(captured, peer)).ready;
       assert.ok(ready, `sequential operation ${i} should resolve`);
-      assert.ok(
-        (
-          await unary(
-            f.clients.HttpCredentialAccess,
-            "AuthorizeSend",
-            f.permitRequest(captured, ready),
-            peer,
-          )
-        ).allowed,
-      );
-      assert.ok(
-        (await f.protect(captured, await f.send(captured, ready), peer)).body_result.transform,
-      );
+      assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
+      assert.ok((await f.protect(captured, await f.send(captured, ready))).body);
     }
     assert.equal(f.providerRequests.length, 4200);
     assert.ok(
@@ -1059,58 +972,60 @@ test(
   },
 );
 
-test(
-  "pending Secret reads consume operation capacity before completion and release it after delivery",
-  { timeout: 60_000 },
-  async (t) => {
-    const f = await staticEgressFixture(t);
-    const before = f.secretReads;
-    const release = f.pauseSecretReads();
-    t.after(release);
-    const peer = f.metadata();
-    const captured = Array.from({ length: 1024 }, () => f.capture());
-    const pending = captured.map((request) =>
-      unary(f.clients.HttpCredentialAccess, "Resolve", request, peer, 30_000),
+test("in-flight Secret selection and outstanding handles consume the same bounded capacity", async (t) => {
+  // Exercise the actual 1024-slot registry, not a race to finish 1024 TLS handshakes,
+  // native IAM checks and Kubernetes reads inside their intentionally short deadlines.
+  const f = await syntheticDispatchFixture(t);
+  const ids = new Set();
+  let reads = 0;
+  const full = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  const forwarder = new EgressForwarder({
+    ...f.ports,
+    acceptance: {
+      capture: (use) => {
+        ids.add(use.id);
+        return { ...f.association, responseId: use.id };
+      },
+      owns: (value, use) => ids.has(use.id) && value.responseId === use.id,
+    },
+    read: async (...args) => {
+      if (++reads === 1024) {
+        full.resolve();
+      }
+      await gate.promise;
+      return f.ports.read(...args);
+    },
+  });
+  const use = (signal) =>
+    forwarder.resolve(
+      "synthetic-peer",
+      f.association.installation.sandboxId,
+      { ...f.request, id: requestId(f.ports.now()) },
+      signal,
     );
-    const until = Date.now() + 15_000;
-    while (f.secretReads !== before + 1024 && Date.now() < until) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal(
-      f.secretReads,
-      before + 1024,
-      "all admitted operations must reach the real Secret SDK read",
-    );
-    assert.ok((await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), peer)).refused);
-    assert.equal(
-      f.secretReads,
-      before + 1024,
-      "the excess operation must refuse before dependency I/O",
-    );
-    release();
-    const decisions = await Promise.all(pending);
-    assert.ok(decisions.every((decision) => decision.ready));
-    const ready = decisions[0].ready;
-    assert.ok(
-      (
-        await unary(
-          f.clients.HttpCredentialAccess,
-          "AuthorizeSend",
-          f.permitRequest(captured[0], ready),
-          peer,
-        )
-      ).allowed,
-    );
-    assert.ok(
-      (await f.protect(captured[0], await f.send(captured[0], ready))).body_result.transform,
-    );
-    assert.ok(
-      (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), peer)).ready,
-      "delivery frees an operation slot without an expiry wait",
-    );
-    assert.equal(f.providerRequests.length, 1);
-  },
-);
+  const first = new AbortController();
+  const other = new AbortController().signal;
+  const pending = Array.from({ length: 1024 }, (_, i) => use(i === 0 ? first.signal : other));
+  await full.promise;
+  const saturated = { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
+  assert.deepEqual(
+    await use(other),
+    saturated,
+    "pending selection is charged before material returns",
+  );
+  assert.equal(reads, 1024, "the excess resolution never starts selection");
+  gate.resolve();
+  assert.ok((await Promise.all(pending)).every((decision) => decision.kind === "ready"));
+  assert.deepEqual(await use(other), saturated, "ready handles remain charged");
+  first.abort();
+  assert.equal(
+    (await use(other)).kind,
+    "ready",
+    "closing the owning sender frees exactly its slot",
+  );
+  assert.deepEqual(await use(other), saturated);
+});
 
 function receiptAttempt(f, captured, ready) {
   return {
@@ -1181,39 +1096,57 @@ function receiptPersistenceFaults() {
   };
 }
 
+test("closing the accepted duplex while its policy check is queued prevents the Secret read", async (t) => {
+  const fault = receiptPersistenceFaults();
+  const finished = Promise.withResolvers();
+  const f = await staticEgressFixture(t, {
+    resolutionFinished: finished.resolve,
+    appFactory: (t, options) =>
+      createConsoleAppFixture(t, { ...options, wrapState: (state) => fault.wrap(state) }),
+  });
+  const gate = fault.arm("findCredentialWithdrawal", "pause");
+  t.after(gate.release);
+  const before = f.secretReads;
+  const captured = f.capture();
+  const exchange = await f.beginExchange();
+  exchange.stream.write(exchange.opening(captured));
+  await gate.reached;
+  // Graceful half-close, with server OK status, proves the real handler saw loss of
+  // this sender before the queued authority returns. No timing sleep or reset inference.
+  const ended = Promise.withResolvers();
+  exchange.stream.once("status", ended.resolve);
+  exchange.stream.end();
+  assert.equal((await ended.promise).code, 0);
+  gate.release();
+  assert.deepEqual(await finished.promise, { kind: "refused", error: { kind: "cancelled" } });
+  assert.equal(f.secretReads, before);
+  assert.equal(f.providerRequests.length, 0);
+  assert.deepEqual(
+    exchange.received.map((message) => message.event),
+    ["challenge"],
+  );
+});
+
 test("authenticated sender receipts survive authority restart without replay permission and distinguish observations", async (t) => {
   const f = await staticEgressFixture(t);
   const captured = f.capture();
-  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-    .ready;
+  const ready = (await f.resolve(captured)).ready;
   const input = receiptAttempt(f, captured, ready);
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(captured, ready),
-        f.metadata(),
-      )
-    ).allowed,
-  );
+  assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
   const possible = await readReceipt(f, input);
   assert.deepEqual(possible.outcome, { kind: "uncertain", dispatch: "possible" });
   assert.equal(possible.observation, null);
   const response = await f.send(captured, ready);
-  // The claimed sender instance, not the request JSON alone, owns the response.
-  assert.ok(
-    (
-      await f.protect(
-        captured,
-        response,
-        f.metadata({ instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
-      )
-    ).preflight_result.block_delivery,
+  const foreign = await f.beginExchange(
+    f.metadata({ instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
   );
-  const results = await Promise.all([f.protect(captured, response), f.protect(captured, response)]);
-  assert.equal(results.filter((result) => result.body_result?.transform).length, 1);
-  assert.equal(results.filter((result) => result.preflight_result?.block_delivery).length, 1);
+  foreign.stream.write({ response });
+  await assert.rejects(
+    foreign.next(),
+    { code: 7 },
+    "another response stream cannot claim the accepted reply",
+  );
+  assert.ok((await f.protect(captured, response)).body);
   const observed = await readReceipt(f, input);
   assert.deepEqual(observed.observation, { kind: "response", dispatch: "confirmed", status: 200 });
   assert.deepEqual(observed.outcome, possible.outcome);
@@ -1242,19 +1175,9 @@ test("authenticated sender receipts survive authority restart without replay per
   );
   assert.ok(!JSON.stringify(observed).includes("synthetic-key-initial"));
   await f.restartAuthority();
-  const replay = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-    .ready;
+  const replay = (await f.resolve(captured)).ready;
   assert.ok(replay, "restarted authority has no transient operation registry");
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(captured, replay),
-        f.metadata(),
-      )
-    ).refused,
-  );
+  assert.ok((await f.authorize(f.permitRequest(captured, replay))).refused);
   assert.deepEqual(await readReceipt(f, input), observed);
   assert.equal(f.providerRequests.length, 1, "recovery never dispatches another request");
 });
@@ -1264,19 +1187,9 @@ test("receipt observation fences only positive credential rejection, including b
   async function exchange(status, body) {
     f.setResponse({ status, body });
     const captured = f.capture();
-    const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-      .ready;
+    const ready = (await f.resolve(captured)).ready;
     assert.ok(ready);
-    assert.ok(
-      (
-        await unary(
-          f.clients.HttpCredentialAccess,
-          "AuthorizeSend",
-          f.permitRequest(captured, ready),
-          f.metadata(),
-        )
-      ).allowed,
-    );
+    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
     const result = await f.protect(captured, await f.send(captured, ready));
     return { result, receipt: await readReceipt(f, receiptAttempt(f, captured, ready)) };
   }
@@ -1286,7 +1199,7 @@ test("receipt observation fences only positive credential rejection, including b
     [403, { error: { code: "invalid_api_key", type: "invalid_request_error" } }],
   ]) {
     const value = await exchange(status, body);
-    assert.ok(value.result.body_result.transform);
+    assert.ok(value.result.body);
     assert.deepEqual(value.receipt.observation, {
       kind: "response",
       dispatch: "confirmed",
@@ -1301,50 +1214,21 @@ test("receipt observation fences only positive credential rejection, including b
     body: { error: { code: "invalid_api_key", type: "invalid_request_error" } },
   });
   const partialCapture = f.capture();
-  const partialReady = (
-    await unary(f.clients.HttpCredentialAccess, "Resolve", partialCapture, f.metadata())
-  ).ready;
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(partialCapture, partialReady),
-        f.metadata(),
-      )
-    ).allowed,
-  );
+  const partialReady = (await f.resolve(partialCapture)).ready;
+  assert.ok((await f.authorize(f.permitRequest(partialCapture, partialReady))).allowed);
   const partialResponse = await f.send(partialCapture, partialReady);
-  const stream = f.clients.HttpResponsePreReturn.Evaluate(f.metadata(), {
-    deadline: Date.now() + 5000,
+  const incomplete = await f.protect(partialCapture, {
+    ...partialResponse,
+    response_complete: false,
   });
-  const partialResult = new Promise((resolve, reject) => {
-    stream.on("error", reject);
-    stream.on("data", (message) => {
-      if (message.preflight_result?.inspect) {
-        stream.write({ body: { sequence: 1, data: partialResponse.body, end_of_stream: false } });
-      } else {
-        resolve(message);
-        stream.end();
-      }
-    });
-  });
-  stream.write({
-    preflight: {
-      context: partialCapture.request.context,
-      status_code: 401,
-      headers: partialResponse.headers,
-      permitted_body_modes: [2],
-    },
-  });
-  assert.ok((await partialResult).body_result.block_delivery);
+  assert.equal(incomplete.blocked, true);
   const partialReceipt = await readReceipt(f, receiptAttempt(f, partialCapture, partialReady));
   assert.equal(partialReceipt.observation.kind, "response_blocked");
   assert.equal(partialReceipt.feedback, null);
   const acceptedRejection = await exchange(401, {
     error: { code: "invalid_api_key", type: "invalid_request_error" },
   });
-  assert.ok(acceptedRejection.result.body_result.transform);
+  assert.ok(acceptedRejection.result.body);
   assert.deepEqual(acceptedRejection.receipt.observation, {
     kind: "provider_rejected",
     dispatch: "confirmed",
@@ -1363,7 +1247,7 @@ test("receipt observation fences only positive credential rejection, including b
     },
   };
   const blocked = await exchange(401, rejection);
-  assert.ok(blocked.result.body_result.block_delivery);
+  assert.ok(blocked.result.blocked);
   assert.deepEqual(blocked.receipt.observation, {
     kind: "response_blocked",
     dispatch: "confirmed",
@@ -1377,17 +1261,8 @@ test("receipt observation fences only positive credential rejection, including b
   assert.equal(blocked.receipt.settled, false);
   assert.ok(!JSON.stringify(blocked.receipt).includes("synthetic-key-next-version"));
   const next = f.capture();
-  const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", next, f.metadata())).ready;
-  assert.ok(
-    (
-      await unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(next, ready),
-        f.metadata(),
-      )
-    ).refused,
-  );
+  const ready = (await f.resolve(next)).ready;
+  assert.ok((await f.authorize(f.permitRequest(next, ready))).refused);
   assert.equal(f.providerRequests.length, 6);
 });
 
@@ -1403,24 +1278,23 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
           createConsoleAppFixture(t, { ...options, wrapState: (state) => fault.wrap(state) }),
       });
       const captured = f.capture();
-      const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-        .ready;
+      const ready = (await f.resolve(captured)).ready;
       const input = receiptAttempt(f, captured, ready);
       const gate = fault.arm(
-        scenario === "check_deadline" ? "isEgressMaterialRejected" : "insert",
+        scenario === "check_deadline"
+          ? "isEgressMaterialRejected"
+          : scenario === "lost_ack"
+            ? "authorize"
+            : "insert",
         ["reject", "lost_ack"].includes(scenario) ? scenario : "pause",
       );
       t.after(gate.release);
-      const result = unary(
-        f.clients.HttpCredentialAccess,
-        "AuthorizeSend",
-        f.permitRequest(captured, ready),
-        f.metadata(),
-        scenario === "cancel" ? 50 : 5000,
-      );
+      const result = f.authorize(f.permitRequest(captured, ready), {
+        cancelAfterMs: scenario === "cancel" ? 50 : undefined,
+      });
       if (scenario !== "reject") {
         const cancellation =
-          scenario === "cancel" ? assert.rejects(result, { code: 4 }) : undefined;
+          scenario === "cancel" ? assert.rejects(result, { code: 1 }) : undefined;
         await gate.reached;
         if (scenario === "revoke") {
           await f.revoke();
@@ -1431,10 +1305,7 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
         if (scenario === "check_deadline") {
           // The actual successful final policy transaction has committed. A new
           // capture prunes the expired handle before that check returns to its owner.
-          assert.ok(
-            (await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata()))
-              .ready,
-          );
+          assert.ok((await f.resolve(f.capture())).ready);
         }
         if (cancellation) {
           await cancellation;
@@ -1449,22 +1320,15 @@ test("receipt persistence failure, lost acknowledgment and late authorization ne
         assert.equal(stored, undefined);
       }
       if (scenario === "lost_ack") {
+        assert.ok(
+          stored.authorization?.association.custodyId,
+          "lost the exact authorized dispatch acknowledgment, not an earlier begin",
+        );
         assert.equal(stored.settled, false);
         assert.deepEqual(stored.outcome, { kind: "uncertain", dispatch: "possible" });
         await f.restartAuthority();
-        const replay = (
-          await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata())
-        ).ready;
-        assert.ok(
-          (
-            await unary(
-              f.clients.HttpCredentialAccess,
-              "AuthorizeSend",
-              f.permitRequest(captured, replay),
-              f.metadata(),
-            )
-          ).refused,
-        );
+        const replay = (await f.resolve(captured)).ready;
+        assert.ok((await f.authorize(f.permitRequest(captured, replay))).refused);
       }
       if (["revoke", "deadline", "check_deadline"].includes(scenario)) {
         assert.equal(stored.outcome.kind, "refused");
@@ -1491,19 +1355,9 @@ test("response persistence must commit its observation and fence before policy b
         body: { error: { code: "invalid_api_key", type: "invalid_request_error" } },
       });
       const captured = f.capture();
-      const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", captured, f.metadata()))
-        .ready;
+      const ready = (await f.resolve(captured)).ready;
       const input = receiptAttempt(f, captured, ready);
-      assert.ok(
-        (
-          await unary(
-            f.clients.HttpCredentialAccess,
-            "AuthorizeSend",
-            f.permitRequest(captured, ready),
-            f.metadata(),
-          )
-        ).allowed,
-      );
+      assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
       const response = await f.send(captured, ready);
       const gate = fault.arm("save", scenario === "deadline" ? "pause" : scenario);
       t.after(gate.release);
@@ -1519,7 +1373,7 @@ test("response persistence must commit its observation and fence before policy b
       if (failed) {
         await failed;
       } else {
-        assert.ok((await pending).body_result.block_delivery);
+        assert.ok((await pending).blocked);
       }
       const receipt = await readReceipt(f, input);
       assert.deepEqual(receipt.outcome, { kind: "uncertain", dispatch: "possible" });

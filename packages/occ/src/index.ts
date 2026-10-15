@@ -19,6 +19,7 @@ import {
 export type { AcceptedEgressAssociation, AuthorizedSend } from "./egress-send-receipts.ts";
 export { EgressForwarder } from "./egress.ts";
 export type {
+  CapturedEgressUse,
   EgressPeerVerifier,
   TrustedEgressAcceptance,
   EgressPeer,
@@ -744,6 +745,7 @@ export interface AgentCredentialSourceInput {
 
 export interface UpdateCredentialSourceInput {
   readonly adoption?: "live";
+  readonly authorityScope?: "execution";
   readonly namespaceId: string;
   readonly credentialSourceId: string;
   /**
@@ -4519,7 +4521,7 @@ export class OpenClawController {
         const secret = await this.state.read((state) =>
           state.secrets.findSecret(source.secret.namespaceId, source.secret.id),
         );
-        if (!secret || secret.driverId !== source.secretDriver.id) {
+        if (signal.aborted || !secret || secret.driverId !== source.secretDriver.id) {
           throw new DependencyUnavailableError("Selected credential material is unavailable.");
         }
         const driver = this.secretDriver(secret.driverId);
@@ -5107,7 +5109,26 @@ export class OpenClawController {
       if (type.rotation === "refresh") {
         refuseIssuerRotatedResend(type, source.secrets, secretRefs);
       }
-      if (source.egress !== undefined || input.adoption === "live") {
+      if (
+        source.egress !== undefined ||
+        input.adoption !== undefined ||
+        input.authorityScope !== undefined
+      ) {
+        const previous = source.egress?.key.provider;
+        const alreadyAdmitted =
+          previous !== undefined &&
+          this.selections.has("egress_proxy") &&
+          this.selectedDriver("egress_proxy").sourceControl.providers.some((provider) =>
+            isDeepStrictEqual(provider.ref, previous),
+          );
+        if (
+          !alreadyAdmitted &&
+          !(input.adoption === "live" && input.authorityScope === "execution")
+        ) {
+          throw new ResourceStateConflictError(
+            "Adopting a legacy or narrower source requires explicit live adoption and execution authority scope.",
+          );
+        }
         // The first cutover refuses bound sources. Keeping the legacy copy intact is safer
         // than replacing material before an exact replacement installation can be verified.
         // TODO(egress live cutover): admit and install a separate candidate for running bindings.

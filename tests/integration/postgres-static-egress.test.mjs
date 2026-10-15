@@ -1,15 +1,97 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
+import pg from "pg";
 import { createPostgresAgentApp } from "../helpers/postgres-agent-app.mjs";
-import { requiresPostgres } from "../helpers/postgres-database.mjs";
-import { staticEgressFixture, unary } from "../helpers/static-egress.mjs";
+import { databaseUrl, requiresPostgres } from "../helpers/postgres-database.mjs";
+import { commitAckProxy } from "../fixtures/postgres-commit-ack-proxy.mjs";
+import { staticEgressFixture } from "../helpers/static-egress.mjs";
 import { PostgresPlatformState } from "../../packages/occ/src/index.ts";
 import { validHarnessAuthSnapshot } from "../../packages/occ/src/state/platform-state.ts";
 
-async function postgresApp(t, options) {
+test(
+  "losing the exact authorized-dispatch COMMIT reply yields no permit or origin, also after restart",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (t) => {
+    const proxy = await commitAckProxy(databaseUrl);
+    const f = await staticEgressFixture(t, {
+      appFactory: (t, options) => postgresApp(t, options, proxy.url),
+    });
+    // Register after the app's pool shutdown. Closing a transport under unrelated
+    // idle pooled connections would inject a second fault during test teardown.
+    const observer = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+    t.after(async () => {
+      await observer.end();
+      await proxy.close();
+    });
+    const sibling = f.capture();
+    const { ready } = await f.resolve(sibling);
+    assert.ok((await f.authorize(f.permitRequest(sibling, ready))).allowed);
+    const normal = await f.protect(sibling, await f.send(sibling, ready));
+    assert.equal(normal.response_complete, true);
+    assert.equal(f.providerRequests.length, 1);
+
+    const captured = f.capture();
+    const select = () =>
+      observer
+        .query(
+          "SELECT authorized_dispatch, observation, outcome FROM occ.egress_send_receipts WHERE use_id=$1",
+          [captured.request.context.request_id],
+        )
+        .then(({ rows }) => rows[0]);
+    const custodyId = createHash("sha256").update(captured.response_custody).digest("hex");
+    let committed;
+    let permits = 0;
+    for (const phase of ["lost_ack", "restarted"]) {
+      const { ready } = await f.resolve(captured);
+      assert.ok(ready, "reach dispatch with genuine material and the original use still live");
+      if (phase === "lost_ack") {
+        proxy.arm({ afterParsePrefix: "UPDATE occ.egress_send_receipts SET authorized_dispatch=" });
+      }
+      const decision = await f.authorize(f.permitRequest(captured, ready));
+      if (decision.allowed) {
+        permits++;
+        await f.send(captured, ready);
+      }
+      assert.ok(decision.refused, phase);
+      assert.equal(
+        proxy.observedCommit,
+        true,
+        "the server's real authorized-dispatch COMMIT was consumed",
+      );
+      assert.equal(permits, 0);
+      assert.equal(
+        f.providerRequests.length,
+        1,
+        "only the positive sibling ever reached the origin",
+      );
+      const row = await select();
+      if (phase === "lost_ack") {
+        assert.equal(
+          row.authorized_dispatch.association.custodyId,
+          custodyId,
+          "exact custody commitment, not raw proof",
+        );
+        assert.equal(row.observation, null);
+        assert.deepEqual(row.outcome, { kind: "uncertain", dispatch: "possible" });
+        committed = row;
+        await f.restartAuthority();
+      } else {
+        assert.deepEqual(
+          row,
+          committed,
+          "no replay or rewrite of the unacknowledged authorized dispatch",
+        );
+      }
+    }
+  },
+);
+
+async function postgresApp(t, options, transportDatabaseUrl) {
   const p = await createPostgresAgentApp(t, {
     label: "static-egress",
     authSecret: "static-egress-fixture-session-secret-2026",
+    transportDatabaseUrl,
     appOptions: { secretDriver: options.secretDriver, computeDriver: options.computeDriver },
   });
   for (const driver of [options.secretDriver, options.computeDriver]) {
@@ -110,19 +192,9 @@ test(
       (error) => error.name === "ResourceConflictError",
     );
     const capture = f.capture();
-    const ready = (await unary(f.clients.HttpCredentialAccess, "Resolve", capture, f.metadata()))
-      .ready;
+    const ready = (await f.resolve(capture)).ready;
     assert.ok(ready);
-    assert.ok(
-      (
-        await unary(
-          f.clients.HttpCredentialAccess,
-          "AuthorizeSend",
-          f.permitRequest(capture, ready),
-          f.metadata(),
-        )
-      ).allowed,
-    );
+    assert.ok((await f.authorize(f.permitRequest(capture, ready))).allowed);
     f.setResponse({
       status: 401,
       body: {
@@ -140,19 +212,9 @@ test(
       true,
     );
     const pending = f.capture();
-    const next = (await unary(f.clients.HttpCredentialAccess, "Resolve", pending, f.metadata()))
-      .ready;
+    const next = (await f.resolve(pending)).ready;
     await f.revoke();
-    assert.ok(
-      (
-        await unary(
-          f.clients.HttpCredentialAccess,
-          "AuthorizeSend",
-          f.permitRequest(pending, next),
-          f.metadata(),
-        )
-      ).refused,
-    );
+    assert.ok((await f.authorize(f.permitRequest(pending, next))).refused);
     const denials = await f.pool.query(
       "SELECT details FROM occ.audit_events WHERE action = 'openclaw.egress.authorize' AND namespace_id = $1",
       [f.namespace.id],

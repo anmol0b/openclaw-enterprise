@@ -46,10 +46,7 @@ export interface CapturedEgressUse {
   readonly operation: InferenceOperation;
 }
 
-/** Installed acceptance owns the actual request, sender and response destination.
- * TODO(M2): wire authenticated installation-bound acceptance into production composition.
- * Synthetic profiles may implement this seam; legacy bearer/IDs are not acceptance.
- */
+/** Installed acceptance owns the actual request, sender and response destination. */
 export interface TrustedEgressAcceptance {
   capture(use: CapturedEgressUse): AcceptedEgressAssociation | undefined;
   /** Match the active transport sender and reply custody, not just stored IDs or liveness. */
@@ -105,6 +102,7 @@ interface OperationRecord {
   value: string;
   phase: "resolved" | "checking" | "permitted" | "protecting" | "observing";
   timer?: ReturnType<typeof setTimeout>;
+  release?: () => void;
 }
 
 function refuse(
@@ -156,6 +154,7 @@ export class EgressForwarder {
 
   private discard(handle: string, record: OperationRecord): void {
     clearTimeout(record.timer);
+    record.release?.();
     record.value = "";
     this.records.delete(handle);
   }
@@ -250,6 +249,15 @@ export class EgressForwarder {
     ) {
       return { kind: "refused", error: { kind: "not_ready", code: "attachment_pending" } };
     }
+    const policyHash = request.verifiedExecutionPolicyHash;
+    if (
+      installation.enforcement.authorityScope !== "execution" ||
+      !policyHash ||
+      !/^[a-f0-9]{64}$/.test(policyHash) ||
+      policyHash !== installation.enforcement.policyHash
+    ) {
+      return refuse("identity");
+    }
     const matches = installation.plan.routes.flatMap((route) => {
       if (request.bindingId !== undefined && route.binding.binding.id !== request.bindingId) {
         return [];
@@ -289,6 +297,11 @@ export class EgressForwarder {
     if (!("key" in source)) {
       return { kind: "refused", error: source };
     }
+    // Policy and installation I/O may have been queued when the accepted stream
+    // closed. Losing that sender revokes material access, not just a later send.
+    if (signal.aborted || !this.owns(association, captured)) {
+      return { kind: "refused", error: { kind: "cancelled" } };
+    }
     try {
       const material = await this.ports.read(source, signal, request.deadlineAt);
       const observed = Date.parse(material.authoritativeObservedAt);
@@ -306,7 +319,7 @@ export class EgressForwarder {
       ) {
         return { kind: "refused", error: { kind: "not_ready", code: "expired" } };
       }
-      if (signal.aborted) {
+      if (signal.aborted || !this.owns(association, captured)) {
         return { kind: "refused", error: { kind: "cancelled" } };
       }
       const evidence: StaticMaterialEvidence = immutableCopy({
@@ -348,6 +361,9 @@ export class EgressForwarder {
         phase: "resolved",
       };
       this.records.set(handle, record);
+      const closed = () => this.discard(handle, record);
+      signal.addEventListener("abort", closed, { once: true });
+      record.release = () => signal.removeEventListener("abort", closed);
       record.timer = setTimeout(
         () => {
           this.discard(handle, record);
@@ -578,7 +594,8 @@ export class EgressForwarder {
       // Persistence may outlive the original deadline or cancellation. Never release late bytes.
       return this.records.get(handle) === record &&
         !signal.aborted &&
-        Date.parse(record.use.request.deadlineAt) > this.ports.now()
+        Date.parse(record.use.request.deadlineAt) > this.ports.now() &&
+        this.owns(record.association, record.use)
         ? safe
         : undefined;
     } finally {

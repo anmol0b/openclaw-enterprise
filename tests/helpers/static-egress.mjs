@@ -26,6 +26,7 @@ const require = createRequire(new URL("../../apps/controller/package.json", impo
 const grpc = require("@grpc/grpc-js");
 const loader = require("@grpc/proto-loader");
 import { openShellExchangeCapabilities as capabilities } from "../../apps/controller/src/drivers/egress-proxy/openshell-exchange-capabilities.ts";
+
 export const wireTime = (millis) => ({
   seconds: Math.floor(millis / 1000),
   nanos: (millis % 1000) * 1e6,
@@ -63,6 +64,7 @@ export async function staticEgressFixture(
     inertProviderRule = false,
     serviceTransport,
     admitRevision = true,
+    resolutionFinished,
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "oce-egress-wire-"));
@@ -440,11 +442,14 @@ export async function staticEgressFixture(
       authorization: request.headers.authorization,
       body: JSON.parse(Buffer.concat(body)),
     });
-    response
-      .writeHead(providerResponse.status, {
-        "content-type": providerResponse.contentType ?? "application/json",
-      })
-      .end(providerResponse.rawBody ?? JSON.stringify(providerResponse.body));
+    response.writeHead(providerResponse.status, {
+      "content-type": providerResponse.contentType ?? "application/json",
+    });
+    response.write(providerResponse.rawBody ?? JSON.stringify(providerResponse.body));
+    if (providerResponse.trailers) {
+      response.addTrailers(providerResponse.trailers);
+    }
+    response.end();
   });
   const providerPort = await listen(provider);
   t.after(() => {
@@ -602,47 +607,23 @@ export async function staticEgressFixture(
     publicKey: keys.publicKey.export({ format: "pem", type: "spki" }),
     sender: egress.sourceControl.sender,
   });
-  // Explicit synthetic acceptance owner; production transport has no such profile
-  // until installation-bound exchange authentication is implemented.
-  const accepted = new Map();
-  function fixtureRequestId() {
-    const id = requestId(now().getTime());
-    accepted.set(id, {
-      exchangeId: randomUUID(),
-      responseId: randomUUID(),
-      custodyId: randomUUID(),
-    });
-    return id;
-  }
-  const acceptance = {
-    capture(use) {
-      const association = accepted.get(use.id);
-      return (
-        association && {
-          ...association,
-          execution: use.installation.plan.execution,
-          installation: {
-            sandboxId: use.installation.sandboxId,
-            ...use.installation.enforcement,
-            plan: { id: use.installation.plan.id, generation: use.installation.plan.generation },
-          },
-        }
-      );
-    },
-    owns(association, use) {
-      const original = accepted.get(use.id);
-      return (
-        original !== undefined &&
-        original.exchangeId === association.exchangeId &&
-        original.responseId === association.responseId &&
-        original.custodyId === association.custodyId
-      );
-    },
-  };
-  let authority = createOpenShellEgressAuthority(
-    identity,
-    app.controller.createEgressForwarder(identity, acceptance),
-  );
+  // The optional observer lets a test wait until queued work finishes *after* its
+  // actual duplex was closed. It cannot substitute an identity, owner or result.
+  const authorityController = resolutionFinished
+    ? {
+        createEgressForwarder(...args) {
+          const forwarder = app.controller.createEgressForwarder(...args);
+          const resolve = forwarder.resolve.bind(forwarder);
+          forwarder.resolve = async (...input) => {
+            const result = await resolve(...input);
+            resolutionFinished(result);
+            return result;
+          };
+          return forwarder;
+        },
+      }
+    : app.controller;
+  let authority = createOpenShellEgressAuthority(identity, authorityController);
   const authorityPort = await bindOpenShellEgressAuthority(authority, "127.0.0.1:0", cert, key);
   t.after(() => authority.forceShutdown());
   const definition = loader.loadSync(
@@ -700,8 +681,13 @@ export async function staticEgressFixture(
   const capture = (body = { model: "fixture-model", input: "hello", store: false }) => ({
     audience: "oce-egress",
     deadline: wireTime(now().getTime() + 20_000),
+    response_custody: randomBytes(32),
+    verified_execution_policy_hash: installation.enforcement.policyHash,
     request: {
-      context: { request_id: fixtureRequestId(), sandbox_id: sandboxId },
+      context: {
+        request_id: requestId(now().getTime()),
+        sandbox_id: sandboxId,
+      },
       target: {
         scheme: "https",
         host: "provider.example.test",
@@ -756,6 +742,10 @@ export async function staticEgressFixture(
             status: response.statusCode,
             headers: [{ name: "content-type", value: response.headers["content-type"] }],
             body: Buffer.concat(chunks),
+            trailers: response.rawTrailers.flatMap((name, index, values) =>
+              index % 2 ? [] : [{ name, value: values[index + 1] }],
+            ),
+            response_complete: response.complete,
           });
         },
       );
@@ -763,36 +753,120 @@ export async function staticEgressFixture(
       outgoing.end(captured.request.body);
     });
   }
-  async function protect(captured, response, peer = metadata()) {
-    const stream = clients.HttpResponsePreReturn.Evaluate(peer, { deadline: Date.now() + 5000 });
-    const messages = [];
-    return new Promise((resolve, reject) => {
-      stream.on("error", reject);
-      stream.on("data", (message) => {
-        messages.push(message);
-        if (message.preflight_result?.inspect) {
-          stream.write({ body: { sequence: 1, data: response.body, end_of_stream: true } });
-        } else if (message.body_result?.transform) {
-          stream.write({ trailers: { headers: [] } });
-        } else {
-          // Exercise the supplier's complete documented exchange. NORMAL/DENIAL are
-          // best-effort notifications, not evidence that this policy decision was applied.
-          stream.write({ session_end: { reason: message.trailers_result ? 1 : 4 } });
-          stream.end();
-        }
-      });
-      stream.on("end", () =>
-        resolve(messages.find((message) => message.body_result) ?? messages.at(-1)),
-      );
-      stream.write({
-        preflight: {
-          context: captured.request.context,
-          status_code: response.status,
-          headers: response.headers,
-          permitted_body_modes: [2],
-        },
-      });
+  async function beginExchange(peer = metadata()) {
+    const stream = clients.HttpInstallationExchange.Exchange(peer, {
+      deadline: Date.now() + 5000,
     });
+    const queued = [];
+    const received = [];
+    const waiting = [];
+    let failure;
+    stream.on("data", (message) => {
+      received.push(message);
+      const waiter = waiting.shift();
+      if (waiter) {
+        waiter.resolve(message);
+      } else {
+        queued.push(message);
+      }
+    });
+    stream.on("error", (error) => {
+      failure = error;
+      for (const waiter of waiting.splice(0)) {
+        waiter.reject(error);
+      }
+    });
+    const next = () => {
+      if (queued.length) {
+        return Promise.resolve(queued.shift());
+      }
+      if (failure) {
+        return Promise.reject(failure);
+      }
+      return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+    };
+    stream.on("end", () => {
+      failure ??= new Error("Installation exchange ended without another message");
+      for (const waiter of waiting.splice(0)) {
+        waiter.reject(failure);
+      }
+    });
+    const { challenge } = await next();
+    return {
+      stream,
+      next,
+      challenge,
+      received,
+      opening(captured, privateKey = exchangeKeys.privateKey, boundChallenge = challenge) {
+        const encoded =
+          definition["openshell.middleware.v1.HttpCredentialResolveRequest"].serialize(captured);
+        return {
+          open: {
+            resolve_request: encoded,
+            signature: sign(
+              null,
+              Buffer.concat([Buffer.from("openshell-exchange-v1\0"), boundChallenge, encoded]),
+              privateKey,
+            ),
+          },
+        };
+      },
+    };
+  }
+  // These are real bidirectional exchanges. In this fixture only, the test caller
+  // owns the simulated downstream and gates synthetic provider access on the echoed custody.
+  const exchangeByHandle = new Map();
+  const exchangeByRequest = new WeakMap();
+  async function resolve(captured, peer) {
+    const exchange = await beginExchange(peer);
+    exchange.stream.write(exchange.opening(captured));
+    const { resolved } = await exchange.next();
+    if (resolved.ready) {
+      const handle = resolved.ready.operation_handle.toString("base64");
+      const entry = { captured, exchange };
+      exchangeByHandle.set(handle, entry);
+      exchange.stream.once("status", () => exchangeByHandle.delete(handle));
+      exchangeByRequest.set(captured, exchange);
+    }
+    return resolved;
+  }
+  async function authorize(permit, { cancelAfterMs } = {}) {
+    const handle = permit.operation_handle.toString("base64");
+    const { captured, exchange } = exchangeByHandle.get(handle);
+    const timer = cancelAfterMs && setTimeout(() => exchange.stream.cancel(), cancelAfterMs);
+    try {
+      exchange.stream.write({ authorize: permit });
+      const { authorized } = await exchange.next();
+      if (authorized.allowed) {
+        assert.deepEqual(authorized.allowed.response_custody, captured.response_custody);
+        assert.deepEqual(
+          authorized.allowed.credential_headers_sha256,
+          permit.credential_headers_sha256,
+        );
+      }
+      return authorized;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  async function protect(captured, response) {
+    const exchange = exchangeByRequest.get(captured);
+    exchange.stream.write({ response });
+    try {
+      const { response: result } = await exchange.next();
+      assert.equal(result.response_complete, true);
+      return result;
+    } catch (error) {
+      if (error.code !== grpc.status.PERMISSION_DENIED) {
+        throw error;
+      }
+      assert.equal(
+        exchange.received.filter((message) => message.response).length,
+        0,
+        "a refused complete response must release no response message, even a head",
+      );
+      return { blocked: true };
+    }
   }
   return {
     ...app,
@@ -814,71 +888,16 @@ export async function staticEgressFixture(
     observed,
     clients,
     metadata,
-    async beginExchange(peer = metadata()) {
-      const stream = clients.HttpInstallationExchange.Exchange(peer, {
-        deadline: Date.now() + 5000,
-      });
-      const queued = [];
-      const received = [];
-      const waiting = [];
-      let failure;
-      stream.on("data", (message) => {
-        received.push(message);
-        const waiter = waiting.shift();
-        if (waiter) {
-          waiter.resolve(message);
-        } else {
-          queued.push(message);
-        }
-      });
-      stream.on("error", (error) => {
-        failure = error;
-        for (const waiter of waiting.splice(0)) {
-          waiter.reject(error);
-        }
-      });
-      const next = () => {
-        if (queued.length) {
-          return Promise.resolve(queued.shift());
-        }
-        if (failure) {
-          return Promise.reject(failure);
-        }
-        return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
-      };
-      t.after(() => stream.cancel());
-      const { challenge } = await next();
-      return {
-        stream,
-        next,
-        challenge,
-        received,
-        opening(captured, privateKey = exchangeKeys.privateKey, boundChallenge = challenge) {
-          const encoded =
-            definition["openshell.middleware.v1.HttpCredentialResolveRequest"].serialize(captured);
-          return {
-            open: {
-              resolve_request: encoded,
-              signature: sign(
-                null,
-                Buffer.concat([Buffer.from("openshell-exchange-v1\0"), boundChallenge, encoded]),
-                privateKey,
-              ),
-            },
-          };
-        },
-      };
-    },
+    beginExchange,
+    resolve,
+    authorize,
     capture,
     permitRequest,
     send,
     protect,
     async restartAuthority() {
       authority.forceShutdown();
-      authority = createOpenShellEgressAuthority(
-        identity,
-        app.controller.createEgressForwarder(identity, acceptance),
-      );
+      authority = createOpenShellEgressAuthority(identity, authorityController);
       await bindOpenShellEgressAuthority(authority, "127.0.0.1:" + authorityPort, cert, key);
       for (const [name, client] of Object.entries(clients)) {
         client.close();
@@ -966,11 +985,17 @@ export async function syntheticDispatchFixture(t, receipts) {
     responsePolicy: ref(),
     deadlineMs: 30_000,
   };
+  const policyHash = "fb".repeat(32);
   const installation = {
     sender,
     sandboxId: peer.sandboxId,
     installedAt: new Date(now).toISOString(),
-    enforcement: { instanceId: peer.instanceId, configurationId: randomUUID() },
+    enforcement: {
+      instanceId: peer.instanceId,
+      configurationId: randomUUID(),
+      policyHash,
+      authorityScope: "execution",
+    },
     plan: {
       ...ref(),
       execution,
@@ -983,6 +1008,7 @@ export async function syntheticDispatchFixture(t, receipts) {
     id: requestId(now),
     method: "POST",
     url: route.origin + route.path,
+    verifiedExecutionPolicyHash: policyHash,
     headers: [["content-type", "application/json"]],
     body: Buffer.from(JSON.stringify({ model: "fixture-model", input: "hello", store: false })),
     deadlineAt,

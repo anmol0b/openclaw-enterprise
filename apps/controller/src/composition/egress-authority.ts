@@ -74,10 +74,7 @@ export async function installEgressAuthority(
     publicKey,
     sender: driver.sourceControl.sender,
   });
-  const server = createOpenShellEgressAuthority(
-    identity,
-    controller.createEgressForwarder(identity),
-  );
+  const server = createOpenShellEgressAuthority(identity, controller);
   try {
     await bindOpenShellEgressAuthority(
       server,

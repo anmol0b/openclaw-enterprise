@@ -100,6 +100,9 @@ export const credentialSourceHandlers = {
           namespaceId,
           credentialSourceId,
           ...(body?.adoption === undefined ? {} : { adoption: body.adoption as "live" }),
+          ...(body?.authorityScope === undefined
+            ? {}
+            : { authorityScope: body.authorityScope as "execution" }),
           ...(body?.secrets === undefined
             ? {}
             : { secrets: body.secrets as Record<string, SecretReference> }),

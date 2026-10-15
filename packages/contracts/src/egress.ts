@@ -105,6 +105,8 @@ export interface EgressInstallation {
   readonly enforcement: {
     readonly instanceId: string;
     readonly configurationId: string;
+    readonly policyHash: string;
+    readonly authorityScope: "execution";
     /** Public key bound by the adapter to this installation, never selected by a request. */
     readonly peerKeyId?: string;
   };
@@ -118,6 +120,8 @@ export interface EgressRequest {
   readonly body: Uint8Array;
   readonly deadlineAt: string;
   readonly bindingId?: string;
+  /** Execution policy observed on the intercepted connection, covered by the signed opening. */
+  readonly verifiedExecutionPolicyHash?: string;
 }
 
 export interface InferenceOperation {
@@ -167,6 +171,8 @@ export interface EgressResponse {
   readonly status: number;
   readonly headers: readonly (readonly [string, string])[];
   readonly body: Uint8Array;
+  /** Complete, ordered trailers, including an empty list when the upstream sent none. */
+  readonly trailers: readonly (readonly [string, string])[];
 }
 
 /** Installed trusted provider semantics; callers never supply code or an injection callback. */

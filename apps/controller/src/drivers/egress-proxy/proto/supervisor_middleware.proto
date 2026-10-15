@@ -74,6 +74,12 @@ message HttpCredentialResolveRequest {
   google.protobuf.Timestamp deadline = 2;
   // Exact operator-configured audience, also verified in the channel JWT.
   string audience = 3;
+  // 32 random bytes minted when the supervisor pins the accepted downstream
+  // response sink. The signed opening covers these bytes. Never log or reuse.
+  bytes response_custody = 4;
+  // Policy hash from the actual transparent workload connection, not a caller
+  // executable identity. Required by the whole-execution authority profile.
+  string verified_execution_policy_hash = 5;
 }
 
 message HttpCredentialResolveResponse {
@@ -131,6 +137,9 @@ message HttpCredentialSendPermit {
   // Finite deadline for starting this send, no later than the operation
   // deadline or material usability. Not cached or reused for another send.
   google.protobuf.Timestamp send_start_by = 4;
+  // Echo from the exact acknowledged dispatch. Match against the still-live
+  // pinned sink before sending and before releasing any response bytes.
+  bytes response_custody = 5;
 }
 
 message HttpCredentialRefusal {
@@ -695,6 +704,14 @@ message RequestContext {
   // Workspace the sandbox belongs to. For display and logging only; see the
   // sandbox guidance above.
   string workspace = 5;
+  VerifiedCredentialConnector verified_credential_connector = 6;
+}
+
+// Actual connecting executable, bound to the effective policy by the enrolled supervisor.
+message VerifiedCredentialConnector {
+  string path = 1;
+  string sha256 = 2;
+  string policy_hash = 3;
 }
 
 // HttpRequestTarget describes the admitted HTTP destination and request target.
@@ -833,6 +850,10 @@ message InstallationExchangeResponse {
   uint32 status = 1;
   repeated HttpHeader headers = 2;
   bytes body = 3;
+  // Every trailer, in arrival order. An empty list is meaningful only when
+  // response_complete is true. No part may be released before this decision.
+  repeated HttpHeader trailers = 4;
+  bool response_complete = 5;
 }
 message InstallationExchangeRequest {
   oneof event {

@@ -14,6 +14,9 @@ export interface AcceptedEgressAssociation {
     readonly instanceId: string;
     readonly configurationId: string;
     readonly peerKeyId?: string;
+    // Absent in historical receipts. Reading one never upgrades its authority.
+    readonly policyHash?: string;
+    readonly authorityScope?: "execution";
     readonly plan: EgressRef;
   };
   readonly exchangeId: string;
@@ -348,13 +351,18 @@ export function authorizedSend(value: unknown): AuthorizedSend {
   ]);
   const claimedInstallation = object(association.installation);
   const boundKey = "peerKeyId" in claimedInstallation;
+  const hasExecution = "authorityScope" in claimedInstallation;
   const installation = exact(claimedInstallation, [
     "sandboxId",
     "instanceId",
     "configurationId",
     ...(boundKey ? ["peerKeyId"] : []),
+    ...(hasExecution ? ["policyHash", "authorityScope"] : []),
     "plan",
   ]);
+  if (hasExecution && installation.authorityScope !== "execution") {
+    return invalid();
+  }
   return {
     association: {
       execution: {
@@ -370,6 +378,9 @@ export function authorizedSend(value: unknown): AuthorizedSend {
         instanceId: text(installation.instanceId),
         configurationId: text(installation.configurationId),
         ...(boundKey ? { peerKeyId: text(installation.peerKeyId) } : {}),
+        ...(hasExecution
+          ? { policyHash: text(installation.policyHash), authorityScope: "execution" as const }
+          : {}),
         plan: ref(installation.plan),
       },
       exchangeId: text(association.exchangeId),
