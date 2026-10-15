@@ -231,9 +231,6 @@ and session-bound plans, credentials and original outcomes through
 Acquisition observes and captures material inside the transport response callback
 through `apps/controller/src/drivers/repo/github/credentials/driver/acquisition-response.ts:observeAcquisitionResponse`.
 Its pure `classifyAcquisitionResponse` checks status, scope and usable lifetime;
-the provider `expires_at` must be a UTC timestamp in `Z` form
-(`YYYY-MM-DDTHH:MM:SS[.sss]Z`), and any other form, including an equivalent
-`+00:00` offset, is rejected as `invalid-response`;
 acquisition then rechecks admission synchronously before accepting the original
 credential. Rejected material retains its cleanup owner.
 Its bounded credential transport,
