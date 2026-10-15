@@ -278,6 +278,14 @@ cleanup material counts against session capacity and shutdown's
 
 ## GitHub response data
 
+The private `metadata-read` profile releases configured `{ id, full_name }` with
+fixed JSON and no-store headers only after HTTP 200 and matching provider
+identity. This protected metadata policy rejects actual trailers before release.
+Existing byte limits, general profiles, descriptions, streamed and bodyless
+responses remain unchanged.
+OpenShell's pre-return protocol returns bodies before trailers; joined enforcement
+remains unproved.
+
 Bounded REST JSON responses omit `temp_clone_token` from the repository object,
 its `parent` and `source` relationships, and pull-request `head.repo` and
 `base.repo`. GraphQL selecting `tempCloneToken` gets 400.

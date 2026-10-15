@@ -216,6 +216,11 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
           responseStall.reset();
           parts.push(Buffer.from(chunk));
         }
+        // Trailer declarations are not the trailers received at stream end.
+        // Opted-in bounded policies reject actual trailers before releasing any bytes.
+        if (plan.responsePolicy.trailers === "forbid" && upstream.rawTrailers.length !== 0) {
+          throw new Error("invalid-upstream");
+        }
         let bytes = Buffer.concat(parts);
         if (plan.responsePolicy.rewriteJson !== undefined) {
           const value: JsonValue = JSON.parse(bytes.toString("utf8"));

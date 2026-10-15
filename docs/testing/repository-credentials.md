@@ -6,6 +6,17 @@ TLS material, start bounded local upstreams, and remove their temporary files,
 listeners and containers when the tests finish. They do not load ambient
 GitHub credentials.
 
+The focused `tests/integration/protected-repository-metadata-read.test.mjs` proof
+combines the actual route policy and upstream sender with generated loopback TLS.
+A separate socket observer captures decrypted requests before origin parsing and
+origin responses through EOF; two client OS processes capture through FIN.
+It checks fixed identity projection, reflected synthetic credentials, route/body
+refusals, undeclared last trailers, and ordinary reads with benign trailers.
+Rejections match the service-owned `exchange-uncertain` response exactly.
+Its dispatch gate is test-only: this proves
+neither authenticated sibling execution nor joined authorization or installed
+runtime enforcement. OpenShell pre-return body delivery remains outside this proof.
+
 ## Reuse fixtures by ownership
 
 Fixtures under `tests/fixtures/repository-credentials/` separate data builders,

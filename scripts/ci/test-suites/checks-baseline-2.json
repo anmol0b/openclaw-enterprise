@@ -40,6 +40,7 @@
     "tests/integration/ci-image-reconciliation.test.mjs",
     "tests/conformance/repository-runtime-material.test.mjs",
     "tests/integration/repository-credentials-server-timeout.test.mjs",
+    "tests/integration/protected-repository-metadata-read.test.mjs",
     "tests/integration/repository-credentials-http.test.mjs",
     "tests/conformance/repository-credentials-fixture-ownership.test.mjs",
     "tests/integration/repository-credentials-projected-inputs.test.mjs",
@@ -336,6 +337,9 @@
     },
     {
       "path": "tests/integration/repository-credentials-config.test.mjs"
+    },
+    {
+      "path": "tests/integration/protected-repository-metadata-read.test.mjs"
     },
     {
       "path": "tests/integration/repository-credentials-http.test.mjs"
