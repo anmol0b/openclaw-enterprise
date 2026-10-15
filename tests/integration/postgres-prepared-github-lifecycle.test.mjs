@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { get } from "node:https";
+import { createServer, get } from "node:https";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -16,6 +16,7 @@ import {
   fixtureRepositoryId,
   fixtureRepository,
 } from "../fixtures/repository-credentials/github.mjs";
+import { listen } from "../fixtures/repository-credentials/process.mjs";
 import { createSystemClock } from "../../apps/controller/src/drivers/repo/credentials/clock.ts";
 import { PostgresPreparedGitHubLifecycle } from "../../apps/controller/src/drivers/repo/github/credentials/prepared-lifecycle.ts";
 
@@ -29,9 +30,11 @@ test(
     const key = join(dir, "custody.key");
     await writeFile(key, randomBytes(32), { mode: 0o600 });
     // A nine-minute provider lifetime puts renewal inside the owner's ten-minute lead.
+    let invalidScope = false;
     const gh = await startGitHubFixture(t, {
       clock: createSystemClock(),
       tokenLifetimeMs: 9 * 60_000,
+      tokenResponse: (packet) => (invalidScope ? { ...packet, repositories: [] } : packet),
     });
     const secretValue = gh.privateKey.export({ format: "pem", type: "pkcs8" });
     let lifecycle;
@@ -39,8 +42,8 @@ test(
     let issuer;
     let source;
     let registration;
-    const createOwner = () =>
-      new PostgresPreparedGitHubLifecycle(key, secretDriver, gh.origin, gh.tls.ca);
+    const createOwner = (origin = gh.origin) =>
+      new PostgresPreparedGitHubLifecycle(key, secretDriver, origin, gh.tls.ca);
     const f = await staticEgressFixture(t, {
       secretValue,
       createPreparedGitHub(opts) {
@@ -185,6 +188,59 @@ test(
     assert.deepEqual(reports, []);
     const renewed = await fresh.readWarm(source, signal);
     assert.notEqual(renewed.materialVersion, old.materialVersion);
+    // B is reachable with the same trusted CA and would falsely acknowledge A's revocation.
+    // Record only whether a credential arrived. A client must not rely on B rejecting A's token.
+    let credentialRequestsAtB = 0;
+    const originB = await listen(
+      t,
+      createServer(gh.tls, (req, res) => {
+        if (req.headers.authorization) {
+          credentialRequestsAtB++;
+        }
+        res.writeHead(204).end();
+      }),
+    );
+    const probeB = await new Promise((resolve, reject) => {
+      get(originB, { ca: gh.tls.ca }, (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      }).once("error", reject);
+    });
+    assert.equal(probeB, 204);
+    const restartedAtB = createOwner(originB);
+    await restartedAtB.connect(f.pool);
+    t.after(() => restartedAtB.close());
+    const pendingRetirements = async () =>
+      (
+        await f.pool.query(
+          `SELECT id, state, encode(sha256(sealed), 'hex') AS envelope FROM occ.prepared_github_attempts
+           WHERE source_id=$1 AND custody='retire' ORDER BY id`,
+          [source.key.source.id],
+        )
+      ).rows;
+    await t.test(
+      "worker restart at B cannot disclose or settle A's routine retirement",
+      async () => {
+        const pendingAtA = await pendingRetirements();
+        assert.deepEqual(
+          pendingAtA.map((r) => r.state),
+          ["committed"],
+        );
+        const attemptsAtA = gh.trace.length;
+        const checksAtB = await restartedAtB.maintain(signal);
+        assert.equal(credentialRequestsAtB, 0, "B received a credential from A");
+        assert.equal(checksAtB, "issuer-mismatch");
+        assert.equal(gh.trace.length, attemptsAtA, "stored origin must not redirect a worker to A");
+        assert.deepEqual(
+          await pendingRetirements(),
+          pendingAtA,
+          "custody or outcome changed under B",
+        );
+        assert.equal(await restartedAtB.ready(source, signal), false);
+        assert.equal(Boolean(await restartedAtB.readWarm(source, signal)), false);
+        assert.equal(await status(old.value), 200, "A still accepts the displaced token");
+      },
+    );
     await fresh.maintain(signal); // Drains the displaced token. GitHub confirms DELETE independently.
     assert.equal(await status(old.value), 401);
     assert.equal(await status(renewed.value), 200);
@@ -200,7 +256,44 @@ test(
     assert.equal(rotated.ownerEpoch, 2);
     assert.notEqual(rotated.inputVersion, old.inputVersion);
     assert.equal(await status(rotated.value), 200);
+    // A issued a real token, but its response cannot qualify the token for use. Withdrawal
+    // under B must preserve that exceptional cleanup candidate and A's now-displaced current token.
+    invalidScope = true;
+    await due();
+    assert.equal(await fresh.maintain(signal), "quarantined");
+    invalidScope = false;
+    await t.test(
+      "API restart at B cannot disclose A's quarantined issuance during withdrawal",
+      async () => {
+        const pending = await pendingRetirements();
+        assert.deepEqual(
+          pending.map((r) => r.state),
+          ["quarantined"],
+        );
+        const attemptsAtA = gh.trace.length;
+        await assert.rejects(restartedAtB.withdraw(source, signal), /unsettled provider attempt/);
+        assert.equal(credentialRequestsAtB, 0, "B received A's exceptional pending credential");
+        assert.equal(gh.trace.length, attemptsAtA);
+        const kept = await pendingRetirements();
+        assert.deepEqual(kept.map((r) => r.state).sort(), ["committed", "quarantined"]);
+        assert.deepEqual(
+          kept.find((r) => r.id === pending[0].id),
+          pending[0],
+        );
+        assert.equal(
+          gh.tokenState().filter((r) => !r.revoked).length,
+          2,
+          "A still owns both live tokens",
+        );
+      },
+    );
     await fresh.withdraw(source, signal);
+    assert.equal(
+      gh.tokenState().every((r) => r.revoked),
+      true,
+      "only A can confirm both retirements",
+    );
+    assert.deepEqual(await pendingRetirements(), []);
     assert.equal(await fresh.ready(source, signal), false);
     assert.equal(await fresh.readWarm(source, signal), undefined);
     assert.equal(

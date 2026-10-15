@@ -16,6 +16,7 @@ import type { PostgresPool } from "@openclaw-enterprise/occ";
 import type { AttemptContext } from "../../credentials/backend-contracts.ts";
 import { createSystemClock } from "../../credentials/clock.ts";
 import { createGitHubKeyOwner } from "./material.ts";
+import { preparationIssuerAuthority } from "./grants.ts";
 import { PreparedGitHubPostgres } from "./prepared-postgres.ts";
 import { createGitHubPreparationOwner } from "./prepared-owner.ts";
 import { createGitHubWarmReader } from "./prepared-reader.ts";
@@ -64,6 +65,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
   private readonly custodyKeyPath: string;
   private readonly secretDriver: SecretDriver;
   readonly apiOrigin: string;
+  private readonly issuerAuthority: string;
   private readonly ca: Uint8Array | undefined;
   constructor(
     custodyKeyPath: string,
@@ -74,7 +76,8 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     this.custodyKeyPath = custodyKeyPath;
     this.secretDriver = secretDriver;
     this.apiOrigin = githubProviderOrigin(apiOrigin);
-    this.ca = ca;
+    this.ca = ca && Buffer.from(ca);
+    this.issuerAuthority = preparationIssuerAuthority(this.apiOrigin, this.ca);
     if (!isAbsolute(custodyKeyPath) || !secretDriver.readCredentialInput) {
       throw new Error(
         "Prepared GitHub requires a custody key mount and authoritative issuer Secret Driver.",
@@ -89,7 +92,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
       throw new Error("Prepared GitHub custody key must contain 32 bytes.");
     }
     this.custodyKey = key;
-    this.repository = new PreparedGitHubPostgres(pool, key);
+    this.repository = new PreparedGitHubPostgres(pool, key, this.issuerAuthority);
   }
 
   private get db() {
@@ -135,6 +138,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     const { version } = await this.readIssuer(issuer, signal);
     await this.db.enroll(source, issuer, {
       familyId: key.source.id,
+      issuerAuthority: this.issuerAuthority,
       generation: key.source.generation,
       inputVersion: version,
       ownerEpoch: 1,
@@ -147,7 +151,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     const db = this.db;
     await db.withdraw(source);
     // Denial commits first; background cleanup still works if the API stops or loses the response.
-    while (await this.retire(source.key.source.id, signal)) {
+    while ((await this.retire(source.key.source.id, signal)) === "retired") {
       signal.throwIfAborted();
     }
     if (!(await db.withdrawalSettled(source))) {
@@ -230,8 +234,8 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
   private async retire(familyId: string | null, outer: AbortSignal) {
     outer.throwIfAborted();
     const candidate = await this.db.takeRetirement(familyId);
-    if (!candidate) {
-      return false;
+    if (!candidate || candidate === "issuer-mismatch") {
+      return candidate ?? "idle";
     }
     let revoked = false;
     const { bytes, admission: a, id } = candidate;
@@ -267,7 +271,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     if (!revoked) {
       throw new Error("Prepared GitHub token revocation is unconfirmed.");
     }
-    return true;
+    return "retired" as const;
   }
 
   startWorker(
@@ -282,10 +286,10 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
       this.running = this.maintain(stop.signal)
         .then((outcome) => {
           // Drain due families promptly; each claim independently moves the family scan forward.
-          if (outcome !== "idle") {
+          if (outcome !== "idle" && outcome !== "issuer-mismatch") {
             delay = 100;
           }
-          if (outcome === "quarantined" || outcome === "blocked") {
+          if (outcome === "quarantined" || outcome === "blocked" || outcome === "issuer-mismatch") {
             report("PREPARED_GITHUB_RECOVERY_REQUIRED");
           }
         })
@@ -305,11 +309,11 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
 
   /** One proactive worker pass; duplicates share the durable claim/attempt fence. */
   async maintain(outer: AbortSignal) {
-    await this.retire(null, outer);
+    const retirement = await this.retire(null, outer);
     const claim = randomUUID();
     const job = await this.db.claim(claim);
     if (!job) {
-      return "idle";
+      return retirement;
     }
     const signal = AbortSignal.any([outer, AbortSignal.timeout(25_000)]);
     const { source, issuer } = job;

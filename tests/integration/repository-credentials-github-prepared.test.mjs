@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { request } from "node:https";
+import { preparationIssuerAuthority } from "../../apps/controller/src/drivers/repo/github/credentials/grants.ts";
 import { createGitHubPreparationOwner } from "../../apps/controller/src/drivers/repo/github/credentials/prepared-owner.ts";
 import { createGitHubWarmReader } from "../../apps/controller/src/drivers/repo/github/credentials/prepared-reader.ts";
 import { createGitHubKeyOwner } from "../../apps/controller/src/drivers/repo/github/credentials/material.ts";
@@ -37,7 +38,9 @@ function readRepository(github, material) {
 
 async function setup(t, options = {}) {
   const clock = createControlledClock();
+  const github = await startGitHubFixture(t, { clock, ...options });
   const admission = {
+    issuerAuthority: preparationIssuerAuthority(github.origin, github.tls.ca),
     familyId: "family",
     generation: 1,
     ownerEpoch: 1,
@@ -54,7 +57,6 @@ async function setup(t, options = {}) {
   };
   const database = createPreparedStore(admission);
   const store = database.connect();
-  const github = await startGitHubFixture(t, { clock, ...options });
   const key = createGitHubKeyOwner({ privateKey: github.privateKey, appId: fixtureAppId, clock });
   t.after(() => key.close());
   let keyReads = 0;

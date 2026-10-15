@@ -13,6 +13,7 @@ import {
 import { createSystemClock } from "../../apps/controller/src/drivers/repo/credentials/clock.ts";
 import {
   createGitHubPreparationOwner,
+  preparationIssuerAuthority,
   createGitHubWarmReader,
   createGitHubKeyOwner,
 } from "../../apps/controller/src/drivers/repo/github/credentials/index.ts";
@@ -54,6 +55,7 @@ test("consented protected repository read uses only exact, already prepared meta
         const { id, generation } = source.key.source;
         admission = {
           familyId: id,
+          issuerAuthority: preparationIssuerAuthority(gh.origin, gh.tls.ca),
           generation,
           ownerEpoch: 1,
           inputVersion: "fixture-key-1",
