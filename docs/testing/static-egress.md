@@ -160,9 +160,12 @@ OCC_HELM_BIN=/absolute/bin/helm node --test --test-name-pattern='protected autho
 
 The Go case runs the release coordinator with command-boundary fixtures, loads
 its output through real controller composition, checks the generated server
-certificate, and renders both charts with real Helm. It proves configuration,
-credential projection, database selection and startup ordering, not a cluster,
-PostgreSQL execution or installed middleware negotiation. The wire cases use
+certificate, and renders both charts with real Helm. The first release requests
+zero workers. A successful Gateway rollout leads to one worker, while a failed
+rollout ends the installation without ever requesting a worker. This checks
+configuration, credential projection, database selection and startup ordering.
+Cluster behavior, PostgreSQL execution and installed middleware negotiation
+require connected verification. The wire cases use
 generated CA/client certificates and actual loopback gRPC TLS, including DNS and
 IP server identity, foreign-client refusal and absence of client credentials on
 the separate service transport. They do not prove OpenShell's role mapping.

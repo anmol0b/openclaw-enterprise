@@ -564,9 +564,11 @@ func TestKubernetesOnlyControlPlaneKeepsPostgreSQLAcrossClusterRestart(t *testin
 	render := exec.Command(realHelm, "template", "openclaw-enterprise", "deploy/helm/openclaw-enterprise",
 		"--namespace", "oce-system", "-f", filepath.Join(state.directory, "helm-values.json"))
 	render.Dir = state.Repository
-	if output, err := render.CombinedOutput(); err != nil {
+	output, err := render.CombinedOutput()
+	if err != nil {
 		t.Fatalf("the chart rejected the generated values: %v\n%s", err, output)
 	}
+	assertDevelopmentReplicas(t, output, 1)
 }
 
 func candidateOpenShellEnvironment() map[string]string {

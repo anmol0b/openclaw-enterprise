@@ -316,6 +316,8 @@ resources:
     memory: 512Mi
 
 worker:
+  # Set to 0 to install the API and run initialization before starting the worker.
+  replicaCount: 1
   pollIntervalMs: 250
   leaseDurationMs: 5000
   maxAttempts: 5

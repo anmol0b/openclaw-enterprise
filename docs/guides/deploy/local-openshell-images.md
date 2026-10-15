@@ -80,10 +80,14 @@ Compute still verifies the installed capabilities before releasing a workload.
 The profile registers the authority, generates its server certificate, and uses
 OpenShell's native PKI hook for Gateway server/client certificates and extension
 signing keys. Only the API and worker receive the administrative mTLS client key.
-The authority receives only the issuer public key. Gateway installation precedes
-OCE installation; Gateway readiness waits until the authority can answer its
-registry negotiation. A failure uses the normal owned-cluster rollback and
-retained-state recovery path.
+The authority receives only the issuer public key.
+
+The launcher installs the Gateway, then installs the OCE API with zero workers so
+the Gateway can reach the authority during startup. After it applies tenant access
+and network policies and the Gateway rollout succeeds, a Helm upgrade starts one
+worker to reconcile the bootstrap Namespace. If a prerequisite fails, the launcher
+returns that error and follows its owned-cluster rollback and retained-state recovery
+path. A successful rollout does not guarantee that the first reconciliation succeeds.
 
 `OCC_DEVELOPMENT_DATABASE_NAME` is optional. When selected it must match
 `openclaw_k8s_[a-z0-9_]+` and be at most 63 characters. The launcher uses it for

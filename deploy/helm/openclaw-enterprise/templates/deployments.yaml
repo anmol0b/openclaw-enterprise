@@ -9,12 +9,17 @@ metadata:
   labels:
     {{- include "openclaw.labels" (dict "root" $ "component" $component) | nindent 4 }}
 spec:
-  replicas: 1
   {{- if eq $component "api" }}
+  replicas: 1
   # One serving controller: sign-in limits and session admission are process-local.
   strategy:
     type: Recreate
   {{- else }}
+  {{- $replicas := toString $.Values.worker.replicaCount }}
+  {{- if not (has $replicas (list "0" "1")) }}
+    {{- fail "worker.replicaCount must be 0 or 1" }}
+  {{- end }}
+  replicas: {{ $replicas }}
   strategy:
     {{- if $.Values.repositoryCredentials.enabled }}
     type: Recreate

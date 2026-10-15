@@ -1,6 +1,7 @@
 package occdev
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/pem"
@@ -102,6 +103,11 @@ func TestDevelopmentDatabaseSelectorIsDisposable(t *testing.T) {
 // supplier chart with OCC_TEST_OPENSHELL_CHART requires both tools and renders
 // both charts. This proves packaging/order, not Kubernetes or PostgreSQL.
 func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *testing.T) {
+	t.Run("gateway ready", func(t *testing.T) { testProtectedPlatformInstallation(t, "0") })
+	t.Run("gateway rollout fails", func(t *testing.T) { testProtectedPlatformInstallation(t, "42") })
+}
+
+func testProtectedPlatformInstallation(t *testing.T, rolloutExit string) {
 	// Resolve the real tools before PATH is replaced by the command fixtures.
 	supplierChart := os.Getenv("OCC_TEST_OPENSHELL_CHART")
 	gatewayChart := supplierChart
@@ -119,6 +125,33 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 	state.ProtectedEgress = true
 	state.DatabaseName = "openclaw_k8s_connected"
 	state.OpenShellHostGatewayIP = "172.30.42.1"
+	// At each OCE release boundary, render the actual Helm arguments, dropping
+	// only cluster-operation flags. Save the initial values to catch persisting
+	// a temporary zero or changing the steady-state inputs at worker activation.
+	render := ":"
+	if helmErr == nil {
+		t.Setenv("RELEASE_DIR", state.directory)
+		render = `
+revision=install
+upgrade=
+case " $* " in
+  *" --install "*) /bin/cp "$RELEASE_DIR/helm-values.json" "$RELEASE_DIR/install-values" || exit 1 ;;
+  *) revision=upgrade; upgrade=--is-upgrade
+     /usr/bin/cmp "$RELEASE_DIR/install-values" "$RELEASE_DIR/helm-values.json" || exit 1 ;;
+esac
+shift # upgrade
+skip=
+for arg do
+  shift
+  if [ -n "$skip" ]; then skip=; continue; fi
+  case "$arg" in
+    --install|--wait) ;;
+    --timeout|--kubeconfig|--kube-context) skip=1 ;;
+    *) set -- "$@" "$arg" ;;
+  esac
+done
+` + shellQuote(helm) + ` template "$@" $upgrade --show-only templates/deployments.yaml > "$RELEASE_DIR/$revision.yaml"`
+	}
 	assets := &openShellDevelopmentAssets{gatewayChart: gatewayChart, gatewayImage: "registry.example/gateway@" + profileTestDigest,
 		sandboxImage: "registry.example/sandbox@" + profileTestDigest, supervisorImage: "registry.example/supervisor@" + profileTestDigest,
 		workspaceResources: []any{map[string]any{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": map[string]string{"name": "openshell-sandbox"}}}}
@@ -136,31 +169,37 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 "-n default get endpoints kubernetes -o jsonpath={.subsets[0].addresses[0].ip}") echo 172.30.42.3 ;;
 "-n default get endpoints kubernetes -o jsonpath={.subsets[0].ports[0].port}") echo 6443 ;;
 "-n oce-system rollout status deployment/occ-development-api-proxy "*) ;;
-"rollout status statefulset/openshell-gateway --namespace oce-system --timeout 1m0s") ;;`,
+"rollout status statefulset/openshell-gateway --namespace oce-system --timeout 1m0s") exit ` + rolloutExit + ` ;;`,
 		"docker": `"exec k3d-occ-dev-owned-server-0 ip route get 10.42.0.2") echo '10.42.0.2 dev cni0 src 10.42.0.1' ;;
 "network inspect k3d-occ-dev-owned") echo '[{"IPAM":{"Config":[{"Subnet":"172.30.42.0/24"}]}}]' ;;`,
 		"helm": `"upgrade --install openshell-gateway "*) ;;
-"upgrade --install openclaw-enterprise "*) ;;`,
+"upgrade "*"openclaw-enterprise deploy/helm/openclaw-enterprise "*) ` + render + ` ;;`,
 	})
 	r := newRunner(Options{Repository: state.Repository})
 	r.engine = "docker"
-	if err := r.installDevelopmentPlatform(context.Background(), state, developmentPlatformInputs{
+	err := r.installDevelopmentPlatform(context.Background(), state, developmentPlatformInputs{
 		openShell: assets, runtimeImage: "registry.example/runtime@" + profileTestDigest,
 		controllerImage: "registry.example/controller@" + profileTestDigest, postgresImage: "registry.example/postgres@" + profileTestDigest,
-	}, time.Minute); err != nil {
+	}, time.Minute)
+	if rolloutExit != "0" {
+		if err == nil || !strings.Contains(err.Error(), "OpenShell Gateway rollout") || !strings.Contains(err.Error(), "exit status "+rolloutExit) {
+			t.Errorf("expected protected Gateway rollout failure with exit %s, got %v", rolloutExit, err)
+		}
+	} else if err != nil {
 		t.Fatalf("platform packaging failed: %v\n%s", err, strings.Join(commands(), "\n"))
 	}
-	find := func(prefix string) int {
-		i := slices.IndexFunc(commands(), func(s string) bool { return strings.HasPrefix(s, prefix) })
+	log := commands()
+	find := func(operation string) int {
+		i := slices.IndexFunc(log, func(s string) bool { return strings.Contains(s, operation) })
 		if i < 0 {
-			t.Fatalf("missing operation %s", prefix)
+			t.Fatalf("missing operation %s", operation)
 		}
 		return i
 	}
 	authority := find("kubectl apply -f " + filepath.Join(state.directory, "egress-tls.json"))
 	gateway := find("helm upgrade --install openshell-gateway ")
 	kid := find("kubectl get secret openshell-gateway-jwt-keys ")
-	control := find("helm upgrade --install openclaw-enterprise ")
+	control := find("openclaw-enterprise deploy/helm/openclaw-enterprise ")
 	ready := find("kubectl rollout status statefulset/openshell-gateway ")
 	if authority >= gateway {
 		t.Fatal("the egress authority TLS material must exist before the Gateway installs")
@@ -168,14 +207,43 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 	if gateway >= kid || kid >= control {
 		t.Fatal("the Gateway key identifier must be read after Gateway install and before OCE install")
 	}
-	if gateway >= control || control >= ready {
-		t.Fatal("the Gateway readiness gate must follow OCE installation")
+	access := find("kubectl apply -f " + filepath.Join(state.directory, "development-tenant-access.json"))
+	network := find("kubectl apply -f " + filepath.Join(state.directory, "openshell-network-policies.json"))
+	if !(control < access && access < network && network < ready) {
+		t.Fatal("expected initial OCE release, tenant access, network policies, then Gateway rollout")
 	}
-	if strings.Contains(commands()[gateway], "--wait") || !strings.Contains(commands()[control], "--wait") {
+	checkWorkerAccess(t, state.directory, state.PlatformNamespace)
+	if helmErr == nil {
+		assertDevelopmentReleaseReplicas(t, state.directory, "install.yaml", 0)
+	}
+	if strings.Contains(log[gateway], "--wait") || !strings.Contains(log[control], "--wait") {
 		t.Fatal("incorrect release readiness gates")
 	}
-	if strings.Contains(strings.Join(commands(), "\n"), "create secret generic openshell-gateway-jwt-keys") {
+	if strings.Contains(strings.Join(log, "\n"), "create secret generic openshell-gateway-jwt-keys") {
 		t.Fatal("protected mode must leave complete PKI generation to OpenShell")
+	}
+	// The fixture rejects direct scaling or unexpected commands. Check the full
+	// OCE release history so a later zero cannot conceal an early worker request.
+	releases := slices.DeleteFunc(slices.Clone(log), func(s string) bool {
+		return !(strings.HasPrefix(s, "helm ") && strings.Contains(s, " openclaw-enterprise "))
+	})
+	const initialWorker = "--install --set worker.replicaCount=0"
+	initial := log[control]
+	if !strings.Contains(initial, initialWorker) || strings.Contains(initial, "--no-hooks") {
+		t.Errorf("first OCE release must keep hooks and request no workers: %s", initial)
+	}
+	if rolloutExit != "0" {
+		if ready != len(log)-1 || len(releases) != 1 {
+			t.Fatalf("failed Gateway rollout must stop after the first OCE release; commands:\n%s", strings.Join(log, "\n"))
+		}
+		return
+	}
+	want := strings.Replace(initial, initialWorker, "--set worker.replicaCount=1", 1)
+	if !slices.Equal(log[ready+1:], []string{want}) || len(releases) != 2 {
+		t.Fatalf("expected one OCE upgrade activating the worker after Gateway rollout; commands:\n%s", strings.Join(log, "\n"))
+	}
+	if helmErr == nil {
+		assertDevelopmentReleaseReplicas(t, state.directory, "upgrade.yaml", 1)
 	}
 
 	// Use the actual startup parser/Driver composition, without provider or cluster I/O.
@@ -240,7 +308,8 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 		return
 	}
 	renders := []struct{ name, chart, values string }{
-		{"openclaw-enterprise", filepath.Join(state.Repository, "deploy/helm/openclaw-enterprise"), "helm-values.json"},
+		// Later repository setup upgrades from the saved values, without an override.
+		{"openclaw-enterprise", filepath.Join(state.Repository, "deploy/helm/openclaw-enterprise"), "install-values"},
 	}
 	if supplierChart != "" {
 		renders = append(renders, struct{ name, chart, values string }{"openshell-gateway", supplierChart, "openshell-protected-values.json"})
@@ -264,22 +333,61 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 			}
 			continue
 		}
-		decoder := yaml.NewDecoder(strings.NewReader(string(out)))
-		count := 0
-		for {
-			var object map[string]any
-			if err := decoder.Decode(&object); err != nil {
-				if err == io.EOF {
-					break
-				}
-				t.Fatal(err)
-			}
-			if object["kind"] != nil {
-				count++
-			}
+		assertDevelopmentReplicas(t, out, 1)
+	}
+}
+
+func assertDevelopmentReleaseReplicas(t *testing.T, dir, name string, workers int) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDevelopmentReplicas(t, data, workers)
+}
+
+func assertDevelopmentReplicas(t *testing.T, manifest []byte, workers int) {
+	t.Helper()
+	var deployments []any
+	decoder := yaml.NewDecoder(bytes.NewReader(manifest))
+	for {
+		var obj map[string]any
+		if err := decoder.Decode(&obj); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
 		}
-		if count == 0 {
-			t.Fatalf("%s rendered no resources", selected.name)
+		if obj["kind"] == "Deployment" {
+			deployments = append(deployments, obj)
+		}
+	}
+	for component, replicas := range map[string]int{"api": 1, "worker": workers} {
+		name := "openclaw-enterprise-" + component
+		obj := manifestByKind(t, deployments, "Deployment", name)
+		if n := field(t, obj, "spec", "replicas"); n != float64(replicas) {
+			t.Errorf("%s Deployment requests %v replicas; want %d", name, n, replicas)
+		}
+	}
+}
+
+func checkWorkerAccess(t *testing.T, dir, namespace string) {
+	t.Helper()
+	const workspaceRole = "openclaw-development-openshell-workspace-rbac"
+	bindings := map[string]string{"openclaw-development-tenant-worker": "openclaw-enterprise-openclaw-tenant-worker", workspaceRole: workspaceRole}
+	access := readJSONFile(t, filepath.Join(dir, "development-tenant-access.json"))
+	for name, role := range bindings {
+		binding := manifestByKind(t, access["items"].([]any), "ClusterRoleBinding", name)
+		subject := field(t, binding, "subjects", 0).(map[string]any)
+		if subject["kind"] != "ServiceAccount" || subject["name"] != "openclaw-enterprise-worker" ||
+			subject["namespace"] != namespace || field(t, binding, "roleRef", "name") != role {
+			t.Fatalf("%s must grant %s to the development worker account", name, role)
+		}
+	}
+	policies := readJSONFile(t, filepath.Join(dir, "openshell-network-policies.json"))["items"].([]any)
+	for _, name := range []string{"openclaw-enterprise-openshell-egress", "openclaw-development-openshell-ingress"} {
+		policy := manifestByKind(t, policies, "NetworkPolicy", name)
+		if field(t, policy, "metadata", "namespace") != namespace {
+			t.Fatalf("expected %s policy in %s", name, namespace)
 		}
 	}
 }

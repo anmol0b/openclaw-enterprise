@@ -1,7 +1,7 @@
 ---
 created: "2026-09-21"
 updated: 2026-10-15
-last_updated_session: authoring-run/c11897e0-33a6-4276-b620-aaec6d57ab00
+last_updated_session: authoring-run/acc80b35-b98a-4e59-83ac-8fd4bf78050e
 ---
 
 # OpenShell Sandbox provisioning flow
@@ -89,16 +89,14 @@ graph TD
 The Installation selects OpenShell, the Gateway, Sandbox and Credential Gateway;
 `binaries` lists x64/ARM64 Codex. Credential-source profiles govern legacy egress.
 
-`scripts/dev-up` invokes `occ dev up`; `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes`
-selects Kubernetes-only. Its preflight rejects port collisions before recording
-engine, cluster, namespace, port and key destination.
+`scripts/dev-up` runs `occ dev up`. With `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes`,
+preflight rejects port collisions, then records engine, cluster, namespace, port and key destination.
 
-Both profiles import larger OCE images before pinned Sandbox and supervisor
-images so k3s garbage collection cannot evict idle OpenShell images. Launchers
-[validate three local digest and revision pairs](../guides/deploy/local-openshell-images.md)
-before resource creation; absent selectors use the release. `prepareOpenShell`
-rechecks candidates; image import forbids candidate pulls and retains collision,
-Linux and cleanup checks. Helm receives all three images with pull policy `Never`.
+Both profiles import larger OCE images first, avoiding k3s eviction of idle OpenShell images.
+Launchers [verify three local image digests and revisions](../guides/deploy/local-openshell-images.md)
+before creating resources. Omitting selectors uses the release. `prepareOpenShell`
+rechecks candidates. Import preserves collision, Linux and cleanup checks. Neither
+import nor Helm pulls candidate images.
 
 On Sandbox rollout failure, `captureAgentSandboxRollout` reads only the fixed
 Deployment, UID-linked ReplicaSets and Pods, and associated Warning reasons.
@@ -107,17 +105,19 @@ the original error for rollback. Its 15-second context allows three seconds and
 256 KiB per command, 32 KiB per record. Pipe draining cannot kill descendants;
 writer latency and durability are outside the budget.
 
-After Helm, `network.providerHarness` records Gateway ClusterIP, Pod selector and
-TCP/8080. The Agent Gateway aliases only the advertised hostname, preserving HTTP
-Host; NetworkPolicy restricts access to those Pods/port.
+After Helm, `network.providerHarness` records Gateway ClusterIP, Pod selector and TCP/8080.
+The Agent Gateway aliases only the advertised hostname, preserving HTTP Host.
+NetworkPolicy limits access to those Pods and port.
 
-[Compose](../guides/deploy/local-kubernetes-development.md) runs PostgreSQL, OCC
-and the k3d worker. Kubernetes-only uses `oce-system` and in-cluster auth.
-Private Envoy routing and operator Workspaces restrict Gateway access to API,
-worker, supervisor callbacks and Agent Gateways. `prepareComposeRoutingFiles`
-sets private routing-file ownership; Installation files remain `0644` in private
-state. Cleanup validates engine and state, removes only the recorded cluster,
-project and volumes, and preserves recovery state on failure.
+[Compose](../guides/deploy/local-kubernetes-development.md) runs PostgreSQL, OCC and the k3d worker.
+Kubernetes-only uses `oce-system` and in-cluster auth. Private Envoy routing and
+operator Workspaces admit only API, worker, supervisor callbacks and Agent Gateways.
+`prepareComposeRoutingFiles` sets private ownership. Installation files are `0644`
+in private state. Cleanup verifies ownership, removes recorded resources and retains recovery state on failure.
+
+In [protected development](../guides/deploy/local-openshell-images.md#select-the-protected-profile),
+initialization and the API start with zero workers. Only after tenant access, network
+policies and Gateway rollout succeed does Helm request one worker.
 
 ### 1. Prepare the Namespace and OpenShell Workspace
 
@@ -358,6 +358,8 @@ networking. Native OpenClaw remains verification-only.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 18:46: Defer protected development worker startup. (authoring-run/acc80b35-b98a-4e59-83ac-8fd4bf78050e - 05750c084)
 
 - 2026-10-15 02:25: Distinguish API-key and PAT isolation. (authoring-run/c11897e0-33a6-4276-b620-aaec6d57ab00 - 07eb950b5)
 

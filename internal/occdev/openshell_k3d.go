@@ -449,15 +449,7 @@ func (r *runner) installDevelopmentPlatform(ctx context.Context, state *developm
 			return err
 		}
 	}
-	if err := r.installKubernetesControlPlane(ctx, state, inputs.controllerImage, inputs.postgresImage, inputs.routingPodCIDR != "", timeout); err != nil {
-		return err
-	}
-	if state.ProtectedEgress {
-		if err := r.waitProtectedOpenShell(ctx, state, timeout); err != nil {
-			return err
-		}
-	}
-	return nil
+	return r.installKubernetesControlPlane(ctx, state, inputs.controllerImage, inputs.postgresImage, inputs.routingPodCIDR != "", timeout)
 }
 
 // kubernetesOnlyClusterArgs pins the k3d node and keeps verified local images
@@ -784,15 +776,33 @@ func (r *runner) installKubernetesControlPlane(ctx context.Context, state *devel
 	if err := exclusiveWrite(valuesPath, valuesData, 0600); err != nil {
 		return err
 	}
-	if err := r.helmUpgrade(ctx, state, valuesPath, timeout); err != nil {
+	// The protected Gateway needs the API's authority to become ready. Keep
+	// the worker from claiming bootstrap work until its access and Gateway are
+	// in place. Override only this release, not the saved steady-state values.
+	install := []string{"--install"}
+	if state.ProtectedEgress {
+		install = append(install, "--set", "worker.replicaCount=0")
+	}
+	if err := r.helmUpgrade(ctx, state, valuesPath, timeout, install...); err != nil {
 		return err
 	}
-	return r.installDevelopmentAPIProxy(ctx, state, controllerImage, timeout)
+	if err := r.installDevelopmentAPIProxy(ctx, state, controllerImage, timeout); err != nil {
+		return err
+	}
+	if !state.ProtectedEgress {
+		return nil
+	}
+	if err := r.waitProtectedOpenShell(ctx, state, timeout); err != nil {
+		return fmt.Errorf("wait for protected OpenShell Gateway rollout before starting worker: %w", err)
+	}
+	return r.helmUpgrade(ctx, state, valuesPath, timeout, "--set", "worker.replicaCount=1")
 }
 
 // helmUpgrade installs or upgrades the chart from one complete values file.
-func (r *runner) helmUpgrade(ctx context.Context, state *developmentState, valuesPath string, timeout time.Duration) error {
-	return r.run(ctx, "helm", "upgrade", "--install", "openclaw-enterprise", "deploy/helm/openclaw-enterprise", "--namespace", state.PlatformNamespace, "--kubeconfig", filepath.Join(state.directory, "kubeconfig"), "--kube-context", "k3d-"+state.Cluster, "-f", valuesPath, "--wait", "--timeout", timeout.String())
+func (r *runner) helmUpgrade(ctx context.Context, state *developmentState, valuesPath string, timeout time.Duration, options ...string) error {
+	args := append([]string{"upgrade"}, options...)
+	args = append(args, "openclaw-enterprise", "deploy/helm/openclaw-enterprise", "--namespace", state.PlatformNamespace, "--kubeconfig", filepath.Join(state.directory, "kubeconfig"), "--kube-context", "k3d-"+state.Cluster, "-f", valuesPath, "--wait", "--timeout", timeout.String())
+	return r.run(ctx, "helm", args...)
 }
 
 // applyDevelopmentRestartEgress keeps the control plane connected after

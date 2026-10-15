@@ -414,7 +414,7 @@ func (r *runner) enableDevelopmentRepository(ctx context.Context, state *develop
 	if err := replaceDevelopmentFile(valuesPath, valuesData); err != nil {
 		return err
 	}
-	if err := r.run(ctx, "helm", "upgrade", "openclaw-enterprise", "deploy/helm/openclaw-enterprise", "--namespace", namespace, "--kubeconfig", filepath.Join(state.directory, "kubeconfig"), "--kube-context", "k3d-"+state.Cluster, "-f", valuesPath, "--wait", "--timeout", timeout.String()); err != nil {
+	if err := r.helmUpgrade(ctx, state, valuesPath, timeout); err != nil {
 		return err
 	}
 	if err := r.run(ctx, "kubectl", "-n", namespace, "rollout", "status", "deployment/openclaw-enterprise-worker", "--timeout", timeout.String()); err != nil {
