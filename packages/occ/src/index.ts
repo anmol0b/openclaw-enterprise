@@ -4781,8 +4781,8 @@ export class OpenClawController {
       // The gateway step repeats these reads; making them first means a transient failure
       // refuses the request before it leaves a mark that only a later update can clear.
       await this.readCredentialSourceSecrets(state, principalId, namespace, secretRefs);
+      const placed = await this.credentialNamespace(namespace);
       if (type.rotation === "refresh") {
-        const placed = await this.credentialNamespace(namespace);
         assertCredentialGatewayHoldsSource(
           await this.credentialGatewayOperation(() =>
             gateway.sourceStatus({
