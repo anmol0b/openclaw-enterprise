@@ -8,40 +8,33 @@ rfc: index.md
 receiving the provider credential. The security principal is the **whole admitted Agent execution**.
 If a repository read is allowed, the Agent, its child process and code it downloads can all make
 that read and see the permitted response. Another execution, even of the same Agent, has no claim
-on that exchange. The [contracts](contracts.md) specify how to enforce this boundary. The evidence
+on that exchange. The [protocol](protocol.md) specifies how to enforce this boundary. The evidence
 below is required before relying on it.
 
-## Where authority and secrets reside
+## Trust boundary
 
-| Caller | Authority and exposure |
-| --- | --- |
-| Agent in protected mode | Sandbox prevents direct egress. Before queuing, the trusted sender binds the request **and its response destination** to the authenticated execution and exact supervisor installation. The installation receipt says which installation to expect. The connection must prove it, for example with a supervisor-only client key enrolled to that verified installation. A sandbox bearer presented first, an old receipt or a relay that sees only voluntary traffic is insufficient. Refuse admission if provenance or enforcement is unavailable. |
-| Agent in explicit unprotected mode | OCE gives the Agent a control-plane identity but does not govern its direct network requests. Admit no managed binding, clone, policy route or provider credential, including an ambient substitute. Protection is versioned independently of binding count. A protected execution with no effective routes denies all egress. |
-| Trusted repository bootstrap | Authenticated delegation covers this executor, execution, repository and original deadline. Each Git operation needs current authority and already prepared material. Compute gates startup on observed clone success and retains ownership of partial-workspace cleanup. |
-| Configuration or discovery in OCC | Authenticate the service and initiating user, capture the business operation, then authorize preparation for that source, scope and destination. The trusted sender in the OpenClaw Control Plane (OCC) checks authority before material access and again before each send. Return a sanitized business response, never a token or a callback that can consume one. |
+The protected Sandbox must prevent bypass and establish the request's execution and
+installation provenance. A copied installation receipt or a relay that sees only
+voluntary traffic is insufficient. The [admission contract](contracts.md#admission-and-configuration)
+defines protected and unprotected modes; unavailable provenance or enforcement fails admission.
 
-OCE alone holds the GitHub App key, signs and exchanges the App JWT, validates the actual repository
-grant and expiry, and commits encrypted installation tokens. OCE owns background renewal,
-withdrawal and fenced takeover. OpenShell may own a *different* credential family. An Agent request
-can read eligible committed material during an issuer outage. A cold or expired lookup cannot
-issue, refresh or schedule preparation. An authority partition or unavailable Resolver fails closed.
+The sender, Resolver, credential owner, Secret Driver and their configuration are trusted.
+A custody handle cannot confine hostile code in a trusted process, and a route cannot
+constrain a bearer stolen there. Keep keys, tokens and handles out of the Agent, UI and
+diagnostics. Record nonsecret caller, scope, purpose, version and attempt evidence.
+An authority partition or unavailable Resolver fails closed.
 
-The sender, Resolver, credential owner, Secret Driver and their configuration are trusted. A custody handle
-cannot confine hostile code in a trusted process, and a route cannot constrain a bearer stolen there.
-Keep keys, tokens and handles out of the Agent, UI and diagnostics. Record nonsecret caller, scope,
-purpose, version and attempt evidence. Check response status, headers, body, trailers and encoding on
-errors as well as success. Start with a bounded response withheld in full until accepted. Blocking
-it cannot undo a provider action, and streaming needs protection at each release boundary.
+## Qualification
 
-## Required verification on the protected path
+### First protected operation
 
-Start with one bodyless metadata read of repository `123` and a recognizable, safe response. Record
-**source**, **independent contract-peer**, **installed runtime** and **live-provider** evidence
-separately. The peer exercises the portable contract. The actual protected OpenShell composition,
-including local use, must demonstrate channel ownership and bypass prevention. Record exact versions,
-policy, custody, clocks and deadlines. Accepted configuration, usable material, installation of the
-exact policy and a serving Agent are four separate observations. No-op CI establishes none of the
-protected-path guarantees.
+Start with a bodyless read of repository `123` and a recognizable, safe response; withhold
+the bounded response until policy accepts it. Record **source**, **independent contract-peer**, **installed runtime** and
+**live-provider** evidence separately. The peer exercises the portable contract. The protected
+OpenShell composition, including local use, must demonstrate channel ownership and bypass
+prevention. Record versions, policy, custody, clocks and deadlines. Configuration, usable
+material, exact policy installation and a serving Agent are separate observations. No-op CI
+establishes none of the protected-path guarantees.
 
 For each exchange, count allowed access permits, released send permits, material reads, requests
 observed at the provider, and response bytes **at each recipient**. Record denials too. A missing
@@ -59,33 +52,37 @@ installations. Current state may invalidate A's exchange but can never relabel i
 | Lose the provider reply *after a write* | Record the send permit and write; the provider effect remains uncertain. One permit does not prove exactly-once delivery. Never replay to resolve the uncertainty. |
 | Lose the credential-rejection acknowledgment, then restart and redeliver | Before acknowledgment, durably deduplicate the authenticated receipt, fence its exact store and version, and commit any coalesced recovery obligation. Observe one obligation for rejected N, none for N+1, no second recovery and no business retry. |
 
+### Destination, response and Git controls
+
 Exercise DNS, destination and TLS authority, redirects, raw TCP, opaque SSH, UDP and QUIC from the
 sandbox. Deny operations that cannot be classified. Swap two live custody handles or replay a consumed permit:
 neither permits a provider write. Put forbidden data in the last response trailer: for the bounded
-read, release no provider bytes. A metadata read qualifies neither clone nor push. For ref-constrained push,
-the trusted sender must parse *all* ref commands, including object IDs, authorize each, and dispatch exactly the checked operation. An allowed first ref followed by a
-forbidden second must result in no provider write. Otherwise refuse protected push.
+read, release no provider bytes. For ref-constrained push, an allowed first ref followed by
+a forbidden second must result in no provider write; otherwise refuse protected push.
+The [protocol](protocol.md#git-operations) specifies the operation to check and dispatch.
 
-Cover static inference and GitHub first. For rotating credentials, race grants sharing one input
-family, crash between provider rotation and durable replacement, and attempt stale-owner publication.
-Preserve uncertain work and require reauthorization if the replacement cannot be recovered. Later
-coverage includes GitHub preclone, custom dynamic providers, and actual Codex OAuth startup, account
-metadata and renewal or reconnect over the selected WebSocket or HTTP/SSE path.
+### Additional provider coverage
+
+A metadata read qualifies neither Git transport, clone, push nor static inference; qualify each
+separately. Cover GitHub and static inference first. For rotating credentials, race grants in one
+input family, crash between provider rotation and durable replacement, and attempt stale-owner
+publication. Preserve uncertain work and require reauthorization if the replacement cannot be
+recovered. GitHub preclone is later coverage. Rotating Codex OAuth and custom dynamic providers
+remain OCE 1.0 requirements, not prerequisites for the first read; exercise actual Codex OAuth
+startup, account metadata and renewal or reconnect over the selected WebSocket or HTTP/SSE path.
 
 ## Withdrawal, last-owner loss and recovery
 
 ![Withdrawal, installation of the remaining policy, and recovery after credential rejection](assets/revocation-recovery.svg)
 
-[Diagram source](assets/revocation-recovery.mmd). Observe OCC denial, confirmed detachment and
-provider-supported revocation separately. A send may **start after withdrawal was acknowledged** if
-its final check raced the change. Bound dispatch start and the original deadline; cancellation is
-best effort. Ordered send admission and renewable stream leases are later work.
-
-Keep the withdrawal tombstone while a late installation is possible. Test stale commands, conflicting
-request IDs, forged receipts, cleanup after catalog removal, and withdrawal of one binding while
-another continues. Accepted cleanup survives loss of the requester's access. After restart, reconcile
-the original owner, attempt and outstanding effects; neither a timeout nor an earlier observation of
-absence settles them.
+[Diagram source](assets/revocation-recovery.mmd). Verify OCC denial, detachment and
+provider-supported revocation separately. A send may start after withdrawal acknowledgment
+if its final check raced the change; ordered send admission and renewable stream leases are
+later work. Test stale commands, conflicting request IDs, forged receipts, cleanup after catalog
+removal, and withdrawal of one binding while another continues. After restart, reconcile the
+original owner, attempt and outstanding effects; a timeout or earlier observation of absence
+does not settle them. The [protocol](protocol.md#withdraw-and-recover) defines the tombstone,
+deadline and cleanup obligations.
 
 Confirmed loss of the *last* authorized owner installs a hold and fences new admissions. Report
 `parking` until stop and data preservation justify `parked`. A team Agent with another authorized owner
@@ -100,22 +97,29 @@ schedules, hooks and pending work inert. Preserve authorized read-only access to
 
 ## Retire the legacy path without widening existing grants
 
+### Execution authority
+
 Migrate execution authority and static-material approval **independently**. If a legacy grant
 allowed the parent read but barred the sibling above, retain its safe authorized path or withhold
 the binding until someone authorized to bind this Agent to this source explicitly admits whole-execution
 access. Carry authority forward only with durable evidence of equivalence. Fence incompatible readers first. Moving to
 unprotected requires a new execution without old mounts, helpers, sessions or late reattachment.
 
-If an operator approved static `v1` and a Secret writer later stored `v2`, keep serving approved
-`v1` in `explicit_update` mode unless revoked. Verify its exact version or owned immutable snapshot,
-including scope and store. If material or ownership cannot be verified, fail closed until an
-authorized source update. Running attachments keep their approved material until replacement
-installation is verified, subject to current denial or revocation. The provenance Secret need
-not remain readable. With zero retention, read that snapshot again. Test rejection, eviction and reread; the version fence must survive. To adopt
-live updates, require `credential_source:update` and `secret:operate`, stage and validate a separate
-candidate, then activate mode, material reference and generation together. Failed opt-in preserves
-approval; uncertain activation requires reconciliation. Verify adoption and outstanding use before
-retiring the old key.
+### Approved static material
+
+If `v1` was approved before a Secret writer stored `v2`, retain `v1` in `explicit_update` mode
+unless revoked. Verify the version or owned immutable snapshot, scope and store; otherwise fail
+closed until an authorized update. Running installations retain approved material until the
+replacement is verified, subject to denial or revocation. Test rejection, eviction and reread:
+the version fence must survive.
+
+To adopt live updates, require `credential_source:update` and `secret:operate`; stage and
+validate a separate candidate, then activate mode, material reference and generation together.
+Failed opt-in preserves approval; uncertain activation requires reconciliation. Verify adoption
+and outstanding use before retiring the old key. The [static read protocol](protocol.md#static-material)
+defines snapshot ownership and zero-retention reads.
+
+### Interface and consumer migration
 
 | Credential Gateway method | Responsibility that must survive retirement |
 | --- | --- |
@@ -124,9 +128,9 @@ retiring the old key.
 | `updateSource` | `applySource` with admitted configuration and static adoption or approved replacement |
 | `sourceStatus` | Configuration status, distinct from per-grant `refreshStatus` |
 | `removeSource` | `removeSource`, `removeRefresh` and owned provider/profile cleanup |
-| `attachForRevision` | `configureRevision`, then Sandbox `installEgress` |
-| `attachmentStatus` | Join Egress `attachmentStatus` to Sandbox `egressStatus` for the exact installation |
-| `withdraw` | Durable withdrawal, `withdrawBinding` and late-attachment rechecks |
+| `attachForRevision` | `configureRevision`, then Sandbox `applyConduit` |
+| `attachmentStatus` | Join Conduit `wiringStatus` to Sandbox `conduitStatus` for the exact installation |
+| `withdraw` | Durable withdrawal, `withdrawBinding` and late-installation rechecks |
 | Additional `validateSourceConfig` | OCC schema validation and provider `normalizeInput`, without I/O and before Secret access |
 
 Move persisted driver IDs, revision and Harness snapshots, Agent bindings and authentication
