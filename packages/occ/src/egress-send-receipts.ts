@@ -13,6 +13,7 @@ export interface AcceptedEgressAssociation {
     readonly sandboxId: string;
     readonly instanceId: string;
     readonly configurationId: string;
+    readonly peerKeyId?: string;
     readonly plan: EgressRef;
   };
   readonly exchangeId: string;
@@ -345,10 +346,13 @@ export function authorizedSend(value: unknown): AuthorizedSend {
     "revisionId",
     "executionId",
   ]);
-  const installation = exact(association.installation, [
+  const claimedInstallation = object(association.installation);
+  const boundKey = "peerKeyId" in claimedInstallation;
+  const installation = exact(claimedInstallation, [
     "sandboxId",
     "instanceId",
     "configurationId",
+    ...(boundKey ? ["peerKeyId"] : []),
     "plan",
   ]);
   return {
@@ -365,6 +369,7 @@ export function authorizedSend(value: unknown): AuthorizedSend {
         sandboxId: text(installation.sandboxId),
         instanceId: text(installation.instanceId),
         configurationId: text(installation.configurationId),
+        ...(boundKey ? { peerKeyId: text(installation.peerKeyId) } : {}),
         plan: ref(installation.plan),
       },
       exchangeId: text(association.exchangeId),
