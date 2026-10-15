@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   EgressExecution,
   EgressRef,
-  StaticMaterialEvidence,
+  EgressMaterialEvidence,
 } from "@openclaw-enterprise/contracts";
 import { ResourceStateConflictError } from "./errors.ts";
 
@@ -37,7 +37,7 @@ export interface SendAttempt {
   readonly instanceId: string;
   readonly useId: string;
   readonly attemptId: string;
-  readonly material: StaticMaterialEvidence | null;
+  readonly material: EgressMaterialEvidence | null;
   readonly deadlineAt: string;
 }
 
@@ -76,7 +76,7 @@ interface TransactionOwner {
     work: (unit: {
       readonly egressSendReceipts: EgressSendReceiptRepository;
       readonly credentialSources: {
-        rejectEgressMaterial(evidence: StaticMaterialEvidence): Promise<void>;
+        rejectEgressMaterial(evidence: EgressMaterialEvidence): Promise<void>;
       };
     }) => Promise<T>,
   ): Promise<T>;
@@ -135,29 +135,75 @@ function ref(value: unknown): EgressRef {
   return { id: text(item.id), generation: item.generation };
 }
 
-function material(value: unknown): StaticMaterialEvidence {
-  const item = exact(value, [
+function material(value: unknown): EgressMaterialEvidence {
+  const item = object(value);
+  const common = [
     "kind",
     "source",
     "binding",
     "grantHash",
     "isolationId",
-    "adoption",
-    "materialRefId",
-    "secret",
-    "secretDriver",
     "materialId",
     "materialVersion",
-    "authoritativeObservedAt",
     "usableUntil",
-    "retention",
-  ]);
+  ];
   const source = exact(item.source, [
     "installationId",
     "namespaceId",
     "source",
     "backend",
     "provider",
+  ]);
+  if (item.kind === "prepared_github") {
+    exact(item, [
+      ...common,
+      "family",
+      "ownerEpoch",
+      "inputVersion",
+      "preparationAttemptId",
+      "providerExpiresAt",
+    ]);
+    const epoch = item.ownerEpoch;
+    const usableUntil = date(item.usableUntil);
+    const providerExpiresAt = date(item.providerExpiresAt);
+    if (
+      typeof epoch !== "number" ||
+      !Number.isSafeInteger(epoch) ||
+      epoch < 1 ||
+      Date.parse(usableUntil) > Date.parse(providerExpiresAt)
+    ) {
+      return invalid();
+    }
+    return {
+      kind: "prepared_github",
+      source: {
+        installationId: text(source.installationId),
+        namespaceId: text(source.namespaceId),
+        source: ref(source.source),
+        backend: ref(source.backend),
+        provider: ref(source.provider),
+      },
+      binding: ref(item.binding),
+      grantHash: text(item.grantHash),
+      isolationId: text(item.isolationId),
+      family: ref(item.family),
+      ownerEpoch: epoch,
+      inputVersion: text(item.inputVersion),
+      preparationAttemptId: text(item.preparationAttemptId),
+      materialId: text(item.materialId),
+      materialVersion: text(item.materialVersion),
+      providerExpiresAt,
+      usableUntil,
+    };
+  }
+  exact(item, [
+    ...common,
+    "adoption",
+    "materialRefId",
+    "secret",
+    "secretDriver",
+    "authoritativeObservedAt",
+    "retention",
   ]);
   const secret = exact(item.secret, ["kind", "namespaceId", "id"]);
   if (

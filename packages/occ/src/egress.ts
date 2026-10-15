@@ -15,9 +15,11 @@ import type {
   EgressRequest,
   EgressResponse,
   EgressRoute,
-  InferenceOperation,
+  EgressOperation,
+  EgressMaterialEvidence,
+  ProtectedEgressSource,
+  PreparedGitHubEgressLifecycle,
   StaticEgressSource,
-  StaticMaterialEvidence,
   VersionedSecretValue,
 } from "@openclaw-enterprise/contracts";
 import { immutableCopy } from "@openclaw-enterprise/utils";
@@ -43,7 +45,7 @@ export interface CapturedEgressUse {
   readonly installation: EgressInstallation;
   readonly route: EgressRoute;
   readonly request: EgressRequest;
-  readonly operation: InferenceOperation;
+  readonly operation: EgressOperation;
 }
 
 /** Installed acceptance owns the actual request, sender and response destination. */
@@ -62,13 +64,14 @@ export interface EgressAuthorityPorts {
   /** Each call must open a new policy unit, independent of the capture and Secret read. */
   check(
     use: CapturedEgressUse,
-    material?: StaticMaterialEvidence,
-  ): Promise<StaticEgressSource | EgressRefusal>;
+    material?: EgressMaterialEvidence,
+  ): Promise<ProtectedEgressSource | EgressRefusal>;
   read(
     source: StaticEgressSource,
     signal: AbortSignal,
     deadlineAt: string,
   ): Promise<VersionedSecretValue & { readonly materialId: string }>;
+  readonly readPreparedGitHub?: PreparedGitHubEgressLifecycle["readWarm"];
   readonly receipts: Pick<EgressSendReceipts, "begin" | "authorize" | "record" | "observe">;
 }
 
@@ -77,7 +80,7 @@ export type EgressResolution =
   | {
       readonly kind: "ready";
       readonly handle: string;
-      readonly evidence: StaticMaterialEvidence;
+      readonly evidence: EgressMaterialEvidence;
       readonly headers: readonly (readonly [string, string])[];
       readonly injectionDigest: string;
     };
@@ -94,8 +97,8 @@ export type EgressSendDecision =
 interface OperationRecord {
   readonly use: CapturedEgressUse;
   readonly provider: CredentialProviderDefinition;
-  readonly source: StaticEgressSource;
-  readonly evidence: StaticMaterialEvidence;
+  readonly source: ProtectedEgressSource;
+  readonly evidence: EgressMaterialEvidence;
   readonly attempt: SendAttempt;
   readonly digest: string;
   readonly association: AcceptedEgressAssociation;
@@ -288,7 +291,7 @@ export class EgressForwarder {
     if (!association || !this.owns(association, captured)) {
       return refuse("identity");
     }
-    let source: StaticEgressSource | EgressRefusal;
+    let source: ProtectedEgressSource | EgressRefusal;
     try {
       source = await this.ports.check(captured);
     } catch {
@@ -303,41 +306,15 @@ export class EgressForwarder {
       return { kind: "refused", error: { kind: "cancelled" } };
     }
     try {
-      const material = await this.ports.read(source, signal, request.deadlineAt);
-      const observed = Date.parse(material.authoritativeObservedAt);
-      const usableUntil = Math.min(
-        deadline,
-        material.expiresAt === undefined ? deadline : Date.parse(material.expiresAt),
-      );
-      if (
-        !material.version ||
-        !material.materialId ||
-        !Number.isFinite(observed) ||
-        observed > this.ports.now() ||
-        !Number.isFinite(usableUntil) ||
-        usableUntil <= this.ports.now()
-      ) {
-        return { kind: "refused", error: { kind: "not_ready", code: "expired" } };
+      // Recheck the same accepted response owner after the independent material read.
+      const material = await this.readMaterial(source, captured, signal);
+      if (!("evidence" in material)) {
+        return { kind: "refused", error: material };
       }
+      const { evidence } = material;
       if (signal.aborted || !this.owns(association, captured)) {
-        return { kind: "refused", error: { kind: "cancelled" } };
+        return refuse("identity");
       }
-      const evidence: StaticMaterialEvidence = immutableCopy({
-        kind: "static",
-        source: source.key,
-        binding: route.binding.binding,
-        grantHash: route.binding.grantHash,
-        isolationId: route.binding.isolationId,
-        adoption: source.adoption,
-        materialRefId: source.materialRefId,
-        secret: source.secret,
-        secretDriver: source.secretDriver,
-        materialId: material.materialId,
-        materialVersion: material.version,
-        authoritativeObservedAt: material.authoritativeObservedAt,
-        usableUntil: new Date(usableUntil).toISOString(),
-        retention: "none",
-      });
       const headers = provider.inject(material.value);
       const digest = egressInjectionDigest(headers);
       const handle = randomUUID();
@@ -376,6 +353,95 @@ export class EgressForwarder {
     }
   }
 
+  private async readMaterial(
+    source: ProtectedEgressSource,
+    use: CapturedEgressUse,
+    signal: AbortSignal,
+  ): Promise<{ value: string; evidence: EgressMaterialEvidence } | EgressRefusal> {
+    const { route, request } = use;
+    const deadline = Date.parse(request.deadlineAt);
+    if (source.adoption === "prepared") {
+      if (
+        use.operation.kind !== "github_repository_metadata" ||
+        !isDeepStrictEqual(source.grant, route.binding.grant) ||
+        !isDeepStrictEqual(source.key, route.binding.source)
+      ) {
+        return { kind: "denied", code: "scope_mismatch" };
+      }
+      const selected = await this.ports.readPreparedGitHub?.(source, signal);
+      if (!selected) {
+        return { kind: "not_ready", code: "material_missing" };
+      }
+      const { value, usableUntil, ...selection } = selected;
+      const until = Math.min(
+        deadline,
+        Date.parse(usableUntil),
+        Date.parse(selection.providerExpiresAt),
+      );
+      if (!Number.isFinite(until) || until <= this.ports.now() || signal.aborted) {
+        return { kind: "not_ready", code: "expired" };
+      }
+      return {
+        value,
+        evidence: immutableCopy({
+          family: selection.family,
+          ownerEpoch: selection.ownerEpoch,
+          inputVersion: selection.inputVersion,
+          preparationAttemptId: selection.preparationAttemptId,
+          materialId: selection.materialId,
+          materialVersion: selection.materialVersion,
+          providerExpiresAt: selection.providerExpiresAt,
+          kind: "prepared_github",
+          source: source.key,
+          binding: route.binding.binding,
+          grantHash: route.binding.grantHash,
+          isolationId: source.grant.isolationId,
+          usableUntil: new Date(until).toISOString(),
+        }),
+      };
+    }
+    if (use.operation.kind !== "inference") {
+      return { kind: "denied", code: "scope_mismatch" };
+    }
+    const material = await this.ports.read(source, signal, request.deadlineAt);
+    const observed = Date.parse(material.authoritativeObservedAt);
+    const usableUntil = Math.min(
+      deadline,
+      material.expiresAt === undefined ? deadline : Date.parse(material.expiresAt),
+    );
+    if (
+      !material.version ||
+      !material.materialId ||
+      !Number.isFinite(observed) ||
+      observed > this.ports.now() ||
+      !Number.isFinite(usableUntil) ||
+      usableUntil <= this.ports.now()
+    ) {
+      return { kind: "not_ready", code: "expired" };
+    }
+    if (signal.aborted) {
+      return { kind: "cancelled" };
+    }
+    const evidence: EgressMaterialEvidence = immutableCopy({
+      kind: "static",
+      source: source.key,
+      binding: route.binding.binding,
+      grantHash: route.binding.grantHash,
+      isolationId: route.binding.isolationId,
+      adoption: source.adoption,
+      materialRefId: source.materialRefId,
+      secret: source.secret,
+      secretDriver: source.secretDriver,
+      materialId: material.materialId,
+      materialVersion: material.version,
+      authoritativeObservedAt: material.authoritativeObservedAt,
+      usableUntil: new Date(usableUntil).toISOString(),
+      retention: "none" as const,
+    });
+
+    return { value: material.value, evidence };
+  }
+
   private owns(association: AcceptedEgressAssociation, use: CapturedEgressUse): boolean {
     return (
       isDeepStrictEqual(association.execution, use.route.binding.execution) &&
@@ -394,7 +460,7 @@ export class EgressForwarder {
     sandboxId: string,
     requestId: string,
     handle: string,
-    evidence: StaticMaterialEvidence,
+    evidence: EgressMaterialEvidence,
     injectionDigest: string,
     deadlineAt: string,
     signal: AbortSignal,
@@ -448,7 +514,7 @@ export class EgressForwarder {
       return deny({ kind: "cancelled" });
     }
     // Fresh transport and policy checks follow possibly slow durable persistence and exact selection.
-    let decision: StaticEgressSource | EgressRefusal;
+    let decision: ProtectedEgressSource | EgressRefusal;
     let finalPeer: EgressPeer | undefined;
     try {
       finalPeer = await this.ports.verifier.verify(authorization);

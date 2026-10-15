@@ -1,4 +1,10 @@
 import type {
+  GitHubMetadataGrant,
+  PreparedGitHubEgressLifecycle,
+  PreparedGitHubEgressSource,
+  PreparedGitHubMaterialEvidence,
+} from "./prepared-github-egress.ts";
+import type {
   AgentRevision,
   CredentialSource,
   CredentialSourceType,
@@ -36,6 +42,8 @@ export interface StaticEgressSource {
   readonly retention: "none";
 }
 
+export type ProtectedEgressSource = StaticEgressSource | PreparedGitHubEgressSource;
+
 export interface VersionedSecretValue {
   readonly value: string;
   readonly version: string;
@@ -70,7 +78,7 @@ export interface EgressBinding {
   readonly binding: EgressRef;
   readonly execution: EgressExecution;
   readonly source: EgressSourceKey;
-  readonly grant: InferenceGrant;
+  readonly grant: InferenceGrant | GitHubMetadataGrant;
   readonly grantHash: string;
   readonly isolationId: string;
 }
@@ -80,7 +88,7 @@ export interface EgressRoute {
   readonly binding: EgressBinding;
   readonly origin: string;
   readonly path: string;
-  readonly method: "POST";
+  readonly method: "POST" | "GET";
   readonly operationPolicy: EgressRef;
   readonly responsePolicy: EgressRef;
   readonly deadlineMs: number;
@@ -130,6 +138,16 @@ export interface InferenceOperation {
   readonly model: string;
 }
 
+export type EgressOperation =
+  | InferenceOperation
+  | {
+      readonly kind: "github_repository_metadata";
+      readonly repository: string;
+      readonly repositoryId: string;
+    };
+
+export type EgressMaterialEvidence = StaticMaterialEvidence | PreparedGitHubMaterialEvidence;
+
 export interface StaticMaterialEvidence {
   readonly kind: "static";
   readonly source: EgressSourceKey;
@@ -168,6 +186,8 @@ export type EgressRefusal =
   | { readonly kind: "cancelled" | "deadline_exceeded" };
 
 export interface EgressResponse {
+  /** Present only when the trusted transport observed end-of-message, including actual last trailers. */
+  readonly trailers?: readonly (readonly [string, string])[];
   readonly status: number;
   readonly headers: readonly (readonly [string, string])[];
   readonly body: Uint8Array;
@@ -181,9 +201,12 @@ export interface CredentialProviderDefinition {
   readonly schemaVersion: 1;
   readonly sourceType: CredentialSourceType;
   normalizeConfig(config: Readonly<Record<string, string>>): Readonly<Record<string, string>>;
-  normalizeGrant(models: readonly string[]): InferenceGrant;
+  normalizeGrant(
+    models: readonly string[],
+    config?: Readonly<Record<string, string>>,
+  ): InferenceGrant | GitHubMetadataGrant;
   routes(source: Readonly<CredentialSource>, binding: EgressBinding): readonly EgressRoute[];
-  classify(route: EgressRoute, request: EgressRequest): InferenceOperation | undefined;
+  classify(route: EgressRoute, request: EgressRequest): EgressOperation | undefined;
   inject(value: string): readonly (readonly [string, string])[];
   /** Positive provider evidence only; status alone never identifies rejected credentials. */
   credentialRejected(response: EgressResponse): boolean;
@@ -191,11 +214,12 @@ export interface CredentialProviderDefinition {
     response: EgressResponse,
     value: string,
     request: EgressRequest,
-    operation: InferenceOperation,
+    operation: EgressOperation,
   ): EgressResponse | undefined;
 }
 
 export interface CredentialSourceControl {
+  readonly preparedGitHub?: PreparedGitHubEgressLifecycle;
   readonly backend: EgressRef;
   readonly sender: EgressRef;
   readonly resolver: EgressRef;

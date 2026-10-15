@@ -1,3 +1,5 @@
+import type { PreparedGitHubEgressLifecycle } from "@openclaw-enterprise/contracts";
+import { githubMetadataProvider } from "./github-metadata.ts";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -187,7 +189,7 @@ export function openShellEgressConfiguration(
   options: OpenShellEgressOptions,
 ): Readonly<Record<string, unknown>> {
   if (new Set(plan.routes.map((route) => route.binding.binding.id)).size > 1) {
-    throw new Error("The protected inference slice permits at most one binding.");
+    throw new Error("The protected execution permits at most one binding.");
   }
   OpenShellEgressProxyDriver.validateConfiguration(options);
   const hosts = [...new Set(plan.routes.map((route) => new URL(route.origin).hostname))];
@@ -272,6 +274,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
       readonly id: string;
       readonly backend: Backend<OpenShellGateway>;
       readonly sandbox: SandboxDriver;
+      readonly preparedGitHub?: PreparedGitHubEgressLifecycle;
     },
   ) {
     OpenShellEgressProxyDriver.validateConfiguration(options);
@@ -286,7 +289,10 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
       backend: { id: selection.backend.id, generation: 1 },
       sender: { id: `${selection.backend.id}/supervisor`, generation: 1 },
       resolver: { id: `${selection.id}/resolver`, generation: 1 },
-      providers: [openAiStaticProvider],
+      providers: selection.preparedGitHub
+        ? [openAiStaticProvider, githubMetadataProvider]
+        : [openAiStaticProvider],
+      ...(selection.preparedGitHub ? { preparedGitHub: selection.preparedGitHub } : {}),
       assertAvailable: async (signal: AbortSignal) => {
         const client = this.backend.client.clientForNamespace("");
         if (!client.getGatewayInfo) {

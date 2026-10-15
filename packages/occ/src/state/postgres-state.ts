@@ -1,6 +1,6 @@
 import { assertExecutionAdmission } from "@openclaw-enterprise/contracts";
 import { postgresEgressSendReceipts } from "./egress-send-receipts.ts";
-import type { StaticEgressSource, EgressInstallation } from "@openclaw-enterprise/contracts";
+import type { ProtectedEgressSource, EgressInstallation } from "@openclaw-enterprise/contracts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { DatabaseError } from "pg";
@@ -593,7 +593,7 @@ function credentialSourceFromRow(row: PostgresRow): Readonly<CredentialSource> {
     config: config as Record<string, string>,
     ...(row.egress == null
       ? {}
-      : { egress: jsonObject(row.egress) as unknown as StaticEgressSource }),
+      : { egress: jsonObject(row.egress) as unknown as ProtectedEgressSource }),
     secrets: Object.fromEntries(
       Object.entries(secretIds as Record<string, string>).map(([field, id]) => [
         field,
@@ -2650,7 +2650,7 @@ export class PostgresPlatformState implements PlatformStateStore {
           "SELECT 1 FROM occ.egress_rejected_material WHERE namespace_id = $1 AND secret_driver_id = $2 AND material_id = $3 AND material_version = $4",
           [
             evidence.source.namespaceId,
-            evidence.secretDriver.id,
+            evidence.kind === "static" ? evidence.secretDriver.id : evidence.source.provider.id,
             evidence.materialId,
             evidence.materialVersion,
           ],
@@ -2662,7 +2662,7 @@ export class PostgresPlatformState implements PlatformStateStore {
           "INSERT INTO occ.egress_rejected_material (namespace_id, secret_driver_id, material_id, material_version) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
           [
             evidence.source.namespaceId,
-            evidence.secretDriver.id,
+            evidence.kind === "static" ? evidence.secretDriver.id : evidence.source.provider.id,
             evidence.materialId,
             evidence.materialVersion,
           ],
