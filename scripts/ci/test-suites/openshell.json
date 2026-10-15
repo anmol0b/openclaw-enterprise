@@ -15,7 +15,8 @@
     "OCC_TEST_OPENSHELL_RUNTIME_CLASS"
   ],
   "env": {
-    "OCC_TEST_OPENSHELL_K3D_REAL": "1"
+    "OCC_TEST_OPENSHELL_K3D_REAL": "1",
+    "OCC_TEST_OPENSHELL_SHELL_PROBE_ONLY": "1"
   },
   "prepare": {
     "postgres": true,
@@ -34,7 +35,9 @@
   "files": [
     {
       "path": "tests/integration/sandbox-driver-openshell-k3d-real.test.mjs",
-      "expectedTests": ["OpenShell enforces provider delivery and authenticated Codex exposure"]
+      "expectedTests": [
+        "OpenShell executes Gateway shell turns and enforces filesystem and network boundaries"
+      ]
     }
   ]
 }

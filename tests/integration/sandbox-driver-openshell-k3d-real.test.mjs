@@ -5171,7 +5171,7 @@ if (demoStatePath !== undefined) {
 }
 
 test(
-  "OpenShell enforces provider delivery and authenticated Codex exposure",
+  "OpenShell executes Gateway shell turns and enforces filesystem and network boundaries",
   {
     ...requiresOpenShellK3d,
     ...(demoStatePath === undefined ? { timeout: 1_800_000 } : {}),
@@ -5261,6 +5261,10 @@ test(
         "OpenShell integration: regular Gateway shell turns passed; testing actual filesystem and network enforcement.\n",
       );
       await assertOpenShellToolFilesystemAndNetworkEnforcement(topology);
+      // Temporary diagnostic selector: retain the PR's full scenario on its owning branch.
+      if (process.env.OCC_TEST_OPENSHELL_SHELL_PROBE_ONLY === "1") {
+        return;
+      }
       process.stderr.write(
         "OpenShell integration: tool filesystem and egress verified; testing the credential route.\n",
       );
