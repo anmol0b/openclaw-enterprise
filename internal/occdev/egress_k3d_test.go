@@ -95,30 +95,30 @@ func TestDevelopmentDatabaseSelectorIsDisposable(t *testing.T) {
 	}
 }
 
-// Run the normal release coordinator with command-boundary fixtures. The resulting
-// Installation is loaded by real controller composition, and both charts are
-// rendered by real Helm. This proves packaging/order, not Kubernetes or PostgreSQL.
+// Run the normal release coordinator with command-boundary fixtures. The ordering,
+// readiness-gate, PKI, TLS and database assertions always run. When the tools are
+// present, the resulting Installation is also loaded by real controller
+// composition (node) and the OCE chart is rendered by real Helm; the supplier chart
+// is rendered only when OCC_TEST_OPENSHELL_CHART selects it. This proves
+// packaging/order, not Kubernetes or PostgreSQL.
 func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *testing.T) {
+	// Resolve optional tools before PATH is replaced by the command fixtures.
 	supplierChart := os.Getenv("OCC_TEST_OPENSHELL_CHART")
-	if supplierChart == "" {
-		t.Skip("OCC_TEST_OPENSHELL_CHART selects the matching supplier chart for local packaging proof")
+	gatewayChart := supplierChart
+	if gatewayChart == "" {
+		// Only the fake helm sees this path; it is never rendered.
+		gatewayChart = "/supplier/openshell-gateway"
 	}
-	realNode, err := exec.LookPath("node")
-	if err != nil {
-		t.Fatal(err)
-	}
+	realNode, nodeErr := exec.LookPath("node")
 	helm := os.Getenv("OCC_HELM_BIN")
 	if helm == "" {
-		helm, err = exec.LookPath("helm")
-	}
-	if err != nil || helm == "" {
-		t.Fatal("set OCC_HELM_BIN to render the normal protected profile")
+		helm, _ = exec.LookPath("helm")
 	}
 	state := kubernetesOnlyOpenShellState(t)
 	state.ProtectedEgress = true
 	state.DatabaseName = "openclaw_k8s_connected"
 	state.OpenShellHostGatewayIP = "172.30.42.1"
-	assets := &openShellDevelopmentAssets{gatewayChart: supplierChart, gatewayImage: "registry.example/gateway@" + profileTestDigest,
+	assets := &openShellDevelopmentAssets{gatewayChart: gatewayChart, gatewayImage: "registry.example/gateway@" + profileTestDigest,
 		sandboxImage: "registry.example/sandbox@" + profileTestDigest, supervisorImage: "registry.example/supervisor@" + profileTestDigest,
 		workspaceResources: []any{map[string]any{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": map[string]string{"name": "openshell-sandbox"}}}}
 	// No actual engine or cluster command is reachable from the command fixtures.
@@ -156,9 +156,17 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 		}
 		return i
 	}
+	authority := find("kubectl apply -f " + filepath.Join(state.directory, "egress-tls.json"))
 	gateway := find("helm upgrade --install openshell-gateway ")
+	kid := find("kubectl get secret openshell-gateway-jwt-keys ")
 	control := find("helm upgrade --install openclaw-enterprise ")
 	ready := find("kubectl rollout status statefulset/openshell-gateway ")
+	if authority >= gateway {
+		t.Fatal("the egress authority TLS material must exist before the Gateway installs")
+	}
+	if gateway >= kid || kid >= control {
+		t.Fatal("the Gateway key identifier must be read after Gateway install and before OCE install")
+	}
 	if gateway >= control || control >= ready {
 		t.Fatal("the Gateway readiness gate must follow OCE installation")
 	}
@@ -170,18 +178,10 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 	}
 
 	// Use the actual startup parser/Driver composition, without provider or cluster I/O.
-	program := `import assert from 'node:assert/strict';
-import {loadInstallationConfiguration} from './apps/controller/src/composition/installation-config.ts';
-const loaded = await loadInstallationConfiguration({mode:'production', environment:{OCC_CONFIG_PATH:process.argv[1]}});
-assert.equal(loaded.installation.backend[0].configuration.auth.mode,'mtls');
-assert.equal(loaded.egressAuthority.keyId,'test-kid');
-assert.equal(loaded.egressAuthority.issuer,'openshell-gateway:openshell-gateway');
-assert.equal(loaded.installation.backend[0].drivers.egress_proxy,loaded.egressProxyDriver.id);
-`
-	parse := exec.Command(realNode, "--input-type=module", "-e", program, filepath.Join(state.directory, "installation.yaml"))
-	parse.Dir = state.Repository
-	if out, err := parse.CombinedOutput(); err != nil {
-		t.Fatalf("real startup rejected generated profile: %v\n%s", err, out)
+	if nodeErr != nil {
+		t.Log("node not found; skipping the real startup parse of the generated Installation")
+	} else {
+		parseGeneratedInstallation(t, realNode, state)
 	}
 
 	// The generated server leaf must authenticate the exact registry hostname.
@@ -228,10 +228,19 @@ assert.equal(loaded.installation.backend[0].drivers.egress_proxy,loaded.egressPr
 	if selectedGateway["server"].(map[string]any)["hostGatewayIP"] != state.OpenShellHostGatewayIP {
 		t.Fatal("selected owned host did not reach the supplier chart input")
 	}
-	for _, selected := range []struct{ name, chart, values string }{
+	if helm == "" {
+		t.Log("helm not found (set OCC_HELM_BIN); skipping chart renders")
+		return
+	}
+	renders := []struct{ name, chart, values string }{
 		{"openclaw-enterprise", filepath.Join(state.Repository, "deploy/helm/openclaw-enterprise"), "helm-values.json"},
-		{"openshell-gateway", supplierChart, "openshell-protected-values.json"},
-	} {
+	}
+	if supplierChart != "" {
+		renders = append(renders, struct{ name, chart, values string }{"openshell-gateway", supplierChart, "openshell-protected-values.json"})
+	} else {
+		t.Log("OCC_TEST_OPENSHELL_CHART unset; skipping the supplier chart render")
+	}
+	for _, selected := range renders {
 		args := []string{"template", selected.name, selected.chart, "--namespace", "oce-system", "-f", filepath.Join(state.directory, selected.values)}
 		if selected.name == "openshell-gateway" {
 			args = append(args, "--set", "agentSandbox.preflight.enabled=false", "--set", "fullnameOverride=openshell-gateway")
@@ -259,5 +268,22 @@ assert.equal(loaded.installation.backend[0].drivers.egress_proxy,loaded.egressPr
 		if count == 0 {
 			t.Fatalf("%s rendered no resources", selected.name)
 		}
+	}
+}
+
+func parseGeneratedInstallation(t *testing.T, realNode string, state *developmentState) {
+	t.Helper()
+	program := `import assert from 'node:assert/strict';
+import {loadInstallationConfiguration} from './apps/controller/src/composition/installation-config.ts';
+const loaded = await loadInstallationConfiguration({mode:'production', environment:{OCC_CONFIG_PATH:process.argv[1]}});
+assert.equal(loaded.installation.backend[0].configuration.auth.mode,'mtls');
+assert.equal(loaded.egressAuthority.keyId,'test-kid');
+assert.equal(loaded.egressAuthority.issuer,'openshell-gateway:openshell-gateway');
+assert.equal(loaded.installation.backend[0].drivers.egress_proxy,loaded.egressProxyDriver.id);
+`
+	parse := exec.Command(realNode, "--input-type=module", "-e", program, filepath.Join(state.directory, "installation.yaml"))
+	parse.Dir = state.Repository
+	if out, err := parse.CombinedOutput(); err != nil {
+		t.Fatalf("real startup rejected generated profile: %v\n%s", err, out)
 	}
 }
