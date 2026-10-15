@@ -79,9 +79,9 @@ export async function createRunEvidence(t, setup, progress) {
     });
     return writing;
   };
-  const checkpoint = async (phase, details = {}) => {
+  const checkpoint = async (phase, details = {}, privateDetails = {}) => {
     progress.stage = phase;
-    ledger.phases.push({ phase, at: new Date().toISOString(), ...details });
+    ledger.phases.push({ phase, at: new Date().toISOString(), ...details, ...privateDetails });
     await saveLedger();
     t.diagnostic(`egress-connected ${phase} ${JSON.stringify(details)}`);
   };
@@ -163,7 +163,7 @@ export async function createRunEvidence(t, setup, progress) {
   };
 }
 
-export async function selectLiveControllerPods({ input, f: { kubectl } }) {
+export async function selectLiveControllerPods({ input, f: { kubectl } }, ...options) {
   const controllerPods = JSON.parse(
     await kubectl(
       "get",
@@ -174,6 +174,7 @@ export async function selectLiveControllerPods({ input, f: { kubectl } }) {
       input.controllerSelector,
       "-o",
       "json",
+      ...options,
     ),
   ).items;
   assert.ok(controllerPods.length > 0, "candidate controller Pod is required");
