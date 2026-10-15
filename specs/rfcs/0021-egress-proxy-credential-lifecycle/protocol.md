@@ -132,8 +132,11 @@ layer, and use bounded by deadline and expiry. Zero means read again, not expire
 `WarmCredentialReader.readWarm` reads only eligible committed material for
 `WarmKey = (SourceKey, exact normalized grant, grant hash, isolation ID)`. Add family generation,
 owner epoch, preparation attempt, actual grant and provider expiry to the evidence. Cold, expired
-or insufficient validity returns `not_ready` without starting work. Eligible material can outlast an
-issuer outage. An unavailable resolver permits no proxy cache, token push or fallback.
+or insufficient validity returns `not_ready` without starting work. The reader owns a detached copy
+until it confirms the read and sufficient remaining validity, then transfers that copy to custody.
+If it cannot confirm either, it erases its copy and returns `not_ready` with no material.
+Eligible material can outlast an issuer outage. An unavailable resolver permits no proxy cache,
+token push or fallback.
 
 ## Prepare and renew credentials
 
@@ -149,8 +152,12 @@ and time to expiry, with alert policy and thresholds left to the deployment.
 
 OCE alone owns the GitHub App key, signs the App JWT, exchanges it for an installation token scoped
 to admitted repositories and permissions, verifies effective grant and expiry, and commits the token,
-version, attempt and epoch together in encrypted custody. OCE owns background renewal, withdrawal
-and fenced takeover. OpenShell may be the sole lifecycle owner for a different credential family.
+version, attempt and epoch together in encrypted custody. In that commit, retain the previous
+successful version, its verified provider expiry and any outstanding retirement obligation.
+Publishing a new version does not revoke the old token. After a lost acknowledgment or restart,
+recover which version is current and reconcile both by version. Do not issue again to resolve
+that uncertainty or report expiry as provider-confirmed revocation. OCE owns background renewal,
+withdrawal and fenced takeover. OpenShell may be the sole lifecycle owner for a different credential family.
 
 ## Bootstrap and management callers
 
