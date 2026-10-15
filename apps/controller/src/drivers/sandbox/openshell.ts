@@ -1,6 +1,6 @@
 import {
   openShellEgressConfiguration,
-  type OpenShellEgressOptions,
+  type OpenShellConduitOptions,
 } from "../egress-proxy/openshell.ts";
 import { asRecord, immutableCopy, isNonEmptyString, sha256Hex } from "@openclaw-enterprise/utils";
 import { KubernetesObjectApi, type KubernetesObject, PatchStrategy } from "@kubernetes/client-node";
@@ -14,7 +14,7 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   AgentRevision,
   EgressInstallation,
-  EgressPlan,
+  ConduitPlan,
   Backend,
   HarnessWorkloadRequirements,
   KubernetesNamespacedResource,
@@ -89,7 +89,7 @@ export interface OpenShellNetworkBinary {
 }
 
 export interface OpenShellSandboxDriverOptions {
-  readonly egress?: OpenShellEgressOptions;
+  readonly egress?: OpenShellConduitOptions;
   /** Workspace and readiness policy; the `openshell` Backend owns the gateway connection. */
   readonly gateway: {
     readonly workspaceMode: "managed" | "operator";
@@ -586,7 +586,7 @@ interface CodexRuntimeFiles {
 
 function codexRuntimeFiles(
   requirements: HarnessWorkloadRequirements,
-  plan?: EgressPlan,
+  plan?: ConduitPlan,
 ): CodexRuntimeFiles {
   const expected = new Map([
     ["runtime.json", PLUGIN_RUNTIME_MANIFEST_ENVIRONMENT],
@@ -1520,13 +1520,13 @@ function sandboxSpec(
         run_as_user: options.policy.process.runAsUser,
         run_as_group: options.policy.process.runAsGroup,
       },
-      ...(requirements.egressAttachment === undefined
+      ...(requirements.conduitWiring === undefined
         ? {}
         : {
             network_middlewares: protectedEgressPolicy(options, requirements).network_middlewares,
           }),
       network_policies: {
-        ...(requirements.egressAttachment === undefined
+        ...(requirements.conduitWiring === undefined
           ? networkPolicies(options)
           : asRecord(protectedEgressPolicy(options, requirements).network_policies)),
         ...(runtimeProvider === undefined || workspaceNodeBinding === undefined
@@ -1700,9 +1700,9 @@ function protectedEgressPolicy(
   options: OpenShellSandboxDriverOptions,
   requirements: HarnessWorkloadRequirements,
 ): Readonly<Record<string, unknown>> {
-  const attachment = requirements.egressAttachment;
+  const wiring = requirements.conduitWiring;
   if (
-    !attachment ||
+    !wiring ||
     !options.egress ||
     requirements.credentialAttachments.length !== 0 ||
     (options.providers?.length ?? 0) !== 0
@@ -1711,9 +1711,9 @@ function protectedEgressPolicy(
       "Protected egress requires its exact paired policy and no legacy credential attachments.",
     );
   }
-  const expected = openShellEgressConfiguration(attachment.plan, options.egress);
-  if (!isDeepStrictEqual(attachment.configuration, expected)) {
-    throw new OpenShellSandboxConfigurationFailure("Protected egress attachment was altered.");
+  const expected = openShellEgressConfiguration(wiring.plan, options.egress);
+  if (!isDeepStrictEqual(wiring.configuration, expected)) {
+    throw new OpenShellSandboxConfigurationFailure("Conduit wiring was altered.");
   }
   return expected;
 }
@@ -2115,11 +2115,9 @@ export class OpenShellSandboxDriver implements SandboxDriver {
 
   async provisionHarness(context: SandboxHarnessContext): Promise<SandboxResourceRef> {
     this.requireOperatorWorkspaceMode("provision a Harness");
-    if (
-      !isDeepStrictEqual(context.requirements.egressAttachment?.plan, context.revision.egressPlan)
-    ) {
+    if (!isDeepStrictEqual(context.requirements.conduitWiring?.plan, context.revision.egressPlan)) {
       throw new OpenShellSandboxConfigurationFailure(
-        "Protected egress attachment must match the admitted revision.",
+        "Conduit wiring must match the admitted revision.",
       );
     }
     if (context.revision.egressPlan !== undefined && context.revision.harness.id !== "codex") {
@@ -2211,13 +2209,13 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       ),
       serviceExposures,
     };
-    const prepared = context.requirements.egressAttachment;
+    const prepared = context.requirements.conduitWiring;
     const result = immutableCopy({
       ...sandbox,
       ...(prepared === undefined
         ? {}
         : {
-            egressAttachment: {
+            conduitWiring: {
               plan: prepared.plan,
               configuration: create.spec.policy,
             },

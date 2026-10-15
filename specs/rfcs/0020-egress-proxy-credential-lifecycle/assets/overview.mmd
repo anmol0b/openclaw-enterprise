@@ -1,5 +1,5 @@
 ---
-title: "Proposed protected Agent egress responsibilities"
+title: "Proposed Conduit responsibilities"
 config:
   theme: base
   htmlLabels: true
@@ -25,15 +25,15 @@ config:
 flowchart TB
   %% Proposed responsibilities, not necessarily separate processes.
   Agent["<b>Agent execution</b><br/>Processes share authority<br/>No provider credential"]
-  Sandbox["<b>SandboxDriver</b><br/>Bind the execution<br/>and prevent bypass"]
-  Driver["<b>EgressProxyDriver</b><br/>Configure and withdraw<br/>Management only"]
-  Sender["<b>EgressForwarder</b><br/>Bind request and reply<br/>Inject, send, protect"]
-  OCC["<b>EgressAuthorizer</b><br/>Current execution,<br/>installation and policy"]
+  Sandbox["<b>SandboxDriver</b><br/>Apply wiring, bind execution<br/>and prevent bypass"]
+  Driver["<b>ConduitDriver</b><br/>Configure and withdraw<br/>Management only"]
+  Sender["<b>Conduit</b><br/>Bind request and reply<br/>Inject, send, protect"]
+  OCC["<b>RequestAuthorizer</b><br/>Current execution,<br/>installation and policy"]
   Resolver["<b>CredentialResolver</b><br/>Admitted static key or<br/>prepared dynamic token"]
   Provider["<b>Provider</b><br/>GitHub / inference"]
   Agent -. request .-> Sandbox
   Sandbox -. authenticated exchange .-> Sender
-  Driver -. attachment .-> Sandbox
+  Driver -. authenticated SandboxConduitWiring .-> Sandbox
   Driver -. configuration .-> Sender
   Sender -. two fresh checks .-> OCC
   Sender -. resolve if needed .-> Resolver

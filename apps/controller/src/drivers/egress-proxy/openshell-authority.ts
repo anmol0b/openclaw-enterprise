@@ -12,7 +12,7 @@ import {
   type ServerDuplexStream,
 } from "@grpc/grpc-js";
 import type { EgressResponse, StaticMaterialEvidence } from "@openclaw-enterprise/contracts";
-import type { EgressForwarder } from "@openclaw-enterprise/occ";
+import type { Conduit } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 import { OpenShellEgressIdentity } from "./openshell-identity.ts";
 
@@ -66,7 +66,7 @@ function refused(kind: string): Wire {
 /** Actual gRPC adapter for the supervisor's exclusive static-credential authority. */
 export function createOpenShellEgressAuthority(
   identity: OpenShellEgressIdentity,
-  forwarder: EgressForwarder,
+  conduit: Conduit,
 ): Server {
   const definition = loadSync(
     fileURLToPath(new URL("./proto/supervisor_middleware.proto", import.meta.url)),
@@ -157,7 +157,7 @@ export function createOpenShellEgressAuthority(
       }
       const signal = new AbortController();
       call.once("cancelled", () => signal.abort());
-      const result = await forwarder.resolve(
+      const result = await conduit.resolve(
         authorization(call.metadata),
         string(context.sandbox_id),
         {
@@ -212,7 +212,7 @@ export function createOpenShellEgressAuthority(
       }
       const signal = new AbortController();
       call.once("cancelled", () => signal.abort());
-      const result = await forwarder.authorizeSend(
+      const result = await conduit.authorizeSend(
         authorization(call.metadata),
         string(context.sandbox_id),
         string(context.request_id),
@@ -268,7 +268,7 @@ export function createOpenShellEgressAuthority(
                 block(false);
                 return;
               }
-              const handle = await forwarder.beginResponse(
+              const handle = await conduit.beginResponse(
                 authorization(call.metadata),
                 string(context.sandbox_id),
                 string(context.request_id),
@@ -284,7 +284,7 @@ export function createOpenShellEgressAuthority(
               ) {
                 phase = "done";
                 if (handle !== undefined) {
-                  await forwarder.protectResponse(
+                  await conduit.protectResponse(
                     handle,
                     {
                       status: Number(preflight.status_code),
@@ -321,7 +321,7 @@ export function createOpenShellEgressAuthority(
             } else if (event.body !== undefined && phase === "body" && head !== undefined) {
               const body = record(event.body);
               phase = "trailers";
-              const safe = await forwarder.protectResponse(
+              const safe = await conduit.protectResponse(
                 head.handle,
                 { ...head.response, body: bytes(body.data) },
                 signal.signal,

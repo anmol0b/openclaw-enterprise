@@ -141,7 +141,7 @@ A background worker can prepare one admitted GitHub App grant without traffic
 from an Agent. The owner commits an `issuing` attempt before retrieving the exact
 signing key version, then checks the family, owner epoch and that attempt again
 before calling GitHub. It reuses the existing signer and installation-token
-exchange. This is the [OCE-owned GitHub preparation option](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/lifecycle.md#github-issuer-bridge).
+exchange. This is the [OCE-owned GitHub preparation option](../../specs/rfcs/0020-egress-proxy-credential-lifecycle/protocol.md#prepare-and-renew-credentials).
 
 GitHub issuance cannot be atomic with local storage. The owner verifies the exact
 returned repository, rights and provider expiry. The publication transaction

@@ -24,7 +24,7 @@ supported operations and configuration.
 - Trigger: an installed supervisor sends `HttpCredentialAccess.Resolve`, followed
   by `AuthorizeSend` and `HttpResponsePreReturn.Evaluate` over authenticated TLS.
 - Source: `apps/controller/src/drivers/egress-proxy/openshell-authority.ts:createOpenShellEgressAuthority`
-- Source: `packages/occ/src/index.ts:createEgressForwarder`
+- Source: `packages/occ/src/index.ts:createConduit`
 - Assumptions: source admission and Agent deployment produced an exact plan;
   a current verified loaded-enforcement receipt permits installation; the Agent is
   running; its service principal holds exact source `operate` permission.
@@ -57,7 +57,7 @@ exercise that contract; deployed enforcement remains a separate qualification.
 ### 1. Admit source and install the revision plan
 
 `packages/occ/src/index.ts:admitStaticEgressSource`,
-`packages/occ/src/index.ts:admitEgressPlan`
+`packages/occ/src/index.ts:admitConduitPlan`
 
 New protected sources store a closed live/static descriptor after source/Secret
 permission checks and candidate validation. Existing sources require explicit
@@ -65,9 +65,10 @@ source-update opt-in. Deployment freezes execution, source generation, model
 grant, binding and route identities in `AgentRevision.egressPlan`.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:prepareRevision`,
-`apps/controller/src/drivers/egress-proxy/openshell.ts:attachmentStatus`
+`apps/controller/src/drivers/egress-proxy/openshell.ts:wiringStatus`
 
-Compute passes the selected Driver's attachment to Sandbox provisioning. The
+Compute passes the selected Conduit Driver's `SandboxConduitWiring` through
+`HarnessWorkloadRequirements.conduitWiring` to Sandbox provisioning. The
 Sandbox returns its complete prepared source policy from
 `apps/controller/src/drivers/sandbox/openshell.ts:provisionHarness`.
 The adapter compares the full source revision against that output and checks the
@@ -117,13 +118,13 @@ see the [supported recovery boundary](../reference/credential-sources/protected-
 ### 2. Capture identity, operation and first authority decision
 
 `apps/controller/src/drivers/egress-proxy/openshell-identity.ts:verify`,
-`packages/occ/src/egress.ts:resolve`
+`packages/occ/src/conduit.ts:resolve`
 
 The TLS adapter verifies the extension JWT, its signed registered `instance_id`
 and matching request Sandbox ID. The gateway validates the supervisor-supplied
 instance against its authenticated Sandbox registration before signing it; this
 trusts the supervisor and does not attest its binary. The instance must equal the
-installation fence. The Forwarder maps that peer to persisted installation state
+installation fence. The Conduit maps that peer to persisted installation state
 and classifies one exact route through its registered provider. It copies request bytes and reserves the
 UUIDv7 request ID before asynchronous authorization. Its embedded creation time
 fixes the 30-second replay horizon, so resubmission cannot extend it. Pending
@@ -147,7 +148,7 @@ without material.
 ### 3. Resolve versioned material and authorize its sole send
 
 `apps/controller/src/drivers/secret/kubernetes/index.ts:readCredentialInput`,
-`packages/occ/src/egress.ts:authorizeSend`
+`packages/occ/src/conduit.ts:authorizeSend`
 
 The selected Secret Driver verifies ownership and reads UID/resourceVersion from
 the authoritative API. The registry retains material only for this bounded
@@ -170,7 +171,7 @@ Revocation can still race the subsequent send; the permit authorizes no retry.
 
 ### 4. Protect response and finish
 
-`packages/occ/src/egress.ts:protectResponse`,
+`packages/occ/src/conduit.ts:protectResponse`,
 `apps/controller/src/drivers/egress-proxy/openai-provider.ts:protectedEvents`,
 `apps/controller/src/drivers/egress-proxy/openai-responses.ts:validResponsesEvent`
 

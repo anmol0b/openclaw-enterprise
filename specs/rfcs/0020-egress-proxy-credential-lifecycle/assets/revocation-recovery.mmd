@@ -28,23 +28,23 @@ config:
 ---
 sequenceDiagram
   participant C as OCC / reconciler
-  participant E as Egress driver
+  participant E as ConduitDriver
   participant B as Sandbox
-  participant F as Forwarder
+  participant F as Conduit
   participant R as Resolver
   Note over C,R: Proposed flow, exact operations and cleanup survive restart
   C->>C: Commit denial and durable withdrawal intent
   C->>E: withdrawBinding(exact binding)
   E->>E: Persist tombstone<br/>Advance policy generation
-  Note over E,B: Sandbox enforces Egress-owned configuration<br/>Late installs cannot restore a tombstoned binding
-  C->>E: attachmentStatus
+  Note over E,B: Sandbox applies authenticated Conduit wiring<br/>Late installs cannot restore a tombstoned binding
+  C->>E: wiringStatus
   E-->>C: Successor: remaining routes and bindings
-  C->>B: installEgress(successor, Command)
-  C->>B: egressStatus for exact successor
+  C->>B: applyConduit(successor, Command)
+  C->>B: conduitStatus for exact successor
   B-->>C: Receipt: binding set and policy generation
-  C->>E: attachmentStatus / inspect / reconcile
+  C->>E: wiringStatus / inspect / reconcile
   E-->>C: Detached evidence or outstanding cleanup
-  F->>C: EgressAuthorizer.check for next operation
+  F->>C: RequestAuthorizer.check for next operation
   C-->>F: Deny withdrawn authority
   Note over C,F: Accepted final-check race remains, original deadlines bound in-flight work<br/>Logical denial, detach and provider revocation are distinct<br/>Revoke only if supported, no exported bearer recall or undo of sent effects
   opt Credential rejection
