@@ -53,7 +53,10 @@ function protectedResponse(
     response.status < 200 ||
     response.status >= 600 ||
     (response.status >= 300 && response.status < 400) ||
-    response.body.byteLength > maximumResponseBytes
+    response.body.byteLength > maximumResponseBytes ||
+    // No trailer semantics are approved for this provider. Check actual trailers,
+    // not merely a Trailer declaration (HTTP/2 need not declare them in advance).
+    response.trailers.length !== 0
   ) {
     return undefined;
   }
@@ -130,6 +133,7 @@ function protectedResponse(
       status: response.status,
       headers: [["content-type", sse ? "text/event-stream" : "application/json"]],
       body: new Uint8Array(response.body),
+      trailers: [],
     };
   } catch {
     return undefined;
@@ -139,7 +143,9 @@ function protectedResponse(
 /** Bounded inference with Harness-local tools and complete finite Responses SSE custody. */
 export const openAiStaticProvider: CredentialProviderDefinition =
   Object.freeze<CredentialProviderDefinition>({
-    ref: { id: "openai-static-https", generation: 1 },
+    // Generation 1 could grant only one executable. Exact provider-generation
+    // matching prevents an upgrade or rollback from reinterpreting that grant.
+    ref: { id: "openai-static-https", generation: 2 },
     schemaVersion: 1,
     sourceType: {
       type: "openai",

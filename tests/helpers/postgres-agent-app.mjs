@@ -62,10 +62,16 @@ async function ensureBootstrap(t, { label, authSecret }) {
  */
 export async function createPostgresAgentApp(
   t,
-  { label, authSecret, createAuditSink = (persisted) => persisted, appOptions },
+  {
+    label,
+    authSecret,
+    createAuditSink = (persisted) => persisted,
+    appOptions,
+    transportDatabaseUrl = databaseUrl,
+  },
 ) {
   await ensureBootstrap(t, { label, authSecret });
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 6 });
+  const pool = new pg.Pool({ connectionString: transportDatabaseUrl, max: 6 });
   t.after(() => pool.end());
   const state = new PostgresPlatformState(pool);
   const installation = await state.loadInstallation();

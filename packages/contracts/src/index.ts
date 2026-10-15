@@ -532,6 +532,8 @@ export type ResolvedHarnessAuth =
 export interface ComputeRevisionContext {
   /** Worker persists only an authenticated receipt for this admitted plan. */
   readonly recordEgressInstallation?: (installation: EgressInstallation) => Promise<void>;
+  /** A fresh read of the still-authorized revision and its exact committed installation. */
+  readonly currentEgressInstallation?: () => Promise<EgressInstallation | undefined>;
   readonly workspaceSetup?: Readonly<WorkspaceSetup>;
   readonly harnessAuth: ResolvedHarnessAuth;
   /** Non-model sources resolved again at dispatch, in admission order. */
@@ -1556,6 +1558,8 @@ export interface SandboxDriver extends Driver {
   enrollHarness?(
     context: SandboxHarnessStatusContext,
     installation: EgressInstallation,
+    /** Compute alone may release this exact fresh startup; the transport bearer cannot. */
+    release: (startupId: string) => Promise<Readonly<Record<string, unknown>>>,
   ): Promise<void>;
   /**
    * Returns the provider-owned transport for the exact provisioned Harness. When present,

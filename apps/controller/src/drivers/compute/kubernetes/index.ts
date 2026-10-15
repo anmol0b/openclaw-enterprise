@@ -1,4 +1,9 @@
-import { assertExecutionReleaseAllowed } from "@openclaw-enterprise/contracts";
+import { assertExecutionAdmission } from "@openclaw-enterprise/contracts";
+import {
+  COMPUTE_RELEASE_PUBLIC_KEY,
+  computeReleasePublicKey,
+  signComputeExecutionRelease,
+} from "../egress-enrollment.ts";
 import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
 import {
   normalizeOpenAiBaseUrl,
@@ -16,7 +21,15 @@ import {
   sha256Hex,
   splitModelRef,
 } from "@openclaw-enterprise/utils";
-import { createHash, randomBytes, timingSafeEqual, X509Certificate } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  generateKeyPairSync,
+  randomBytes,
+  timingSafeEqual,
+  X509Certificate,
+  type KeyObject,
+} from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { isAbsolute, posix } from "node:path";
 import { isKubernetesNamespaceName, isKubernetesResourceName } from "./resource-name.ts";
@@ -70,6 +83,8 @@ import type {
   ComputePreflightResult,
   ComputePrepareRevisionFailureDiagnostic,
   ComputeRevisionContext,
+  EgressInstallation,
+  EgressRevisionContext,
   ConfigurationValidationOptions,
   CredentialAttachmentStatus,
   CredentialGatewayDriver,
@@ -3842,7 +3857,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
       : native
         ? "Dedicated OpenClaw"
         : "Dedicated Codex";
-    requireHarnessAuthMethod(kubernetesHarnessAuthMethods(topology), auth.method);
+    const protectedWithoutCredential =
+      codex && auth.method === "runtime" && this.egressProxyDriver !== undefined;
+    if (!protectedWithoutCredential) {
+      requireHarnessAuthMethod(kubernetesHarnessAuthMethods(topology), auth.method);
+    }
     // Reject here, before a deployment stops predecessors, not only during preparation. Only
     // Dedicated Codex reaches this with oauth.
     if (auth.method === "oauth" && this.sandboxDriver !== undefined) {
@@ -5280,14 +5299,65 @@ export class KubernetesComputeDriver implements ComputeDriver {
   validateExecutionAdmission(
     revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
   ): void {
-    assertExecutionReleaseAllowed(revision);
+    assertExecutionAdmission(revision);
+    const plan = revision.egressPlan;
+    if (plan === undefined && this.egressProxyDriver === undefined) {
+      return;
+    }
+    const sandbox = this.sandboxDriver;
+    if (
+      plan === undefined ||
+      this.options.runtime === undefined ||
+      this.egressProxyDriver?.implementation !== "openshell" ||
+      this.egressProxyDriver.id !== plan.egressDriverId ||
+      sandbox?.implementation !== "openshell" ||
+      sandbox.id !== plan.sandboxDriverId ||
+      !sandbox.provisionHarness ||
+      !sandbox.enrollHarness ||
+      !sandbox.harnessEndpoint ||
+      !sandbox.harnessStatus
+    ) {
+      throw new DependencyUnavailableError(
+        "Protected execution is unavailable without its exact paired Compute release.",
+      );
+    }
+  }
+
+  private validateRevisionExecution(
+    revision: AgentRevision,
+    context?: ComputeRevisionContext,
+  ): void {
+    this.validateExecutionAdmission(revision);
+    const plan = revision.egressPlan;
+    if (!plan) {
+      return;
+    }
+    const execution = plan.execution;
+    if (
+      revision.harness.id !== "codex" ||
+      revision.harness.mode !== "dedicated" ||
+      revision.sandboxDriverId !== plan.sandboxDriverId ||
+      !context?.currentEgressInstallation ||
+      execution.agentId !== revision.agentId ||
+      execution.revisionId !== revision.id ||
+      execution.namespaceId !== revision.namespaceId ||
+      execution.servicePrincipalId !== revision.servicePrincipalId ||
+      plan.routes.some((route) => !isDeepStrictEqual(route.binding.execution, execution)) ||
+      (plan.routes.length === 0
+        ? revision.harnessAuth.method !== "runtime"
+        : revision.harnessAuth.method !== "credential_source")
+    ) {
+      throw new DependencyUnavailableError(
+        "Protected Compute release requires its dedicated Harness and current admitted installation.",
+      );
+    }
   }
 
   async prepareRevision(
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): Promise<ComputeReadiness> {
-    assertExecutionReleaseAllowed(revision);
+    this.validateRevisionExecution(revision, context);
     try {
       return await this.prepareRevisionWorkloads(revision, context);
     } catch (error) {
@@ -6088,6 +6158,13 @@ export class KubernetesComputeDriver implements ComputeDriver {
           attachments,
           this.sandboxWorkloadFiles(pluginRuntime),
         );
+        const releaseKey =
+          egressAttachment === undefined
+            ? undefined
+            : await this.executionReleaseKey(
+                revision,
+                await this.controlNamespace(revision.namespaceId),
+              );
         const requirements = {
           ...harnessRequirements,
           ...(egressAttachment === undefined
@@ -6099,6 +6176,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
                 environment: [
                   ...harnessRequirements.environment,
                   { name: "OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID", value: revision.id },
+                  { name: COMPUTE_RELEASE_PUBLIC_KEY, value: computeReleasePublicKey(releaseKey!) },
                 ],
               }),
         };
@@ -6139,6 +6217,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
                 transportToken,
               },
               installed,
+              async (startupId) => {
+                const committed = await this.verifiedReleaseInstallation(
+                  egressContext,
+                  context!,
+                  installed,
+                );
+                this.operationSignal().throwIfAborted();
+                return signComputeExecutionRelease(releaseKey!, startupId, committed);
+              },
             ),
           );
         }
@@ -6388,7 +6475,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   }
 
   async activateRevision(revision: AgentRevision, context?: ComputeRevisionContext): Promise<void> {
-    assertExecutionReleaseAllowed(revision);
+    this.validateRevisionExecution(revision, context);
     try {
       await this.activateRevisionWorkloads(revision, context);
     } catch (error) {
@@ -6718,6 +6805,17 @@ export class KubernetesComputeDriver implements ComputeDriver {
           this.sandboxNamespaceForRevision(revision, namespace),
           namespace,
         );
+        if (revision.egressPlan !== undefined) {
+          await this.verifiedReleaseInstallation(
+            {
+              namespace: sandboxContext.namespace,
+              signal: sandboxContext.signal,
+              revision,
+              plan: revision.egressPlan,
+            },
+            context!,
+          );
+        }
         providerEndpoint = await sandboxDriver.harnessEndpoint({
           ...sandboxContext,
           revision,
@@ -7465,6 +7563,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
         `plugin-runtime-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`,
         this.pluginRuntimeOwnership(revision),
         gatewayNamespace,
+      );
+    }
+    if (revision.egressPlan !== undefined) {
+      await this.deleteOwnedNamespacedResource(
+        "Secret",
+        this.executionReleaseSecretName(revision),
+        this.pluginRuntimeOwnership(revision),
+        await this.controlNamespace(revision.namespaceId),
       );
     }
     for (const name of [
@@ -13124,7 +13230,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       ) {
         throw new OwnershipFailure("Harness credential source does not match the admitted source.");
       }
-    } else {
+    } else if (auth.method !== "runtime" || revision.egressPlan?.routes.length !== 0) {
       if (
         !isServiceAccountHarnessAuth(auth) ||
         !isDeepStrictEqual(auth, revision.harnessAuth) ||
@@ -13135,7 +13241,13 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         );
       }
     }
-    const prepared = prepareHarnessAuth(revision.harness, auth, revision.configuration);
+    const prepared: PreparedHarnessAuth =
+      auth.method === "runtime" && revision.egressPlan?.routes.length === 0
+        ? {
+            loginMode: "runtime",
+            environment: [{ name: "CODEX_LOGIN_MODE", value: "protected-no-inference" }],
+          }
+        : prepareHarnessAuth(revision.harness, auth, revision.configuration);
     const native = harnessModelAuthentication(revision.configuration);
     return {
       ...prepared,
@@ -13882,6 +13994,85 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
             };
       }),
     };
+  }
+
+  /** The release signer is revision-owned in the control plane and is never projected into a workload. */
+  private async executionReleaseKey(
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<KeyObject> {
+    const name = this.executionReleaseSecretName(revision);
+    const ownership = this.pluginRuntimeOwnership(revision);
+    try {
+      let observed = await this.getOwned("Secret", name, namespace, ownership);
+      if (!observed) {
+        const key = generateKeyPairSync("ed25519").privateKey.export({
+          type: "pkcs8",
+          format: "der",
+        });
+        const clients = await this.clients(namespace.plane);
+        await this.request(
+          () =>
+            clients.core.createNamespacedSecret({
+              namespace: namespace.name,
+              body: {
+                ...this.manifest("v1", "Secret", name, ownership, namespace),
+                immutable: true,
+                type: "Opaque",
+                data: { signer: key.toString("base64") },
+              },
+            }),
+          { mutating: true },
+        );
+        observed = await this.getOwned("Secret", name, namespace, ownership);
+      }
+      if (
+        observed?.immutable !== true ||
+        !observed.metadata.uid ||
+        observed.metadata.deletionTimestamp ||
+        !observed.data?.signer
+      ) {
+        throw new Error("Incomplete Compute execution release key.");
+      }
+      const key = createPrivateKey({
+        key: Buffer.from(observed.data.signer, "base64"),
+        format: "der",
+        type: "pkcs8",
+      });
+      if (key.asymmetricKeyType !== "ed25519") {
+        throw new Error("Invalid Compute execution release key.");
+      }
+      return key;
+    } catch (error) {
+      this.operationSignal().throwIfAborted();
+      throw privateWriteFailure("Compute execution release key is unavailable.", error);
+    }
+  }
+
+  private executionReleaseSecretName(revision: AgentRevision): string {
+    return `compute-release-${sha256Hex(revision.agentId, 12)}-rev-${sha256Hex(revision.id, 12)}`;
+  }
+
+  private async verifiedReleaseInstallation(
+    egress: EgressRevisionContext,
+    context: ComputeRevisionContext,
+    observed?: EgressInstallation,
+  ): Promise<EgressInstallation> {
+    const current = await context.currentEgressInstallation!();
+    if (
+      !current ||
+      !isDeepStrictEqual(current.plan, egress.plan) ||
+      (observed &&
+        (observed.sandboxId !== current.sandboxId ||
+          !isDeepStrictEqual(current.sender, observed.sender) ||
+          !isDeepStrictEqual(current.enforcement, observed.enforcement))) ||
+      !(await this.egressProxyDriver!.verifyInstallation(egress, current))
+    ) {
+      throw new DependencyUnavailableError(
+        "Compute release requires the exact current committed installation.",
+      );
+    }
+    return current;
   }
 
   private async sandboxTransportVerifier(

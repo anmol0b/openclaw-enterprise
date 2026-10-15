@@ -83,14 +83,67 @@ test("A resolves, authorizes and receives the protected actual reply on its acce
   assert.equal(f.providerRequests.length, 0);
 
   a.stream.write({ authorize: f.permitRequest(captured, resolved.ready) });
-  assert.ok((await a.next()).authorized.allowed);
+  const permit = (await a.next()).authorized.allowed;
+  assert.deepEqual(permit.response_custody, captured.response_custody);
   const response = await f.send(captured, resolved.ready);
   assert.equal(f.providerRequests.length, 1);
   a.stream.write({ response });
   const returned = await a.next();
   assert.ok(returned.response.body.length > 0);
   assert.equal(returned.response.status, 200);
+  assert.equal(returned.response.response_complete, true);
   assert.doesNotMatch(returned.response.body.toString(), /Bearer/);
+});
+
+test("signed custody must be present, unique to this live exchange and unchanged in the proof", async (t) => {
+  const f = await staticEgressFixture(t);
+  const captured = f.capture();
+  assert.ok((await f.resolve(captured)).ready);
+  const before = f.secretReads;
+  for (const hash of ["", "ab".repeat(32)]) {
+    const withheld = await f.resolve({ ...f.capture(), verified_execution_policy_hash: hash });
+    assert.ok(withheld.refused, "a signed opening must name the actual enforced execution policy");
+  }
+  for (const custody of [captured.response_custody, undefined, Buffer.alloc(31)]) {
+    await assert.rejects(f.resolve({ ...f.capture(), response_custody: custody }), { code: 7 });
+  }
+  const changed = await f.beginExchange();
+  const packet = changed.opening(captured);
+  const replacement = { ...captured, response_custody: f.capture().response_custody };
+  packet.open.resolve_request = changed.opening(replacement).open.resolve_request;
+  changed.stream.write(packet);
+  await assert.rejects(changed.next(), { code: 7 });
+  assert.equal(f.secretReads, before);
+  assert.equal(f.providerRequests.length, 0);
+});
+
+test("the last forbidden trailer reaches the complete response policy; no head or body is released", async (t) => {
+  const f = await staticEgressFixture(t);
+  const captured = f.capture();
+  const a = await f.beginExchange();
+  a.stream.write(a.opening(captured));
+  const { ready } = (await a.next()).resolved;
+  a.stream.write({ authorize: f.permitRequest(captured, ready) });
+  assert.deepEqual((await a.next()).authorized.allowed.response_custody, captured.response_custody);
+  f.setResponse({
+    status: 200,
+    body: { output: "otherwise safe body" },
+    trailers: { "x-first-trailer": "first", "x-forbidden-last": "synthetic-private" },
+  });
+  const response = await f.send(captured, ready);
+  assert.equal(response.response_complete, true);
+  assert.deepEqual(response.trailers.at(-1), {
+    name: "x-forbidden-last",
+    value: "synthetic-private",
+  });
+  a.stream.write({ response });
+  await assert.rejects(a.next(), { code: 7 });
+  assert.equal(f.providerRequests.length, 1, "the origin had already executed once");
+  assert.equal(
+    a.received.filter((event) => event.response).length,
+    0,
+    "not even an early response head",
+  );
 });
 
 test("current installation replacement revokes captured A without reassigning its request", async (t) => {

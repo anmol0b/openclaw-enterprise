@@ -163,7 +163,7 @@ func (r *runner) readDevelopmentEgressKeyID(ctx context.Context, state *developm
 
 func developmentEgressConfiguration(state *developmentState) map[string]any {
 	return map[string]any{"id": developmentEgressDriver, "configuration": map[string]any{
-		"middlewareName": developmentEgressMiddleware, "binaries": openShellCodexBinaries(),
+		"middlewareName": developmentEgressMiddleware, "authorityScope": "execution",
 		"authority": map[string]any{
 			"host": "0.0.0.0", "port": developmentEgressPort,
 			"certificatePath":     "/etc/openclaw/egress/tls/tls.crt",

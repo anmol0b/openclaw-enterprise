@@ -4645,7 +4645,8 @@ Push current or replacement Secret values to the Credential Gateway copy
 
 | Field | Type | Required | Constraints |
 | --- | --- | --- | --- |
-| `adoption` | `"live"` | No | Explicitly opt an unbound static source into protected live Secret reads. Requires source update and Secret operate permission; failure preserves the existing source. |
+| `adoption` | `"live"` | No | Opt an unbound static source into protected live Secret reads. A legacy or narrower source also requires explicit authorityScope: execution. Requires source update and Secret operate permission. |
+| `authorityScope` | `"execution"` | No | Consent to every process in this dedicated execution using the constrained inference grant. An older executable-specific grant is never broadened by an upgrade or Secret change. |
 | `secrets` | `object<string, object>` | No | Secret inputs keyed by catalog field name. Each value references an OCC Secret in the same Namespace; OCC never returns its value. |
 
 ##### Responses

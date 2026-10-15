@@ -274,6 +274,8 @@ message NetworkMiddlewareConfig {
   MiddlewareEndpointSelector endpoints = 5;
   int32 order = 6;
   bool credential_authority = 7;
+  repeated CredentialConnector credential_connectors = 8;
+  bool execution_authority = 9;
 }
 
 message MiddlewareEndpointSelector {
@@ -797,4 +799,9 @@ message SandboxPolicyRevision {
   uint32 status = 3;
   SandboxPolicy policy = 7;
   google.protobuf.Timestamp loaded_time = 106;
+}
+
+message CredentialConnector {
+  string path = 1;
+  string sha256 = 2;
 }

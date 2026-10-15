@@ -21,6 +21,7 @@ export async function commitAckProxy(databaseUrl) {
   }
   let armed = false;
   let skipCommits = 0;
+  let afterParsePrefix;
   let observed = false;
   let commits = 0;
   const sockets = new Set();
@@ -37,6 +38,7 @@ export async function commitAckProxy(databaseUrl) {
     let backend = Buffer.alloc(0);
     let startup = true;
     let dropping = false;
+    let matchedInTransaction = false;
     const close = () => {
       client.destroy();
       upstream.destroy();
@@ -59,11 +61,26 @@ export async function commitAckProxy(databaseUrl) {
         }
         const frame = frontend.subarray(0, size);
         frontend = frontend.subarray(size);
+        // Match the actual extended-protocol Parse on this connection. The next
+        // COMMIT is the target, even if policy/reservation used other transactions.
+        if (armed && afterParsePrefix && !startup && frame[0] === 80) {
+          const sql = frame.indexOf(0, 5) + 1;
+          matchedInTransaction ||=
+            frame.toString("utf8", sql, sql + afterParsePrefix.length) === afterParsePrefix;
+        }
+        if (
+          !startup &&
+          frame[0] === 81 &&
+          frame.subarray(5, -1).toString().trim().toUpperCase() === "ROLLBACK"
+        ) {
+          matchedInTransaction = false;
+        }
         if (
           !startup &&
           frame[0] === 81 &&
           frame.subarray(5, -1).toString().trim().toUpperCase() === "COMMIT" &&
-          armed
+          armed &&
+          (!afterParsePrefix || matchedInTransaction)
         ) {
           if (skipCommits > 0) {
             skipCommits -= 1;
@@ -119,6 +136,7 @@ export async function commitAckProxy(databaseUrl) {
         throw new Error("The single-use fault is already armed or consumed.");
       }
       skipCommits = skip;
+      afterParsePrefix = options.afterParsePrefix;
       armed = true;
     },
     get commits() {

@@ -427,6 +427,7 @@ function twoClusterOptions() {
 function routedRevision(driver, overrides = {}) {
   return {
     id: "revision-routed-1",
+    executionAdmission: { version: 2, mode: "unprotected" },
     namespaceId: tenant.id,
     agentId: "agent-routed",
     revision: 1,
@@ -12653,6 +12654,7 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
     const protectedRevision = {
       ...revision,
       id: protectedId,
+      executionAdmission: { version: 2, mode: "protected" },
       revision: revision.revision + 1,
       harnessAuth: protectedAuth,
       egressPlan: plan,
@@ -12666,7 +12668,11 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
       sandboxId: "installed-sandbox",
       sender: source.egress.sender,
       installedAt: "2026-10-14T00:00:00.000Z",
-      enforcement: { instanceId: "current-instance", configurationId: "current-configuration" },
+      enforcement: {
+        instanceId: "current-instance",
+        configurationId: "current-configuration",
+        peerKeyId: "enrolled-exchange-key",
+      },
     };
     const events = [];
     let observation = installed;
@@ -12674,6 +12680,7 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
     driver.credentialGatewayDriver.listSourceTypes = async () => [openAiStaticProvider.sourceType];
     driver.egressProxyDriver = {
       id: plan.egressDriverId,
+      implementation: "openshell",
       async configureRevision() {
         return attachment;
       },
@@ -12687,8 +12694,10 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
       },
     };
     let enrollmentRequirements;
+    let releaseByCompute;
     const released = new DependencyUnavailableError("stop after authenticated enrollment boundary");
-    fixture.sandbox.enrollHarness = async (context, receipt) => {
+    fixture.sandbox.enrollHarness = async (context, receipt, release) => {
+      releaseByCompute = release;
       assert.equal(context.transportToken, "test-transport");
       assert.equal(context.revision, protectedRevision);
       assert.equal(receipt, installed);
@@ -12714,6 +12723,7 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
       async recordEgressInstallation() {
         events.push("commit");
       },
+      currentEgressInstallation: async () => observation,
     };
     observation = undefined;
     assert.equal((await driver.prepareRevision(protectedRevision, protectedContext)).ready, false);
@@ -12862,7 +12872,44 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
           ).status,
           409,
         );
-        assert.equal((await release(challenge)).status, 200);
+        // A bearer holder can read the real challenge but cannot echo it to release startup.
+        assert.equal((await release(challenge)).status, 409);
+        for (const substitution of [
+          undefined,
+          { ...installed, sandboxId: "replacement" },
+          {
+            ...installed,
+            enforcement: { ...installed.enforcement, peerKeyId: "new-enrolled-peer" },
+          },
+        ]) {
+          observation = substitution;
+          await assert.rejects(
+            releaseByCompute(challenge.startupId),
+            /exact current committed installation/,
+          );
+        }
+        observation = installed;
+        current = false;
+        await assert.rejects(
+          releaseByCompute(challenge.startupId),
+          /exact current committed installation/,
+        );
+        current = true;
+        const stale = await releaseByCompute("another-startup");
+        assert.equal((await release(stale)).status, 409);
+        const signed = await releaseByCompute(challenge.startupId);
+        const signer = [...objects.values()].find((v) =>
+          v.metadata?.name.startsWith("compute-release-"),
+        );
+        assert.ok(signer?.immutable);
+        assert.equal(JSON.stringify(enrollmentRequirements).includes(signer.data.signer), false);
+        for (const forged of [
+          { ...signed, signature: Buffer.alloc(64).toString("base64url") },
+          { ...signed, installation: { ...signed.installation, peerKeyId: "new-peer" } },
+        ]) {
+          assert.equal((await release(forged)).status, 409);
+        }
+        assert.equal((await release(signed)).status, 200);
         assert.deepEqual(await exited, [0, null]);
       },
     );
@@ -12890,6 +12937,122 @@ test("provider Harness endpoint owns Gateway transport through preparation and a
         assert.match(result.stderr, /Protected Harness enrollment configuration is invalid/);
       });
     }
+    await t.test(
+      "a zero-binding execution releases only its local app server, after the exact committed deny-all",
+      async (t) => {
+        const id = "ar_00000000-0000-4000-8000-000000000548";
+        const zeroPlan = { ...plan, execution: { ...plan.execution, revisionId: id }, routes: [] };
+        const zero = {
+          ...protectedRevision,
+          id,
+          revision: protectedRevision.revision + 1,
+          harnessAuth: { method: "runtime" },
+          egressPlan: zeroPlan,
+          credentialSources: [],
+        };
+        save({
+          ...setup,
+          metadata: {
+            ...setup.metadata,
+            name: driver.workspaceNodeName(zero),
+            labels: { ...setup.metadata.labels, "openclaw.dev/revision": id },
+          },
+        });
+        const zeroInstalled = { ...installed, plan: zeroPlan };
+        observation = zeroInstalled;
+        driver.egressProxyDriver.configureRevision = async ({ plan }) => ({ ...attachment, plan });
+        let zeroRequirements;
+        let authorizeZero;
+        fixture.sandbox.enrollHarness = async ({ requirements }, receipt, release) => {
+          assert.equal(receipt, zeroInstalled);
+          zeroRequirements = requirements;
+          authorizeZero = release;
+          throw released;
+        };
+        const zeroContext = {
+          harnessAuth: zero.harnessAuth,
+          credentialSources: [],
+          currentEgressInstallation: async () => zeroInstalled,
+          recordEgressInstallation: async (receipt) => assert.equal(receipt, zeroInstalled),
+        };
+        await assert.rejects(
+          driver.prepareRevision(zero, zeroContext),
+          (error) => error === released,
+        );
+        const directory = await mkdtemp(join(tmpdir(), "oce-compute-deny-all-"));
+        t.after(() => rm(directory, { recursive: true, force: true }));
+        const calls = join(directory, "codex-calls");
+        await writeFile(calls, "");
+        // Stub only the CLI. Use the owning prepareRevision's actual files and environment.
+        await writeFile(
+          join(directory, "codex"),
+          '#!/bin/sh\necho "$@" >> "$OCE_TEST_CODEX_CALLS"\n',
+          { mode: 0o700 },
+        );
+        const env = {
+          ...Object.fromEntries(
+            zeroRequirements.environment
+              .filter((entry) => "value" in entry)
+              .map(({ name, value }) => [name, value]),
+          ),
+          PATH: directory + ":" + process.env.PATH,
+          HOME: directory,
+          CODEX_HOME: directory,
+          OPENCLAW_WORKSPACE_DIR: directory,
+          OCE_TEST_CODEX_CALLS: calls,
+          APP_SERVER_PORT: String(port),
+        };
+        for (const file of zeroRequirements.files) {
+          const path = join(directory, file.name);
+          await writeFile(path, file.content);
+          env[file.environmentVariable] = path;
+        }
+        const script = join(directory, "harness.cjs");
+        await writeFile(script, AGENT_RUNTIME_ENTRYPOINT);
+        const child = spawn(process.execPath, [script], {
+          env,
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        t.after(() => child.kill());
+        const exited = once(child, "exit");
+        let stderr = "";
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk;
+        });
+        const url = "http://127.0.0.1:" + port + HARNESS_EGRESS_ENROLLMENT_PATH;
+        const headers = {
+          authorization: "Bearer test-transport",
+          "content-type": "application/json",
+        };
+        let challenge;
+        for (let n = 0; n < 100; n++) {
+          assert.equal(child.exitCode, null, stderr);
+          challenge = await fetch(url, { headers })
+            .then((r) => r.json())
+            .catch(() => undefined);
+          if (challenge) {
+            break;
+          }
+          await delay(20);
+        }
+        assert.equal(challenge?.routeCount, 0, stderr);
+        assert.equal(
+          await readFile(calls, "utf8"),
+          "",
+          "protected startup ran no CLI before release",
+        );
+        const signed = await authorizeZero(challenge.startupId);
+        assert.equal(
+          (await fetch(url, { headers, method: "POST", body: JSON.stringify(signed) })).status,
+          200,
+        );
+        assert.equal((await exited)[0], 0, stderr);
+        const invocations = (await readFile(calls, "utf8")).trim().split("\n");
+        assert.equal(invocations.length, 1);
+        assert.match(invocations[0], /app-server/);
+      },
+    );
+    driver.egressProxyDriver = undefined;
   }
 
   // An unreachable Harness transport is a Sandbox provisioning failure in diagnostics.

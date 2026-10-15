@@ -13,19 +13,19 @@ import {
   type ServerDuplexStream,
 } from "@grpc/grpc-js";
 import type { StaticMaterialEvidence } from "@openclaw-enterprise/contracts";
-import type { EgressForwarder } from "@openclaw-enterprise/occ";
+import type { OpenClawController } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 import { OpenShellEgressIdentity } from "./openshell-identity.ts";
+import { openShellExchangeCapabilities } from "./openshell-exchange-capabilities.ts";
 
 type Wire = Record<string, unknown>;
 type AuthorityCall = {
   request: Wire;
-  metadata: Metadata;
-  once(event: "cancelled", listener: () => void): unknown;
+  authorization: string;
+  signal: AbortSignal;
 };
-const credentialCapability = "openshell.supervisor-middleware.http-credential-access.v1";
-const exchangeCapability = "openshell.supervisor-middleware.installation-exchange.v1";
 const contractCapability = "openshell.supervisor-middleware.contract";
+const capabilities = [contractCapability, ...openShellExchangeCapabilities];
 const record = (input: unknown): Wire => asRecord(input) ?? {};
 const string = (input: unknown): string => (typeof input === "string" ? input : "");
 const bytes = (input: unknown): Buffer =>
@@ -73,8 +73,11 @@ function refused(kind: string): Wire {
 /** Actual gRPC adapter for the supervisor's exclusive static-credential authority. */
 export function createOpenShellEgressAuthority(
   identity: OpenShellEgressIdentity,
-  forwarder: EgressForwarder,
+  controller: Pick<OpenClawController, "createEgressForwarder">,
 ): Server {
+  // The verifier owns acceptance on the actual stream. No separate synthetic owner,
+  // bearer-only profile or caller-selected response destination can enter this composition.
+  const forwarder = controller.createEgressForwarder(identity, identity);
   const definition = loadSync(
     fileURLToPath(new URL("./proto/supervisor_middleware.proto", import.meta.url)),
     { keepCase: true, longs: String, enums: Number, defaults: false, oneofs: true },
@@ -99,20 +102,19 @@ export function createOpenShellEgressAuthority(
   server.addService(service.SupervisorMiddleware!.service, {
     Describe: unary(async (call) => {
       const peer = record(call.request.gateway);
+      const supported = peer.supported_capabilities;
+      const required = peer.required_capabilities;
       if (
         !identity.verifyControl(authorization(call.metadata)) ||
         record(peer.protocol_version).major !== 1 ||
-        !Array.isArray(peer.supported_capabilities) ||
-        !peer.supported_capabilities.includes(contractCapability) ||
-        !peer.supported_capabilities.includes(credentialCapability) ||
-        !peer.supported_capabilities.includes(exchangeCapability) ||
-        (Array.isArray(peer.required_capabilities) &&
-          peer.required_capabilities.some(
-            (capability) =>
-              ![contractCapability, credentialCapability, exchangeCapability].includes(
-                String(capability),
-              ),
-          ))
+        !Array.isArray(supported) ||
+        !capabilities.every((capability) => supported.includes(capability)) ||
+        !Array.isArray(required) ||
+        // Generic Describe runs before protected policy selection. Rust sends all
+        // supported capabilities, requires the base contract here, then verifies our
+        // complete required profile at protected-policy selection and installation.
+        !required.includes(contractCapability) ||
+        required.some((capability) => !capabilities.includes(String(capability)))
       ) {
         throw new Error("Unsupported or unauthenticated counterpart.");
       }
@@ -123,8 +125,8 @@ export function createOpenShellEgressAuthority(
           protocol_version: { major: 1, minor: 0 },
           implementation_name: "oce/static-egress",
           implementation_version: "1",
-          supported_capabilities: [contractCapability, credentialCapability, exchangeCapability],
-          required_capabilities: [contractCapability, credentialCapability, exchangeCapability],
+          supported_capabilities: capabilities,
+          required_capabilities: capabilities,
         },
         bindings: [
           { operation: 1, phase: 1, max_payload_bytes: 4 * 1024 * 1024 },
@@ -139,7 +141,7 @@ export function createOpenShellEgressAuthority(
         Object.keys(record(record(call.request.config).fields)).length === 0,
     })),
     EvaluateHttpRequest: unary(async (call) => ({
-      decision: (await identity.verify(authorization(call.metadata))) ? 1 : 2,
+      decision: identity.supervisor(authorization(call.metadata)) ? 1 : 2,
       reason_code: "egress_identity",
     })),
   });
@@ -154,6 +156,7 @@ export function createOpenShellEgressAuthority(
     const host = string(target.host);
     const path = string(target.path);
     if (
+      context.verified_credential_connector !== undefined ||
       target.scheme !== "https" ||
       !/^[a-z0-9.-]+$/.test(host) ||
       !Number.isSafeInteger(port) ||
@@ -164,20 +167,19 @@ export function createOpenShellEgressAuthority(
     ) {
       return refused("denied");
     }
-    const signal = new AbortController();
-    call.once("cancelled", () => signal.abort());
     const result = await forwarder.resolve(
-      authorization(call.metadata),
+      call.authorization,
       string(context.sandbox_id),
       {
         id: string(context.request_id),
+        verifiedExecutionPolicyHash: string(call.request.verified_execution_policy_hash),
         method: string(target.method),
         url: `https://${host}${port === 443 ? "" : `:${port}`}${path}`,
         headers: headers(evaluation.headers),
         body: bytes(evaluation.body),
         deadlineAt: timestamp(call.request.deadline),
       },
-      signal.signal,
+      call.signal,
     );
     if (result.kind === "refused") {
       return refused(result.error.kind);
@@ -219,26 +221,35 @@ export function createOpenShellEgressAuthority(
     ) {
       return refused("denied");
     }
-    const signal = new AbortController();
-    call.once("cancelled", () => signal.abort());
+    if (context.verified_credential_connector !== undefined) {
+      return refused("denied");
+    }
     const result = await forwarder.authorizeSend(
-      authorization(call.metadata),
+      call.authorization,
       string(context.sandbox_id),
       string(context.request_id),
       bytes(call.request.operation_handle).toString("utf8"),
       evidence,
       bytes(call.request.credential_headers_sha256).toString("hex"),
       timestamp(call.request.deadline),
-      signal.signal,
+      call.signal,
     );
-    return result.kind === "refused"
-      ? refused(result.error.kind)
+    if (result.kind === "refused") {
+      return refused(result.error.kind);
+    }
+    const responseCustody = identity.responseCustody(
+      call.authorization,
+      result.authorization.association,
+    );
+    return responseCustody === undefined
+      ? refused("cancelled")
       : {
           allowed: {
             request_id: context.request_id,
             operation_handle: call.request.operation_handle,
             credential_headers_sha256: Buffer.from(result.injectionDigest, "hex"),
             send_start_by: wireTimestamp(result.sendStartBy),
+            response_custody: responseCustody,
           },
         };
   };
@@ -267,9 +278,6 @@ export function createOpenShellEgressAuthority(
       const close = () => {
         clearTimeout(timer);
         signal.abort();
-        if (capability) {
-          identity.closeExchange(capability);
-        }
         phase = "done";
       };
       const fail = () => {
@@ -296,23 +304,26 @@ export function createOpenShellEgressAuthority(
         if (phase === "open" && event.open !== undefined) {
           const opening = record(event.open);
           const encoded = bytes(opening.resolve_request);
+          const codec = definition[
+            "openshell.middleware.v1.HttpCredentialResolveRequest"
+          ] as unknown as { deserialize(value: Buffer): Wire };
           capability = identity.acceptExchange(
             bearer,
             challenge,
             encoded,
             bytes(opening.signature),
+            () => {
+              request = codec.deserialize(encoded);
+              context = record(record(request.request).context);
+              return {
+                requestId: string(context.request_id),
+                sandboxId: string(context.sandbox_id),
+                responseCustody: bytes(request.response_custody),
+              };
+            },
+            signal.signal,
           );
           if (!capability) {
-            fail();
-            return;
-          }
-          try {
-            const codec = definition[
-              "openshell.middleware.v1.HttpCredentialResolveRequest"
-            ] as unknown as { deserialize(value: Buffer): Wire };
-            request = codec.deserialize(encoded);
-            context = record(record(request.request).context);
-          } catch {
             fail();
             return;
           }
@@ -327,18 +338,10 @@ export function createOpenShellEgressAuthority(
         busy = true;
         const acceptedPhase = phase;
         // The internal credential is created only by the real stream verifier.
-        const metadata = call.metadata.clone();
-        metadata.set("authorization", capability!);
         const acceptedCall: AuthorityCall = {
-          request,
-          metadata,
-          once: (_event, listener) => {
-            if (signal.signal.aborted) {
-              listener();
-            } else {
-              signal.signal.addEventListener("abort", listener, { once: true });
-            }
-          },
+          request: request!,
+          authorization: capability!,
+          signal: signal.signal,
         };
         void (async () => {
           if (acceptedPhase === "open") {
@@ -365,14 +368,17 @@ export function createOpenShellEgressAuthority(
               fail();
               return;
             }
+            const complete = acceptedCall.request;
             const response = await forwarder.protectResponse(
               handle,
               {
-                status: Number(request.status),
-                headers: headers(request.headers),
-                body: bytes(request.body),
+                status: Number(complete.status),
+                headers: headers(complete.headers),
+                body: bytes(complete.body),
+                trailers: headers(complete.trailers),
               },
               signal.signal,
+              complete.response_complete === true,
             );
             if (!response || signal.signal.aborted) {
               fail();
@@ -383,6 +389,8 @@ export function createOpenShellEgressAuthority(
                 status: response.status,
                 headers: response.headers.map(([name, value]) => ({ name, value })),
                 body: response.body,
+                trailers: response.trailers.map(([name, value]) => ({ name, value })),
+                response_complete: true,
               },
             });
             phase = "done";
@@ -392,7 +400,16 @@ export function createOpenShellEgressAuthority(
             close();
             call.end();
           }
-        })().catch(fail);
+        })().catch(() => {
+          if (signal.signal.aborted) {
+            return;
+          }
+          close();
+          call.emit("error", {
+            code: status.UNAVAILABLE,
+            message: "Installation exchange unavailable.",
+          });
+        });
       });
     },
   });

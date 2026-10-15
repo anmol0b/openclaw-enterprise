@@ -180,7 +180,10 @@ export function pluginRuntimeSpecForRevision(
 
 function protectedProviderTools(revision: Readonly<AgentRevision>): "none" {
   const routes = revision.egressPlan?.routes;
-  if (!routes?.length || routes.some((route) => route.binding.grant.providerTools !== "none")) {
+  if (
+    routes === undefined ||
+    routes.some((route) => route.binding.grant.providerTools !== "none")
+  ) {
     throw new Error("Unsupported protected inference tool grant.");
   }
   return "none";
@@ -210,7 +213,11 @@ function codexToml(
       ? plugins
       : `approval_policy = ${JSON.stringify(approvalPolicy)}\n\n${plugins}`);
   const endpoint = runtime.modelEndpoint;
-  if (runtime.providerTools === "none" && endpoint === undefined) {
+  if (
+    runtime.providerTools === "none" &&
+    runtime.egressEnrollment?.routeCount !== 0 &&
+    endpoint === undefined
+  ) {
     throw new Error("Protected inference requires an explicit normalized model endpoint.");
   }
   return endpoint === undefined

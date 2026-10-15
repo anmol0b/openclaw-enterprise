@@ -14,11 +14,12 @@ import type {
 import { DependencyUnavailableError } from "@openclaw-enterprise/occ";
 import { asRecord, immutableCopy, sha256Hex } from "@openclaw-enterprise/utils";
 import { type OpenShellGateway, openShellWorkspaceName } from "../../backends/openshell.ts";
+import { openShellExchangeCapabilities as capabilities } from "./openshell-exchange-capabilities.ts";
 import { openAiStaticProvider } from "./openai-provider.ts";
 
 export interface OpenShellEgressOptions {
   readonly middlewareName: string;
-  readonly binaries: readonly string[];
+  readonly authorityScope: "execution";
 }
 
 // Proto3 omits default fields; compare their semantics while retaining every nondefault.
@@ -59,8 +60,6 @@ function wirePolicy(value: unknown, preserveDefaults = false, mapEntries = false
     : value;
 }
 
-const capability = "openshell.supervisor-middleware.http-credential-access.v1";
-
 // Retain uint64 revisions as decimal strings: Number would lose generation precision.
 function revisionNumber(value: unknown): string | undefined {
   // Proto3 omits a scalar zero; the enclosing evidence message remains mandatory.
@@ -79,6 +78,7 @@ function enforcementEvidence(
   sandboxId: string,
   policyVersion: number,
   revisionId: string,
+  options: OpenShellEgressOptions,
 ): EgressInstallation["enforcement"] | undefined {
   const revision = asRecord(status.revision);
   const observation = asRecord(status.loaded_policy_observation);
@@ -86,6 +86,7 @@ function enforcementEvidence(
   const effective = asRecord(observation?.effective_policy);
   const evidence = asRecord(observation?.enforcement);
   const registeredKey = observation?.registered_exchange_public_key;
+  const authority = asRecord(asRecord(effective?.network_middlewares)?.["oce-egress"]);
   if (
     !revision ||
     !observation ||
@@ -110,10 +111,12 @@ function enforcementEvidence(
     observation.source_policy_hash !== revision.policy_hash ||
     revisionNumber(evidence.config_revision) === undefined ||
     revisionNumber(evidence.provider_env_revision) === undefined ||
-    !isDeepStrictEqual(evidence.enforced_capabilities, [
-      capability,
-      "openshell.supervisor-middleware.installation-exchange.v1",
-    ])
+    authority?.execution_authority !== true ||
+    authority.credential_authority !== true ||
+    authority.middleware !== options.middlewareName ||
+    (authority.credential_connectors !== undefined &&
+      !isDeepStrictEqual(authority.credential_connectors, [])) ||
+    !isDeepStrictEqual(evidence.enforced_capabilities, capabilities)
   ) {
     return undefined;
   }
@@ -130,12 +133,11 @@ function enforcementEvidence(
     }
   } else {
     const expectedName = `_provider_oce_runtime_${sha256Hex(revisionId, 16)}`;
-    const sourceRules = asRecord(source.network_policies);
+    const sourceRules = asRecord(source.network_policies) ?? {};
     const effectiveRules = asRecord(effective.network_policies);
     if (
       inertRule !== expectedName ||
       evidence.policy_hash === revision.policy_hash ||
-      !sourceRules ||
       !effectiveRules ||
       Object.hasOwn(sourceRules, expectedName) ||
       !isDeepStrictEqual(wirePolicy(effectiveRules[expectedName]), { name: expectedName }) ||
@@ -154,7 +156,9 @@ function enforcementEvidence(
   }
   return {
     instanceId: evidence.instance_id,
+    policyHash: evidence.policy_hash,
     peerKeyId: Buffer.from(registeredKey).toString("base64url"),
+    authorityScope: "execution" as const,
     // Local change fence, not the supplier's canonical policy hash. Both supplier
     // identities and complete decoded policies must remain stable on revalidation.
     configurationId: createHash("sha256")
@@ -167,7 +171,7 @@ function enforcementEvidence(
           evidence.policy_hash,
           revisionNumber(evidence.config_revision),
           revisionNumber(evidence.provider_env_revision),
-          capability,
+          capabilities,
           wirePolicy(source),
           wirePolicy(effective),
           inertRule,
@@ -182,13 +186,19 @@ export function openShellEgressConfiguration(
   plan: EgressPlan,
   options: OpenShellEgressOptions,
 ): Readonly<Record<string, unknown>> {
-  if (
-    new Set(plan.routes.map((route) => route.binding.binding.id)).size !== 1 ||
-    plan.routes.length === 0
-  ) {
-    throw new Error("The protected inference slice requires exactly one binding.");
+  if (new Set(plan.routes.map((route) => route.binding.binding.id)).size > 1) {
+    throw new Error("The protected inference slice permits at most one binding.");
   }
+  OpenShellEgressProxyDriver.validateConfiguration(options);
   const hosts = [...new Set(plan.routes.map((route) => new URL(route.origin).hostname))];
+  // Keep the authority installed for a zero-route plan. The selector names no
+  // reachable rule: network_policies below remains empty, never a wildcard.
+  if (!hosts.length) {
+    hosts.push("deny-egress.invalid");
+  }
+  if (hosts.length !== 1 || !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(hosts[0]!)) {
+    throw new Error("Protected egress requires one literal host.");
+  }
   return immutableCopy({
     network_policies: Object.fromEntries(
       plan.routes.map((route, index) => {
@@ -197,7 +207,6 @@ export function openShellEgressConfiguration(
           `oce-egress-${index}`,
           {
             name: `oce-egress-${index}`,
-            binaries: options.binaries.map((path) => ({ path })),
             endpoints: [
               {
                 host: origin.hostname,
@@ -219,6 +228,7 @@ export function openShellEgressConfiguration(
         on_error: "fail_closed",
         endpoints: { include: hosts },
         credential_authority: true,
+        execution_authority: true,
       },
     },
   });
@@ -236,10 +246,10 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
   static readonly configurationSchema = {
     type: "object",
     additionalProperties: false,
-    required: ["middlewareName", "binaries"],
+    required: ["middlewareName", "authorityScope"],
     properties: {
       middlewareName: { type: "string", minLength: 1 },
-      binaries: { type: "array", minItems: 1, items: { type: "string", pattern: "^/" } },
+      authorityScope: { type: "string", const: "execution" },
     },
   };
 
@@ -247,14 +257,10 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     const value = asRecord(configuration);
     if (
       !value ||
-      Object.keys(value).some((key) => !["middlewareName", "binaries"].includes(key)) ||
+      Object.keys(value).some((key) => !["middlewareName", "authorityScope"].includes(key)) ||
       typeof value.middlewareName !== "string" ||
       !value.middlewareName.trim() ||
-      !Array.isArray(value.binaries) ||
-      value.binaries.length === 0 ||
-      value.binaries.some(
-        (path) => typeof path !== "string" || !path.startsWith("/") || path.includes(".."),
-      )
+      value.authorityScope !== "execution"
     ) {
       throw new Error("Invalid protected OpenShell egress configuration.");
     }
@@ -269,12 +275,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     },
   ) {
     OpenShellEgressProxyDriver.validateConfiguration(options);
-    if (
-      !options.middlewareName ||
-      options.binaries.length === 0 ||
-      options.binaries.some((binary) => !binary.startsWith("/") || binary.includes("..")) ||
-      selection.sandbox.harnessResource === undefined
-    ) {
+    if (selection.sandbox.harnessResource === undefined) {
       throw new Error("Invalid protected OpenShell egress configuration.");
     }
     this.id = selection.id;
@@ -304,14 +305,12 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
               (item.kind === "EXTENSION_KIND_SUPERVISOR_MIDDLEWARE" || item.kind === 4) &&
               item.protocol_major === 1 &&
               Array.isArray(item.required_capabilities) &&
-              item.required_capabilities.includes(capability) &&
-              item.required_capabilities.includes(
-                "openshell.supervisor-middleware.installation-exchange.v1",
+              capabilities.every((capability) =>
+                (item.required_capabilities as unknown[]).includes(capability),
               ) &&
               Array.isArray(item.supported_capabilities) &&
-              item.supported_capabilities.includes(capability) &&
-              item.supported_capabilities.includes(
-                "openshell.supervisor-middleware.installation-exchange.v1",
+              capabilities.every((capability) =>
+                (item.supported_capabilities as unknown[]).includes(capability),
               )
             );
           })
@@ -367,6 +366,9 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     const expectedPolicies = asRecord(expected.network_policies);
     if (
       !expectedPolicies ||
+      Object.keys(expectedPolicies).some(
+        (key) => !key.startsWith("oce-egress-") && key !== "workspace-node-enrollment",
+      ) ||
       !isDeepStrictEqual(
         wirePolicy(expected.network_middlewares),
         wirePolicy(protectedConfiguration.network_middlewares),
@@ -388,7 +390,8 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     if (
       !revision ||
       !policy ||
-      !policies ||
+      // Protobuf omits the map when deny-all has no rules (even auxiliary rules).
+      (Object.keys(expectedPolicies).length > 0 && !policies) ||
       Number(status.active_version) !== context.plan.generation ||
       Number(revision.version) !== context.plan.generation ||
       ![2, "POLICY_STATUS_LOADED"].includes(revision.status as string | number) ||
@@ -411,6 +414,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
       existing.id,
       context.plan.generation,
       context.revision.id,
+      this.options,
     );
     return enforcement === undefined
       ? undefined
@@ -454,7 +458,13 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
     // The supplier revalidates registration, effective config and installed registry under
     // its sandbox mutation lock. Exact equality also refuses replacements of our saved fence.
     return isDeepStrictEqual(
-      enforcementEvidence(status, existing.id, context.plan.generation, context.revision.id),
+      enforcementEvidence(
+        status,
+        existing.id,
+        context.plan.generation,
+        context.revision.id,
+        this.options,
+      ),
       installation.enforcement,
     );
   }

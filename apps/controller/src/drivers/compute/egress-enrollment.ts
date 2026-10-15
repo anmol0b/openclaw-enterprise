@@ -1,21 +1,81 @@
-import type { EgressExecution, EgressPlan, EgressRef } from "@openclaw-enterprise/contracts";
+import { createPublicKey, sign, type KeyObject } from "node:crypto";
+import type {
+  EgressExecution,
+  EgressInstallation,
+  EgressPlan,
+  EgressRef,
+} from "@openclaw-enterprise/contracts";
 
 export const HARNESS_EGRESS_ENROLLMENT_PATH = "/openclaw/runtime/egress-enrollment";
 
 export interface HarnessEgressEnrollment {
+  readonly routeCount: number;
   readonly plan: EgressRef;
   readonly execution: EgressExecution;
 }
 
 export function harnessEgressEnrollment(plan: EgressPlan): HarnessEgressEnrollment {
-  return { plan: { id: plan.id, generation: plan.generation }, execution: plan.execution };
+  // Project keys in wire order: PostgreSQL JSONB does not preserve insertion order.
+  const { installationId, namespaceId, agentId, servicePrincipalId, revisionId, executionId } =
+    plan.execution;
+  return {
+    routeCount: plan.routes.length,
+    plan: { id: plan.id, generation: plan.generation },
+    execution: {
+      installationId,
+      namespaceId,
+      agentId,
+      servicePrincipalId,
+      revisionId,
+      executionId,
+    },
+  };
 }
 
-// This runs in the generated Harness, before its first model probe. The exact
-// transport peer releases startup only after Compute commits installation evidence.
+export const COMPUTE_RELEASE_PROFILE = "oce-compute-execution-release-v1";
+export const COMPUTE_RELEASE_PUBLIC_KEY = "OPENCLAW_EGRESS_COMPUTE_RELEASE_PUBLIC_KEY";
+
+export function computeReleasePublicKey(key: KeyObject): string {
+  return createPublicKey(key).export({ format: "der", type: "spki" }).toString("base64url");
+}
+
+/** Called only by Compute after committed association and a fresh verification of that installation. */
+export function signComputeExecutionRelease(
+  privateKey: KeyObject,
+  startupId: string,
+  { plan, enforcement, sandboxId }: EgressInstallation,
+) {
+  const installation = {
+    sandboxId,
+    instanceId: enforcement.instanceId,
+    configurationId: enforcement.configurationId,
+    peerKeyId: enforcement.peerKeyId,
+  };
+  if (
+    !Object.values(installation).every((value) => typeof value === "string" && value.length > 0)
+  ) {
+    throw new Error("Protected execution release requires the exact enrolled installation.");
+  }
+  const challenge = {
+    profile: COMPUTE_RELEASE_PROFILE,
+    ...harnessEgressEnrollment(plan),
+    startupId,
+  };
+  const expiresAt = Date.now() + 30_000;
+  const transcript = JSON.stringify([challenge, installation, expiresAt]);
+  return {
+    challenge,
+    installation,
+    expiresAt,
+    signature: sign(null, Buffer.from(transcript), privateKey).toString("base64url"),
+  };
+}
+
+// This runs in the generated Harness, before Codex, login or its first model probe. The transport
+// bearer may read this challenge; only Compute can sign its release.
 export const HARNESS_EGRESS_ENROLLMENT_HELPER = String.raw`
 function waitForHarnessEgressEnrollment(enrollment) {
-  const { createHash, randomUUID, timingSafeEqual } = require("node:crypto");
+  const { createHash, createPublicKey, randomUUID, timingSafeEqual, verify } = require("node:crypto");
   const { isDeepStrictEqual } = require("node:util");
   const { createServer } = require("node:http");
   const verifier = process.env.APP_TOKEN_SHA;
@@ -23,7 +83,8 @@ function waitForHarnessEgressEnrollment(enrollment) {
   const executionKeys = ["installationId", "namespaceId", "agentId", "servicePrincipalId", "revisionId", "executionId"];
   if (typeof verifier !== "string" || !/^[a-f0-9]{64}$/.test(verifier) ||
       !Number.isSafeInteger(port) || port < 1 || port > 65535 ||
-      !isPlainObject(enrollment) || Object.keys(enrollment).length !== 2 ||
+      !isPlainObject(enrollment) || Object.keys(enrollment).length !== 3 ||
+      !Number.isSafeInteger(enrollment.routeCount) || enrollment.routeCount < 0 ||
       !isPlainObject(enrollment.plan) || Object.keys(enrollment.plan).length !== 2 ||
       typeof enrollment.plan.id !== "string" || !enrollment.plan.id || enrollment.plan.id.length > 256 ||
       !Number.isSafeInteger(enrollment.plan.generation) || enrollment.plan.generation < 1 ||
@@ -33,8 +94,16 @@ function waitForHarnessEgressEnrollment(enrollment) {
       enrollment.execution.revisionId !== process.env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID) {
     return Promise.reject(new Error("Protected Harness enrollment configuration is invalid."));
   }
+  const encodedKey = process.env.OPENCLAW_EGRESS_COMPUTE_RELEASE_PUBLIC_KEY;
+  if (typeof encodedKey !== "string" || !/^[A-Za-z0-9_-]{59}$/.test(encodedKey)) {
+    return Promise.reject(new Error("Protected Harness Compute release verification key is missing."));
+  }
+  const key = createPublicKey({key: Buffer.from(encodedKey, "base64url"), type: "spki", format: "der"});
+  if (key.asymmetricKeyType !== "ed25519") {
+    return Promise.reject(new Error("Protected Harness Compute release verification key is invalid."));
+  }
   const expected = Buffer.from(verifier, "hex");
-  const challenge = { ...enrollment, startupId: randomUUID() };
+  const challenge = { profile: "oce-compute-execution-release-v1", ...enrollment, startupId: randomUUID() };
   const deadline = performance.now() + 180000;
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -94,7 +163,16 @@ function waitForHarnessEgressEnrollment(enrollment) {
           chunks.push(chunk);
         }
         const release = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        if (settled || released || performance.now() >= deadline || !isDeepStrictEqual(release, challenge)) {
+        const { installation, expiresAt, signature } = release ?? {};
+        const now = Date.now();
+        if (settled || released || performance.now() >= deadline ||
+            !isDeepStrictEqual(release.challenge, challenge) || !isPlainObject(installation) ||
+            !["sandboxId", "instanceId", "configurationId", "peerKeyId"].every((k) =>
+              typeof installation[k] === "string" && installation[k].length > 0) ||
+            !Number.isSafeInteger(expiresAt) || expiresAt < now || expiresAt > now + 60000 ||
+            typeof signature !== "string" || !/^[A-Za-z0-9_-]{86}$/.test(signature) ||
+            !verify(null, Buffer.from(JSON.stringify([challenge, installation, expiresAt])), key,
+              Buffer.from(signature, "base64url"))) {
           answer(409, { error: "stale_enrollment" });
           return;
         }
