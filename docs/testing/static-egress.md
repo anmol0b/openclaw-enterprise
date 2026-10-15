@@ -1,5 +1,10 @@
 # Verify protected static inference
 
+All shipped Compute Drivers currently refuse protected execution. Protocol fixtures
+can exercise valid protected v2 schemas without releasing a workload. Their
+admission and installation evidence does not satisfy the
+[production execution cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
+
 Run these checks with installed workspace dependencies. OCE source and fixture
 coverage does not establish installed OpenShell or real-provider behavior.
 

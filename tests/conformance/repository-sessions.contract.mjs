@@ -58,6 +58,7 @@ export async function seedSessionRevision(
     createdAt,
   };
   const revision = {
+    executionAdmission: { version: 2, mode: "unprotected" },
     id: `rev_${randomUUID()}`,
     namespaceId: namespace.id,
     agentId: agent.id,

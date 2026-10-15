@@ -1,9 +1,9 @@
 # Protected static inference
 
-The optional `egress_proxy` Driver adds protected static inference through
-OpenShell. For each admitted request, OCC checks current authorization, reads the
-current Kubernetes Secret material, and protects the response before the trusted
-supervisor releases it to the Agent.
+Protected execution admission is currently unavailable with every shipped Compute
+Driver. Selecting `egress_proxy` requests protection for the whole execution,
+even without credential bindings. The protocol implementation described below is
+available to synthetic fixtures; it is not a deployable protected profile.
 
 This first connected slice implements part of
 [RFC 0020](../../../specs/rfcs/0020-egress-proxy-credential-lifecycle/index.md).
@@ -14,6 +14,31 @@ historical receipt alone does not establish protected readiness; installed runti
 qualification is separate. GitHub's dynamic credential lifecycle, retirement of
 the old Driver path, additional bindings and general platform rollout remain
 follow-up work.
+
+## Execution admission cutoff
+
+Every new revision records `executionAdmission: {version: 2, mode: ...}`.
+`unprotected` requires no egress plan. `protected` requires a plan; zero routes
+means deny-all, never an unprotected no-op. Schema validity alone grants no release.
+OCC asks the selected Compute to validate admission. All shipped Computes refuse
+protected mode, and the worker and Compute prepare/activate paths repeat the
+release check. Missing, unknown or inconsistent decisions refuse before execution.
+
+Stored old revisions without this decision are not inferred to be unprotected.
+The new PostgreSQL reader refuses them; browsing retains metadata with a
+configuration-read error. No record is backfilled. Old writers cannot insert
+revisions without the decision after the schema constraint is installed. For a
+protected revision the schema also requires `protectedExecutionVersion` inside
+the Harness authentication snapshot. The previous reader requires an exact
+authentication shape and refuses that revision before passing it to Compute.
+Unprotected v2 remains readable by that reader. This preserves running workloads;
+a rollout must account for every other reader and any already released execution.
+
+Protected availability remains blocked until Compute-owned release authority,
+installed deny-all for empty plans, and fencing of incompatible readers are
+proven together. The ordinary Agent bearer and the retained Harness enrollment
+exchange do not satisfy that gate. Exchange, dispatch and connected-read work
+must join behind it before deployment qualification.
 
 ## Supported boundary
 

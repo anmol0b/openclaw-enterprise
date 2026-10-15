@@ -1,3 +1,7 @@
+import {
+  assertExecutionAdmission,
+  assertExecutionReleaseAllowed,
+} from "@openclaw-enterprise/contracts";
 import { EgressSendReceipts } from "./egress-send-receipts.ts";
 import type {
   StaticEgressSource,
@@ -4779,12 +4783,17 @@ export class OpenClawController {
         sources.push(source);
       }
     }
-    if (sources.length === 0) {
+    if (!this.selections.has("egress_proxy")) {
+      if (sources.length > 0) {
+        throw new DependencyUnavailableError(
+          "Protected sources require the selected egress Driver.",
+        );
+      }
       return undefined;
     }
-    if (sources.length !== 1 || agent.credentialSources?.length !== 1) {
+    if (sources.length > 1 || (agent.credentialSources?.length ?? 0) !== sources.length) {
       throw new ScopeViolationError(
-        "Protected inference requires exactly one source binding and no legacy attachments.",
+        "Protected inference permits at most one source binding and no legacy attachments.",
       );
     }
     if (!sandboxDriverId || agent.executionMode !== "dedicated") {
@@ -4794,12 +4803,12 @@ export class OpenClawController {
     await driver.sourceControl.assertAvailable(AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS));
     const selection = asRecord(asRecord(configuration.agents)?.defaults)?.model;
     const model = typeof selection === "string" ? selection : asRecord(selection)?.primary;
-    if (typeof model !== "string" || !model.includes("/")) {
+    if (sources.length > 0 && (typeof model !== "string" || !model.includes("/"))) {
       throw new ScopeViolationError(
         "Protected inference requires an explicit provider/model selection.",
       );
     }
-    const modelId = model.slice(model.indexOf("/") + 1);
+    const modelId = typeof model === "string" ? model.slice(model.indexOf("/") + 1) : "";
     const execution = {
       installationId: this.installation.id,
       namespaceId: agent.namespaceId,
@@ -7455,9 +7464,29 @@ export class OpenClawController {
         admittedConfiguration,
         sandbox?.id,
       );
+      const executionAdmission = {
+        version: 2 as const,
+        mode: this.selections.has("egress_proxy")
+          ? ("protected" as const)
+          : ("unprotected" as const),
+      };
+      const execution = { executionAdmission, ...(egressPlan === undefined ? {} : { egressPlan }) };
+      assertExecutionAdmission(execution);
+      try {
+        if (compute.validateExecutionAdmission === undefined) {
+          assertExecutionReleaseAllowed(execution);
+        } else {
+          compute.validateExecutionAdmission(execution);
+        }
+      } catch {
+        throw new DependencyUnavailableError(
+          "The selected Compute cannot admit this execution mode; protected release and old-reader fencing are unavailable.",
+        );
+      }
       const revision = await state.revisions.createRevision(
         freezeAgentRevision({
           id: revisionId,
+          executionAdmission,
           ...(egressPlan === undefined ? {} : { egressPlan }),
           namespaceId: namespace.id,
           agentId: lockedAgent.id,

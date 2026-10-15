@@ -81,7 +81,7 @@ ALTER TABLE occ.agent_revisions
       - 'configuration_id' - 'configuration_kind' - 'configuration_generation'
       - 'draft_spec' - 'harness' - 'compute' - 'sandbox_driver_id'
       - 'secret_driver_id' - 'secret_bindings' - 'harness_auth' - 'credential_sources' - 'plugins' - 'plugin_approvers'
-      - 'repository_credentials' - 'egress_plan') = '{}'::jsonb
+      - 'repository_credentials' - 'egress_plan' - 'execution_admission') = '{}'::jsonb
     AND jsonb_typeof(admitted_spec->'configuration_id') = 'string'
     AND (admitted_spec->>'configuration_id') ~ '^cfg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
     AND jsonb_typeof(admitted_spec->'configuration_kind') = 'string'
@@ -124,7 +124,7 @@ ALTER TABLE occ.agent_revisions
       NOT (admitted_spec ? 'secret_bindings')
       OR occ.secret_bindings_are_valid(admitted_spec->'secret_bindings', namespace_id)
     )
-    AND occ.harness_auth_is_valid(admitted_spec->'harness_auth', namespace_id, true)
+    AND occ.harness_auth_is_valid((admitted_spec->'harness_auth') - 'protectedExecutionVersion', namespace_id, true)
     AND (
       NOT (admitted_spec ? 'repository_credentials')
       OR occ.repository_credentials_are_valid(admitted_spec->'repository_credentials')
@@ -152,10 +152,30 @@ ALTER TABLE occ.agent_revisions ADD CONSTRAINT agent_revisions_egress_scope CHEC
     AND admitted_spec->'egress_plan'->'execution'->>'namespaceId' = namespace_id
     AND admitted_spec->'egress_plan'->'execution'->>'agentId' = agent_id
     AND admitted_spec->'egress_plan'->'execution'->>'revisionId' = id
-    AND jsonb_typeof(admitted_spec->'egress_plan'->'routes') = 'array'
-    AND jsonb_array_length(admitted_spec->'egress_plan'->'routes') > 0,
+    AND jsonb_typeof(admitted_spec->'egress_plan'->'routes') = 'array',
     false)
 );
+-- Existing snapshots are deliberately not relabeled as safe. New readers refuse
+-- their missing decision. NOT VALID preserves history while rejecting old writers.
+-- v1 readers require an exact Harness auth snapshot. For protected revisions, put
+-- the minimum reader version in that snapshot, not only in an unknown top-level
+-- field v1 would discard. This version is a read barrier, never launch authority.
+--> statement-breakpoint
+ALTER TABLE occ.agent_revisions ADD CONSTRAINT agent_revisions_execution_admission CHECK (
+  COALESCE(
+    jsonb_typeof(admitted_spec->'execution_admission') = 'object'
+    AND (admitted_spec->'execution_admission') ?& ARRAY['version', 'mode']
+    AND ((admitted_spec->'execution_admission') - 'version' - 'mode') = '{}'::jsonb
+    AND admitted_spec->'execution_admission'->'version' = '2'::jsonb
+    AND (
+      (admitted_spec->'execution_admission'->>'mode' = 'unprotected'
+        AND NOT (admitted_spec ? 'egress_plan')
+        AND NOT ((admitted_spec->'harness_auth') ? 'protectedExecutionVersion'))
+      OR (admitted_spec->'execution_admission'->>'mode' = 'protected'
+        AND admitted_spec ? 'egress_plan'
+        AND admitted_spec #> '{harness_auth,protectedExecutionVersion}' = '2'::jsonb)
+    ), false)
+) NOT VALID;
 --> statement-breakpoint
 GRANT SELECT, INSERT, UPDATE, DELETE ON occ.egress_installations, occ.egress_rejected_material TO occ_app;
 

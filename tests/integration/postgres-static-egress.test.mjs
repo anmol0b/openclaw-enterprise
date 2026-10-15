@@ -4,6 +4,7 @@ import { createPostgresAgentApp } from "../helpers/postgres-agent-app.mjs";
 import { requiresPostgres } from "../helpers/postgres-database.mjs";
 import { staticEgressFixture, unary } from "../helpers/static-egress.mjs";
 import { PostgresPlatformState } from "../../packages/occ/src/index.ts";
+import { validHarnessAuthSnapshot } from "../../packages/occ/src/state/platform-state.ts";
 
 async function postgresApp(t, options) {
   const p = await createPostgresAgentApp(t, {
@@ -162,5 +163,74 @@ test(
       ),
     );
     assert.equal(f.providerRequests.length, 1);
+  },
+);
+
+test(
+  "PostgreSQL preserves v2 admission and rejects absent, unknown and inconsistent decisions",
+  requiresPostgres,
+  async (t) => {
+    const f = await staticEgressFixture(t, { appFactory: postgresApp });
+    const state = new PostgresPlatformState(f.pool);
+    const revision = await state.read((view) =>
+      view.revisions.findRevision(f.namespace.id, f.agent.id, f.revision.id),
+    );
+    assert.deepEqual(revision.executionAdmission, { version: 2, mode: "protected" });
+    const {
+      rows: [row],
+    } = await f.pool.query("SELECT admitted_spec FROM occ.agent_revisions WHERE id = $1", [
+      revision.id,
+    ]);
+    const insert = (spec) =>
+      f.pool.query(
+        `
+    INSERT INTO occ.agent_revisions (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
+    SELECT id, namespace_id, agent_id, revision_number, backend_id, $2::jsonb, admitted_at
+    FROM occ.agent_revisions WHERE id = $1 ON CONFLICT DO NOTHING`,
+        [revision.id, JSON.stringify(spec)],
+      );
+    // PostgreSQL checks constraints before resolving the duplicate key. The original
+    // immutable row stays intact; the attempted old writer must still be rejected.
+    const missing = structuredClone(row.admitted_spec);
+    delete missing.execution_admission;
+    const protectedWithoutPlan = structuredClone(row.admitted_spec);
+    delete protectedWithoutPlan.egress_plan;
+    const fencedAuth = row.admitted_spec.harness_auth;
+    const { protectedExecutionVersion, ...unfencedAuth } = fencedAuth;
+    assert.equal(protectedExecutionVersion, revision.executionAdmission.version);
+    assert.equal(
+      validHarnessAuthSnapshot(fencedAuth, f.namespace.id),
+      false,
+      "v1 reader must refuse protected auth",
+    );
+    assert.equal(
+      validHarnessAuthSnapshot(unfencedAuth, f.namespace.id),
+      true,
+      "control must pass the same v1 validator",
+    );
+    for (const spec of [
+      { ...row.admitted_spec, harness_auth: unfencedAuth },
+      { ...protectedWithoutPlan, execution_admission: { version: 2, mode: "unprotected" } },
+      missing,
+      { ...row.admitted_spec, execution_admission: { version: 3, mode: "protected" } },
+      { ...row.admitted_spec, execution_admission: { version: 2, mode: "unprotected" } },
+      protectedWithoutPlan,
+    ]) {
+      await assert.rejects(insert(spec), {
+        code: "23514",
+        constraint: "agent_revisions_execution_admission",
+      });
+    }
+    // Both modes have schema meaning. Empty protected routes are valid deny-all
+    // intent; the shipped Compute cutoff separately refuses their execution.
+    await insert({
+      ...row.admitted_spec,
+      egress_plan: { ...row.admitted_spec.egress_plan, routes: [] },
+    });
+    await insert({
+      ...protectedWithoutPlan,
+      harness_auth: unfencedAuth,
+      execution_admission: { version: 2, mode: "unprotected" },
+    });
   },
 );

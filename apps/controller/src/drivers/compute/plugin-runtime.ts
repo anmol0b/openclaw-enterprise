@@ -1,5 +1,6 @@
 import {
   type AgentRevision,
+  assertExecutionAdmission,
   type PluginDesiredState,
   validPluginRevisionState,
   validPluginApprovers,
@@ -140,6 +141,7 @@ export function pluginRuntimeSpecForRevision(
   repositoryBrokerNetworkPolicy?: CodexRepositoryBrokerNetworkPolicy,
   openaiBaseUrl?: string,
 ): PluginRuntimeSpec | undefined {
+  assertExecutionAdmission(revision);
   const state = revision.plugins;
   if (state === undefined) {
     return pluginFreeRuntimeForRevision(revision, repositoryBrokerNetworkPolicy, openaiBaseUrl);

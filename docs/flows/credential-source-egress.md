@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
-updated: "2026-10-14"
-last_updated_session: authoring-run/c11e8dcb-9e87-4682-b47e-e8640a65706d
+updated: "2026-10-15"
+last_updated_session: authoring-run/f0b2d2f6-37a8-4c41-b2e8-6c0c61ed8d5a
 ---
 
 # Protected credential request flow
@@ -13,6 +13,11 @@ static credential, obtains a fresh send decision, and submits the complete provi
 response for protection. OCC owns identity mapping, current IAM decisions, versioned
 Secret selection and response policy. The supervisor runs outside the Agent and
 owns injection and the business send.
+
+Protected revision admission and execution are blocked by all shipped Computes.
+The request flow below describes the retained OCE protocol implementation and its
+synthetic fixtures, not a currently deployable protected execution. See the
+[execution cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
 
 This flow describes the implemented OCE side and the required counterpart contract.
 It does not prove a deployed supervisor or no-bypass networking. The
@@ -61,8 +66,26 @@ exercise that contract; deployed enforcement remains a separate qualification.
 
 New protected sources store a closed live/static descriptor after source/Secret
 permission checks and candidate validation. Existing sources require explicit
-source-update opt-in. Deployment freezes execution, source generation, model
-grant, binding and route identities in `AgentRevision.egressPlan`.
+source-update opt-in. OCC records an explicit v2 `executionAdmission` decision
+from the selected egress capability, independently of bindings. Protected plans
+freeze execution, source generation, grant and route identities. Empty routes
+retain protected semantics and require deny-all.
+
+`packages/contracts/src/egress.ts:assertExecutionReleaseAllowed`,
+`apps/controller/src/worker.ts:resolveRevisionSecretContext`
+
+OCC calls Compute's admission validator before storing the revision. Every shipped
+Compute refuses protected mode. The worker refuses before resolving launch context;
+Compute prepare/activate also check before effects. Missing, unsupported and
+inconsistent decisions fail closed. PostgreSQL stores `execution_admission` inside
+`admitted_spec` and rejects old snapshots on read without relabeling them. The
+schema blocks old writes. Protected snapshots put a required reader version in
+Harness authentication, which the previous reader refuses before reaching Compute.
+Release still requires Compute-owned authority, an inventory of the readers in
+the installation, and evidence that an empty protected plan enforces deny-all.
+
+The remaining installation trace is retained protocol code, reached by synthetic
+fixtures only while that cutoff remains in place.
 
 `apps/controller/src/drivers/compute/kubernetes/index.ts:prepareRevision`,
 `apps/controller/src/drivers/egress-proxy/openshell.ts:attachmentStatus`
@@ -244,6 +267,8 @@ image compatibility.
 None.
 
 ## Changelog
+
+- 2026-10-15 04:06: Record the accompanying v2 admission cutoff and refusal before Compute release. (authoring-run/f0b2d2f6-37a8-4c41-b2e8-6c0c61ed8d5a - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
 
 - 2026-10-14 21:54: Join durable sender receipts to the authority, separate response observations from supplier proof, and fence positive rejection atomically. (authoring-run/c11e8dcb-9e87-4682-b47e-e8640a65706d - fc20eb0174eaf8ae9d4ccb327ec65236c49ef4fb)
 

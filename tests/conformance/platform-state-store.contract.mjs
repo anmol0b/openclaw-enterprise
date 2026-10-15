@@ -115,6 +115,7 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     harnessAuth: { ...apiKeyBinding, secretDriverId: harnessSecret.driverId },
     harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
     compute: { id: "compute-contract", implementation: "deterministic-contract" },
+    executionAdmission: { version: 2, mode: "unprotected" },
     servicePrincipalId: agent.servicePrincipalId,
     createdAt: new Date().toISOString(),
   };

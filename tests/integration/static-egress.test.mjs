@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
+import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { readFileSync } from "node:fs";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { createRequire } from "node:module";
@@ -91,8 +93,33 @@ test("protected inference uses real admission, fresh IAM, versioned Secret reads
     {},
     "protected grant does not replace local plugin selection",
   );
-  const unprotected = { ...f.revision };
-  delete unprotected.egressPlan;
+  // Deleting the plan must never downgrade an admitted protected execution.
+  const withoutPlan = { ...f.revision };
+  delete withoutPlan.egressPlan;
+  assert.throws(() => pluginRuntimeSpecForRevision(withoutPlan), /Inconsistent durable/);
+  const missing = { ...withoutPlan };
+  delete missing.executionAdmission;
+  assert.throws(() => pluginRuntimeSpecForRevision(missing), /Missing or unsupported durable/);
+  assert.throws(
+    () =>
+      pluginRuntimeSpecForRevision({
+        ...withoutPlan,
+        executionAdmission: { version: 3, mode: "unprotected" },
+      }),
+    /Missing or unsupported durable/,
+  );
+  assert.throws(
+    () =>
+      pluginRuntimeSpecForRevision({
+        ...f.revision,
+        executionAdmission: { version: 2, mode: "unprotected" },
+      }),
+    /Inconsistent durable/,
+  );
+  const unprotected = {
+    ...withoutPlan,
+    executionAdmission: { version: 2, mode: "unprotected" },
+  };
   assert.doesNotMatch(
     pluginRuntimeConfigMapData(pluginRuntimeSpecForRevision(unprotected))["config.toml"],
     /web_search/,
@@ -1508,4 +1535,98 @@ test("response persistence must commit its observation and fence before policy b
       assert.equal(f.providerRequests.length, 1);
     });
   }
+});
+
+test("production Compute refuses protected admission and release, including empty plans", async (t) => {
+  const compute = createTestKubernetesComputeDriver("admission-cutoff");
+  const f = await staticEgressFixture(t);
+  const withoutPlan = { ...f.revision };
+  delete withoutPlan.egressPlan;
+  const missing = { ...withoutPlan };
+  delete missing.executionAdmission;
+  const unprotected = {
+    ...withoutPlan,
+    executionAdmission: { version: 2, mode: "unprotected" },
+  };
+  const cases = [
+    [missing, /Missing or unsupported durable/],
+    [
+      { ...unprotected, executionAdmission: { version: 1, mode: "unprotected" } },
+      /Missing or unsupported durable/,
+    ],
+    [withoutPlan, /Inconsistent durable/],
+    [{ ...f.revision, executionAdmission: unprotected.executionAdmission }, /Inconsistent durable/],
+    [f.revision, /Protected execution is unavailable/],
+    [
+      {
+        ...f.revision,
+        credentialSources: [],
+        egressPlan: { ...f.revision.egressPlan, routes: [] },
+      },
+      /Protected execution is unavailable/,
+    ],
+  ];
+  // Actual shipped Compute entrypoints: no clients are initialized and no cluster exists.
+  // Even its runtime-disabled activation fast path must recognize admission first.
+  for (const [revision, expected] of cases) {
+    assert.throws(() => compute.validateExecutionAdmission(revision), expected);
+    await assert.rejects(compute.prepareRevision(revision), expected);
+    await assert.rejects(compute.activateRevision(revision), expected);
+  }
+  assert.doesNotThrow(() => compute.validateExecutionAdmission(unprotected));
+  await compute.activateRevision(unprotected);
+  assert.equal((await compute.prepareRevision(unprotected)).ready, false);
+
+  // Protection comes from the selected execution policy, not the number of credentials.
+  // Runtime-auth fixtures carry no credential source; their durable plan remains deny-all.
+  const emptyAgent = await f.createAgent(
+    f.namespace.id,
+    "credential-free",
+    f.revision.configuration,
+    {
+      executionMode: "dedicated",
+      harnessAuth: { method: "runtime" },
+    },
+  );
+  const emptyMetadata = await f.deployAgent(f.namespace.id, emptyAgent.id);
+  const emptyRevision = await f.controller.transact((unit) =>
+    unit.revisions.findRevision(f.namespace.id, emptyAgent.id, emptyMetadata.id),
+  );
+  assert.deepEqual(emptyRevision.executionAdmission, { version: 2, mode: "protected" });
+  assert.deepEqual(emptyRevision.egressPlan.routes, []);
+  await assert.rejects(
+    compute.prepareRevision(emptyRevision),
+    /Protected execution is unavailable/,
+  );
+
+  // Exercise the real OCC deploy route with the shipped Compute admission policy.
+  // Other Compute operations remain deterministic fixtures; this is not cluster proof.
+  let admissionChecks = 0;
+  const admission = await staticEgressFixture(t, {
+    admitRevision: false,
+    appFactory: (context, options) =>
+      createConsoleAppFixture(context, {
+        ...options,
+        computeDriver: {
+          ...options.computeDriver,
+          validateExecutionAdmission(revision) {
+            admissionChecks += 1;
+            compute.validateExecutionAdmission(revision);
+          },
+        },
+      }),
+  });
+  const response = await admission.request(
+    "POST",
+    `/namespaces/${admission.namespace.id}/agents/${admission.agent.id}/deploy`,
+  );
+  assert.equal(response.status, 503, JSON.stringify(response.body));
+  assert.equal(response.body.error.code, "DEPENDENCY_UNAVAILABLE");
+  assert.equal(admissionChecks, 1, "the OCC route must reach the shipped Compute admission gate");
+  assert.deepEqual(
+    await admission.controller.transact((unit) =>
+      unit.revisions.listRevisions(admission.namespace.id, admission.agent.id),
+    ),
+    [],
+  );
 });

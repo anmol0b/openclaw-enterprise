@@ -225,3 +225,44 @@ export interface EgressProxyDriver extends Driver {
   withdrawBinding(context: EgressRevisionContext, binding: EgressRef): Promise<boolean>;
   removeRevision(context: EgressRevisionContext): Promise<boolean>;
 }
+
+/** Durable admission semantics, independent of credential bindings and route count. */
+export interface ExecutionAdmission {
+  readonly version: 2;
+  readonly mode: "protected" | "unprotected";
+}
+
+/** Recognition only. A valid protected schema is not proof of deployability. */
+export function assertExecutionAdmission(
+  revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+): void {
+  const admission = revision.executionAdmission;
+  if (
+    !admission ||
+    admission.version !== 2 ||
+    (admission.mode !== "protected" && admission.mode !== "unprotected") ||
+    Object.keys(admission).some((key) => key !== "version" && key !== "mode")
+  ) {
+    throw new Error("Missing or unsupported durable execution admission.");
+  }
+  if ((admission.mode === "protected") !== (revision.egressPlan !== undefined)) {
+    throw new Error("Inconsistent durable execution admission and egress plan.");
+  }
+  if (admission.mode === "protected" && !Array.isArray(revision.egressPlan?.routes)) {
+    throw new Error("Invalid protected execution plan.");
+  }
+}
+
+/** Current shipped execution cutoff; ordinary Agent authentication cannot release it. */
+export function assertExecutionReleaseAllowed(
+  revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+): void {
+  assertExecutionAdmission(revision);
+  if (revision.executionAdmission.mode === "protected") {
+    // TODO(M1): enable only after Compute-owned release, installed deny-all for empty
+    // plans, and an old-reader fence are proven together. No runtime flag bypass.
+    throw new Error(
+      "Protected execution is unavailable until Compute release and old-reader fencing are proven.",
+    );
+  }
+}

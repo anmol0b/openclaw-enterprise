@@ -1,3 +1,4 @@
+import { assertExecutionAdmission } from "@openclaw-enterprise/contracts";
 import { memoryEgressSendReceipts } from "./egress-send-receipts.ts";
 import type { EgressSendReceiptRepository, StoredSendReceipt } from "../egress-send-receipts.ts";
 import { isDeepStrictEqual } from "node:util";
@@ -758,6 +759,7 @@ export function validCredentialSourceSnapshots(value: unknown): boolean {
 }
 
 function assertAdmittedAgentRevision(revision: AgentRevision): void {
+  assertExecutionAdmission(revision);
   if (
     (revision.backendId !== null && !isBackendId(revision.backendId)) ||
     !/^cfg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(

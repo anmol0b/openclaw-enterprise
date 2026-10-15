@@ -52,6 +52,10 @@ not select candidate images.
 
 ## Select the protected profile
 
+Protected Agent deployment is currently refused by all shipped Compute Drivers.
+The packaging below does not bypass the
+[execution admission cutoff](../../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
+
 For a fresh Kubernetes control plane with a matching protected-inference
 candidate, set the image selectors above without starting the stack, then add:
 

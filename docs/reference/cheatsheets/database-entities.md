@@ -62,6 +62,8 @@ Stores Agent drafts, their desired runtime state, and the active revision refere
 ### `agent_revisions`
 
 Stores numbered, immutable snapshots of Agent settings accepted for deployment.
+`admitted_spec` includes the explicit v2
+[execution admission decision](../credential-sources/protected-inference.md#execution-admission-cutoff).
 
 - `id`
 - `namespace_id`

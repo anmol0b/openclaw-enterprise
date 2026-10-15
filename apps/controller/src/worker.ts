@@ -1,3 +1,4 @@
+import { assertExecutionReleaseAllowed } from "@openclaw-enterprise/contracts";
 import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { isSecretHarnessAuth, isServiceAccountHarnessAuth } from "@openclaw-enterprise/contracts";
@@ -1392,6 +1393,7 @@ export class ControllerWorker {
       throw new Error(`The selected production Compute Driver requires ${operation}.`);
     }
     if (operation === "activateRevision") {
+      assertExecutionReleaseAllowed(revision);
       this.stoppedPredecessors.delete(revision.id);
     }
     await stage.call(this.compute, revision, context);
@@ -1542,6 +1544,7 @@ export class ControllerWorker {
     revision: Readonly<AgentRevision>,
     context: ComputeRevisionContext,
   ): Promise<{ readonly observation: ComputeReadiness; readonly context: ComputeRevisionContext }> {
+    assertExecutionReleaseAllowed(revision);
     const timing = this.deployTimings.get(claim.idempotencyKey);
     const started = Date.now();
     try {
@@ -4104,6 +4107,11 @@ export class ControllerWorker {
   ): Promise<
     { readonly context: ComputeRevisionContext } | { readonly result: RevisionDispatchResult }
   > {
+    try {
+      assertExecutionReleaseAllowed(revision);
+    } catch {
+      return { result: { outcome: "permanent", code: "EXECUTION_ADMISSION_UNAVAILABLE" } };
+    }
     const bindings = revisionSecretBindings(revision);
     if ("result" in bindings) {
       return { result: bindings.result };

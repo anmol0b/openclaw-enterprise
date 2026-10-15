@@ -1,3 +1,4 @@
+import { assertExecutionAdmission } from "@openclaw-enterprise/contracts";
 import { postgresEgressSendReceipts } from "./egress-send-receipts.ts";
 import type { StaticEgressSource, EgressInstallation } from "@openclaw-enterprise/contracts";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -632,18 +633,36 @@ function revisionFromRow(
     harness: AgentRevision["harness"];
     compute: AgentRevision["compute"];
     sandbox_driver_id?: AgentRevision["sandboxDriverId"];
-    harness_auth: AgentRevision["harnessAuth"];
+    harness_auth: AgentRevision["harnessAuth"] & { readonly protectedExecutionVersion?: number };
     credential_sources?: AgentRevision["credentialSources"];
     egress_plan?: AgentRevision["egressPlan"];
+    execution_admission: AgentRevision["executionAdmission"];
     secret_driver_id?: AgentRevision["secretDriverId"];
     secret_bindings?: AgentRevision["secretBindings"];
     plugins?: AgentRevision["plugins"];
     plugin_approvers?: AgentRevision["pluginApprovers"];
     repository_credentials?: AgentRevision["repositoryCredentials"];
   };
+  try {
+    assertExecutionAdmission({
+      executionAdmission: admitted.execution_admission,
+      ...(admitted.egress_plan === undefined ? {} : { egressPlan: admitted.egress_plan }),
+    });
+  } catch {
+    throw new SavedConfigurationReadError(
+      "configuration",
+      "Persisted AgentRevision execution admission is missing, unsupported or inconsistent.",
+    );
+  }
+  // Older readers require an exact Harness-auth shape, rejecting the protected
+  // reader version before handing a revision to Compute. It grants no authority.
+  const { protectedExecutionVersion, ...harnessAuth } = admitted.harness_auth ?? {};
+  const protectedAdmission = admitted.execution_admission.mode === "protected";
   if (
     Object.hasOwn(admitted, "service_account") ||
-    !validHarnessAuthSnapshot(admitted.harness_auth, text(row, "namespace_id"))
+    protectedExecutionVersion !==
+      (protectedAdmission ? admitted.execution_admission.version : undefined) ||
+    !validHarnessAuthSnapshot(harnessAuth, text(row, "namespace_id"))
   ) {
     throw new SavedConfigurationReadError(
       "harnessAuth",
@@ -705,7 +724,8 @@ function revisionFromRow(
     ...(admitted.repository_credentials === undefined
       ? {}
       : { repositoryCredentials: admitted.repository_credentials }),
-    harnessAuth: admitted.harness_auth,
+    harnessAuth,
+    executionAdmission: admitted.execution_admission,
     ...(admitted.egress_plan === undefined ? {} : { egressPlan: admitted.egress_plan }),
     ...(admitted.credential_sources === undefined
       ? {}
@@ -3641,7 +3661,14 @@ export class PostgresPlatformState implements PlatformStateStore {
               ...(revision.repositoryCredentials === undefined
                 ? {}
                 : { repository_credentials: revision.repositoryCredentials }),
-              harness_auth: revision.harnessAuth,
+              harness_auth:
+                revision.executionAdmission.mode === "protected"
+                  ? {
+                      ...revision.harnessAuth,
+                      protectedExecutionVersion: revision.executionAdmission.version,
+                    }
+                  : revision.harnessAuth,
+              execution_admission: revision.executionAdmission,
               ...(revision.egressPlan === undefined ? {} : { egress_plan: revision.egressPlan }),
               ...(revision.credentialSources === undefined
                 ? {}

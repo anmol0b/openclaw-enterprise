@@ -1,3 +1,4 @@
+import { assertExecutionAdmission } from "../../packages/contracts/src/index.ts";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomUUID, randomBytes, sign } from "node:crypto";
 import { createServer as createHttpsServer, request as httpsRequest } from "node:https";
@@ -61,6 +62,7 @@ export async function staticEgressFixture(
     recordInstallation = true,
     inertProviderRule = false,
     serviceTransport,
+    admitRevision = true,
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "oce-egress-wire-"));
@@ -399,6 +401,8 @@ export async function staticEgressFixture(
     secretDriver,
     computeDriver: {
       ...createDevelopmentComputeDriver(),
+      // Schema/protocol fixture only: no workload is released by this Compute.
+      validateExecutionAdmission: assertExecutionAdmission,
       async resolveSandboxNamespace(value) {
         return physicalPlacement ? placement.resolveSandboxNamespace(value) : value;
       },
@@ -505,6 +509,9 @@ export async function staticEgressFixture(
     },
   });
   assert.equal(grant.status, 201, JSON.stringify(grant.body));
+  if (!admitRevision) {
+    return { ...app, namespace, agent };
+  }
   const revisionMetadata = await app.deployAgent(namespace.id, agent.id);
   const revision = await app.controller.transact((unit) =>
     unit.revisions.findRevision(namespace.id, agent.id, revisionMetadata.id),

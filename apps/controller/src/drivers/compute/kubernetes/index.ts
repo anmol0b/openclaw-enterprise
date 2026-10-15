@@ -1,3 +1,4 @@
+import { assertExecutionReleaseAllowed } from "@openclaw-enterprise/contracts";
 import type { EgressProxyDriver } from "@openclaw-enterprise/contracts";
 import {
   normalizeOpenAiBaseUrl,
@@ -5077,10 +5078,17 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
   }
 
+  validateExecutionAdmission(
+    revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+  ): void {
+    assertExecutionReleaseAllowed(revision);
+  }
+
   async prepareRevision(
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): Promise<ComputeReadiness> {
+    assertExecutionReleaseAllowed(revision);
     try {
       return await this.prepareRevisionWorkloads(revision, context);
     } catch (error) {
@@ -6181,6 +6189,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   }
 
   async activateRevision(revision: AgentRevision, context?: ComputeRevisionContext): Promise<void> {
+    assertExecutionReleaseAllowed(revision);
     try {
       await this.activateRevisionWorkloads(revision, context);
     } catch (error) {

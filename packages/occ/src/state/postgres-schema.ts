@@ -668,9 +668,25 @@ export const agentRevisions = occSchema.table(
         AND ${table.admittedSpec}->'egress_plan'->'execution'->>'namespaceId' = ${table.namespaceId}
         AND ${table.admittedSpec}->'egress_plan'->'execution'->>'agentId' = ${table.agentId}
         AND ${table.admittedSpec}->'egress_plan'->'execution'->>'revisionId' = ${table.id}
-        AND jsonb_typeof(${table.admittedSpec}->'egress_plan'->'routes') = 'array'
-        AND jsonb_array_length(${table.admittedSpec}->'egress_plan'->'routes') > 0,
+        AND jsonb_typeof(${table.admittedSpec}->'egress_plan'->'routes') = 'array',
         false)`,
+    ),
+    // Migration 0054 installs this NOT VALID to preserve old, unreadable history.
+    check(
+      "agent_revisions_execution_admission",
+      sql`COALESCE(
+        jsonb_typeof(${table.admittedSpec}->'execution_admission') = 'object'
+        AND (${table.admittedSpec}->'execution_admission') ?& ARRAY['version', 'mode']
+        AND ((${table.admittedSpec}->'execution_admission') - 'version' - 'mode') = '{}'::jsonb
+        AND ${table.admittedSpec}->'execution_admission'->'version' = '2'::jsonb
+        AND (
+          (${table.admittedSpec}->'execution_admission'->>'mode' = 'unprotected'
+            AND NOT (${table.admittedSpec} ? 'egress_plan')
+            AND NOT ((${table.admittedSpec}->'harness_auth') ? 'protectedExecutionVersion'))
+          OR (${table.admittedSpec}->'execution_admission'->>'mode' = 'protected'
+            AND ${table.admittedSpec} ? 'egress_plan'
+            AND ${table.admittedSpec} #> '{harness_auth,protectedExecutionVersion}' = '2'::jsonb)
+        ), false)`,
     ),
     check(
       "agent_revisions_admitted_snapshot",
@@ -682,7 +698,7 @@ export const agentRevisions = occSchema.table(
           - 'configuration_id' - 'configuration_kind' - 'configuration_generation'
           - 'draft_spec' - 'harness' - 'compute' - 'sandbox_driver_id'
           - 'secret_driver_id' - 'secret_bindings' - 'harness_auth' - 'credential_sources' - 'plugins'
-          - 'repository_credentials' - 'egress_plan') = '{}'::jsonb
+          - 'repository_credentials' - 'egress_plan' - 'execution_admission') = '{}'::jsonb
         AND jsonb_typeof(${table.admittedSpec}->'configuration_id') = 'string'
         AND (${table.admittedSpec}->>'configuration_id') ~ ${identifierPatterns.configuration}
         AND jsonb_typeof(${table.admittedSpec}->'configuration_kind') = 'string'
@@ -726,7 +742,7 @@ export const agentRevisions = occSchema.table(
           NOT (${table.admittedSpec} ? 'secret_bindings')
           OR occ.secret_bindings_are_valid(${table.admittedSpec}->'secret_bindings', ${table.namespaceId})
         )
-        AND occ.harness_auth_is_valid(${table.admittedSpec}->'harness_auth', ${table.namespaceId}, true)
+        AND occ.harness_auth_is_valid((${table.admittedSpec}->'harness_auth') - 'protectedExecutionVersion', ${table.namespaceId}, true)
         AND (
           NOT (${table.admittedSpec} ? 'repository_credentials')
           OR occ.repository_credentials_are_valid(${table.admittedSpec}->'repository_credentials')

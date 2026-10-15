@@ -1,4 +1,5 @@
 import type {
+  ExecutionAdmission,
   StaticEgressSource,
   CredentialInputRead,
   VersionedSecretValue,
@@ -10,6 +11,7 @@ import type {
 export type {
   EgressRef,
   EgressSourceKey,
+  ExecutionAdmission,
   StaticEgressSource,
   CredentialInputRead,
   VersionedSecretValue,
@@ -30,6 +32,7 @@ export type {
   CredentialSourceControl,
   EgressProxyDriver,
 } from "./egress.ts";
+export { assertExecutionAdmission, assertExecutionReleaseAllowed } from "./egress.ts";
 import type { WorkspaceSetup } from "./workspace-setup.ts";
 
 export type { ComputePreparationFailureEvidence } from "./compute-preparation.ts";
@@ -825,6 +828,7 @@ export interface RevisionHarnessDescriptor extends HarnessDescriptor {
 }
 
 export interface AgentRevision extends Scope {
+  readonly executionAdmission: ExecutionAdmission;
   readonly egressPlan?: EgressPlan;
   readonly id: string;
   readonly namespaceId: string;
@@ -864,6 +868,7 @@ export type AgentRevisionRead =
 export function freezeAgentRevision(revision: AgentRevision): Readonly<AgentRevision> {
   return Object.freeze({
     ...revision,
+    executionAdmission: immutableCopy(revision.executionAdmission),
     ...(revision.egressPlan === undefined
       ? {}
       : { egressPlan: immutableCopy(revision.egressPlan) }),
@@ -1840,6 +1845,10 @@ export interface ConfigurationValidationOptions {
 }
 
 export interface ComputeDriver extends Driver {
+  /** Admission capability check, not release authority. Missing support fails closed. */
+  validateExecutionAdmission?(
+    revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+  ): void;
   readonly supportsWorkspaceSetup?: true;
   readonly capability: "compute";
   /** Deployment must observe and provision Agent-owned runtime credentials before revision admission. */
