@@ -23,6 +23,10 @@ import {
   ScopeViolationError,
 } from "@openclaw-enterprise/occ";
 import { resolveKubernetesControlNamespace } from "../../compute/kubernetes/index.ts";
+import {
+  currentComputeAbortSignal,
+  withComputeAbortSignal,
+} from "../../compute/operation-context.ts";
 import { createKubernetesClientConfiguration } from "../../kubernetes/client.ts";
 import { OAUTH_PHASE_ANNOTATION } from "../../kubernetes/oauth-seal.ts";
 import { kubernetesRequest } from "../../kubernetes/request.ts";
@@ -438,17 +442,25 @@ export class KubernetesSecretDriver implements SecretDriver {
 
   async readCredentialInput(input: CredentialInputRead): Promise<VersionedSecretValue> {
     input.signal.throwIfAborted();
-    if (
-      !Number.isFinite(Date.parse(input.deadlineAt)) ||
-      Date.parse(input.deadlineAt) <= Date.now() ||
-      input.retention !== "none"
-    ) {
+    const deadline = Date.parse(input.deadlineAt);
+    const remaining = deadline - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0 || input.retention !== "none") {
       throw new SecretOwnershipError("Credential read bounds are invalid.");
     }
-    const { observed } = await this.readOwnedSecret(input.secret);
-    input.signal.throwIfAborted();
+    // Namespace verification, the subsequent Secret GET and any read retries must all
+    // inherit the caller's lifetime. A check after readOwnedSecret alone is too late.
+    const owner = currentComputeAbortSignal();
+    const signal = AbortSignal.any([
+      input.signal,
+      AbortSignal.timeout(Math.min(remaining, 2_147_483_647)),
+      ...(owner ? [owner] : []),
+    ]);
+    const { observed } = await withComputeAbortSignal(signal, () =>
+      this.readOwnedSecret(input.secret),
+    );
+    signal.throwIfAborted();
     const version = observed.metadata?.resourceVersion;
-    if (!isNonEmptyString(version) || Date.parse(input.deadlineAt) <= Date.now()) {
+    if (!isNonEmptyString(version) || deadline <= Date.now()) {
       throw new SecretOwnershipError("Versioned credential material is unavailable.");
     }
     return {

@@ -305,8 +305,17 @@ export class CredentialProxy {
     }
     // Policy and installation I/O may have been queued when the accepted stream
     // closed. Losing that sender revokes material access, not just a later send.
-    if (signal.aborted || !this.owns(association, captured)) {
-      return { kind: "refused", error: { kind: "cancelled" } };
+    const accessEnded = (): EgressRefusal | undefined => {
+      if (signal.aborted || !this.owns(association, captured)) {
+        return { kind: "cancelled" };
+      }
+      if (this.ports.now() >= deadline) {
+        return { kind: "deadline_exceeded" };
+      }
+    };
+    const beforeSelection = accessEnded();
+    if (beforeSelection) {
+      return { kind: "refused", error: beforeSelection };
     }
     try {
       // Recheck the same accepted response owner after selection, including any independent material read.
@@ -315,8 +324,9 @@ export class CredentialProxy {
         return { kind: "refused", error: material };
       }
       const { evidence } = material;
-      if (signal.aborted || !this.owns(association, captured)) {
-        return refuse("identity");
+      const afterSelection = accessEnded();
+      if (afterSelection) {
+        return { kind: "refused", error: afterSelection };
       }
       if (evidence.kind !== "no_material_required" && material.value === undefined) {
         return { kind: "refused", error: { kind: "not_ready", code: "material_missing" } };
@@ -358,7 +368,10 @@ export class CredentialProxy {
         ? { kind: "ready_without_material", handle }
         : { kind: "ready", handle, evidence, headers, injectionDigest: digest };
     } catch {
-      return { kind: "refused", error: { kind: "unavailable", code: "secret_store" } };
+      return {
+        kind: "refused",
+        error: accessEnded() ?? { kind: "unavailable", code: "secret_store" },
+      };
     }
   }
 

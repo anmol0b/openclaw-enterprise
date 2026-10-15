@@ -105,12 +105,14 @@ export async function staticEgressFixture(
   let runtimeNamespace;
   let secretReads = 0;
   let secretReadBarrier;
+  let beforeNamespaceResponse;
   const kubeRequests = [];
   const kube = createHttpsServer({ key, cert }, async (request, response) => {
     response.setHeader("content-type", "application/json");
     const url = new URL(request.url, "http://localhost");
     kubeRequests.push([request.method, url.pathname]);
     if (url.pathname === "/api/v1/namespaces") {
+      await beforeNamespaceResponse?.();
       const nsId = namespace.id;
       assert.ok(
         [`openclaw.dev/gateway-namespace=${nsId}`, `openclaw.dev/namespace=${nsId}`].includes(
@@ -948,6 +950,21 @@ export async function staticEgressFixture(
     },
     get secretReads() {
       return secretReads;
+    },
+    pauseNamespaceVerification() {
+      const reached = Promise.withResolvers();
+      const paused = Promise.withResolvers();
+      beforeNamespaceResponse = () => {
+        reached.resolve();
+        return paused.promise;
+      };
+      return {
+        reached: reached.promise,
+        release() {
+          beforeNamespaceResponse = undefined;
+          paused.resolve();
+        },
+      };
     },
     pauseSecretReads() {
       const paused = Promise.withResolvers();

@@ -134,8 +134,12 @@ test("Credential Proxy startup preserves the selection and refuses retired keys"
       `Credential Proxy: Backend member=${member}, Installation selection=${selected}`,
       async () => {
         const candidate = structuredClone(configuration);
-        if (!member) delete candidate.backend[0].drivers.credential_proxy;
-        if (!selected) delete candidate.drivers.credential_proxy;
+        if (!member) {
+          delete candidate.backend[0].drivers.credential_proxy;
+        }
+        if (!selected) {
+          delete candidate.drivers.credential_proxy;
+        }
         await writeFile(path, JSON.stringify(candidate));
 
         // Direct OCC composition must enforce the same membership rule as Installation startup.

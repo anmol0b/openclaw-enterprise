@@ -1128,6 +1128,60 @@ test("closing the accepted duplex while its policy check is queued prevents the 
   );
 });
 
+test("closing the accepted duplex during Kubernetes namespace verification prevents the Secret GET", async (t) => {
+  const finished = Promise.withResolvers();
+  const f = await staticEgressFixture(t, { resolutionFinished: finished.resolve });
+  const captured = f.capture();
+  const exchange = await f.beginExchange();
+  const before = f.secretReads;
+  const placement = f.pauseNamespaceVerification();
+  t.after(placement.release);
+  exchange.stream.write(exchange.opening(captured));
+  await placement.reached;
+
+  // Wait for the real authority to acknowledge the half-close, then let namespace lookup
+  // finish. Checking the eventual wire response alone would miss an unnecessary Secret GET.
+  const ended = Promise.withResolvers();
+  exchange.stream.once("status", ended.resolve);
+  exchange.stream.end();
+  assert.equal((await ended.promise).code, 0);
+  placement.release();
+  const result = await finished.promise;
+  assert.equal(f.secretReads, before, "a lost response owner cannot start a new Secret GET");
+  assert.deepEqual(result, { kind: "refused", error: { kind: "cancelled" } });
+  assert.equal(f.providerRequests.length, 0);
+  assert.deepEqual(
+    exchange.received.map((message) => message.event),
+    ["challenge"],
+  );
+
+  assert.ok(
+    (await f.resolve(f.capture())).ready,
+    "an independently accepted exchange can still resolve",
+  );
+});
+
+test("policy verification crossing the request deadline cannot start material selection", async (t) => {
+  const f = await syntheticDispatchFixture(t);
+  const forwarder = new CredentialProxy({
+    ...f.ports,
+    check: async (...args) => {
+      const decision = await f.ports.check(...args);
+      f.advance(Date.parse(f.request.deadlineAt) - f.ports.now());
+      return decision;
+    },
+  });
+  const result = await forwarder.resolve(
+    "synthetic-peer",
+    f.association.installation.sandboxId,
+    f.request,
+    new AbortController().signal,
+  );
+  assert.equal(f.reads, 0, "the material owner must not be called on an expired access decision");
+  assert.deepEqual(result, { kind: "refused", error: { kind: "deadline_exceeded" } });
+  assert.equal(f.arrivals, 0);
+});
+
 test("authenticated sender receipts survive authority restart without replay permission and distinguish observations", async (t) => {
   const f = await staticEgressFixture(t);
   const captured = f.capture();
