@@ -550,6 +550,72 @@ test(
         "unreceived retirement bytes were not cleared",
       );
     });
+    for (const custody of ["current", "retire"]) {
+      await t.test(`publication rollback clears ${custody} bytes`, async (t) => {
+        const created = await f.request("POST", path, {
+          body: { ...registration, name: `prepared-rollback-${custody}` },
+        });
+        assert.equal(created.status, 201);
+        invalidScope = custody === "retire";
+        t.after(() => {
+          invalidScope = false;
+        });
+
+        const repo = fresh.repository;
+        const seal = repo.seal.bind(repo);
+        const transaction = repo.transaction.bind(repo);
+        let candidate;
+        let publication;
+        t.mock.method(repo, "seal", (bytes, ...args) => {
+          candidate = bytes; // Retain the repository-owned buffer, never a copy or diagnostic.
+          return seal(bytes, ...args);
+        });
+        t.mock.method(repo, "transaction", (work) =>
+          transaction((client) =>
+            work({
+              async query(sql, args) {
+                const result = await client.query(sql, args);
+                if (sql.includes("SET state=$2,custody=$3")) {
+                  // The real write succeeded. Abort PostgreSQL before COMMIT, then inspect
+                  // only metadata outside the transaction's sanitized error boundary.
+                  publication = {
+                    custody: args[2],
+                    sealed: args[3] != null,
+                    live: candidate?.some((byte) => byte !== 0),
+                    rows: result.rowCount,
+                  };
+                  await client.query("SELECT 1/0");
+                }
+                return result;
+              },
+            }),
+          ),
+        );
+        const issues = gh.issuesOfTokens.length;
+        assert.equal(await fresh.maintain(signal), "quarantined");
+        const clearedAtReturn = candidate?.every((byte) => byte === 0);
+        assert.deepEqual(publication, { custody, sealed: true, live: true, rows: 1 });
+        assert.equal(gh.issuesOfTokens.length, issues + 1);
+        const { rows } = await f.pool.query(
+          "SELECT state,custody,sealed IS NOT NULL AS sealed FROM occ.prepared_github_attempts WHERE source_id=$1",
+          [created.data.id],
+        );
+        assert.deepEqual(rows, [{ state: "issuing", custody: "intent", sealed: false }]);
+
+        // The durable intent blocks another issuance even after the family becomes due.
+        await f.pool.query(
+          "UPDATE occ.prepared_github_families SET next_check_at=now() WHERE source_id=$1",
+          [created.data.id],
+        );
+        assert.equal(await fresh.maintain(signal), "blocked");
+        assert.equal(gh.issuesOfTokens.length, issues + 1);
+        assert.equal(
+          clearedAtReturn,
+          true,
+          "publication returned without clearing its draft bytes",
+        );
+      });
+    }
     assert.deepEqual(gh.errors, []);
   },
 );

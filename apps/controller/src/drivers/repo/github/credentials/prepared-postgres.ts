@@ -327,13 +327,21 @@ export class PreparedGitHubPostgres {
                     key,
                   ],
                 );
-                bytes?.fill(0);
               }
             }
           }
           return result;
         } finally {
           previous?.bytes.fill(0);
+          if (change) {
+            // The writer can install a new plaintext buffer before publication fails.
+            if (family.committed !== previous) {
+              family.committed?.bytes.fill(0);
+            }
+            for (const attempt of family.attempts) {
+              attempt.candidate?.fill(0);
+            }
+          }
         }
       });
     return {
