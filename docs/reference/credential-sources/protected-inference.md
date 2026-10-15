@@ -54,12 +54,21 @@ resourceVersion. An update applies to the next operation without changing the
 source's configuration generation. The Agent receives a nonsecret client marker,
 not the provider key.
 
-An existing source keeps its gateway copy until an authorized caller opts it in:
+While `egress_proxy` is selected, OCC refuses to create a source of any type the
+protected provider does not support. Today that is every type except the static
+`openai` key, such as `bearer-token`, `oauth2-client-credentials` and
+`oauth2-refresh-token`. Register those sources before selecting the Driver, or
+on an Installation without it.
+
+An existing source keeps using its gateway copy until an authorized caller opts it in:
 `PATCH /namespaces/:namespaceId/credential-sources/:credentialSourceId` with
 `{"adoption":"live"}`. The caller needs exact `credential_source:update` and
 `secret:operate` permissions. The source must be unbound, the counterpart supported,
 and the candidate material valid. A failed admission leaves the previous
-configuration intact. Source GET/list expose adoption and retention;
+configuration intact. After opt-in, the previous Credential Gateway copy is
+retained but detached: new revisions never receive it, and it is removed only
+when the source is deleted. If the old value must stop working, rotate it at the
+provider. Source GET/list expose adoption and retention;
 `status.state: ready` means source admission, not installed runtime protection.
 
 ## Authority and response handling

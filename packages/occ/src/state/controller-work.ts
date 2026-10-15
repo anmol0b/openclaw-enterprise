@@ -675,6 +675,8 @@ function deploymentErrorMessage(code: string): string {
       return "The Installation no longer selects the Credential Gateway this revision was admitted with. Bind sources registered through the selected gateway, or remove them and change harnessAuth, then deploy again.";
     case "HARNESS_AUTH_SOURCE_UNAVAILABLE":
       return "The Harness authentication source this revision was admitted with is missing, being deleted, or changed since admission. Bind an available source, then deploy again.";
+    case "EGRESS_PROVIDER_UNAVAILABLE":
+      return "The protected egress provider this revision's Harness source was admitted with is no longer selected or available. Ask an admin to reselect it, or bind a source admitted under the selected provider, then deploy again.";
     case "CREDENTIAL_SOURCE_UNAVAILABLE":
       return "A credential source this revision lists is missing, being deleted, or changed since admission. Bind available sources, then deploy again.";
     case "SECRET_DRIVER_MISMATCH":

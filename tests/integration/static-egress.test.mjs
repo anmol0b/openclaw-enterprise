@@ -5,6 +5,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { createRequire } from "node:module";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
 import { egressInjectionDigest } from "../../packages/occ/src/egress.ts";
+import { deploymentErrorForWork } from "../../packages/occ/src/state/controller-work.ts";
 import {
   pluginRuntimeSpecForRevision,
   pluginRuntimeConfigMapData,
@@ -1073,3 +1074,13 @@ test(
     assert.equal(f.providerRequests.length, 1);
   },
 );
+
+test("an unavailable protected egress provider fails the deployment with an operator message", () => {
+  const error = deploymentErrorForWork({
+    state: "failed_permanent",
+    reasonCode: "EGRESS_PROVIDER_UNAVAILABLE",
+  });
+  assert.equal(error.code, "EGRESS_PROVIDER_UNAVAILABLE");
+  assert.notEqual(error.message, "Deployment reconciliation failed.");
+  assert.match(error.message, /protected egress provider/);
+});
