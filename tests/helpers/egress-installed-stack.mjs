@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile, readFile, rename } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { createManagedWorkloadExec } from "./egress-managed-workload-exec.mjs";
 import { enforcementCapabilities } from "./egress-installed-agent.mjs";
 import { OpenShellGateway } from "../../apps/controller/src/backends/openshell.ts";
 import { createRealKubernetesFixture } from "./kubernetes-real.mjs";
@@ -66,16 +67,17 @@ export async function createRunEvidence(t, setup, progress) {
     phases: [],
     cleanup: "pending",
   };
-  const saveLedger = async () => {
-    await writeFile(
-      join(directory, "observations.pending.json"),
-      JSON.stringify(ledger, null, 2) + "\n",
-      { mode: 0o600 },
-    );
-    await rename(
-      join(directory, "observations.pending.json"),
-      join(directory, "observations.json"),
-    );
+  // An admitted client can still be pending when we dispatch another one. Serialize
+  // atomic ledger snapshots so each pre-dispatch checkpoint is durable before its RPC.
+  let writing = Promise.resolve();
+  const saveLedger = () => {
+    const snapshot = JSON.stringify(ledger, null, 2) + "\n";
+    writing = writing.then(async () => {
+      const pending = join(directory, "observations.pending.json");
+      await writeFile(pending, snapshot, { mode: 0o600 });
+      await rename(pending, join(directory, "observations.json"));
+    });
+    return writing;
   };
   const checkpoint = async (phase, details = {}) => {
     progress.stage = phase;
@@ -255,5 +257,20 @@ export async function observePreparedStack(t, setup, evidence, progress) {
       pod.status?.conditions?.some(({ type, status }) => type === "Ready" && status === "True"),
     );
   }
-  return { namespacePath, namespace, placement, controllerPods, gatewayClient, pool, installation };
+  const execWorkload = createManagedWorkloadExec(t, {
+    backend: input.openShellBackend,
+    workspace: placement,
+    gatewayClient,
+    checkpoint: evidence.checkpoint,
+  });
+  return {
+    namespacePath,
+    namespace,
+    placement,
+    controllerPods,
+    gatewayClient,
+    pool,
+    installation,
+    execWorkload,
+  };
 }

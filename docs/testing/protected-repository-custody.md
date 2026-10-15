@@ -26,6 +26,16 @@ the workload's effective authorization cannot retrieve or project the Compute si
 The test generates an App key, separately consented dedicated Agents and metadata-only
 installation credentials. It contacts neither GitHub nor a model provider.
 
+The qualification operator needs the supplier's workspace User role and
+`sandbox:write` access for `ExecSandbox`. The test rechecks the enrolled Sandbox
+name and immutable ID, records a fresh launch request ID, then asks the authenticated
+gateway to start ordinary curl or Node on the supplier's workload launcher. The
+children inherit its connection mediation and installed TLS trust. Operator credentials
+stay on the gateway control channel. A Kubernetes exec in the same Pod would not
+inherit the launcher's mediation. If the terminal `Exit` is missing or the supplier
+reports an execution timeout, reconcile that launch ID without resubmitting the client.
+The supervisor's later egress request ID identifies a separate operation.
+
 Before installing the disposable API controller, start the following observer on
 its owner host. Use the same limited disposable database selected for the test.
 The directory must not already exist. Keep the Unix socket on this host. Route
@@ -63,7 +73,7 @@ openings and two live dispatch handles, and attempts to splice an actual pending
 The installed test cannot extract a supervisor's possession key to repeat that injection.
 Instead it holds two separately authorized executions' actual replies, makes B finish
 first with only the final forbidden trailer, checks B's exact refusal and A's exact approved
-identity through TLS FIN, then checks B's own fresh authorized read. The separate trailer
+identity through TLS FIN (curl at A, an independent Node client at B), then checks B's own fresh authorized read. The separate trailer
 control has identical chunk framing and no trailers. For replacement, B remains authorized
 with its own accepted read pending while A's late valid response is released. It must receive
 only its expected refusal through FIN, then its own fresh successful read. The subsequent IAM denial is a withdrawal control.

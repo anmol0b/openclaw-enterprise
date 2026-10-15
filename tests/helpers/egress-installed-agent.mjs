@@ -342,6 +342,10 @@ export async function observeInstalledProtection(
   return {
     harness,
     sandboxName,
+    inAgent: async (...command) => {
+      const { stdout } = await stack.execWorkload({ sandboxName, sandboxId }, command);
+      return stdout.toString("utf8");
+    },
     readReceipt,
     receipt,
     gatewayPods,

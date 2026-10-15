@@ -369,14 +369,11 @@ async function verifyManagedClientsAndDirectBypass(
   installed,
   turns,
 ) {
-  const {
-    controller,
-    f: { kubectl },
-  } = setup;
+  const { controller } = setup;
   const { placement } = stack;
   const { checkpoint } = evidence;
   const { provider } = owned;
-  const { harness } = installed;
+  const { inAgent } = installed;
   const { successfulTurn } = turns;
   // The normal Launcher may probe the model during activation. Keep those
   // requests visible and distinct from measured user turns; never reset counts.
@@ -412,17 +409,6 @@ async function verifyManagedClientsAndDirectBypass(
   // An ordinary sibling, with no credential, caller claim or binding header,
   // gets the same managed operation. A Codex-only allowlist fails this control.
   await checkpoint("managed-sibling-start", { codexRequest });
-  const inAgent = (...args) =>
-    kubectl(
-      "exec",
-      harness.metadata.name,
-      "--namespace",
-      placement,
-      "--container",
-      "agent",
-      "--",
-      ...args,
-    );
   const nonce = `OCE-EGRESS-${randomUUID()}`;
   const model = controller.model;
   const before = provider.observations.length;

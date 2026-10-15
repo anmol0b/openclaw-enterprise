@@ -107,30 +107,22 @@ export async function receipts(pool, installation, selection = "prepared_github"
   return rows;
 }
 
-export function agentClients(setup, stack, harness, origin, path = repositoryPath) {
+export function agentClients({ inAgent }, origin, path = repositoryPath) {
   const target = origin + path;
-  const inAgent = (...args) =>
-    setup.f.kubectl(
-      "exec",
-      "-n",
-      stack.placement,
-      harness.metadata.name,
-      "-c",
-      "agent",
-      "--",
-      ...args,
-    );
   // Ordinary independent clients. Neither conveys an identity, credential, binding,
   // executable assertion or capture hook. Both must receive exactly the selected identity.
   const curl = () =>
     inAgent(
       "curl",
+      "-q",
       "--silent",
       "--show-error",
       "--include",
       "--raw",
+      // Wait for FIN, including in the simultaneous authorized curl/Node comparison.
+      "--ignore-content-length",
       "--max-time",
-      "28",
+      "90",
       "--header",
       "Connection: close",
       target,

@@ -66,9 +66,7 @@ export async function verifyCredentialFreeReadAndWithdrawal({
   const events = () => supplierEvents(setup, placement, installed.supervisor);
   const rows = () => receipts(pool, installed.installation, "no_material_required");
   const { curl } = agentClients(
-    setup,
-    stack,
-    installed.harness,
+    installed,
     provider.businessOrigin,
     "/repos/" + repository.full_name,
   );
