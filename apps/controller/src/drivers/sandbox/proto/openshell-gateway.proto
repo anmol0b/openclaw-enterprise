@@ -778,6 +778,8 @@ message LoadedPolicyObservationV1 {
   SandboxPolicy effective_policy = 2;
   LoadedEnforcementEvidence enforcement = 3;
   string inert_provider_rule = 4;
+  // Ed25519 public key observed on the gateway current supervisor session.
+  bytes registered_exchange_public_key = 5;
 }
 // Additive supplier contract: current accepted registration after runtime installation.
 message LoadedEnforcementEvidence {

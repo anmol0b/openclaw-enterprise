@@ -21,6 +21,9 @@ export interface EgressPeer {
   readonly sandboxId: string;
   readonly instanceId: string;
   readonly expiresAt: string;
+  readonly exchangeId?: string;
+  /** Public key identifier authenticated by the transport, pinned separately at installation. */
+  readonly peerKeyId?: string;
 }
 
 /** Only installed transport verifiers implement this interface, never workload input. */
@@ -154,6 +157,10 @@ export class EgressForwarder {
     input: EgressRequest,
     signal: AbortSignal,
   ): Promise<EgressResolution> {
+    input = {
+      ...immutableCopy({ ...input, body: undefined }),
+      body: new Uint8Array(input.body),
+    } as EgressRequest;
     this.prune();
     // Reserve before authentication or any other await. Pending Secret/policy I/O
     // consumes the same capacity as an outstanding material handle.
@@ -215,7 +222,8 @@ export class EgressForwarder {
     if (
       !installation ||
       !isDeepStrictEqual(installation.sender, peer.sender) ||
-      installation.enforcement?.instanceId !== peer.instanceId
+      installation.enforcement?.instanceId !== peer.instanceId ||
+      installation.enforcement.peerKeyId !== peer.peerKeyId
     ) {
       return { kind: "refused", error: { kind: "not_ready", code: "attachment_pending" } };
     }
@@ -344,6 +352,7 @@ export class EgressForwarder {
       peer.sandboxId !== sandboxId ||
       !isDeepStrictEqual(peer.sender, record.use.peer.sender) ||
       peer.instanceId !== record.use.peer.instanceId ||
+      peer.exchangeId !== record.use.peer.exchangeId ||
       sandboxId !== record.use.peer.sandboxId ||
       requestId !== record.use.request.id ||
       deadlineAt !== record.use.request.deadlineAt ||
@@ -434,6 +443,7 @@ export class EgressForwarder {
         record.use.request.id === requestId &&
         record.use.peer.sandboxId === sandboxId &&
         record.use.peer.instanceId === peer.instanceId &&
+        record.use.peer.exchangeId === peer.exchangeId &&
         isDeepStrictEqual(record.use.peer.sender, peer.sender),
     );
     if (!entry) {

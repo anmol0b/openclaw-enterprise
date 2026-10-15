@@ -1,4 +1,4 @@
-import { createPublicKey, verify, type KeyObject } from "node:crypto";
+import { createPublicKey, randomBytes, verify, type KeyObject } from "node:crypto";
 import type { EgressRef } from "@openclaw-enterprise/contracts";
 import type { EgressPeer, EgressPeerVerifier } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
@@ -23,6 +23,64 @@ export class OpenShellEgressIdentity implements EgressPeerVerifier {
   readonly audience: string;
   private readonly options: OpenShellEgressIdentityOptions;
   private readonly key: KeyObject;
+  private readonly exchanges = new Map<string, { bearer: string; peer: EgressPeer }>();
+
+  /** Only the accepted duplex stream holds this local capability; never put it on the wire. */
+  acceptExchange(
+    bearer: string,
+    challenge: Buffer,
+    request: Buffer,
+    signature: Buffer,
+  ): string | undefined {
+    const claims = this.claims(bearer);
+    const peer = this.peer(claims);
+    const binding = asRecord(claims?.exchange_key);
+    if (
+      !peer ||
+      challenge.length !== 32 ||
+      signature.length !== 64 ||
+      binding?.profile !== "openshell-exchange-v1" ||
+      binding?.kty !== "OKP" ||
+      binding?.crv !== "Ed25519" ||
+      typeof binding?.x !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(binding.x) ||
+      this.exchanges.size >= 1024
+    ) {
+      return undefined;
+    }
+    try {
+      const key = createPublicKey({
+        key: { kty: "OKP", crv: "Ed25519", x: binding.x },
+        format: "jwk",
+      });
+      if (
+        !verify(
+          null,
+          Buffer.concat([Buffer.from("openshell-exchange-v1\0"), challenge, request]),
+          key,
+          signature,
+        )
+      ) {
+        return undefined;
+      }
+      const capability = randomBytes(32).toString("base64url");
+      this.exchanges.set(capability, {
+        bearer,
+        peer: Object.freeze({
+          ...peer,
+          peerKeyId: binding.x,
+          exchangeId: randomBytes(32).toString("base64url"),
+        }),
+      });
+      return capability;
+    } catch {
+      return undefined;
+    }
+  }
+
+  closeExchange(capability: string): void {
+    this.exchanges.delete(capability);
+  }
 
   constructor(options: OpenShellEgressIdentityOptions) {
     this.options = options;
@@ -92,7 +150,11 @@ export class OpenShellEgressIdentity implements EgressPeerVerifier {
   }
 
   async verify(authorization: string): Promise<EgressPeer | undefined> {
-    const claims = this.claims(authorization);
+    const exchange = this.exchanges.get(authorization);
+    return exchange && this.peer(this.claims(exchange.bearer)) ? exchange.peer : undefined;
+  }
+
+  private peer(claims: Record<string, unknown> | undefined): EgressPeer | undefined {
     if (
       !claims ||
       claims.caller_kind !== "supervisor" ||

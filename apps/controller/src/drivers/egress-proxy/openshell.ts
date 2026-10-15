@@ -85,12 +85,15 @@ function enforcementEvidence(
   const source = asRecord(revision?.policy);
   const effective = asRecord(observation?.effective_policy);
   const evidence = asRecord(observation?.enforcement);
+  const registeredKey = observation?.registered_exchange_public_key;
   if (
     !revision ||
     !observation ||
     !source ||
     !effective ||
     !evidence ||
+    !(registeredKey instanceof Uint8Array) ||
+    registeredKey.byteLength !== 32 ||
     evidence.sandbox_id !== sandboxId ||
     typeof evidence.instance_id !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -107,7 +110,10 @@ function enforcementEvidence(
     observation.source_policy_hash !== revision.policy_hash ||
     revisionNumber(evidence.config_revision) === undefined ||
     revisionNumber(evidence.provider_env_revision) === undefined ||
-    !isDeepStrictEqual(evidence.enforced_capabilities, [capability])
+    !isDeepStrictEqual(evidence.enforced_capabilities, [
+      capability,
+      "openshell.supervisor-middleware.installation-exchange.v1",
+    ])
   ) {
     return undefined;
   }
@@ -148,6 +154,7 @@ function enforcementEvidence(
   }
   return {
     instanceId: evidence.instance_id,
+    peerKeyId: Buffer.from(registeredKey).toString("base64url"),
     // Local change fence, not the supplier's canonical policy hash. Both supplier
     // identities and complete decoded policies must remain stable on revalidation.
     configurationId: createHash("sha256")
@@ -298,8 +305,14 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
               item.protocol_major === 1 &&
               Array.isArray(item.required_capabilities) &&
               item.required_capabilities.includes(capability) &&
+              item.required_capabilities.includes(
+                "openshell.supervisor-middleware.installation-exchange.v1",
+              ) &&
               Array.isArray(item.supported_capabilities) &&
-              item.supported_capabilities.includes(capability)
+              item.supported_capabilities.includes(capability) &&
+              item.supported_capabilities.includes(
+                "openshell.supervisor-middleware.installation-exchange.v1",
+              )
             );
           })
         ) {

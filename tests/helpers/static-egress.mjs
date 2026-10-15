@@ -26,6 +26,7 @@ const require = createRequire(new URL("../../apps/controller/package.json", impo
 const grpc = require("@grpc/grpc-js");
 const loader = require("@grpc/proto-loader");
 const capability = "openshell.supervisor-middleware.http-credential-access.v1";
+const exchangeCapability = "openshell.supervisor-middleware.installation-exchange.v1";
 export const wireTime = (millis) => ({
   seconds: Math.floor(millis / 1000),
   nanos: (millis % 1000) * 1e6,
@@ -250,8 +251,8 @@ export async function staticEgressFixture(
                 kind: 4,
                 configured_name: "oce-authority",
                 protocol_major: 1,
-                supported_capabilities: [capability],
-                required_capabilities: [capability],
+                supported_capabilities: [capability, exchangeCapability],
+                required_capabilities: [capability, exchangeCapability],
               },
             ]
           : [],
@@ -557,6 +558,7 @@ export async function staticEgressFixture(
   );
   // Supplier observations are fixtures; the production adapter must consume their
   // exact protobuf shape. No hand-written installation bypasses its readiness checks.
+  const exchangeKeys = generateKeyPairSync("ed25519");
   observed.policyHash = "1a".repeat(32);
   observed.evidence = {
     sandbox_id: sandboxId,
@@ -565,7 +567,7 @@ export async function staticEgressFixture(
     policy_hash: observed.policyHash,
     config_revision: "17395563786422799999",
     provider_env_revision: "9019556378642279999",
-    enforced_capabilities: [capability],
+    enforced_capabilities: [capability, exchangeCapability],
   };
   const effectivePolicy = structuredClone(observed.policy);
   const ruleName = inertProviderRule
@@ -579,6 +581,10 @@ export async function staticEgressFixture(
     source_policy_hash: observed.policyHash,
     effective_policy: effectivePolicy,
     inert_provider_rule: ruleName,
+    registered_exchange_public_key: Buffer.from(
+      exchangeKeys.publicKey.export({ format: "jwk" }).x,
+      "base64url",
+    ),
   };
   const installation = await egress.attachmentStatus(context, attachment);
   assert.ok(installation, "the adapter must validate the complete supplier observation");
@@ -612,7 +618,12 @@ export async function staticEgressFixture(
   );
   const services = grpc.loadPackageDefinition(definition).openshell.middleware.v1;
   const clients = Object.fromEntries(
-    ["HttpCredentialAccess", "HttpResponsePreReturn", "SupervisorMiddleware"].map((name) => [
+    [
+      "HttpCredentialAccess",
+      "HttpResponsePreReturn",
+      "SupervisorMiddleware",
+      "HttpInstallationExchange",
+    ].map((name) => [
       name,
       new services[name](`127.0.0.1:${authorityPort}`, grpc.credentials.createSsl(cert)),
     ]),
@@ -638,6 +649,10 @@ export async function staticEgressFixture(
         caller_kind: "supervisor",
         sandbox_id: sandboxId,
         instance_id: installation.enforcement.instanceId,
+        exchange_key: {
+          profile: "openshell-exchange-v1",
+          ...exchangeKeys.publicKey.export({ format: "jwk" }),
+        },
         ...overrides,
       }),
     ).toString("base64url");
@@ -763,6 +778,61 @@ export async function staticEgressFixture(
     observed,
     clients,
     metadata,
+    async beginExchange(peer = metadata()) {
+      const stream = clients.HttpInstallationExchange.Exchange(peer, {
+        deadline: Date.now() + 5000,
+      });
+      const queued = [];
+      const received = [];
+      const waiting = [];
+      let failure;
+      stream.on("data", (message) => {
+        received.push(message);
+        const waiter = waiting.shift();
+        if (waiter) {
+          waiter.resolve(message);
+        } else {
+          queued.push(message);
+        }
+      });
+      stream.on("error", (error) => {
+        failure = error;
+        for (const waiter of waiting.splice(0)) {
+          waiter.reject(error);
+        }
+      });
+      const next = () => {
+        if (queued.length) {
+          return Promise.resolve(queued.shift());
+        }
+        if (failure) {
+          return Promise.reject(failure);
+        }
+        return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+      };
+      t.after(() => stream.cancel());
+      const { challenge } = await next();
+      return {
+        stream,
+        next,
+        challenge,
+        received,
+        opening(captured, privateKey = exchangeKeys.privateKey, boundChallenge = challenge) {
+          const encoded =
+            definition["openshell.middleware.v1.HttpCredentialResolveRequest"].serialize(captured);
+          return {
+            open: {
+              resolve_request: encoded,
+              signature: sign(
+                null,
+                Buffer.concat([Buffer.from("openshell-exchange-v1\0"), boundChallenge, encoded]),
+                privateKey,
+              ),
+            },
+          };
+        },
+      };
+    },
     capture,
     permitRequest,
     send,

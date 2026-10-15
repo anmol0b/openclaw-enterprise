@@ -818,3 +818,34 @@ message HttpRequestResult {
   // OpenShell may return this code to the requester, unlike free-form reason.
   string reason_code = 8;
 }
+
+// One operation per stream. The server challenge binds the signed opening bytes
+// to this actual reply stream; a client-selected destination is never authority.
+service HttpInstallationExchange {
+  rpc Exchange(stream InstallationExchangeRequest) returns (stream InstallationExchangeReply);
+}
+message InstallationExchangeOpen {
+  // Exact binary encoding of HttpCredentialResolveRequest, signed without re-encoding.
+  bytes resolve_request = 1;
+  bytes signature = 2;
+}
+message InstallationExchangeResponse {
+  uint32 status = 1;
+  repeated HttpHeader headers = 2;
+  bytes body = 3;
+}
+message InstallationExchangeRequest {
+  oneof event {
+    InstallationExchangeOpen open = 1;
+    HttpCredentialAuthorizeSendRequest authorize = 2;
+    InstallationExchangeResponse response = 3;
+  }
+}
+message InstallationExchangeReply {
+  oneof event {
+    bytes challenge = 1;
+    HttpCredentialResolveResponse resolved = 2;
+    HttpCredentialAuthorizeSendResponse authorized = 3;
+    InstallationExchangeResponse response = 4;
+  }
+}

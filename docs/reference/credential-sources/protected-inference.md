@@ -8,7 +8,7 @@ available to synthetic fixtures; it is not a deployable protected profile.
 This first connected slice implements part of
 [RFC 0020](../../../specs/rfcs/0020-egress-proxy-credential-lifecycle/index.md).
 It requires a fresh Agent revision and matching OpenShell gateway and supervisor
-candidates implementing the receipt and signed-instance contract below. The bundled
+candidates implementing the receipt and installation-bound exchange contract below. The bundled
 OpenShell release does not provide that counterpart. A manifest, loaded policy or
 historical receipt alone does not establish protected readiness; installed runtime
 qualification is separate. GitHub's dynamic credential lifecycle, retirement of
@@ -87,10 +87,27 @@ and the candidate material valid. A failed admission leaves the previous
 configuration intact. Source GET/list expose adoption and retention;
 `status.state: ready` means source admission, not installed runtime protection.
 
+## Installation-bound exchange
+
+The authority requires a dedicated TLS gRPC `HttpInstallationExchange.Exchange`
+stream for each operation. Its challenge binds the signed opening request to the
+actual reply stream. The gateway reports the Ed25519 public key from its current
+authenticated supervisor session in the loaded-policy observation. OCC pins that
+key at installation, requires the gateway-signed `exchange_key` claim to match,
+and refuses a replacement key even when the supervisor instance ID is unchanged. Resolve, authorization and the complete
+bounded response use that same stream. Legacy bearer-only operations refuse.
+
+The counterpart must advertise
+`openshell.supervisor-middleware.installation-exchange.v1` as both supported and
+required. Existing executable restrictions remain unchanged. The supplier must
+pin its downstream socket and whole-execution admission separately before this
+capability can be enabled. The current supplier enrollment work alone does not
+provide that path, so installed protected readiness remains unavailable.
+
 ## Authority and response handling
 
-The supervisor calls `HttpCredentialAccess.Resolve` over verified TLS with its
-gateway-issued extension JWT. OCC verifies the issuer, audience, key ID,
+The supervisor opens the installation exchange over verified TLS with its
+gateway-issued extension JWT and proves possession of its enrolled key. OCC verifies the issuer, audience, key ID,
 Ed25519 signature, expiry, supervisor subject, immutable Sandbox ID and signed
 `instance_id`. The supervisor, outside the Agent, registers its startup instance
 before requesting an extension token. The gateway validates that supplied instance

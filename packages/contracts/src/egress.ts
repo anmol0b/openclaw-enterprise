@@ -105,6 +105,8 @@ export interface EgressInstallation {
   readonly enforcement: {
     readonly instanceId: string;
     readonly configurationId: string;
+    /** Public key bound by the adapter to this installation, never selected by a request. */
+    readonly peerKeyId?: string;
   };
 }
 

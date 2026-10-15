@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-15"
-last_updated_session: authoring-run/f0b2d2f6-37a8-4c41-b2e8-6c0c61ed8d5a
+last_updated_session: authoring-run/4ac4c430-12aa-4529-a02a-e1f26041eab4
 ---
 
 # Protected credential request flow
@@ -142,17 +142,32 @@ see the [supported recovery boundary](../reference/credential-sources/protected-
 `apps/controller/src/drivers/egress-proxy/openshell-identity.ts:verify`,
 `packages/occ/src/egress.ts:resolve`
 
-The TLS adapter verifies the extension JWT, its signed registered `instance_id`
-and matching request Sandbox ID. The gateway validates the supervisor-supplied
-instance against its authenticated Sandbox registration before signing it; this
-trusts the supervisor and does not attest its binary. The instance must equal the
-installation fence. The Forwarder maps that peer to persisted installation state
-and classifies one exact route through its registered provider. It copies request bytes and reserves the
-UUIDv7 request ID before asynchronous authorization. Its embedded creation time
-fixes the 30-second replay horizon, so resubmission cannot extend it. Pending
-resolution reserves active capacity before any verifier await. Unsupported or
-ambiguous operations refuse before Secret access. Replay reservations and
-outstanding handles are bounded.
+The TLS adapter accepts one operation on `HttpInstallationExchange.Exchange`.
+It issues a random 32-byte challenge on that actual stream. Before asynchronous
+work, `OpenShellEgressIdentity.acceptExchange` verifies the gateway-signed
+`exchange_key` binding and the supervisor's Ed25519 signature over the domain
+`openshell-exchange-v1` plus a zero byte, challenge, and exact binary opening
+request. Request JSON cannot introduce a key. Bearer-only legacy RPCs refuse.
+
+The adapter creates a private capability for this stream and copies the decoded
+request before asynchronous work. OCC captures the peer, including its exchange
+identity, installation and request. Both authorization and response claiming must
+match that identity. Another stream cannot claim the response even with the same
+bearer, key, request ID or handle. Closing the stream invalidates its capability
+and aborts its pending work. Pipelining is refused.
+
+The Forwarder maps the captured peer to persisted installation state and
+classifies one exact route through its registered provider. It reserves the
+UUIDv7 request ID before asynchronous authorization. Its creation time fixes
+the 30-second replay horizon; pending resolution and replay state are bounded.
+Unsupported or ambiguous operations refuse before Secret access.
+
+The required supplier enrollment starts at its authenticated current supervisor
+hello, not at the first exchange. The supplier must keep the corresponding
+private key outside the Agent and pin its actual downstream reply sink before
+queueing. That complete supplier path is not yet qualified. The Driver requires
+`openshell.supervisor-middleware.installation-exchange.v1`; old counterparts
+cannot acquire this profile through an existing executable-restricted grant.
 
 `packages/occ/src/index.ts:checkEgressUse`
 
@@ -177,7 +192,7 @@ the authoritative API. The registry retains material only for this bounded
 request. It returns credential headers, opaque handle and nonsecret material
 evidence to the authenticated supervisor.
 
-The second RPC must echo the original deadline, evidence and injection digest.
+The authorization frame on that same stream must echo the original deadline, evidence and injection digest.
 The registry reserves the handle, then uses
 `packages/occ/src/egress-send-receipts.ts:EgressSendReceipts.begin` to commit
 possible dispatch before permission. The key includes authenticated sender Ref,
@@ -197,8 +212,9 @@ Revocation can still race the subsequent send; the permit authorizes no retry.
 `apps/controller/src/drivers/egress-proxy/openai-provider.ts:protectedEvents`,
 `apps/controller/src/drivers/egress-proxy/openai-responses.ts:validResponsesEvent`
 
-The response service requests whole-body inspection, matches the original peer
-and request ID, and removes visible headers outside its allowlist. The provider
+The response frame carries the complete bounded response on the accepted exchange.
+The registry matches the original peer, request ID and exchange identity, and
+removes visible headers outside its allowlist. The provider
 policy parses bounded JSON or complete finite SSE using closed provider event
 schemas and rejects unsupported responses or selected-material reflection, including
 text deltas joined across item IDs as exposed by the Codex consumer. Indexed
@@ -207,7 +223,7 @@ parsed once as bounded JSON, including their completed delta accumulation, befor
 release. This does not recursively decode arbitrary string encodings. No SSE event
 is released early. The original deadline and 4 MiB limit still apply.
 
-Authenticated preflight claims one response stream. The provider classifier
+Only the accepted exchange can claim its response. The provider classifier
 requires a structured 401 `invalid_api_key` / `invalid_request_error` error;
 status alone does not fence material. `EgressSendReceipts.observe` commits the
 safe response decision and exact rejection fence atomically before the adapter
@@ -215,9 +231,9 @@ replies. Blocked responses can still establish rejection. Receipts contain no
 bodies, headers, material values or credential-bearing handles. Persistence
 failure withholds bytes, and the deadline/cancellation check repeats after commit.
 
-Observation is distinct from final supplier proof: the current best-effort
-`session_end` notification does not attest application of this decision.
-Therefore post-send outcomes remain uncertain and unsettled even after NORMAL;
+Observation is distinct from final supplier proof: returning bytes on the
+exchange does not attest delivery to the downstream workload.
+Therefore post-send outcomes remain uncertain and unsettled;
 recovery reads the exact attempt and never retries. Material is erased after
 response handling or deadline. Pre-permission refusals can settle as undispatched;
 a possibly issued permission cannot become a refusal.
@@ -268,6 +284,7 @@ None.
 
 ## Changelog
 
+- 2026-10-15 04:09: Bind capture and response to a possession-authenticated exchange; refuse legacy peers and record the remaining supplier gate. (authoring-run/4ac4c430-12aa-4529-a02a-e1f26041eab4 - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
 - 2026-10-15 04:06: Record the accompanying v2 admission cutoff and refusal before Compute release. (authoring-run/f0b2d2f6-37a8-4c41-b2e8-6c0c61ed8d5a - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
 
 - 2026-10-14 21:54: Join durable sender receipts to the authority, separate response observations from supplier proof, and fence positive rejection atomically. (authoring-run/c11e8dcb-9e87-4682-b47e-e8640a65706d - fc20eb0174eaf8ae9d4ccb327ec65236c49ef4fb)
