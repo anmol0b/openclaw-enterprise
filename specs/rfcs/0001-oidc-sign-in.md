@@ -115,11 +115,10 @@ exact `Origin`, Installation `administer`, and every IAM grant of the target acc
 Principal ([index.ts:3677][covers]). Attach advances the version and ends the account's
 sessions ([human-authentication.ts:797-840][attach-state]).
 
-If another account already holds the subject, the [documented attach response][attach-guide]
-is `409`, “The external identity is already assigned.” Check the existing assignment before
-changing either account. The original proposal specified [`404` for that conflict][errors].
-The route also returns `409` if OIDC is off, the account version is stale or the account is
-disabled. [Create the account][create-account] with a password, then attach its OIDC identity.
+If another account already held the subject, the original route returned [`404`][errors].
+For the current response, see [Attach and detach][attach-guide].
+The original route returned `409` if OIDC was off, the account version was stale or the account
+was disabled. [Create the account][create-account] with a password, then attach its OIDC identity.
 At creation, the only external identity you can optionally attach is a GitHub subject.
 
 The callback admits only an attached (instance, subject) pair
@@ -333,9 +332,9 @@ leeway; the JWKS stays uncached; the code cap is 4,096; denial audits carry the 
 [console-error]: https://github.com/openclaw/openclaw-enterprise/blob/ccf5d79bd377d11d9e6ce66117839aa0e538fa19/apps/controller/src/console/console.mjs#L646-L648
 [snapshot]: https://github.com/openclaw/openclaw-enterprise/blob/ccf5d79bd377d11d9e6ce66117839aa0e538fa19/packages/occ/src/state/human-authentication.ts#L545-L562
 [attach-state]: https://github.com/openclaw/openclaw-enterprise/blob/ccf5d79bd377d11d9e6ce66117839aa0e538fa19/packages/occ/src/state/human-authentication.ts#L797-L840
-[errors]: https://github.com/openclaw/openclaw-enterprise/blob/ccf5d79bd377d11d9e6ce66117839aa0e538fa19/apps/controller/src/http/errors.ts
+[errors]: https://github.com/openclaw/openclaw-enterprise/blob/ccf5d79bd377d11d9e6ce66117839aa0e538fa19/apps/controller/src/http/errors.ts#L378-L383
 [attach-guide]: ../../docs/guides/deploy/oidc-sign-in.md#attach-and-detach
-[offboard-guide]: ../../docs/guides/deploy/oidc-sign-in.md#changes-rotation-and-outages
+[offboard-guide]: ../../docs/guides/deploy/oidc-operations.md#offboard-a-person
 [service-key-guide]: ../../docs/reference/authentication/service-api-keys.md#revoke-or-rotate-a-service-key
 [denied]: https://github.com/openclaw/openclaw-enterprise/blob/ccf5d79bd377d11d9e6ce66117839aa0e538fa19/packages/occ/src/state/human-authentication.ts#L1151
 [db-length]: https://github.com/openclaw/openclaw-enterprise/blob/ccf5d79bd377d11d9e6ce66117839aa0e538fa19/migrations/0008_better_auth_sessions.sql#L52
