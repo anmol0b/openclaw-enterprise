@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-15"
-last_updated_session: authoring-run/4ac4c430-12aa-4529-a02a-e1f26041eab4
+last_updated_session: authoring-run/77dbaecc-5f2b-4d7c-bd72-178b481d4feb
 ---
 
 # Protected credential request flow
@@ -18,6 +18,11 @@ Protected revision admission and execution are blocked by all shipped Computes.
 The request flow below describes the retained OCE protocol implementation and its
 synthetic fixtures, not a currently deployable protected execution. See the
 [execution cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
+
+The dispatch path requires a trusted acceptance owner for the actual exchange,
+sender and response destination. Production composition does not yet supply that
+installation-bound owner (M2); without it, resolution refuses before reading material.
+Synthetic acceptance profiles exercise the OCE side only.
 
 This flow describes the implemented OCE side and the required counterpart contract.
 It does not prove a deployed supervisor or no-bypass networking. The
@@ -47,7 +52,9 @@ graph TD
   P -- "duplicate or unknown" --> X
   P -- "committed new attempt" --> E{"<b>Fresh IAM unit 2</b><br/>Receipt, permission and material"}
   E -- "stale or denied" --> X
-  E -- "allowed once" --> F["<b>Supervisor send</b><br/>Finite send-start bound"]
+  E -- "allowed" --> J["<b>Commit authorized attempt</b><br/>Exact accepted custody and deadline"]
+  J -- "unknown or expired" --> X
+  J -- "acknowledged and still owned" --> F["<b>Supervisor send</b><br/>Finite send-start bound"]
   F --> G{"<b>Protect whole response</b><br/>Complete JSON or finite SSE"}
   G --> O["<b>Commit observation</b><br/>Fence actual rejection"]
   O -- "safe and still live" --> H["<b>Return policy bytes</b><br/>Delivery unconfirmed"]
@@ -204,7 +211,17 @@ A separate fresh identity and policy check follows persistence and additionally
 validates material identity and the durable rejection fence. The registry checks
 cancellation, live handle ownership and deadline again after that check. The allowed permit
 expires at the earliest request/material/identity bound and within one second.
+`EgressSendReceipts.authorize` then atomically records the exact accepted execution,
+installation fence, exchange, response and custody association, request and injection
+digests, authorization time and bounded send-start time. This is a separate commit
+from reservation. A receipt alone never grants permission. The trusted acceptance
+owner must still own the same operation after commit; cancellation, lost handles,
+expired bounds and unknown acknowledgments release no permit. The bound is never
+recomputed after persistence. Restart cannot authorize the reserved attempt again.
+
 Revocation can still race the subsequent send; the permit authorizes no retry.
+An origin write followed by a lost reply remains a possible effect, never a reason
+to repeat the business request.
 
 ### 4. Protect response and finish
 
@@ -284,6 +301,7 @@ None.
 
 ## Changelog
 
+- 2026-10-15 04:08: Add acknowledged exact dispatch and the pending trusted acceptance integration gate. (authoring-run/77dbaecc-5f2b-4d7c-bd72-178b481d4feb - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
 - 2026-10-15 04:09: Bind capture and response to a possession-authenticated exchange; refuse legacy peers and record the remaining supplier gate. (authoring-run/4ac4c430-12aa-4529-a02a-e1f26041eab4 - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
 - 2026-10-15 04:06: Record the accompanying v2 admission cutoff and refusal before Compute release. (authoring-run/f0b2d2f6-37a8-4c41-b2e8-6c0c61ed8d5a - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
 

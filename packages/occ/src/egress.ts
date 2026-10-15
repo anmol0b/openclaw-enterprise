@@ -1,4 +1,10 @@
-import type { EgressSendReceipts, SendAttempt, SendObservation } from "./egress-send-receipts.ts";
+import type {
+  EgressSendReceipts,
+  SendAttempt,
+  SendObservation,
+  AcceptedEgressAssociation,
+  AuthorizedSend,
+} from "./egress-send-receipts.ts";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -40,7 +46,18 @@ export interface CapturedEgressUse {
   readonly operation: InferenceOperation;
 }
 
+/** Installed acceptance owns the actual request, sender and response destination.
+ * TODO(M2): wire authenticated installation-bound acceptance into production composition.
+ * Synthetic profiles may implement this seam; legacy bearer/IDs are not acceptance.
+ */
+export interface TrustedEgressAcceptance {
+  capture(use: CapturedEgressUse): AcceptedEgressAssociation | undefined;
+  /** Match the active transport sender and reply custody, not just stored IDs or liveness. */
+  owns(association: AcceptedEgressAssociation, use: CapturedEgressUse): boolean;
+}
+
 export interface EgressAuthorityPorts {
+  readonly acceptance?: TrustedEgressAcceptance | undefined;
   readonly verifier: EgressPeerVerifier;
   readonly now: () => number;
   installation(peer: EgressPeer): Promise<EgressInstallation | undefined>;
@@ -55,7 +72,7 @@ export interface EgressAuthorityPorts {
     signal: AbortSignal,
     deadlineAt: string,
   ): Promise<VersionedSecretValue & { readonly materialId: string }>;
-  readonly receipts: Pick<EgressSendReceipts, "begin" | "record" | "observe">;
+  readonly receipts: Pick<EgressSendReceipts, "begin" | "authorize" | "record" | "observe">;
 }
 
 export type EgressResolution =
@@ -70,7 +87,12 @@ export type EgressResolution =
 
 export type EgressSendDecision =
   | { readonly kind: "refused"; readonly error: EgressRefusal }
-  | { readonly kind: "allow"; readonly sendStartBy: string; readonly injectionDigest: string };
+  | {
+      readonly kind: "allow";
+      readonly authorization: AuthorizedSend;
+      readonly sendStartBy: string;
+      readonly injectionDigest: string;
+    };
 
 interface OperationRecord {
   readonly use: CapturedEgressUse;
@@ -79,6 +101,7 @@ interface OperationRecord {
   readonly evidence: StaticMaterialEvidence;
   readonly attempt: SendAttempt;
   readonly digest: string;
+  readonly association: AcceptedEgressAssociation;
   value: string;
   phase: "resolved" | "checking" | "permitted" | "protecting" | "observing";
   timer?: ReturnType<typeof setTimeout>;
@@ -252,6 +275,11 @@ export class EgressForwarder {
     }) as unknown as CapturedEgressUse;
     // Keep captured bytes private and detached from the transport's mutable buffer.
     const captured = { ...use, request };
+    const accepted = this.ports.acceptance?.capture(captured);
+    const association = accepted === undefined ? undefined : immutableCopy(accepted);
+    if (!association || !this.owns(association, captured)) {
+      return refuse("identity");
+    }
     let source: StaticEgressSource | EgressRefusal;
     try {
       source = await this.ports.check(captured);
@@ -302,6 +330,7 @@ export class EgressForwarder {
       const handle = randomUUID();
       const record: OperationRecord = {
         use: captured,
+        association: immutableCopy(association),
         provider,
         source,
         evidence,
@@ -329,6 +358,19 @@ export class EgressForwarder {
     } catch {
       return { kind: "refused", error: { kind: "unavailable", code: "secret_store" } };
     }
+  }
+
+  private owns(association: AcceptedEgressAssociation, use: CapturedEgressUse): boolean {
+    return (
+      isDeepStrictEqual(association.execution, use.route.binding.execution) &&
+      isDeepStrictEqual(association.execution, use.installation.plan.execution) &&
+      isDeepStrictEqual(association.installation, {
+        sandboxId: use.installation.sandboxId,
+        ...use.installation.enforcement,
+        plan: { id: use.installation.plan.id, generation: use.installation.plan.generation },
+      }) &&
+      this.ports.acceptance?.owns(association, use) === true
+    );
   }
 
   async authorizeSend(
@@ -417,10 +459,50 @@ export class EgressForwarder {
     if (sendStartBy <= now || this.records.get(handle) !== record || record.phase !== "checking") {
       return deny({ kind: "deadline_exceeded" });
     }
+    const authorized: AuthorizedSend = immutableCopy({
+      association: record.association,
+      requestDigest: createHash("sha256")
+        .update(
+          JSON.stringify({
+            ...record.use.request,
+            body: Buffer.from(record.use.request.body).toString("base64"),
+          }),
+        )
+        .digest("hex"),
+      injectionDigest: record.digest,
+      authorizedAt: new Date(now).toISOString(),
+      sendStartBy: new Date(sendStartBy).toISOString(),
+    });
+    if (!this.owns(record.association, record.use)) {
+      return deny({ kind: "denied", code: "identity" });
+    }
+    try {
+      const committed = await this.ports.receipts.authorize(
+        peer.sender,
+        record.attempt,
+        authorized,
+      );
+      // Never repair/replay a lost acknowledgment or extend the bound across this await.
+      if (
+        !isDeepStrictEqual(committed.authorization, authorized) ||
+        signal.aborted ||
+        this.records.get(handle) !== record ||
+        record.phase !== "checking" ||
+        this.ports.now() >= sendStartBy ||
+        !this.owns(record.association, record.use)
+      ) {
+        this.discard(handle, record);
+        return refuse("invalid_handle");
+      }
+    } catch {
+      this.discard(handle, record);
+      return { kind: "refused", error: { kind: "unavailable", code: "authority" } };
+    }
     // This means permission issued, NOT confirmed dispatch. The durable receipt stays possible.
     record.phase = "permitted";
     return {
       kind: "allow",
+      authorization: authorized,
       sendStartBy: new Date(sendStartBy).toISOString(),
       injectionDigest: record.digest,
     };
@@ -440,6 +522,7 @@ export class EgressForwarder {
     const entry = [...this.records].find(
       ([, record]) =>
         record.phase === "permitted" &&
+        this.owns(record.association, record.use) &&
         record.use.request.id === requestId &&
         record.use.peer.sandboxId === sandboxId &&
         record.use.peer.instanceId === peer.instanceId &&

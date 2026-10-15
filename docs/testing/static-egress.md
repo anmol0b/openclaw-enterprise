@@ -10,6 +10,19 @@ coverage does not establish installed OpenShell or real-provider behavior.
 
 ## Authority and provider fixtures
 
+The authority fixtures use an explicitly synthetic trusted acceptance profile.
+They do not prove installation-bound exchange authentication or actual protected
+response custody; production integration remains gated on M2.
+
+`tests/integration/postgres-egress-send-receipts.test.mjs` runs the real Forwarder
+and PostgreSQL receipt transactions with a loopback byte-counting origin. With a
+migrated disposable `OCC_TEST_DATABASE_URL`, it suppresses the second COMMIT reply
+after observing reservation, verifies no permit or origin arrival, and reconstructs
+the Forwarder before the original deadline to prove no replacement. Policy, material
+and acceptance inputs in that dispatch case are synthetic; the transactions, fault
+proxy and sender socket are real. It also tests expiry, cancellation and lost custody
+after the authorized record commits.
+
 Run the bounded authority integration:
 
 ```sh

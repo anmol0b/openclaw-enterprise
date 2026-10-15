@@ -603,9 +603,46 @@ export async function staticEgressFixture(
     publicKey: keys.publicKey.export({ format: "pem", type: "spki" }),
     sender: egress.sourceControl.sender,
   });
+  // Explicit synthetic acceptance owner; production transport has no such profile
+  // until installation-bound exchange authentication is implemented.
+  const accepted = new Map();
+  function fixtureRequestId() {
+    const id = requestId(now().getTime());
+    accepted.set(id, {
+      exchangeId: randomUUID(),
+      responseId: randomUUID(),
+      custodyId: randomUUID(),
+    });
+    return id;
+  }
+  const acceptance = {
+    capture(use) {
+      const association = accepted.get(use.id);
+      return (
+        association && {
+          ...association,
+          execution: use.installation.plan.execution,
+          installation: {
+            sandboxId: use.installation.sandboxId,
+            ...use.installation.enforcement,
+            plan: { id: use.installation.plan.id, generation: use.installation.plan.generation },
+          },
+        }
+      );
+    },
+    owns(association, use) {
+      const original = accepted.get(use.id);
+      return (
+        original !== undefined &&
+        original.exchangeId === association.exchangeId &&
+        original.responseId === association.responseId &&
+        original.custodyId === association.custodyId
+      );
+    },
+  };
   let authority = createOpenShellEgressAuthority(
     identity,
-    app.controller.createEgressForwarder(identity),
+    app.controller.createEgressForwarder(identity, acceptance),
   );
   const authorityPort = await bindOpenShellEgressAuthority(authority, "127.0.0.1:0", cert, key);
   t.after(() => authority.forceShutdown());
@@ -665,7 +702,7 @@ export async function staticEgressFixture(
     audience: "oce-egress",
     deadline: wireTime(now().getTime() + 20_000),
     request: {
-      context: { request_id: requestId(now().getTime()), sandbox_id: sandboxId },
+      context: { request_id: fixtureRequestId(), sandbox_id: sandboxId },
       target: {
         scheme: "https",
         host: "provider.example.test",
@@ -841,7 +878,7 @@ export async function staticEgressFixture(
       authority.forceShutdown();
       authority = createOpenShellEgressAuthority(
         identity,
-        app.controller.createEgressForwarder(identity),
+        app.controller.createEgressForwarder(identity, acceptance),
       );
       await bindOpenShellEgressAuthority(authority, "127.0.0.1:" + authorityPort, cert, key);
       for (const [name, client] of Object.entries(clients)) {
@@ -873,6 +910,223 @@ export async function staticEgressFixture(
         `/namespaces/${namespace.id}/iam/access-bindings/${grant.data.id}`,
       );
       assert.equal(result.status, 204, JSON.stringify(result.body));
+    },
+  };
+}
+
+/** Explicit trusted acceptance profile for dispatch tests only. The captured owner
+ * holds the actual sender and reply recipient; no bearer or header establishes custody. */
+export async function syntheticDispatchFixture(t, receipts) {
+  const { createServer, connect } = await import("node:net");
+  const { once } = await import("node:events");
+  const { EgressForwarder } = await import("../../packages/occ/src/egress.ts");
+  const { openAiStaticProvider } =
+    await import("../../apps/controller/src/drivers/egress-proxy/openai-provider.ts");
+  const ref = () => ({ id: randomUUID(), generation: 1 });
+  const now = Date.now();
+  const deadlineAt = new Date(now + 25_000).toISOString();
+  const execution = Object.fromEntries(
+    [
+      "installationId",
+      "namespaceId",
+      "agentId",
+      "servicePrincipalId",
+      "revisionId",
+      "executionId",
+    ].map((key) => [key, randomUUID()]),
+  );
+  const sender = ref();
+  const peer = { sender, sandboxId: randomUUID(), instanceId: randomUUID(), expiresAt: deadlineAt };
+  const source = {
+    key: {
+      installationId: execution.installationId,
+      namespaceId: execution.namespaceId,
+      source: ref(),
+      backend: ref(),
+      provider: ref(),
+    },
+    adoption: "live",
+    materialRefId: randomUUID(),
+    secret: { kind: "secret", namespaceId: execution.namespaceId, id: randomUUID() },
+    secretDriver: ref(),
+  };
+  const route = {
+    route: ref(),
+    binding: {
+      binding: ref(),
+      execution,
+      source: source.key,
+      grant: { kind: "inference", models: ["fixture-model"], providerTools: "none" },
+      grantHash: "synthetic",
+      isolationId: randomUUID(),
+    },
+    origin: "https://provider.example.test",
+    path: "/v1/responses",
+    method: "POST",
+    operationPolicy: ref(),
+    responsePolicy: ref(),
+    deadlineMs: 30_000,
+  };
+  const installation = {
+    sender,
+    sandboxId: peer.sandboxId,
+    installedAt: new Date(now).toISOString(),
+    enforcement: { instanceId: peer.instanceId, configurationId: randomUUID() },
+    plan: {
+      ...ref(),
+      execution,
+      sandboxDriverId: "synthetic",
+      egressDriverId: sender.id,
+      routes: [route],
+    },
+  };
+  const request = {
+    id: requestId(now),
+    method: "POST",
+    url: route.origin + route.path,
+    headers: [["content-type", "application/json"]],
+    body: Buffer.from(JSON.stringify({ model: "fixture-model", input: "hello", store: false })),
+    deadlineAt,
+  };
+  const custody = { id: randomUUID(), reply: { id: randomUUID(), chunks: [] } };
+  const association = {
+    execution,
+    installation: {
+      sandboxId: peer.sandboxId,
+      ...installation.enforcement,
+      plan: { id: installation.plan.id, generation: installation.plan.generation },
+    },
+    exchangeId: randomUUID(),
+    responseId: custody.reply.id,
+    custodyId: custody.id,
+  };
+  let reads = 0;
+  let arrivals = 0;
+  let permits = 0;
+  let current = true;
+  let clock = now;
+  let ready;
+  // Count the first bytes on each connection before parsing any application data.
+  const origin = createServer((socket) =>
+    socket.once("data", () => {
+      arrivals++;
+      socket.end("synthetic response");
+    }),
+  );
+  origin.listen(0, "127.0.0.1");
+  await once(origin, "listening");
+  t.after(() => new Promise((resolve) => origin.close(resolve)));
+  const acceptance = {
+    capture(use) {
+      return current && use.request.id === request.id ? association : undefined;
+    },
+    owns(value, use) {
+      return (
+        current &&
+        JSON.stringify(value) === JSON.stringify(association) &&
+        use.request.id === request.id &&
+        Buffer.from(use.request.body).equals(request.body)
+      );
+    },
+  };
+  const ports = {
+    acceptance,
+    receipts,
+    now: () => clock,
+    verifier: { verify: async () => peer },
+    installation: async () => installation,
+    provider: () => openAiStaticProvider,
+    // Policy and Secret dependencies are synthetic; dispatch, persistence and sockets are real.
+    check: async () => source,
+    read: async () => {
+      reads++;
+      return {
+        value: "synthetic-material",
+        version: "N",
+        materialId: "synthetic-material-id",
+        authoritativeObservedAt: new Date(now).toISOString(),
+      };
+    },
+  };
+  let forwarder = new EgressForwarder(ports);
+  return {
+    startedAt: new Date(now).toISOString(),
+    get reads() {
+      return reads;
+    },
+    request,
+    association,
+    sender,
+    ports,
+    get arrivals() {
+      return arrivals;
+    },
+    get permits() {
+      return permits;
+    },
+    advance(ms) {
+      clock += ms;
+    },
+    replaceCustody() {
+      current = false;
+    },
+    restart() {
+      forwarder = new EgressForwarder(ports);
+    },
+    async resolve() {
+      ready = await forwarder.resolve(
+        "synthetic-peer",
+        peer.sandboxId,
+        request,
+        new AbortController().signal,
+      );
+      return ready;
+    },
+    async dispatch(signal = new AbortController().signal) {
+      assert.equal(ready.kind, "ready");
+      const decision = await forwarder.authorizeSend(
+        "synthetic-peer",
+        peer.sandboxId,
+        request.id,
+        ready.handle,
+        ready.evidence,
+        ready.injectionDigest,
+        request.deadlineAt,
+        signal,
+      );
+      if (decision.kind !== "allow") {
+        return decision;
+      }
+      permits++;
+      // The real sender retains this accepted operation and destination. A permit for
+      // any other operation/custody or an expired permit cannot reach the socket.
+      assert.deepEqual(decision.authorization.association, association);
+      assert.equal(decision.injectionDigest, ready.injectionDigest);
+      assert.equal(
+        decision.authorization.requestDigest,
+        createHash("sha256")
+          .update(JSON.stringify({ ...request, body: request.body.toString("base64") }))
+          .digest("hex"),
+      );
+      assert.ok(current && clock < Date.parse(decision.sendStartBy));
+      const socket = connect(origin.address().port, "127.0.0.1");
+      socket.on("data", (bytes) => custody.reply.chunks.push(bytes));
+      await once(socket, "connect");
+      assert.ok(current && clock < Date.parse(decision.sendStartBy));
+      socket.end(request.body);
+      await once(socket, "close");
+      assert.equal(Buffer.concat(custody.reply.chunks).toString(), "synthetic response");
+      return decision;
+    },
+    attempt() {
+      return {
+        sender,
+        instanceId: peer.instanceId,
+        useId: request.id,
+        attemptId: request.id,
+        material: ready.evidence,
+        deadlineAt,
+      };
     },
   };
 }

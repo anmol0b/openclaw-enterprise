@@ -9,11 +9,18 @@ import type {
   EgressRefusal,
   StaticMaterialEvidence,
 } from "@openclaw-enterprise/contracts";
-import { EgressForwarder, type EgressPeerVerifier, type CapturedEgressUse } from "./egress.ts";
+import {
+  EgressForwarder,
+  type EgressPeerVerifier,
+  type CapturedEgressUse,
+  type TrustedEgressAcceptance,
+} from "./egress.ts";
 
+export type { AcceptedEgressAssociation, AuthorizedSend } from "./egress-send-receipts.ts";
 export { EgressForwarder } from "./egress.ts";
 export type {
   EgressPeerVerifier,
+  TrustedEgressAcceptance,
   EgressPeer,
   EgressResolution,
   EgressSendDecision,
@@ -4487,8 +4494,12 @@ export class OpenClawController {
   }
 
   /** Trusted composition only: public workloads never supply an identity verifier. */
-  createEgressForwarder(verifier: EgressPeerVerifier): EgressForwarder {
+  createEgressForwarder(
+    verifier: EgressPeerVerifier,
+    acceptance?: TrustedEgressAcceptance,
+  ): EgressForwarder {
     return new EgressForwarder({
+      acceptance,
       verifier,
       now: () => this.clock().getTime(),
       installation: (peer) =>

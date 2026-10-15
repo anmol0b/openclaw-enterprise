@@ -1217,6 +1217,7 @@ test("authenticated sender receipts survive authority restart without replay per
   const observed = await readReceipt(f, input);
   assert.deepEqual(observed.observation, { kind: "response", dispatch: "confirmed", status: 200 });
   assert.deepEqual(observed.outcome, possible.outcome);
+  assert.deepEqual(observed.authorization, possible.authorization);
   assert.equal(
     observed.settled,
     false,
@@ -1232,6 +1233,7 @@ test("authenticated sender receipts survive authority restart without replay per
       "attemptId",
       "material",
       "deadlineAt",
+      "authorization",
       "observation",
       "outcome",
       "settled",

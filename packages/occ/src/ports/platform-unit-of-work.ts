@@ -12,6 +12,7 @@ export function bindPlatformUnitOfWork(
       "find",
       "insert",
       "save",
+      "authorize",
     ]),
     installations: bindRepository(repositories.installations, lifetime, [
       "findInstallation",

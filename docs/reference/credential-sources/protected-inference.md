@@ -156,6 +156,19 @@ the supplier applied the returned policy decision: the current wire's best-effor
 terminal notification supplies no such proof. Post-send receipts therefore remain
 uncertain and unsettled. Recovery does not resend.
 
+Dispatch additionally requires a trusted acceptance owner binding the actual
+exchange, sender and response destination to the admitted execution and installation.
+The production transport still needs this M2 integration; the ordinary signed bearer
+and caller-provided IDs cannot substitute. Without this owner, resolution fails closed
+before material access.
+
+After its fresh final check, OCC separately commits the exact authorized attempt,
+including acceptance association, request and injection digests, original deadline
+and send-start bound. It releases a permit only after acknowledgment and another
+cancellation, ownership and time check. Lost acknowledgment releases no permit;
+recovery cannot repair or replay the attempt. A lost provider reply after an origin
+write remains a possible effect and never authorizes retry.
+
 ## Installation configuration
 
 Keep the existing [OpenShell Backend and Sandbox configuration](../drivers/openshell-credential-gateway.md).

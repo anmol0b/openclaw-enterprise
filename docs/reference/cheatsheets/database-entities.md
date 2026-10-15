@@ -152,6 +152,7 @@ See [protected inference](../credential-sources/protected-inference.md).
 
 - `sender_id`, `sender_generation`, `instance_id`, `use_id`, `attempt_id`
 - `binding` (selected material evidence and original deadline)
+- `authorized_dispatch` (accepted execution, installation and custody, digests and send-start bound)
 - `outcome`, `observation`, `settled`, `feedback`
 
 ### `egress_rejected_material`

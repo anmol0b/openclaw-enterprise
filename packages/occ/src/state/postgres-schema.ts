@@ -1680,6 +1680,7 @@ export const egressSendReceipts = occSchema.table(
     useId: text("use_id").notNull(),
     attemptId: text("attempt_id").notNull(),
     binding: jsonb("binding").notNull(),
+    authorization: jsonb("authorized_dispatch"),
     observation: jsonb("observation"),
     outcome: jsonb("outcome").notNull(),
     settled: boolean("settled").notNull().default(false),
@@ -1755,6 +1756,22 @@ export const egressSendReceipts = occSchema.table(
       "egress_send_receipts_check_16",
       sql`feedback IS NULL OR ((observation IS NOT NULL OR (settled AND outcome->>'dispatch' = 'confirmed'))
     AND binding->'material'->>'kind' = 'static') IS TRUE`,
+    ),
+    check(
+      "egress_send_receipts_check_17",
+      sql`authorized_dispatch IS NULL OR (jsonb_typeof(authorized_dispatch) = 'object'
+    AND binding->'material'->>'kind' = 'static'
+    AND authorized_dispatch->'association'->'installation'->>'instanceId' = instance_id
+    AND authorized_dispatch->'association'->'execution'->>'installationId' = binding->'material'->'source'->>'installationId'
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz > (authorized_dispatch->>'authorizedAt')::timestamptz
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (authorized_dispatch->>'authorizedAt')::timestamptz + interval '1 second'
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->>'deadlineAt')::timestamptz
+    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->'material'->>'usableUntil')::timestamptz
+    AND length(authorized_dispatch->'association'->>'exchangeId') > 0
+    AND length(authorized_dispatch->'association'->>'responseId') > 0
+    AND length(authorized_dispatch->'association'->>'custodyId') > 0
+    AND length(authorized_dispatch->>'requestDigest') = 64
+    AND length(authorized_dispatch->>'injectionDigest') = 64) IS TRUE`,
     ),
   ],
 );
