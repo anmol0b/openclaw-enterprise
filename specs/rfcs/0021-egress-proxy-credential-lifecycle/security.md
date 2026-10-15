@@ -144,6 +144,9 @@ Compute, maintenance, withdrawal and companion-revision consumers with their att
 A withdrawn required model binding blocks startup; an optional tool can be omitted. Transfer native
 OAuth input custody only after stopping the old refresher. Keep Repo discovery, profiles and sessions,
 and use separately authorized OCC preparation for management retrieval. Migrate repositories,
-constraints and source-copy utilities without rewriting historical migrations. Disable legacy
-reattachment and refresh before removing capability selection, registration, exports, package checks
-and persistence coupling. A temporary adapter is useful only while those obligations remain.
+constraints and source-copy utilities without rewriting historical migrations. Test an upgrade from
+the released catalog with revisions that exercise its latest admission fields, including a public
+GitHub reader revision with `compute.admission` populated. Preserve every released receipt and
+still-supported snapshot. If receipt history diverges, refuse the upgrade and leave the ledger unchanged.
+Disable legacy reattachment and refresh before removing capability selection, registration, exports,
+package checks and persistence coupling. A temporary adapter is useful only while those obligations remain.
