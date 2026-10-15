@@ -935,12 +935,14 @@ test("a refresh update or rotation that fails after reaching the gateway records
       /did not mint a token \(oauth_invalid_grant\)/.test(error.message),
   );
   context.refresh.nextRotate = undefined;
-  // A success records only its own event.
+  // A success records only its own event; an update commits it with its references.
   await request("openclaw.credential_sources.rotate", (audit) =>
     controller.rotateCredentialSource(administrator, input, audit),
   );
+  await update(administrator, { client_secret: replacement.ref });
   assert.deepEqual((await outcomes()).slice(2), [
     ["openclaw.credential_sources.rotate", "success", undefined],
+    ["openclaw.credential_sources.update", "success", undefined],
   ]);
 });
 
@@ -1721,8 +1723,7 @@ test("an update whose commit fails after the gateway accepted it converges when 
 /** True for the 409 that names the source as a consumer of the Secret being deleted. */
 function referencedBy(sourceId) {
   return (error) =>
-    error.name === "SecretReferencedError" &&
-    error.consumers.credentialSources.includes(sourceId);
+    error.name === "SecretReferencedError" && error.consumers.credentialSources.includes(sourceId);
 }
 
 const failingAudit = () => {
@@ -1867,7 +1868,10 @@ test("an update that fails before any gateway write restores the previous pendin
   const input = { namespaceId: namespace.id, credentialSourceId: source.id };
   const sent = await createSecret(context, "client-secret", "sent-client-secret");
   // A failed mint follows the gateway write, so the sent Secret stays pending.
-  context.refresh.nextRotate = async () => ({ state: "failed", failureCode: "oauth_invalid_grant" });
+  context.refresh.nextRotate = async () => ({
+    state: "failed",
+    failureCode: "oauth_invalid_grant",
+  });
   await assert.rejects(
     controller.updateCredentialSource(administrator, {
       ...input,

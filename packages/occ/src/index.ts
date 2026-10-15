@@ -4939,7 +4939,9 @@ export class OpenClawController {
       input.credentialSourceId,
     );
     if (!source) {
-      throw new ScopeViolationError("The credential source does not belong to the exact Namespace.");
+      throw new ScopeViolationError(
+        "The credential source does not belong to the exact Namespace.",
+      );
     }
     if (source.state !== "ready") {
       throw new ResourceStateConflictError("Only a ready credential source can be updated.");
