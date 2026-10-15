@@ -1860,7 +1860,7 @@ test("a refresh update refuses to resend an issuer-rotated Secret an unfinished 
   await controller.deleteSecret(administrator, namespace.id, sent.id);
 });
 
-test("an update that fails before any gateway write restores the previous pending Secret", async () => {
+test("an update refused before its gateway write marks nothing and keeps an earlier pending Secret", async () => {
   const context = await fixture();
   await context.makeReady();
   const { controller, namespace } = context;
@@ -1881,8 +1881,9 @@ test("an update that fails before any gateway write restores the previous pendin
   );
   context.refresh.nextRotate = undefined;
 
-  // The next update is refused at the gateway status check, before any write. Its own mark is
-  // removed, and the earlier one comes back: the gateway may still hold that Secret's material.
+  // The next update is refused at the gateway status check, which runs before OCC records its
+  // Secret, so it leaves no mark. The earlier mark stays: the gateway may still hold that
+  // Secret's material.
   const next = await createSecret(context, "client-secret", "next-client-secret");
   const copy = context.gateway.stored.get(source.id);
   context.gateway.stored.delete(source.id);

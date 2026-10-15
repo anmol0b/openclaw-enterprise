@@ -164,8 +164,9 @@ OCC records each replacement Secret before the gateway call. Until an update
 commits, the gateway may already hold that Secret's value, so the Secret counts
 as a consumer of the source: deleting it returns `409` naming the source, as for
 the source's current Secrets. The source's next successful update, or its
-deletion, releases it. A request refused before the gateway call releases it
-at once.
+deletion, releases it. A request refused before OCC records the Secret leaves
+no mark. OCC marks one Secret per field, so after two failed updates of the same
+source in a row, delete and register the source again.
 
 Migration `0048_administrator_credential_source_grants` adds the current
 `credential_source` grants, including `update`, to an unchanged built-in

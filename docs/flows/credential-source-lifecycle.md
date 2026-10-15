@@ -202,14 +202,14 @@ audit failure leaves `deleting` for retry. Namespace deletion returns
 
 OCC authorizes `credential_source:update` and `secret:operate`, locks only the
 source, requires `ready` and an offered type (`409` otherwise) and validates
-replacement references against catalog fields. One transaction commits each
-replacement as its field's `pending_secret_id`, a Secret consumer refresh types
-cannot resend. Another relocks, reads values and calls `updateSource` (OpenShell
-`UpdateProvider`), then commits references, cleared pending ids and success
-audit. Later failure keeps pending ids and newer gateway values for a repeated
-request and records a `failure` audit; earlier failure restores them. `absent`
-or `failed` returns `503`. OpenShell rejects empty values because
-`UpdateProvider` merges them; only new processes receive updates.
+replacement references against catalog fields. One transaction reads values, then
+commits each replacement as its field's `pending_secret_id`, a Secret consumer
+refresh types cannot resend. Another relocks, reads values again and calls
+`updateSource` (OpenShell `UpdateProvider`), then commits references, cleared
+pending ids and success audit. Later failure keeps pending ids and newer gateway
+values for a repeated request and records a `failure` audit. `absent` or `failed`
+returns `503`. OpenShell rejects empty values because `UpdateProvider` merges
+them; only new processes receive updates.
 
 ### 9. Withdraw a source from an Agent
 
