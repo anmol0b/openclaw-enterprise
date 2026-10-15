@@ -592,7 +592,7 @@ export async function loadInstallationConfiguration(options: {
     const egress = object(selection.configuration, "drivers.egress_proxy.configuration");
     closed(
       egress,
-      ["middlewareName", "binaries", "authority"],
+      ["middlewareName", "credentialConnectors", "authority"],
       "drivers.egress_proxy.configuration",
     );
     egressAuthority = egressAuthorityConfiguration(egress.authority, options.mode);

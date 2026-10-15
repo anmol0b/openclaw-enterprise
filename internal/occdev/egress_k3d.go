@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,6 +20,36 @@ const (
 	developmentEgressDriver     = "egress-openshell-development"
 	developmentEgressMiddleware = "oce-authority"
 )
+
+// Operator-verified immutable input, never discovered from a running process.
+type credentialConnector struct {
+	Path         string `json:"path"`
+	SHA256       string `json:"sha256"`
+	Image        string `json:"image"`
+	Verification string `json:"verification"`
+}
+
+func (r *runner) protectedCredentialConnector() (*credentialConnector, error) {
+	var pin credentialConnector
+	err := json.Unmarshal([]byte(r.env["OCC_DEVELOPMENT_EGRESS_CONNECTOR"]), &pin, json.RejectUnknownMembers(true))
+	if err != nil {
+		return nil, fmt.Errorf("invalid OCC_DEVELOPMENT_EGRESS_CONNECTOR JSON")
+	}
+	if err := validateCredentialConnector(&pin, r.env["OCC_KUBERNETES_RUNTIME_IMAGE"]); err != nil {
+		return nil, err
+	}
+	return &pin, nil
+}
+
+func validateCredentialConnector(pin *credentialConnector, image string) error {
+	if pin == nil || !strings.HasPrefix(pin.Path, "/") || pin.Path == "/" || path.Clean(pin.Path) != pin.Path ||
+		strings.ContainsFunc(pin.Path, func(c rune) bool { return c <= 32 || c == 127 }) || !regexp.MustCompile(`^[a-f0-9]{64}$`).MatchString(pin.SHA256) ||
+		!regexp.MustCompile(`^[^\s@]+@sha256:[a-f0-9]{64}$`).MatchString(pin.Image) ||
+		pin.Image != image || pin.Verification != "operator-verified-image-executable" {
+		return fmt.Errorf("OCC_DEVELOPMENT_EGRESS_CONNECTOR requires an operator-verified canonical path and sha256 for the exact immutable runtime image")
+	}
+	return nil
+}
 
 var developmentDatabaseName = regexp.MustCompile(`^openclaw_k8s_[a-z0-9_]+$`)
 
@@ -72,6 +103,9 @@ func (r *runner) protectedEgressSelection(controlPlane, sandbox string) (bool, e
 		if r.env[key] == "" {
 			return false, fmt.Errorf("protected egress requires explicit %s", key)
 		}
+	}
+	if _, err := r.protectedCredentialConnector(); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -163,7 +197,7 @@ func (r *runner) readDevelopmentEgressKeyID(ctx context.Context, state *developm
 
 func developmentEgressConfiguration(state *developmentState) map[string]any {
 	return map[string]any{"id": developmentEgressDriver, "configuration": map[string]any{
-		"middlewareName": developmentEgressMiddleware, "binaries": openShellCodexBinaries(),
+		"middlewareName": developmentEgressMiddleware, "credentialConnectors": []any{map[string]string{"path": state.CredentialConnector.Path, "sha256": state.CredentialConnector.SHA256}},
 		"authority": map[string]any{
 			"host": "0.0.0.0", "port": developmentEgressPort,
 			"certificatePath":     "/etc/openclaw/egress/tls/tls.crt",

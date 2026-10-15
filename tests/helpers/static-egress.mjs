@@ -25,8 +25,7 @@ import {
 const require = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
 const grpc = require("@grpc/grpc-js");
 const loader = require("@grpc/proto-loader");
-const capability = "openshell.supervisor-middleware.http-credential-access.v1";
-const exchangeCapability = "openshell.supervisor-middleware.installation-exchange.v1";
+import { openShellExchangeCapabilities as capabilities } from "../../apps/controller/src/drivers/egress-proxy/openshell-exchange-capabilities.ts";
 export const wireTime = (millis) => ({
   seconds: Math.floor(millis / 1000),
   nanos: (millis % 1000) * 1e6,
@@ -251,8 +250,8 @@ export async function staticEgressFixture(
                 kind: 4,
                 configured_name: "oce-authority",
                 protocol_major: 1,
-                supported_capabilities: [capability, exchangeCapability],
-                required_capabilities: [capability, exchangeCapability],
+                supported_capabilities: observed.capabilities ?? capabilities,
+                required_capabilities: observed.capabilities ?? capabilities,
               },
             ]
           : [],
@@ -357,7 +356,7 @@ export async function staticEgressFixture(
     { gatewayClient },
   );
   t.after(() => backend.client.close());
-  const egressOptions = { middlewareName: "oce-authority", binaries: ["/usr/bin/model-client"] };
+  const egressOptions = { middlewareName: "oce-authority", credentialConnectors: [{ path: "/usr/bin/model-client", sha256: "c1".repeat(32) }] };
   const sandbox = new OpenShellSandboxDriver(
     {
       egress: egressOptions,
@@ -390,7 +389,7 @@ export async function staticEgressFixture(
     sandbox,
   });
   const catalog = new OpenShellCredentialGatewayDriver(
-    { binaries: egressOptions.binaries },
+    { binaries: egressOptions.credentialConnectors.map((pin) => pin.path) },
     { id: "openshell-credentials", backend },
   );
   const placement = createTestKubernetesComputeDriver("placement", {
@@ -567,7 +566,7 @@ export async function staticEgressFixture(
     policy_hash: observed.policyHash,
     config_revision: "17395563786422799999",
     provider_env_revision: "9019556378642279999",
-    enforced_capabilities: [capability, exchangeCapability],
+    enforced_capabilities: observed.capabilities ?? capabilities,
   };
   const effectivePolicy = structuredClone(observed.policy);
   const ruleName = inertProviderRule

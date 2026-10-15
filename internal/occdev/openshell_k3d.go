@@ -116,7 +116,15 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 	if err != nil {
 		return err
 	}
+	var connector *credentialConnector
+	if protectedEgress {
+		connector, err = r.protectedCredentialConnector()
+		if err != nil {
+			return err
+		}
+	}
 	state := &developmentState{
+		CredentialConnector:    connector,
 		Version:                3,
 		ProtectedEgress:        protectedEgress,
 		DatabaseName:           databaseName,
