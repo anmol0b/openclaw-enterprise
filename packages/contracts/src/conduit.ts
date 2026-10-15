@@ -1,4 +1,9 @@
 import type {
+  CredentialFreeEgressSource,
+  CredentialFreeMetadataGrant,
+  NoMaterialSelection,
+} from "./credential-free-metadata.ts";
+import type {
   GitHubMetadataGrant,
   PreparedGitHubEgressLifecycle,
   PreparedGitHubEgressSource,
@@ -42,7 +47,8 @@ export interface StaticEgressSource {
   readonly retention: "none";
 }
 
-export type ProtectedEgressSource = StaticEgressSource | PreparedGitHubEgressSource;
+export type ProtectedEgressSource =
+  StaticEgressSource | PreparedGitHubEgressSource | CredentialFreeEgressSource;
 
 export interface VersionedSecretValue {
   readonly value: string;
@@ -78,7 +84,7 @@ export interface EgressBinding {
   readonly binding: EgressRef;
   readonly execution: EgressExecution;
   readonly source: EgressSourceKey;
-  readonly grant: InferenceGrant | GitHubMetadataGrant;
+  readonly grant: InferenceGrant | GitHubMetadataGrant | CredentialFreeMetadataGrant;
   readonly grantHash: string;
   readonly isolationId: string;
 }
@@ -141,12 +147,14 @@ export interface InferenceOperation {
 export type EgressOperation =
   | InferenceOperation
   | {
-      readonly kind: "github_repository_metadata";
+      readonly kind: "github_repository_metadata" | "credential_free_repository_metadata";
       readonly repository: string;
       readonly repositoryId: string;
     };
 
 export type EgressMaterialEvidence = StaticMaterialEvidence | PreparedGitHubMaterialEvidence;
+
+export type EgressSelectionEvidence = EgressMaterialEvidence | NoMaterialSelection;
 
 export interface StaticMaterialEvidence {
   readonly kind: "static";
@@ -202,7 +210,7 @@ export interface CredentialProviderDefinition {
   normalizeGrant(
     models: readonly string[],
     config?: Readonly<Record<string, string>>,
-  ): InferenceGrant | GitHubMetadataGrant;
+  ): InferenceGrant | GitHubMetadataGrant | CredentialFreeMetadataGrant;
   routes(source: Readonly<CredentialSource>, binding: EgressBinding): readonly EgressRoute[];
   classify(route: EgressRoute, request: EgressRequest): EgressOperation | undefined;
   inject(value: string): readonly (readonly [string, string])[];
@@ -210,7 +218,7 @@ export interface CredentialProviderDefinition {
   credentialRejected(response: EgressResponse): boolean;
   protectResponse(
     response: EgressResponse,
-    value: string,
+    value: string | undefined,
     request: EgressRequest,
     operation: EgressOperation,
   ): EgressResponse | undefined;

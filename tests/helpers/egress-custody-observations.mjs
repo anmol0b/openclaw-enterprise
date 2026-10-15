@@ -71,7 +71,7 @@ export function exactTransitions(events, before, expected) {
 
 // Deliberately project truth predicates, never return a proof, custody nonce,
 // credential, or provider response. use_id joins the real supplier request ID.
-export async function receipts(pool, installation) {
+export async function receipts(pool, installation, selection = "prepared_github") {
   const {
     enforcement: { instanceId, peerKeyId },
     sandboxId,
@@ -90,20 +90,25 @@ export async function receipts(pool, installation) {
        a->'installation'->>'instanceId'=$1 AND a->'installation'->>'peerKeyId'=$4 AND
        length(a->>'exchangeId') > 0 AND length(a->>'responseId') > 0 AND length(a->>'custodyId') > 0 AND
        count(*) over (partition by a->>'custodyId')=1 AND
-       binding->'material'->>'kind'='prepared_github' AND
+       a->'installation'->>'authorityScope'='execution' AND a->'installation'->>'policyHash'=$6 AND
+       binding->'material'->>'kind'=$5 AND CASE WHEN $5='no_material_required' THEN
+       (binding->'material') - ARRAY['kind','source','binding','grantHash','isolationId'] = '{}'::jsonb AND
+       binding #>> '{material,source,provider,id}' = 'credential-free-repository-metadata' AND
+       dispatch->>'injectionDigest' = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+       ELSE
        (binding->'material'->>'ownerEpoch')::bigint > 0 AND
-       (binding->'material'->'family'->>'generation')::bigint > 0 AND length(dispatch->>'requestDigest')=64 AND
+       (binding->'material'->'family'->>'generation')::bigint > 0 END AND length(dispatch->>'requestDigest')=64 AND
        length(dispatch->>'injectionDigest')=64 AND
        (dispatch->>'sendStartBy')::timestamptz <= (binding->>'deadlineAt')::timestamptz) AS exact
     FROM actual ORDER BY id`,
-      [instanceId, execution, sandboxId, peerKeyId],
+      [instanceId, execution, sandboxId, peerKeyId, selection, installation.enforcement.policyHash],
     )
   ).rows;
   return rows;
 }
 
-export function agentClients(setup, stack, harness, origin) {
-  const target = origin + repositoryPath;
+export function agentClients(setup, stack, harness, origin, path = repositoryPath) {
+  const target = origin + path;
   const inAgent = (...args) =>
     setup.f.kubectl(
       "exec",
@@ -148,8 +153,8 @@ export function agentClients(setup, stack, harness, origin) {
   return { curl, node, inAgent };
 }
 
-export function assertIdentityResponse(raw) {
-  const identity = JSON.stringify(repository);
+export function assertIdentityResponse(raw, expected = repository) {
+  const identity = JSON.stringify(expected);
   const [headers, body, ...extra] = raw.split("\r\n\r\n");
   const [status, ...fields] = headers.split("\r\n");
   assert.ok(status === "HTTP/1.1 200 OK", "expected approved provider status");

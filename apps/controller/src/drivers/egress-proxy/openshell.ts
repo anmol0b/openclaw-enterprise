@@ -1,5 +1,5 @@
 import type { PreparedGitHubEgressLifecycle } from "@openclaw-enterprise/contracts";
-import { githubMetadataProvider } from "./github-metadata.ts";
+import { credentialFreeMetadataProvider, githubMetadataProvider } from "./github-metadata.ts";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -16,7 +16,10 @@ import type {
 import { DependencyUnavailableError } from "@openclaw-enterprise/occ";
 import { asRecord, immutableCopy, sha256Hex } from "@openclaw-enterprise/utils";
 import { type OpenShellGateway, openShellWorkspaceName } from "../../backends/openshell.ts";
-import { openShellExchangeCapabilities as capabilities } from "./openshell-exchange-capabilities.ts";
+import {
+  advertisesOpenShellExecutionProfile,
+  openShellExchangeCapabilities as capabilities,
+} from "./openshell-exchange-capabilities.ts";
 import { openAiStaticProvider } from "./openai-provider.ts";
 
 export interface OpenShellConduitOptions {
@@ -290,8 +293,8 @@ export class OpenShellConduitDriver implements ConduitDriver {
       sender: { id: `${selection.backend.id}/supervisor`, generation: 1 },
       resolver: { id: `${selection.id}/resolver`, generation: 1 },
       providers: selection.preparedGitHub
-        ? [openAiStaticProvider, githubMetadataProvider]
-        : [openAiStaticProvider],
+        ? [openAiStaticProvider, credentialFreeMetadataProvider, githubMetadataProvider]
+        : [openAiStaticProvider, credentialFreeMetadataProvider],
       ...(selection.preparedGitHub ? { preparedGitHub: selection.preparedGitHub } : {}),
       assertAvailable: async (signal: AbortSignal) => {
         const client = this.backend.client.clientForNamespace("");
@@ -310,14 +313,8 @@ export class OpenShellConduitDriver implements ConduitDriver {
               item?.configured_name === options.middlewareName &&
               (item.kind === "EXTENSION_KIND_SUPERVISOR_MIDDLEWARE" || item.kind === 4) &&
               item.protocol_major === 1 &&
-              Array.isArray(item.required_capabilities) &&
-              capabilities.every((capability) =>
-                (item.required_capabilities as unknown[]).includes(capability),
-              ) &&
-              Array.isArray(item.supported_capabilities) &&
-              capabilities.every((capability) =>
-                (item.supported_capabilities as unknown[]).includes(capability),
-              )
+              advertisesOpenShellExecutionProfile(item.required_capabilities) &&
+              advertisesOpenShellExecutionProfile(item.supported_capabilities)
             );
           })
         ) {

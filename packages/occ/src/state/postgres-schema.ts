@@ -483,7 +483,12 @@ export const credentialSources = occSchema.table(
   (table): PgTableExtraConfigValue[] => [
     check(
       "credential_sources_egress_valid",
-      sql`${table.egress} IS NULL OR occ.egress_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id})`,
+      sql`CASE WHEN ${table.type} = 'credential-free-repository-metadata' THEN
+      ${table.config}->'authority' = '"execution"'::jsonb
+      AND ${table.config}->'agent_id' = ${table.egress} #> '{grant,isolationId}' AND ${table.config}->'origin' = ${table.egress}->'origin'
+      AND ${table.config}->'repository_id' = ${table.egress} #> '{grant,repositoryId}' AND ${table.config}->'repository' = ${table.egress} #> '{grant,repository}'
+      AND occ.credential_free_metadata_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id})
+    ELSE ${table.egress} IS NULL OR occ.egress_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id}) END IS TRUE`,
     ),
     unique("credential_sources_namespace_id_id_unique").on(table.namespaceId, table.id),
     unique("credential_sources_namespace_id_name_unique").on(table.namespaceId, table.name),
@@ -1759,20 +1764,29 @@ export const egressSendReceipts = occSchema.table(
     ),
     check(
       "egress_send_receipts_check_17",
-      sql`authorized_dispatch IS NULL OR (jsonb_typeof(authorized_dispatch) = 'object'
-    AND occ.egress_receipt_material_is_valid(binding->'material')
-    AND (binding->'material'->>'kind' = 'static' OR occ.prepared_github_dispatch_matches(authorized_dispatch, binding->'material'))
-    AND authorized_dispatch->'association'->'installation'->>'instanceId' = instance_id
-    AND authorized_dispatch->'association'->'execution'->>'installationId' = binding->'material'->'source'->>'installationId'
+      sql`aauthorized_dispatch IS NULL OR (
+    jsonb_typeof(authorized_dispatch) = 'object'
+    AND authorized_dispatch #>> '{association,installation,instanceId}' = instance_id
+    AND authorized_dispatch #>> '{association,execution,installationId}' = binding #>> '{material,source,installationId}'
     AND (authorized_dispatch->>'sendStartBy')::timestamptz > (authorized_dispatch->>'authorizedAt')::timestamptz
     AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (authorized_dispatch->>'authorizedAt')::timestamptz + interval '1 second'
     AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->>'deadlineAt')::timestamptz
-    AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding->'material'->>'usableUntil')::timestamptz
-    AND length(authorized_dispatch->'association'->>'exchangeId') > 0
-    AND length(authorized_dispatch->'association'->>'responseId') > 0
-    AND length(authorized_dispatch->'association'->>'custodyId') > 0
-    AND length(authorized_dispatch->>'requestDigest') = 64
-    AND length(authorized_dispatch->>'injectionDigest') = 64) IS TRUE`,
+    AND CASE WHEN binding #>> '{material,kind}' = 'no_material_required' THEN
+      (binding->'material') - ARRAY['kind','source','binding','grantHash','isolationId'] = '{}'::jsonb
+      AND binding #>> '{material,grantHash}' ~ '^[0-9a-f]{64}$'
+      AND occ.egress_ref_is_valid(binding #> '{material,binding}')
+      AND binding #> '{material,source,provider}' = '{"id":"credential-free-repository-metadata","generation":1}'::jsonb
+      AND occ.egress_ref_is_valid(binding #> '{material,source,source}') AND occ.egress_ref_is_valid(binding #> '{material,source,backend}')
+      AND binding #>> '{material,source,namespaceId}' = authorized_dispatch #>> '{association,execution,namespaceId}'
+      AND occ.prepared_github_dispatch_matches(authorized_dispatch, binding->'material')
+      AND authorized_dispatch->>'injectionDigest' = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+    ELSE occ.egress_receipt_material_is_valid(binding->'material')
+      AND (binding #>> '{material,kind}' = 'static' OR occ.prepared_github_dispatch_matches(authorized_dispatch, binding->'material'))
+      AND (authorized_dispatch->>'sendStartBy')::timestamptz <= (binding #>> '{material,usableUntil}')::timestamptz
+      AND length(authorized_dispatch #>> '{association,exchangeId}') > 0 AND length(authorized_dispatch #>> '{association,responseId}') > 0
+      AND length(authorized_dispatch #>> '{association,custodyId}') > 0 AND length(authorized_dispatch->>'requestDigest') = 64
+      AND length(authorized_dispatch->>'injectionDigest') = 64
+    END) IS TRUE`,
     ),
   ],
 );

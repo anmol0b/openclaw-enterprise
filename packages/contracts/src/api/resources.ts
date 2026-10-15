@@ -554,13 +554,17 @@ export const CredentialSourceSchema = Type.Object(
     egress: Type.Optional(
       Type.Object(
         {
-          adoption: Type.Union([Type.Literal("live"), Type.Literal("prepared")]),
+          adoption: Type.Union([
+            Type.Literal("live"),
+            Type.Literal("prepared"),
+            Type.Literal("credential_free"),
+          ]),
           retention: Type.Literal("none"),
         },
         {
           additionalProperties: false,
           description:
-            "Protected live static or eligible prepared material, without request-path retention. Inference and GitHub metadata require distinct explicit grants. Runtime readiness requires current authenticated supervisor evidence.",
+            "Protected live static, eligible prepared, or explicitly credential-free metadata access. Each profile requires its own grant; missing material never selects credential-free access. Runtime readiness requires current authenticated supervisor evidence.",
         },
       ),
     ),

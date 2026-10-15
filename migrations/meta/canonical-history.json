@@ -465,6 +465,14 @@
       "tag": "0058_prepared_github_egress",
       "breakpoints": true,
       "sha256": "76f385a160d5662aebef2b439494f7d10e7410351f1c039f2b3f0cea2132fcdc"
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1787000000059,
+      "tag": "0059_protected_credential_free_metadata",
+      "breakpoints": true,
+      "sha256": "061d0989b9585c3db9fc8f0feba3a003c30eb6838474dd376cb1a8b59655c380"
     }
   ],
   "initialSchemaStates": {
@@ -492,7 +500,7 @@
     "main": "bd490d16dd23ec1ea722bb370155e9454fb52187bd2b16cd8a0fe277e3e41bde",
     "repositoryCredentials": "5f9359057412199ea7a5659bdedbef664fb6da7bcd99d7a552f01a5782b904ea",
     "workspaceSetup": "3d7801c345eea875fb79adba4e04a4e2b24bad49ffe6ada62cc58117c5cce134",
-    "completed": "d5f7d4a9ad046e8a39a6cf576432b22703b7fd7bb495f5e80c366ae5ce24b2b8",
+    "completed": "5000971d7c0cc245d4f6512057fa41767be6c80ac40b202a6fac1c7b5264b120",
     "repositoryRetention": "a66448129d9ae2adf076f1d7887d3c7151cdc68f635c6fac7984d4254604d074",
     "agentProvisioning": "baac9e369ace8610f96948c1a930e6387431b1d0a33cefa3893765e52f8f7a52",
     "backendCompleted": "a2ba6fc82fbf0047cea491efad4a9e58eacaed7c29ce8528accff331569c51dd",
@@ -522,7 +530,8 @@
     "preStaticEgress": "52b65cf1a9e0539f3c133d9a25f0da0ee8b2ca51f981934bef44e670134d8083",
     "preSendReceipts": "5b19a7bb32b7ecc5ad106950fc4014496524e2f22a039b54f4d41a1a92227552",
     "prePreparedGitHubCustody": "dcb3cf807ea0fe46582ceb381db46dba48e7f6da88db1f3a84ed4c7f617d9a74",
-    "prePreparedGitHubEgress": "de72fac145059d988b9f029d13dd9e862dc711bf62483a11f51443dd3c3a7191"
+    "prePreparedGitHubEgress": "de72fac145059d988b9f029d13dd9e862dc711bf62483a11f51443dd3c3a7191",
+    "preCredentialFreeMetadata": "d5f7d4a9ad046e8a39a6cf576432b22703b7fd7bb495f5e80c366ae5ce24b2b8"
   },
   "ledgerCatalogs": {
     "initialized": "62946da6b1fc2b06df09e97dda4cf1831f170a2f3d5ff35a9f107af206c425dc",

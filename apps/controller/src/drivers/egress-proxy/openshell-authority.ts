@@ -16,7 +16,10 @@ import type { EgressMaterialEvidence } from "@openclaw-enterprise/contracts";
 import type { OpenClawController } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 import { OpenShellEgressIdentity } from "./openshell-identity.ts";
-import { openShellExchangeCapabilities } from "./openshell-exchange-capabilities.ts";
+import {
+  advertisesOpenShellExecutionProfile,
+  openShellExchangeCapabilities,
+} from "./openshell-exchange-capabilities.ts";
 
 type Wire = Record<string, unknown>;
 type AuthorityCall = {
@@ -108,7 +111,8 @@ export function createOpenShellEgressAuthority(
         !identity.verifyControl(authorization(call.metadata)) ||
         record(peer.protocol_version).major !== 1 ||
         !Array.isArray(supported) ||
-        !capabilities.every((capability) => supported.includes(capability)) ||
+        !supported.includes(contractCapability) ||
+        !advertisesOpenShellExecutionProfile(supported) ||
         !Array.isArray(required) ||
         // Generic Describe runs before protected policy selection. Rust sends all
         // supported capabilities, requires the base contract here, then verifies our
@@ -184,6 +188,15 @@ export function createOpenShellEgressAuthority(
     if (result.kind === "refused") {
       return refused(result.error.kind);
     }
+    if (result.kind === "ready_without_material") {
+      return {
+        ready_without_material: {
+          request_id: context.request_id,
+          operation_handle: Buffer.from(result.handle),
+          audience: identity.audience,
+        },
+      };
+    }
     return {
       ready: {
         request_id: context.request_id,
@@ -204,21 +217,36 @@ export function createOpenShellEgressAuthority(
       return refused("denied");
     }
     const context = record(call.request.context);
-    const wireEvidence = record(call.request.evidence);
-    let evidence: EgressMaterialEvidence;
-    try {
-      evidence = JSON.parse(
-        bytes(wireEvidence.authority_evidence).toString("utf8"),
-      ) as EgressMaterialEvidence;
-    } catch {
-      return refused("denied");
-    }
+    let selection: EgressMaterialEvidence | true;
+    // Reject absent, false and conflicting oneof selections, including from an older peer.
     if (
-      evidence.materialId !== wireEvidence.material_id ||
-      evidence.materialVersion !== wireEvidence.material_version ||
-      evidence.usableUntil !== timestamp(wireEvidence.usable_until) ||
-      Date.parse(timestamp(call.request.deadline)) < Date.parse(evidence.usableUntil)
+      call.request.selection === "no_material_required" &&
+      call.request.no_material_required === true &&
+      call.request.evidence === undefined
     ) {
+      selection = true;
+    } else if (
+      call.request.selection === "evidence" &&
+      call.request.no_material_required === undefined &&
+      call.request.evidence !== undefined
+    ) {
+      const wireEvidence = record(call.request.evidence);
+      try {
+        selection = JSON.parse(
+          bytes(wireEvidence.authority_evidence).toString("utf8"),
+        ) as EgressMaterialEvidence;
+      } catch {
+        return refused("denied");
+      }
+      if (
+        selection.materialId !== wireEvidence.material_id ||
+        selection.materialVersion !== wireEvidence.material_version ||
+        selection.usableUntil !== timestamp(wireEvidence.usable_until) ||
+        Date.parse(timestamp(call.request.deadline)) < Date.parse(selection.usableUntil)
+      ) {
+        return refused("denied");
+      }
+    } else {
       return refused("denied");
     }
     if (context.verified_credential_connector !== undefined) {
@@ -229,7 +257,7 @@ export function createOpenShellEgressAuthority(
       string(context.sandbox_id),
       string(context.request_id),
       bytes(call.request.operation_handle).toString("utf8"),
-      evidence,
+      selection,
       bytes(call.request.credential_headers_sha256).toString("hex"),
       timestamp(call.request.deadline),
       call.signal,
@@ -250,6 +278,7 @@ export function createOpenShellEgressAuthority(
             credential_headers_sha256: Buffer.from(result.injectionDigest, "hex"),
             send_start_by: wireTimestamp(result.sendStartBy),
             response_custody: responseCustody,
+            no_material_required: result.noMaterialRequired,
           },
         };
   };
@@ -349,7 +378,7 @@ export function createOpenShellEgressAuthority(
             if (signal.signal.aborted) {
               return;
             }
-            phase = result.ready ? "authorize" : "done";
+            phase = result.ready || result.ready_without_material ? "authorize" : "done";
             call.write({ resolved: result });
           } else if (acceptedPhase === "authorize") {
             const result = await authorizeSend(acceptedCall);

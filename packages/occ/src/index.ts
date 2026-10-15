@@ -1,6 +1,9 @@
 import {
   assertExecutionAdmission,
   assertExecutionReleaseAllowed,
+  credentialFreeMetadataGrant,
+  credentialFreeMetadataType,
+  credentialFreeProviderRef,
   githubMetadataGrant,
   preparedGitHubProviderRef,
   preparedGitHubSourceFromRoute,
@@ -11,7 +14,8 @@ import type {
   StaticEgressSource,
   ConduitPlan,
   EgressRefusal,
-  EgressMaterialEvidence,
+  EgressSelectionEvidence,
+  CredentialFreeEgressSource,
   PreparedGitHubEgressSource,
   ProtectedEgressSource,
 } from "@openclaw-enterprise/contracts";
@@ -4646,7 +4650,7 @@ export class OpenClawController {
 
   private async checkEgressUse(
     use: CapturedEgressUse,
-    material?: EgressMaterialEvidence,
+    material?: EgressSelectionEvidence,
   ): Promise<ProtectedEgressSource | EgressRefusal> {
     // Never borrow an enclosing controller/IAM snapshot. The two RPCs each establish a new
     // platform unit and the native IAM Driver loads policy within that exact fresh unit.
@@ -4788,6 +4792,36 @@ export class OpenClawController {
         }
         throw error;
       }
+      if (admitted.adoption === "credential_free") {
+        const grant = credentialFreeMetadataGrant(source.config);
+        const { binding } = use.route;
+        if (
+          source.type !== credentialFreeMetadataType ||
+          use.operation.kind !== "credential_free_repository_metadata" ||
+          !isDeepStrictEqual(admitted.key.provider, credentialFreeProviderRef) ||
+          admitted.origin !== source.config.origin ||
+          use.route.origin !== admitted.origin ||
+          grant.isolationId !== execution.agentId ||
+          grant.isolationId !== binding.isolationId ||
+          !isDeepStrictEqual(admitted.grant, grant) ||
+          !isDeepStrictEqual(binding.grant, grant) ||
+          binding.grantHash !== createHash("sha256").update(JSON.stringify(grant)).digest("hex") ||
+          (material !== undefined &&
+            !isDeepStrictEqual(material, {
+              kind: "no_material_required",
+              source: binding.source,
+              binding: binding.binding,
+              grantHash: binding.grantHash,
+              isolationId: grant.isolationId,
+            }))
+        ) {
+          return deny("scope_mismatch");
+        }
+        return admitted;
+      }
+      if (material?.kind === "no_material_required") {
+        return deny("scope_mismatch");
+      }
       if (admitted.adoption === "prepared") {
         const lifecycle = control.preparedGitHub;
         if (
@@ -4908,6 +4942,40 @@ export class OpenClawController {
       }),
       issuer: secret,
     };
+  }
+
+  private async admitCredentialFreeMetadata(
+    state: PlatformUnitOfWork,
+    principalId: string,
+    namespaceId: string,
+    sourceId: string,
+    config: Readonly<Record<string, string>>,
+  ): Promise<CredentialFreeEgressSource> {
+    const control = this.selectedDriver("conduit").sourceControl;
+    const grant = credentialFreeMetadataGrant(config);
+    const id = grant.isolationId;
+    await this.authorize(principalId, "operate", { kind: "agent", namespaceId, id });
+    const agent = await state.agents.findAgent(namespaceId, id);
+    if (agent?.executionMode !== "dedicated" || agent.status !== "active") {
+      throw new ScopeViolationError("Credential-free metadata requires this dedicated Agent.");
+    }
+    await control.assertAvailable(AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS));
+    return immutableCopy({
+      key: {
+        installationId: this.installation.id,
+        namespaceId,
+        source: { id: sourceId, generation: 1 },
+        provider: credentialFreeProviderRef,
+        backend: control.backend,
+      },
+      sender: control.sender,
+      resolver: control.resolver,
+      origin: config.origin!,
+      grant,
+      schemaVersion: 3 as const,
+      adoption: "credential_free" as const,
+      retention: "none" as const,
+    });
   }
 
   private async admitStaticEgressSource(
@@ -5098,7 +5166,7 @@ export class OpenClawController {
       // The Driver may return the configuration in the form it uses, such as a normalized URL:
       // the stored record, the response and the gateway then agree (finding 1292).
       const config = Object.freeze({
-        ...(type.type === preparedGitHubType
+        ...(type.type === preparedGitHubType || type.type === credentialFreeMetadataType
           ? written
           : (selected.validateSourceConfig({ type: type.type, config: written }) ?? written)),
       });
@@ -5119,18 +5187,20 @@ export class OpenClawController {
           : undefined;
       const egress =
         prepared?.source ??
-        (this.selections.has("conduit")
-          ? await this.admitStaticEgressSource(
-              state,
-              principalId,
-              locked.id,
-              sourceId,
-              type.type,
-              config,
-              secretRefs,
-              1,
-            )
-          : undefined);
+        (type.type === credentialFreeMetadataType
+          ? await this.admitCredentialFreeMetadata(state, principalId, locked.id, sourceId, config)
+          : this.selections.has("conduit")
+            ? await this.admitStaticEgressSource(
+                state,
+                principalId,
+                locked.id,
+                sourceId,
+                type.type,
+                config,
+                secretRefs,
+                1,
+              )
+            : undefined);
       const read =
         egress === undefined
           ? await this.readCredentialSourceSecrets(state, principalId, locked, secretRefs)
@@ -5347,9 +5417,9 @@ export class OpenClawController {
       if (type.rotation === "refresh") {
         refuseIssuerRotatedResend(type, source.secrets, secretRefs);
       }
-      if (source.egress?.adoption === "prepared") {
+      if (source.egress?.adoption === "prepared" || source.egress?.adoption === "credential_free") {
         throw new ScopeViolationError(
-          "A different GitHub metadata source or grant requires explicit new admission.",
+          "A different protected metadata source or grant requires explicit new admission.",
         );
       }
       if (
@@ -5744,7 +5814,7 @@ export class OpenClawController {
         source.egress,
         AbortSignal.timeout(CREDENTIAL_GATEWAY_TIMEOUT_MS),
       );
-    } else {
+    } else if (source.egress?.adoption !== "credential_free") {
       const refresh = await this.refreshDriverForSource(gateway, source.type);
       if (refresh !== undefined) {
         await this.credentialGatewayOperation(() => refresh.removeRefresh(context()));
@@ -10767,6 +10837,18 @@ export class OpenClawController {
     driver: CredentialGatewayDriver,
     type: string,
   ): Promise<CredentialSourceType> {
+    if (type === credentialFreeMetadataType) {
+      if (this.selections.has("conduit")) {
+        const control = this.selectedDriver("conduit").sourceControl;
+        const provider = control.providers.find((entry) =>
+          isDeepStrictEqual(entry.ref, credentialFreeProviderRef),
+        );
+        if (provider) {
+          return provider.sourceType;
+        }
+      }
+      throw new CredentialSourceTypeNotOfferedError();
+    }
     if (type === preparedGitHubType) {
       if (this.selections.has("conduit")) {
         const control = this.selectedDriver("conduit").sourceControl;

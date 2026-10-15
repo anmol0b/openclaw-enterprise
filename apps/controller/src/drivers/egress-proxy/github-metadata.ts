@@ -1,4 +1,7 @@
 import {
+  credentialFreeMetadataGrant,
+  credentialFreeMetadataType,
+  credentialFreeProviderRef,
   githubMetadataGrant,
   preparedGitHubProviderRef,
   preparedGitHubType,
@@ -13,7 +16,8 @@ import { parseUnambiguousJson } from "./openai-json.ts";
 function closedRequest(route: EgressRoute, request: EgressRequest): boolean {
   const { grant } = route.binding;
   if (
-    grant.kind !== "github_repository_metadata" ||
+    (grant.kind !== "github_repository_metadata" &&
+      grant.kind !== "credential_free_repository_metadata") ||
     grant.profile !== "metadata-read" ||
     grant.isolationId !== route.binding.execution.agentId ||
     grant.isolationId !== route.binding.isolationId ||
@@ -77,7 +81,7 @@ export const githubMetadataProvider: CredentialProviderDefinition =
     routes(source, binding) {
       const admitted = source.egress;
       if (
-        admitted?.adoption !== "prepared" ||
+        (admitted?.adoption !== "prepared" && admitted?.adoption !== "credential_free") ||
         !isDeepStrictEqual(binding.grant, admitted.grant) ||
         binding.execution.agentId !== admitted.grant.isolationId
       ) {
@@ -98,7 +102,7 @@ export const githubMetadataProvider: CredentialProviderDefinition =
     },
     classify(route, request) {
       const { grant } = route.binding;
-      return closedRequest(route, request) && grant.kind === "github_repository_metadata"
+      return closedRequest(route, request) && grant.kind !== "inference"
         ? { kind: grant.kind, repository: grant.repository, repositoryId: grant.repositoryId }
         : undefined;
     },
@@ -116,7 +120,7 @@ export const githubMetadataProvider: CredentialProviderDefinition =
       const { trailers, headers } = response;
       const media = headers.filter(([name]) => name.toLowerCase() === "content-type");
       if (
-        operation.kind !== "github_repository_metadata" ||
+        operation.kind === "inference" ||
         response.status !== 200 ||
         trailers?.length !== 0 ||
         response.body.byteLength > 64 * 1024 ||
@@ -147,5 +151,31 @@ export const githubMetadataProvider: CredentialProviderDefinition =
       } catch {
         return undefined;
       }
+    },
+  });
+
+/** Same exact GET and complete response as the prepared profile, expressly without material. */
+export const credentialFreeMetadataProvider: CredentialProviderDefinition =
+  Object.freeze<CredentialProviderDefinition>({
+    ...githubMetadataProvider,
+    ref: credentialFreeProviderRef,
+    sourceType: {
+      type: credentialFreeMetadataType,
+      rotation: "none",
+      config: ["origin", "repository_id", "repository", "agent_id", "authority"].map((name) => ({
+        name,
+        required: true,
+      })),
+      secrets: [],
+    },
+    normalizeConfig(config) {
+      credentialFreeMetadataGrant(config);
+      return immutableCopy(config);
+    },
+    normalizeGrant(_models, config) {
+      return credentialFreeMetadataGrant(config ?? {});
+    },
+    inject() {
+      throw new Error("Credential-free metadata does not perform credential injection.");
     },
   });

@@ -297,5 +297,6 @@ export const openAiStaticProvider: CredentialProviderDefinition =
         return false;
       }
     },
-    protectResponse: protectedResponse,
+    protectResponse: (response, value, request, operation) =>
+      value === undefined ? undefined : protectedResponse(response, value, request, operation),
   });

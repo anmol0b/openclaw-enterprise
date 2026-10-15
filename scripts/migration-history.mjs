@@ -124,6 +124,9 @@ function classifyReceipts(receipts, manifest) {
       if (receipts.length === 57) {
         return "prePreparedGitHubEgress";
       }
+      if (receipts.length === 58) {
+        return "preCredentialFreeMetadata";
+      }
       if (receipts.length === manifest.entries.length) {
         return "completed";
       }
@@ -221,6 +224,9 @@ function classifyReceipts(receipts, manifest) {
   }
   if (receipts.length === 57) {
     return "prePreparedGitHubEgress";
+  }
+  if (receipts.length === 58) {
+    return "preCredentialFreeMetadata";
   }
   if (receipts.length === manifest.entries.length) {
     return "completed";

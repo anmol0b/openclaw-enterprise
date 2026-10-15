@@ -95,6 +95,19 @@ test("A resolves, authorizes and receives the protected actual reply on its acce
   assert.doesNotMatch(returned.response.body.toString(), /Bearer/);
 });
 
+test("a real credentialed selection cannot be changed into a credential-free send", async (t) => {
+  const f = await staticEgressFixture(t);
+  const captured = f.capture();
+  const selected = await f.resolve(captured);
+  assert.ok(selected.ready && !selected.ready_without_material);
+  const fake = f.permitRequest(captured, selected.ready, { noMaterial: true });
+  assert.ok(
+    (await f.authorize(fake)).refused,
+    "the empty injection and explicit no-material flag cannot change the selection",
+  );
+  assert.deepEqual(f.providerRequests, []);
+});
+
 test("signed custody must be present, unique to this live exchange and unchanged in the proof", async (t) => {
   const f = await staticEgressFixture(t);
   const captured = f.capture();

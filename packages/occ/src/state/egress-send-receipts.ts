@@ -61,7 +61,13 @@ export function memoryEgressSendReceipts(
         start <= at ||
         start > at + 1000 ||
         start > Date.parse(input.deadlineAt) ||
-        start > Date.parse(input.material.usableUntil) ||
+        (input.material.kind === "no_material_required"
+          ? authorization.injectionDigest !==
+              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ||
+            authorization.association.execution.agentId !== input.material.isolationId ||
+            authorization.association.installation.authorityScope !== "execution"
+          : start > Date.parse(input.material.usableUntil)) ||
+        !isDeepStrictEqual(previous.material, input.material) ||
         authorization.association.installation.instanceId !== input.instanceId ||
         authorization.association.execution.installationId !== input.material.source.installationId
       ) {
@@ -95,6 +101,7 @@ export function memoryEgressSendReceipts(
         (saved.feedback !== null &&
           (saved.feedback !== "fenced" ||
             saved.material === null ||
+            saved.material.kind === "no_material_required" ||
             (saved.observation === null &&
               (!saved.settled ||
                 saved.outcome.kind === "refused" ||

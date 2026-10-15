@@ -27,6 +27,7 @@ export type {
   ProtectedEgressSource,
   EgressOperation,
   EgressMaterialEvidence,
+  EgressSelectionEvidence,
   EgressRefusal,
   EgressResponse,
   SandboxConduitWiring,
@@ -36,6 +37,7 @@ export type {
   ConduitDriver,
 } from "./conduit.ts";
 export * from "./prepared-github-egress.ts";
+export * from "./credential-free-metadata.ts";
 export { assertExecutionAdmission, assertExecutionReleaseAllowed } from "./conduit.ts";
 import type { WorkspaceSetup } from "./workspace-setup.ts";
 

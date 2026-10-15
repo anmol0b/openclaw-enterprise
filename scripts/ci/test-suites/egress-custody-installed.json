@@ -20,7 +20,8 @@
         "unmanaged direct TCP cannot reach the independently observed permitted target",
         "a forbidden final actual trailer reaches origin once and releases zero provider bytes",
         "loss of the exact authorized dispatch COMMIT acknowledgement and authority restart produce no send",
-        "a replacement execution cannot inherit the old pending request or receive its late response"
+        "a replacement execution cannot inherit the old pending request or receive its late response",
+        "explicit protected credential-free read, removal of authority and final route withdrawal"
       ]
     }
   ]

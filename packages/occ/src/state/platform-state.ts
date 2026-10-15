@@ -1272,6 +1272,29 @@ function assertProtectedEgressSource(
     key.namespaceId === namespaceId &&
     key.source?.id === sourceId &&
     [key.source, key.backend, key.provider, value.sender, value.resolver].every(validEgressRef);
+  if (value.adoption === "credential_free") {
+    const { grant } = value;
+    if (
+      !common ||
+      key.provider.id !== "credential-free-repository-metadata" ||
+      key.provider.generation !== 1 ||
+      Object.keys(value).length !== 8 ||
+      value.schemaVersion !== 3 ||
+      value.retention !== "none" ||
+      Object.keys(grant).length !== 5 ||
+      grant.kind !== "credential_free_repository_metadata" ||
+      grant.profile !== "metadata-read" ||
+      !/^[1-9]\d*$/.test(grant.repositoryId) ||
+      !Number.isSafeInteger(Number(grant.repositoryId)) ||
+      !/^[a-zA-Z\d_-]+\/[a-zA-Z\d_.-]+$/.test(grant.repository) ||
+      /\/(?:\.|\.)$/.test(grant.repository) ||
+      !/^agt_[0-9a-f-]{36}$/.test(grant.isolationId) ||
+      !/^https:\/\/[a-z0-9.-]+(?::\d+)?$/.test(value.origin)
+    ) {
+      throw new ScopeViolationError("The credential-free metadata schema or scope is invalid.");
+    }
+    return;
+  }
   if (value.adoption === "prepared") {
     const { grant } = value;
     if (

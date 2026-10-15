@@ -11,6 +11,7 @@ import {
   createRunEvidence,
   observePreparedStack,
 } from "../helpers/egress-installed-stack.mjs";
+import { verifyCredentialFreeReadAndWithdrawal } from "../helpers/egress-credential-free-installed.mjs";
 import { registerCleanupAndStartProvider } from "../helpers/egress-installed-agent.mjs";
 import {
   admitRepositoryAgent,
@@ -33,7 +34,7 @@ test(
   "installed protected repository read binds execution, exact dispatch and final response",
   {
     skip: selected ? false : "Dedicated installed-custody lane requires a fresh disposable pair.",
-    timeout: 36 * 60_000,
+    timeout: 54 * 60_000,
   },
   async (t) => {
     const progress = { stage: "input-preflight" };
@@ -274,7 +275,11 @@ test(
           });
         },
       );
-      await checkpoint("installed-custody-observations-complete", { requiredObservations: 5 });
+      await stage(
+        "explicit protected credential-free read, removal of authority and final route withdrawal",
+        () => verifyCredentialFreeReadAndWithdrawal({ setup, stack, evidence, owned, admitted }),
+      );
+      await checkpoint("installed-custody-observations-complete", { requiredObservations: 6 });
     } catch (error) {
       throw safeError(error);
     }

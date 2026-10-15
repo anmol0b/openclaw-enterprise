@@ -3,6 +3,7 @@ import type {
   EgressExecution,
   EgressRef,
   EgressMaterialEvidence,
+  EgressSelectionEvidence,
 } from "@openclaw-enterprise/contracts";
 import { ResourceStateConflictError } from "./errors.ts";
 
@@ -37,7 +38,7 @@ export interface SendAttempt {
   readonly instanceId: string;
   readonly useId: string;
   readonly attemptId: string;
-  readonly material: EgressMaterialEvidence | null;
+  readonly material: EgressSelectionEvidence | null;
   readonly deadlineAt: string;
 }
 
@@ -239,6 +240,41 @@ function material(value: unknown): EgressMaterialEvidence {
   };
 }
 
+function selection(value: unknown): EgressSelectionEvidence {
+  const selected = object(value);
+  if (selected.kind !== "no_material_required") {
+    return material(value);
+  }
+  const item = exact(selected, ["kind", "source", "binding", "grantHash", "isolationId"]);
+  const src = exact(item.source, [
+    "installationId",
+    "namespaceId",
+    "source",
+    "backend",
+    "provider",
+  ]);
+  const source = {
+    installationId: text(src.installationId),
+    namespaceId: text(src.namespaceId),
+    source: ref(src.source),
+    backend: ref(src.backend),
+    provider: ref(src.provider),
+  };
+  if (
+    source.provider.id !== "credential-free-repository-metadata" ||
+    source.provider.generation !== 1
+  ) {
+    return invalid();
+  }
+  return {
+    kind: "no_material_required",
+    source,
+    binding: ref(item.binding),
+    grantHash: text(item.grantHash),
+    isolationId: text(item.isolationId),
+  };
+}
+
 export function attempt(value: unknown, authenticatedSender: EgressRef): SendAttempt {
   const item = exact(value, [
     "sender",
@@ -257,7 +293,7 @@ export function attempt(value: unknown, authenticatedSender: EgressRef): SendAtt
     instanceId: text(item.instanceId),
     useId: text(item.useId),
     attemptId: text(item.attemptId),
-    material: item.material === null ? null : material(item.material),
+    material: item.material === null ? null : selection(item.material),
     deadlineAt: date(item.deadlineAt),
   };
 }

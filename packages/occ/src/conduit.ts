@@ -17,6 +17,7 @@ import type {
   EgressRoute,
   EgressOperation,
   EgressMaterialEvidence,
+  EgressSelectionEvidence,
   ProtectedEgressSource,
   PreparedGitHubEgressLifecycle,
   StaticEgressSource,
@@ -64,7 +65,7 @@ export interface EgressAuthorityPorts {
   /** Each call must open a new policy unit, independent of the capture and Secret read. */
   check(
     use: CapturedEgressUse,
-    material?: EgressMaterialEvidence,
+    material?: EgressSelectionEvidence,
   ): Promise<ProtectedEgressSource | EgressRefusal>;
   read(
     source: StaticEgressSource,
@@ -76,6 +77,7 @@ export interface EgressAuthorityPorts {
 }
 
 export type EgressResolution =
+  | { readonly kind: "ready_without_material"; readonly handle: string }
   | { readonly kind: "refused"; readonly error: EgressRefusal }
   | {
       readonly kind: "ready";
@@ -92,17 +94,18 @@ export type EgressSendDecision =
       readonly authorization: AuthorizedSend;
       readonly sendStartBy: string;
       readonly injectionDigest: string;
+      readonly noMaterialRequired: boolean;
     };
 
 interface OperationRecord {
   readonly use: CapturedEgressUse;
   readonly provider: CredentialProviderDefinition;
   readonly source: ProtectedEgressSource;
-  readonly evidence: EgressMaterialEvidence;
+  readonly evidence: EgressSelectionEvidence;
   readonly attempt: SendAttempt;
   readonly digest: string;
   readonly association: AcceptedEgressAssociation;
-  value: string;
+  value: string | undefined;
   phase: "resolved" | "checking" | "permitted" | "protecting" | "observing";
   timer?: ReturnType<typeof setTimeout>;
   release?: () => void;
@@ -158,7 +161,7 @@ export class Conduit {
   private discard(handle: string, record: OperationRecord): void {
     clearTimeout(record.timer);
     record.release?.();
-    record.value = "";
+    record.value = undefined;
     this.records.delete(handle);
   }
 
@@ -306,8 +309,8 @@ export class Conduit {
       return { kind: "refused", error: { kind: "cancelled" } };
     }
     try {
-      // Recheck the same accepted response owner after the independent material read.
-      const material = await this.readMaterial(source, captured, signal);
+      // Recheck the same accepted response owner after selection, including any independent material read.
+      const material = await this.selectMaterial(source, captured, signal);
       if (!("evidence" in material)) {
         return { kind: "refused", error: material };
       }
@@ -315,7 +318,11 @@ export class Conduit {
       if (signal.aborted || !this.owns(association, captured)) {
         return refuse("identity");
       }
-      const headers = provider.inject(material.value);
+      if (evidence.kind !== "no_material_required" && material.value === undefined) {
+        return { kind: "refused", error: { kind: "not_ready", code: "material_missing" } };
+      }
+      const headers =
+        evidence.kind === "no_material_required" ? [] : provider.inject(material.value!);
       const digest = egressInjectionDigest(headers);
       const handle = randomUUID();
       const record: OperationRecord = {
@@ -347,19 +354,41 @@ export class Conduit {
         },
         Math.max(1, deadline - this.ports.now()),
       ).unref();
-      return { kind: "ready", handle, evidence, headers, injectionDigest: digest };
+      return evidence.kind === "no_material_required"
+        ? { kind: "ready_without_material", handle }
+        : { kind: "ready", handle, evidence, headers, injectionDigest: digest };
     } catch {
       return { kind: "refused", error: { kind: "unavailable", code: "secret_store" } };
     }
   }
 
-  private async readMaterial(
+  private async selectMaterial(
     source: ProtectedEgressSource,
     use: CapturedEgressUse,
     signal: AbortSignal,
-  ): Promise<{ value: string; evidence: EgressMaterialEvidence } | EgressRefusal> {
+  ): Promise<{ value?: string; evidence: EgressSelectionEvidence } | EgressRefusal> {
     const { route, request } = use;
     const deadline = Date.parse(request.deadlineAt);
+    if (source.adoption === "credential_free") {
+      if (
+        use.operation.kind !== "credential_free_repository_metadata" ||
+        source.origin !== route.origin ||
+        !isDeepStrictEqual(source.grant, route.binding.grant) ||
+        !isDeepStrictEqual(source.key, route.binding.source)
+      ) {
+        return { kind: "denied", code: "scope_mismatch" };
+      }
+      const { binding, grantHash, isolationId } = route.binding;
+      return {
+        evidence: immutableCopy({
+          kind: "no_material_required" as const,
+          source: source.key,
+          binding,
+          grantHash,
+          isolationId,
+        }),
+      };
+    }
     if (source.adoption === "prepared") {
       if (
         use.operation.kind !== "github_repository_metadata" ||
@@ -460,7 +489,7 @@ export class Conduit {
     sandboxId: string,
     requestId: string,
     handle: string,
-    evidence: EgressMaterialEvidence,
+    selection: EgressMaterialEvidence | true,
     injectionDigest: string,
     deadlineAt: string,
     signal: AbortSignal,
@@ -480,7 +509,10 @@ export class Conduit {
       sandboxId !== record.use.peer.sandboxId ||
       requestId !== record.use.request.id ||
       deadlineAt !== record.use.request.deadlineAt ||
-      !isDeepStrictEqual(record.evidence, evidence) ||
+      (selection === true
+        ? record.evidence.kind !== "no_material_required"
+        : record.evidence.kind === "no_material_required" ||
+          !isDeepStrictEqual(record.evidence, selection)) ||
       !sameSecret(record.digest, injectionDigest)
     ) {
       return refuse("invalid_handle");
@@ -535,7 +567,9 @@ export class Conduit {
     const sendStartBy = Math.min(
       now + 1000,
       Date.parse(record.use.request.deadlineAt),
-      Date.parse(record.evidence.usableUntil),
+      record.evidence.kind === "no_material_required"
+        ? Infinity
+        : Date.parse(record.evidence.usableUntil),
       Date.parse(finalPeer.expiresAt),
     );
     if (sendStartBy <= now || this.records.get(handle) !== record || record.phase !== "checking") {
@@ -587,6 +621,7 @@ export class Conduit {
       authorization: authorized,
       sendStartBy: new Date(sendStartBy).toISOString(),
       injectionDigest: record.digest,
+      noMaterialRequired: record.evidence.kind === "no_material_required",
     };
   }
 
@@ -633,7 +668,10 @@ export class Conduit {
     // Consume even while persistence is pending; no second stream/body can reuse this response.
     record.phase = "observing";
     try {
-      const rejected = inspect && record.provider.credentialRejected(response);
+      const rejected =
+        inspect &&
+        record.evidence.kind !== "no_material_required" &&
+        record.provider.credentialRejected(response);
       const safe =
         inspect && !signal.aborted && Date.parse(record.use.request.deadlineAt) > this.ports.now()
           ? record.provider.protectResponse(

@@ -389,7 +389,7 @@ test("zero-route admission has no business allow and an older supplier cannot cl
   assert.equal(installed?.enforcement.authorityScope, "execution");
   assert.ok(await f.egress.verifyInstallation(context, installed));
   const current = observed.evidence.enforced_capabilities;
-  const old = current.filter((cap) => !cap.endsWith(".execution-authority.v1"));
+  const old = current.filter((cap) => !cap.endsWith(".protected-no-material.v1"));
   observed.evidence.enforced_capabilities = old;
   assert.equal(
     await f.egress.wiringStatus(context, attachment),

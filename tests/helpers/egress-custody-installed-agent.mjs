@@ -3,7 +3,10 @@ import { sha256Hex } from "../../packages/utils/src/hashing.ts";
 import assert from "node:assert/strict";
 import { observeInstalledProtection } from "./egress-installed-agent.mjs";
 import { protectedConfigurationBody, sourceAccessBindingBody } from "./egress-connected-inputs.mjs";
-import { repositoryPath } from "../fixtures/egress-custody-repository-origin.mjs";
+import {
+  credentialFreeRepository,
+  repositoryPath,
+} from "../fixtures/egress-custody-repository-origin.mjs";
 
 export async function admitRepositoryAgent(setup, stack, evidence, owned) {
   const { create, provider } = owned;
@@ -103,14 +106,19 @@ export async function activateRepositoryAgent(setup, stack, evidence, owned, adm
   );
   const sandbox = await setup.f.waitForSandbox(stack.placement, revision);
   const sandboxId = await owned.recordSandbox(sandbox);
+  const noMaterial = source.egress?.adoption === "credential_free";
+  const repository = noMaterial
+    ? credentialFreeRepository.full_name
+    : owned.provider.identity.repository;
   const installed = await observeInstalledProtection(
     setup,
     stack,
     evidence,
     { agent, source, revision, sandbox, sandboxId },
     ({ grant }) =>
-      grant.kind === "github_repository_metadata" &&
-      grant.repository === owned.provider.identity.repository &&
+      grant.kind ===
+        (noMaterial ? "credential_free_repository_metadata" : "github_repository_metadata") &&
+      grant.repository === repository &&
       grant.isolationId === agent.id &&
       grant.profile === "metadata-read",
   );
@@ -118,17 +126,19 @@ export async function activateRepositoryAgent(setup, stack, evidence, owned, adm
   const [exactRoute, ...others] = installed.installation.plan.routes;
   assert.equal(others.length, 0);
   assert.equal(exactRoute.method, "GET");
-  assert.equal(exactRoute.path, repositoryPath);
+  assert.equal(exactRoute.path, noMaterial ? "/repos/" + repository : repositoryPath);
   assert.equal(
     exactRoute.origin,
     owned.provider.businessOrigin,
     "must address selected synthetic GitHub",
   );
   assert.equal(exactRoute.binding.execution.revisionId, revision.id);
-  assert.ok(
-    owned.provider.issues > 0,
-    "provider must observe proactive scoped token issue before first workload read",
-  );
+  if (!noMaterial) {
+    assert.ok(
+      owned.provider.issues > 0,
+      "provider must observe proactive scoped token issue before first workload read",
+    );
+  }
   return { ...installed, revision };
 }
 

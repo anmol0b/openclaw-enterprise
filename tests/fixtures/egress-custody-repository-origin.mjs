@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:https";
 
 export const repository = { id: 7301, full_name: "fixture/repository" };
+export const credentialFreeRepository = { id: 7311, full_name: "fixture/credential-free" };
 export const repositoryPath = "/repos/" + repository.full_name;
 
 // Only GitHub's public wire is simulated. Production OCE must prepare the token
@@ -78,7 +79,15 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
         return;
       }
       const selected = mode;
+      const exactCredentialFreeRead =
+        req.method === "GET" &&
+        req.url === "/repos/" + credentialFreeRepository.full_name &&
+        !text &&
+        Object.keys(req.headers).every((name) =>
+          ["host", "connection", "content-length", "accept", "user-agent"].includes(name),
+        );
       const entry = {
+        exactCredentialFreeRead,
         number: observations.length + 1,
         mode: selected,
         exactRead:
@@ -94,7 +103,7 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
       res.once("close", () => {
         entry.closed = true;
       });
-      if (!entry.exactRead) {
+      if (!entry.exactRead && !exactCredentialFreeRead) {
         res.writeHead(403).end();
         return;
       }
@@ -106,7 +115,10 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
       }
       // Body and unapproved header precede the *last actual* forbidden trailer.
       // Record finish after both went to the TLS socket, never infer application.
-      const responseBody = JSON.stringify({ ...repository, description: "omit-from-response" });
+      const responseBody = JSON.stringify({
+        ...(exactCredentialFreeRead ? credentialFreeRepository : repository),
+        description: "omit-from-response",
+      });
       if (selected === "forbidden-final") {
         const finalName = "x-fixture-forbidden-last";
         const wire = [

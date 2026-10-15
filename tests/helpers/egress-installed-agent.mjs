@@ -11,7 +11,12 @@ export function enforcementCapabilities(input) {
   return [
     "http-credential-access",
     ...(fresh
-      ? ["installation-exchange", "response-custody", "execution-authority"]
+      ? [
+          "installation-exchange",
+          "response-custody",
+          "execution-authority",
+          "protected-no-material",
+        ]
       : ["http-credential-verified-connector"]),
   ].map((name) => "openshell.supervisor-middleware." + name + ".v1");
 }

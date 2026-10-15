@@ -447,7 +447,8 @@ export async function staticEgressFixture(
       method: request.method,
       path: request.url,
       authorization: request.headers.authorization,
-      body: JSON.parse(Buffer.concat(body)),
+      body: body.length ? JSON.parse(Buffer.concat(body)) : undefined,
+      headers: request.headers,
     });
     response.writeHead(providerResponse.status, {
       "content-type": providerResponse.contentType ?? "application/json",
@@ -512,7 +513,15 @@ export async function staticEgressFixture(
       assert.equal(enrolled.status, 201);
       issuer = enrolled.data;
     }
-    ({ agent, source } = await admitSource({ app, agent, namespace, secret: issuer, path }));
+    ({ agent, source } = await admitSource({
+      app,
+      agent,
+      namespace,
+      secret: issuer,
+      path,
+      countSecretReads: () => secretReads,
+      origin: `https://provider.example.test:${providerPort}`,
+    }));
   }
   // Grant the real service principal through the supported policy API. Revocation later
   // commits between independent RPC transactions and must affect the final send check.
@@ -718,9 +727,9 @@ export async function staticEgressFixture(
       body: Buffer.from(JSON.stringify(body)),
     },
   });
-  function permitRequest(captured, ready) {
+  function permitRequest(captured, ready, { noMaterial = false } = {}) {
     const hash = createHash("sha256");
-    for (const header of ready.credential_headers) {
+    for (const header of noMaterial ? [] : ready.credential_headers) {
       for (const value of [header.name, header.value]) {
         const bytes = Buffer.from(value);
         const length = Buffer.alloc(8);
@@ -733,7 +742,7 @@ export async function staticEgressFixture(
       operation_handle: ready.operation_handle,
       audience: "oce-egress",
       deadline: captured.deadline,
-      evidence: ready.evidence,
+      ...(noMaterial ? { no_material_required: true } : { evidence: ready.evidence }),
       credential_headers_sha256: hash.digest(),
     };
   }
@@ -745,10 +754,10 @@ export async function staticEgressFixture(
           servername: "provider.example.test",
           ca: cert,
           port: providerPort,
-          method: "POST",
+          method: captured.request.target.method,
           path: captured.request.target.path,
           headers: {
-            "content-type": "application/json",
+            ...Object.fromEntries(captured.request.headers.map(({ name, value }) => [name, value])),
             ...Object.fromEntries(ready.credential_headers.map(({ name, value }) => [name, value])),
           },
         },
@@ -840,8 +849,10 @@ export async function staticEgressFixture(
     const exchange = await beginExchange(peer);
     exchange.stream.write(exchange.opening(captured));
     const { resolved } = await exchange.next();
-    if (resolved.ready) {
-      const handle = resolved.ready.operation_handle.toString("base64");
+    if (resolved.ready || resolved.ready_without_material) {
+      const handle = (resolved.ready || resolved.ready_without_material).operation_handle.toString(
+        "base64",
+      );
       const entry = { captured, exchange };
       exchangeByHandle.set(handle, entry);
       exchange.stream.once("status", () => exchangeByHandle.delete(handle));
@@ -857,6 +868,7 @@ export async function staticEgressFixture(
       exchange.stream.write({ authorize: permit });
       const { authorized } = await exchange.next();
       if (authorized.allowed) {
+        assert.equal(authorized.allowed.no_material_required, permit.no_material_required === true);
         assert.deepEqual(authorized.allowed.response_custody, captured.response_custody);
         assert.deepEqual(
           authorized.allowed.credential_headers_sha256,
