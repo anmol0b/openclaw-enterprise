@@ -13,7 +13,7 @@ test(
   "losing the exact authorized-dispatch COMMIT reply yields no permit or origin, also after restart",
   { ...requiresPostgres, timeout: 60_000 },
   async (t) => {
-    const proxy = await commitAckProxy(databaseUrl);
+    const proxy = await commitAckProxy(databaseUrl, { egressDispatch: true });
     const f = await staticEgressFixture(t, {
       appFactory: (t, options) => postgresApp(t, options, proxy.url),
     });
@@ -46,7 +46,7 @@ test(
       const { ready } = await f.resolve(captured);
       assert.ok(ready, "reach dispatch with genuine material and the original use still live");
       if (phase === "lost_ack") {
-        proxy.arm({ afterParsePrefix: "UPDATE occ.egress_send_receipts SET authorized_dispatch=" });
+        proxy.arm({ instanceId: f.installation.enforcement.instanceId });
       }
       const decision = await f.authorize(f.permitRequest(captured, ready));
       if (decision.allowed) {

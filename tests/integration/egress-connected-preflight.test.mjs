@@ -194,6 +194,12 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
         (role) => [role, `fixture/${role}@sha256:${"a".repeat(64)}`],
       ),
     ),
+    credentialConnector: {
+      path: "/usr/bin/model-client",
+      sha256: "b".repeat(64),
+      image: `fixture/agent@sha256:${"a".repeat(64)}`,
+      verification: "operator-verified-image-executable",
+    },
     openShellBackend: {
       endpoint: "https://gateway.test:8443",
       rootCertificatePath: "/fixture/root.pem",
@@ -232,6 +238,35 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
       assert.equal(validate(input), input);
     }
   }
+  for (const pin of [
+    undefined,
+    {},
+    { ...inputs().credentialConnector, sha256: "" },
+    { ...inputs().credentialConnector, image: inputs().images.sandbox },
+    { ...inputs().credentialConnector, path: "model-client" },
+    { ...inputs().credentialConnector, verification: "discovered" },
+  ]) {
+    assert.throws(() =>
+      validateConnectedInputs({ ...inputs(), credentialConnector: pin }, controller),
+    );
+  }
+  const fresh = {
+    ...inputs(),
+    credentialConnector: undefined,
+    authorityProfile: "fresh-whole-execution",
+  };
+  const wholeExecution = (input) =>
+    validateConnectedInputs(input, controller, { wholeExecution: true });
+  assert.equal(wholeExecution(fresh), fresh);
+  assert.throws(() => validate(fresh), "legacy lane cannot silently broaden a connector grant");
+  assert.throws(
+    () => wholeExecution(inputs()),
+    "fresh profile must not inherit connector authority",
+  );
+  assert.throws(() =>
+    wholeExecution({ ...fresh, credentialConnector: inputs().credentialConnector }),
+  );
+  assert.throws(() => wholeExecution({ ...fresh, authorityProfile: undefined }));
   const rejectedAuth = [
     undefined,
     { mode: "unauthenticated" },

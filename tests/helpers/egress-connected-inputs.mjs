@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { isIP } from "node:net";
-import { isAbsolute } from "node:path";
+import { isAbsolute, posix } from "node:path";
 import { createHarnessConfiguration } from "./harness-configuration.mjs";
 
 export const protectedEgressCapability =
@@ -50,7 +50,7 @@ export function takeConnectedControllerBinding(env) {
 
 // Inputs describe an already installed, disposable protected stack. They do not
 // authorize this test to install a gateway, change trust, or relax admission.
-export function validateConnectedInputs(input, controller) {
+export function validateConnectedInputs(input, controller, { wholeExecution = false } = {}) {
   assert.equal(input.version, 2);
   assert.equal(input.apiOrigin, controller.apiOrigin, "controller origin disagrees with runner");
   assert.equal(input.namespaceId, controller.namespaceId, "tenant disagrees with runner");
@@ -83,6 +83,32 @@ export function validateConnectedInputs(input, controller) {
     Object.keys(input.images ?? {}).sort(),
     ["agent", "controller", "gateway", "openShellGateway", "sandbox", "supervisor"].sort(),
   );
+  // Explicit operator verification of the genuine intended executable in the
+  // immutable workload image is required. Never discover authority by TOFU.
+  if (wholeExecution) {
+    assert.equal(input.authorityProfile, "fresh-whole-execution");
+    assert.equal(
+      input.credentialConnector,
+      undefined,
+      "a connector grant cannot authorize the entire execution",
+    );
+  } else {
+    assert.equal(
+      input.authorityProfile,
+      undefined,
+      "legacy connector inputs cannot claim whole-execution authority",
+    );
+    const pin = input.credentialConnector;
+    assert.ok(pin && typeof pin.path === "string" && pin.path.startsWith("/") && pin.path !== "/");
+    assert.equal(posix.normalize(pin.path), pin.path);
+    assert.ok(
+      !pin.path.endsWith("/") &&
+        ![...pin.path].some((char) => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127),
+    );
+    assert.match(pin.sha256 ?? "", /^[a-f0-9]{64}$/);
+    assert.equal(pin.image, input.images.agent);
+    assert.equal(pin.verification, "operator-verified-image-executable");
+  }
   for (const head of [input.oceCommit, input.supplierCommit]) {
     assert.match(head ?? "", /^[a-f0-9]{40}$/);
   }
