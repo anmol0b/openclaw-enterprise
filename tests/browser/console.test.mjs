@@ -1664,19 +1664,24 @@ for (const trigger of ["Refresh", "Back with a replacement session"]) {
       await page.getByRole("button", { name: "Login" }).click();
     }
     await namespaceHold.waitForRelease();
-    // A changed session can discard a retained shell or leave the first-load shell.
-    // Any remaining selector must still await the fresh readable-Namespace response.
-    if (await selector.count()) {
-      assert.equal(await selector.isDisabled(), true);
-      assert.equal(await selector.locator('option:not([value=""])').count(), 0);
-    }
-    assert.equal(new URL(page.url()).searchParams.get("namespace"), missingId);
+    // Refresh preserves the requested Namespace. A replacement session starts on Agents
+    // with no Namespace selection until its own admission returns.
+    const refreshed = trigger === "Refresh";
+    const pendingSelector = refreshed ? selector : page.locator("#namespace-selector");
+    await pendingSelector.waitFor();
+    assert.equal(await pendingSelector.isDisabled(), true);
+    assert.equal(await pendingSelector.locator('option:not([value=""])').count(), 0);
+    assert.equal(new URL(page.url()).searchParams.get("namespace"), refreshed ? missingId : null);
     await releaseHeldRoute(page, "**/namespaces", namespaceHold);
     await page.locator("#namespace-selector:not(:disabled)").waitFor();
-    assert.equal(await selector.locator(`option[value="${alpha.id}"]`).count(), 0);
-    await selector.selectOption(beta.id);
-    await page.waitForURL(`**/console/namespaces?namespace=${beta.id}`);
-    await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+    assert.equal(await pendingSelector.locator(`option[value="${alpha.id}"]`).count(), 0);
+    if (refreshed) {
+      await selector.selectOption(beta.id);
+      await page.waitForURL(`**/console/namespaces?namespace=${beta.id}`);
+      await page.getByRole("list", { name: "Namespaces", exact: true }).waitFor();
+    } else {
+      await page.waitForURL(`**/console/agents?namespace=${beta.id}`);
+    }
     assert.equal(await page.locator(".namespace-recovery").count(), 0);
   });
 }
@@ -1766,7 +1771,10 @@ for (const trigger of ["Refresh", "Back with a replacement session"]) {
     }
     await namespaceHold.waitForRelease();
     await assertPendingHeader();
-    assert.equal(new URL(page.url()).searchParams.get("namespace"), missingId);
+    assert.equal(
+      new URL(page.url()).searchParams.get("namespace"),
+      trigger === "Refresh" ? missingId : null,
+    );
     await releaseHeldRoute(page, "**/namespaces", namespaceHold);
     await page.locator(".page-header #namespace-selector:not(:disabled)").waitFor();
     assert.equal(await selector.locator(`option[value="${alpha.id}"]`).count(), 0);
