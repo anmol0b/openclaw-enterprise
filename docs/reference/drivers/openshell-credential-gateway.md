@@ -11,9 +11,8 @@ keeping them outside the Harness. It implements the
 authentication, admission, and provider-file proof follow the
 [OpenShell qualification contract](openshell-sandbox.md#qualification-contract).
 
-The separate [protected static inference path](../credential-sources/protected-inference.md)
-requires a new authenticated credential-access counterpart. Selecting this legacy
-Driver alone does not enable that path.
+[Protected static inference](../credential-sources/protected-inference.md)
+requires a separate authenticated counterpart.
 
 ## Configure the Driver
 

@@ -942,6 +942,7 @@
               "guides/deploy/local-compose-kubernetes",
               "guides/deploy/openshell-credential-sources",
               "guides/deploy/local-openshell-images",
+              "guides/deploy/protected-egress-development",
               "reference/settings/development",
               "design/resources",
               "design/access",

@@ -278,24 +278,19 @@ cleanup material counts against session capacity and shutdown's
 
 ## GitHub response data
 
-The private `metadata-read` profile releases configured `{ id, full_name }` with
-fixed JSON and no-store headers only after HTTP 200 and matching provider
-identity. This protected metadata policy rejects actual trailers before release.
-Existing byte limits, general profiles, descriptions, streamed and bodyless
-responses remain unchanged.
-OpenShell's pre-return protocol returns bodies before trailers; joined enforcement
-remains unproved.
+[Protected metadata](../flows/repository-credentials.md#5-deliver-an-outcome-and-release-ownership)
+requires verified identity and no actual trailers before releasing `{ id, full_name }`.
+Joined OpenShell enforcement still needs proof.
 
 Bounded REST JSON responses omit `temp_clone_token` from the repository object,
 its `parent` and `source` relationships, and pull-request `head.repo` and
 `base.repo`. GraphQL selecting `tempCloneToken` gets 400.
 
-Gateway rewriting covers only validated pagination links and explicitly followed
-resource fields that pass origin, repository, route and profile checks. Native
-`/repositories/<id>` URLs must match the configured repository ID and become its
-admitted `/repos/OWNER/REPO` route. Issue collection pagination accepts bounded
-`after` and `before` cursors; direct requests to repository-ID routes remain
-unsupported. Other links, human text and unrelated metadata remain unchanged.
+Rewrite only validated pagination and followed links passing origin, repository,
+route and profile checks. Translate `/repositories/<id>` only for the configured
+ID, to its admitted `/repos/OWNER/REPO` route. Pagination accepts bounded `after`
+and `before`; direct ID-route requests remain unsupported. Preserve other links,
+human text and unrelated metadata.
 
 ## Client routing and limits
 

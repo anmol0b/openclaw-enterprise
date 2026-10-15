@@ -86,58 +86,38 @@ graph TD
 `internal/occdev/openshell.go:prepareOpenShell`,
 `internal/occdev/kubernetes.go:writeInstallation`
 
-The Installation declares the `openshell` Backend, Gateway endpoint, Sandbox and
-Credential Gateway; `binaries` lists native Codex for x64/ARM64 regardless of host.
-Credential-source profiles, not Sandbox policy, govern egress.
+The Installation selects OpenShell, the Gateway, Sandbox and Credential Gateway;
+`binaries` lists x64/ARM64 Codex. Credential-source profiles govern legacy egress.
 
 `scripts/dev-up` invokes `occ dev up`; `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes`
 selects Kubernetes-only. Its preflight rejects port collisions before recording
 engine, cluster, namespace, port and key destination.
 
-Both profiles import larger OCE images before pinned OpenShell Sandbox and
-supervisor images, then install OpenShell workloads. This prevents k3s image
-garbage collection during platform-image imports from removing idle OpenShell images.
+Both profiles import larger OCE images before pinned Sandbox and supervisor
+images so k3s garbage collection cannot evict idle OpenShell images. Launchers
+[validate three local digest and revision pairs](../guides/deploy/local-openshell-images.md)
+before resource creation; absent selectors use the release. `prepareOpenShell`
+rechecks candidates; image import forbids candidate pulls and retains collision,
+Linux and cleanup checks. Helm receives all three images with pull policy `Never`.
 
-Before resource creation, both launchers call
-`internal/occdev/openshell.go:selectOpenShellImages` and
-`internal/occdev/openshell.go:validateOpenShellImageRevisions`. Candidates require
-three local SHA-256 references with revision labels matching a full OpenShell
-commit; absent selectors retain releases. `prepareOpenShell` rechecks candidates,
-verifies pinned or selects local assets, then calls
-`internal/occdev/openshell.go:importOpenShellImage`. Import forbids candidate pulls,
-retains staging-collision/Linux checks and cleanup, and prints source/containerd
-references. `internal/occdev/openshell.go:installOpenShellGateway` supplies the
-three imported Helm images with pull policy `Never`. See
-[candidate digest/provenance verification](../guides/deploy/local-openshell-images.md). Kubernetes-only also imports
-controller/runtime and PostgreSQL images and resolves in-cluster digests.
-
-On Agent Sandbox rollout failure, `prepareOpenShell` calls
-`internal/occdev/agent_sandbox_rollout_diagnostics.go:captureAgentSandboxRollout`
-once, then returns the original error for rollback. Capture reads the fixed
-Deployment, controller-UID-linked ReplicaSets/Pods and associated Warning reasons;
-omits messages, environment, full labels and logs; and marks unavailable,
-malformed or oversized results.
-
-Limits: fresh 15-second context, three seconds/request/command, 256 KiB/command,
-32 KiB/record. Commands are awaited; 200 ms pipe draining cannot terminate arbitrary
-descendants. Output-write errors are ignored; writer latency/durability remain
-outside the budget. Capture neither retries nor diagnoses.
+On Sandbox rollout failure, `captureAgentSandboxRollout` reads only the fixed
+Deployment, UID-linked ReplicaSets and Pods, and associated Warning reasons.
+It marks incomplete results, omits text, environment, labels and logs, and returns
+the original error for rollback. Its 15-second context allows three seconds and
+256 KiB per command, 32 KiB per record. Pipe draining cannot kill descendants;
+writer latency and durability are outside the budget.
 
 After Helm, `network.providerHarness` records Gateway ClusterIP, Pod selector and
 TCP/8080. The Agent Gateway aliases only the advertised hostname, preserving HTTP
 Host; NetworkPolicy restricts access to those Pods/port.
 
-Compose runs PostgreSQL, OCC and its k3d-targeting worker; Kubernetes-only uses
-`oce-system` and in-cluster authentication. Both install private Envoy routing
-and operator Workspaces, limiting Gateway access to API, worker, supervisor
-callbacks and dedicated Agent Gateways. See
-[local deployment guides](../guides/deploy/local-kubernetes-development.md).
-
-`internal/occdev/compose_routing.go:prepareComposeRoutingFiles` sets container
-ownership for private routing files; Installation files remain `0644` in private state.
-
-Cleanup validates recorded engine/state before deleting the named cluster and
-Compose project/volumes; partial cleanup retains recovery state.
+[Compose](../guides/deploy/local-kubernetes-development.md) runs PostgreSQL, OCC
+and the k3d worker. Kubernetes-only uses `oce-system` and in-cluster auth.
+Private Envoy routing and operator Workspaces restrict Gateway access to API,
+worker, supervisor callbacks and Agent Gateways. `prepareComposeRoutingFiles`
+sets private routing-file ownership; Installation files remain `0644` in private
+state. Cleanup validates engine and state, removes only the recorded cluster,
+project and volumes, and preserves recovery state on failure.
 
 ### 1. Prepare the Namespace and OpenShell Workspace
 
@@ -257,18 +237,14 @@ first-Agent path.
 
 `apps/controller/src/drivers/sandbox/openshell-gateway-client.ts:createSandbox`
 
-The client sends the Sandbox identity, spec, Workspace scope and `request_id`.
-OpenShell retains unresolved server-side create failures indefinitely. After
+Create includes Sandbox identity, spec, Workspace scope and `request_id`.
+Unresolved creates persist; completed records expire after 24 hours. After
 `REQUEST_OUTCOME_UNCERTAIN`, `REQUEST_ID_PAYLOAD_MISMATCH` or
-`REQUEST_REPLAY_UNAVAILABLE`, the Driver requires an absent `getSandbox` result
-before advancing through 16 IDs: the revision UUID, then 15 derived IDs. Each
-failing pass spends one ID; the Workspace-unique name prevents duplicates.
-At 1000 unresolved or unexpired admissions per controller identity, OpenShell
-rejects new IDs with `RESOURCE_EXHAUSTED`; completed admissions expire after
-24 hours. `unary` maps that exact refusal to `OpenShellAdmissionLimitError`, a
-`TransientDependencyError` (`SANDBOX_ADMISSION_LIMIT_REACHED`). Revision
-provisioning waits until the convergence deadline without spending attempts;
-Namespace work retries as usual.
+`REQUEST_REPLAY_UNAVAILABLE`, advance to the next of 16 revision-derived IDs
+only if `getSandbox` finds nothing. The Workspace-unique name prevents duplicates.
+At 1,000 live or unresolved admissions, `RESOURCE_EXHAUSTED` maps to transient
+`SANDBOX_ADMISSION_LIMIT_REACHED`. Revision convergence waits without spending
+attempts; Namespace work retries normally.
 
 Codex requests one unnamed bearer-passthrough exposure on `APP_SERVER_PORT` and
 requires its `service_urls` entry. Native OpenClaw connects outbound, requests

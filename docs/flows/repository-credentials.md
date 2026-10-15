@@ -278,18 +278,12 @@ remain unchanged. Transport applies
 `apps/controller/src/drivers/repo/credentials/transport/response-headers.ts:safeResponseHeaders`
 before writing response headers to the client.
 
-The closed `metadata-read` profile instead selects
-`apps/controller/src/drivers/repo/github/credentials/metadata-response.ts:createMetadataResponsePolicy`
-through the existing route policy. It accepts only status 200 and the configured
-numeric repository ID and exact full name, then constructs `{ id, full_name }`
-from that configuration with fixed JSON and no-store headers. General repository
-responses and the separate description-fetching path retain their policies.
-`apps/controller/src/drivers/repo/credentials/transport/upstream.ts:createUpstreamSender`
-checks actual `rawTrailers` after stream end only when a bounded response policy
-selects `trailers: "forbid"`, as protected metadata does, before releasing headers
-or body. Ordinary REST, streamed and bodyless responses retain their semantics. A trailer declaration alone is not an actual
-trailer. Byte limits apply before and after JSON rewriting. Streaming responses
-do not provide this hold-until-end guarantee.
+For bounded `metadata-read`, the [response policy](../../apps/controller/src/drivers/repo/github/credentials/metadata-response.ts)
+requires HTTP 200 and the exact repository ID and full name. After stream end,
+[transport](../../apps/controller/src/drivers/repo/credentials/transport/upstream.ts)
+rejects actual trailers (a declaration alone is not one), enforces byte limits
+before and after rewriting, then releases configured `{ id, full_name }` with
+fixed JSON and no-store headers. Streamed responses cannot make that guarantee.
 
 After successful input, upstream failure before response headers stops upstream
 I/O, then sends fixed `502 exchange-uncertain` after settlement. Cancellation,
