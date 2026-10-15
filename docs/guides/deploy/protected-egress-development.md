@@ -16,34 +16,36 @@ A private development database whose 0055 was `static_egress` has a different hi
 Stop its writers and withdraw it using its own matching release and quiesced backup, or
 retire it and create a fresh disposable installation. Never renumber applied receipts.
 
-Before upgrading from 0055, pause new admissions. Use the release that owns each
-execution, including any anonymous reader, to stop it, retire predecessors and
-reconcile outstanding work. Confirm the stop completed, no revision is active and
-no cleanup remains. Stay on that release if you cannot finish or need to deploy
-the same Agent again.
+Use this order when keeping a development database:
 
-Stop workers and maintenance writers, then take and verify a physical database
-snapshot. Confirm the previous migration command accepts the restored catalog. On PostgreSQL
-18.6, a quiesced database copy (`CREATE DATABASE ... TEMPLATE ... STRATEGY FILE_COPY`
-with the same database-level access) preserved the catalog and receipt history.
-A logical dump and restore can reparse CHECK expressions and fail that exact
-catalog check even when the restore command succeeds. Retain the matching
-controller, runtime, supplier and configuration revisions with the snapshot.
+1. **Settle executions on their owning release.** Pause new admissions. Before stopping
+   writers or taking the cutover snapshot, stop or withdraw executions admitted by that release,
+   including any running anonymous reader. Retire predecessors and verify that no revision is
+   active and no cleanup remains. If you cannot settle the work, stay on that release.
+   If you need to deploy under that Agent identity again, stay on its owning release. Stopping an
+   Agent preserves its revisions; there is no supported in-place conversion for admissions through 0055.
+2. **Quiesce writers and verify a physical snapshot.** Stop admission, workers and maintenance
+   writers. On PostgreSQL 18.6, `CREATE DATABASE ... TEMPLATE ... STRATEGY FILE_COPY` with the
+   same database-level access preserved the catalog and receipt history. A logical restore can
+   reparse CHECK expressions and fail the exact catalog check despite reporting success.
+   Verify that the previous migration command accepts the restored catalog; keep its matching
+   controller, runtime, supplier and configuration revisions.
+3. **Migrate once; retain the old Agent for inspection.** Start the matching API and workers
+   with `conduit` unselected. The revision list preserves the old identity; revision detail
+   reports `SAVED_CONFIGURATION_UNREADABLE` because 0055 recorded no execution admission.
+   Deployment reads _all_ revisions so it can stop or retire them; on this Agent it returns 503
+   without creating a revision or queuing work. Do not delete the history or invent an
+   `execution_admission`. The saved peer admission and credential-source reference are history,
+   not authority for the new controller to release that execution.
+4. **Resume development on a new, independently authorized Agent.** Use an Agent with no
+   pre-cutover revisions, or a fresh disposable installation. In the same Namespace, create a
+   new Agent with its own Configuration and service principal; confirm revision 1 is explicitly
+   `unprotected`. Nothing adopts the old source, copies a credential or grants access. Do not
+   carry forward mounts, helpers or sessions, or arrange delayed reattachment.
 
-Apply the normal migration once. Keep the stopped Agent and its revision for
-read-only inspection and audit. The revision list preserves its identity. Revision detail
-reports `SAVED_CONFIGURATION_UNREADABLE` because 0055 recorded no execution
-admission. Deploying that Agent returns 503 without creating a revision or
-queuing work. The controller must be able to read every revision to stop or retire it.
-Leave the saved Compute admission, credential-source reference and history intact.
-
-To resume development, start the matching API and workers with `conduit`
-unselected. Create a **new Agent** in the same Namespace, with its own Configuration
-and service principal. Deploy revision 1 and confirm its execution admission is
-`unprotected`. Start without the old credential, grants, mounts, helpers or sessions.
-Do not arrange to reattach them later. Withhold any new binding unless durable evidence
-shows equivalent authority or an authorized binder explicitly admits the broader access.
-Permission to update a source is not that consent.
+Execution authority and material approval are independent. Withhold a new binding unless durable
+evidence shows equivalent authority or an authorized binder explicitly admits the broader access.
+Permission to update the source is not that consent.
 
 If the migration transaction fails, verify the previous history before resuming
 the old installation. After a successful migration, switching binaries alone
