@@ -267,6 +267,11 @@ Supply the controller's loopback PostgreSQL URL through `OCC_TEST_DATABASE_URL`.
 URL query parameters are rejected because they can override the selected host or
 database. Keep both input files and credential contents out of logs and Git.
 
+Set `authorityProfile: "fresh-whole-execution"` and omit `credentialConnector`.
+This lane requires execution authority, all five supplier capabilities, and a
+loaded managed policy with no caller executable list. Run it from the candidate
+checkout named by `oceCommit`.
+
 With those prerequisites ready, select a fresh result directory:
 
 ```sh
@@ -291,13 +296,19 @@ that its remote process stopped. Do not replay an uncertain operation.
 The test creates resources through public APIs, deploys through the real worker,
 reads its persisted installation, and checks the authenticated supplier receipt.
 It uses the packaged Codex app-server caller from the Agent Gateway Pod. It
-requires one normal startup probe, then counts fifteen measured provider sends:
-permitted access, regrant, rotation, and six hostile responses with recovery, including split-ID text deltas and
-JSON-escaped function arguments.
-IAM revocation and the ordinary-binary bypass probe must send nothing upstream.
-Hostile responses must fail with the supplier's explicit pre-return refusal and
-no partial assistant output. Synthetic material must be absent from observed
-responses, bounded logs, diagnostics, audit, Pod specs and ConfigMaps.
+explicitly adopts its fresh unbound source with `adoption: "live"` and
+`authorityScope: "execution"`. The origin observes seventeen requests: one
+normal startup probe, fifteen measured Codex sends (including six hostile
+responses and recovery), and one managed request from an ordinary sibling.
+Each measured exchange must join the supervisor's resolve, permit and response
+transitions. IAM revocation must produce no permit or upstream request. A raw
+TCP bypass to the same live listener must produce no connection, with independent
+reachability controls immediately before and after. Hostile responses must give
+Codex an empty HTTP 502, no partial assistant output, and a private
+`response_blocked` transition after the authorized provider send. The test
+checks that the synthetic provider credential is absent from the ordinary Agent
+and running Codex process environments, observed responses, bounded logs,
+diagnostics, audit, Pod specs and ConfigMaps.
 
 The per-run `.build/egress-connected/runtime-<uuid>/` directory retains atomic
 phase checkpoints, resource IDs and bounded provider observations without raw

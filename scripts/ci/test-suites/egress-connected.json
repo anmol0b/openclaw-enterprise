@@ -13,7 +13,7 @@
     {
       "path": "tests/integration/agent-openshell-static-egress-k3d-real.test.mjs",
       "expectedTests": [
-        "a protected OpenShell Agent uses fresh IAM, live Secret rotation and bounded Responses delivery"
+        "protected Codex and a sibling share bounded execution authority through IAM revocation and live rotation"
       ]
     }
   ]

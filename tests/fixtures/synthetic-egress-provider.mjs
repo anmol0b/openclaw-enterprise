@@ -258,6 +258,11 @@ export async function startSyntheticEgressProvider(t, configuration, credentials
       }
     },
   );
+  // Direct-bypass qualification must count TCP arrivals, even without TLS or HTTP.
+  let tcpConnections = 0;
+  server.on("connection", () => {
+    tcpConnections++;
+  });
   server.requestTimeout = 35_000;
   server.headersTimeout = 5_000;
   t.after(() => {
@@ -276,6 +281,9 @@ export async function startSyntheticEgressProvider(t, configuration, credentials
   return {
     observations,
     errors,
+    get tcpConnections() {
+      return tcpConnections;
+    },
     setMode(value) {
       assert.ok(
         [

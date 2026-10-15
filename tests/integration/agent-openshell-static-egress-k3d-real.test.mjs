@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,7 +11,6 @@ import {
   protectedSourceBody,
   sourceAccessBindingBody,
 } from "../helpers/egress-connected-inputs.mjs";
-
 import {
   arrangeRealPrerequisites,
   observePreparedStack,
@@ -20,6 +20,15 @@ import {
   registerCleanupAndStartProvider,
   observeInstalledProtection,
 } from "../helpers/egress-installed-agent.mjs";
+import {
+  exactTransitions,
+  supplierEvents,
+  tryDirectTcp,
+} from "../helpers/egress-custody-observations.mjs";
+import {
+  encodeSyntheticEvents,
+  syntheticResponsesEvents,
+} from "../fixtures/synthetic-egress-provider.mjs";
 
 const inputsPath = process.env.OCC_TEST_EGRESS_CONNECTED_INPUTS;
 const selected = process.env.OCC_TEST_EGRESS_CONNECTED === "1" || inputsPath !== undefined;
@@ -29,7 +38,7 @@ function safeConnectedFailure(error, stage) {
   // location and the durable phase, never raw error payloads or an unsafe cause.
   const location =
     String(error.stack).match(
-      /(?:agent-openshell-static-egress-k3d-real\.test|egress-connected-inputs|openshell-kubernetes-real)\.mjs:\d+:\d+/,
+      /(?:agent-openshell-static-egress-k3d-real\.test|egress-[\w.-]+|openshell-kubernetes-real)\.mjs:\d+:\d+/,
     )?.[0] ?? "external-operation";
   const kind = error.code === "ERR_ASSERTION" ? "assertion" : "operation";
   return new Error(
@@ -48,7 +57,7 @@ function safeConnectedFailure(error, stage) {
  */
 
 test(
-  "a protected OpenShell Agent uses fresh IAM, live Secret rotation and bounded Responses delivery",
+  "protected Codex and a sibling share bounded execution authority through IAM revocation and live rotation",
   {
     skip: selected ? false : "Select OCC_TEST_EGRESS_CONNECTED=1 with a prepared protected stack.",
     timeout: 30 * 60_000,
@@ -56,7 +65,14 @@ test(
   async (t) => {
     const progress = { stage: "input-preflight" };
     try {
-      const setup = await arrangeRealPrerequisites(t, progress, inputsPath);
+      const setup = await arrangeRealPrerequisites(t, progress, inputsPath, {
+        wholeExecution: true,
+      });
+      assert.equal(
+        execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        setup.input.oceCommit,
+        "run this qualification from the selected candidate checkout",
+      );
       const evidence = await createRunEvidence(t, setup, progress);
       const stack = await observePreparedStack(t, setup, evidence, progress);
       const owned = await registerCleanupAndStartProvider(t, setup, stack, evidence);
@@ -64,7 +80,7 @@ test(
       const installed = await observeInstalledProtection(setup, stack, evidence, deployment);
       const turns = await observeRunningAgent(setup, stack, evidence, owned, deployment, installed);
 
-      await verifyFirstTurnAndBinaryBypass(setup, stack, evidence, owned, installed, turns);
+      await verifyManagedClientsAndDirectBypass(setup, stack, evidence, owned, installed, turns);
       await revokeExactGrantAndObserveDenial(stack, evidence, owned, deployment, turns);
       await regrantAndObserveRecovery(owned, deployment, turns);
       const rotatedSecret = await rotateSecretOnly(setup, stack, evidence, deployment, turns);
@@ -73,8 +89,8 @@ test(
       await withdrawAndObserveSandboxAbsence(setup, stack, evidence, deployment, installed);
       assert.equal(
         owned.provider.observations.length,
-        16,
-        "one startup probe and fifteen measured sends, with no background retries",
+        17,
+        "one startup probe, fifteen measured Codex sends and one managed sibling send; no retries",
       );
     } catch (error) {
       throw safeConnectedFailure(error, progress.stage);
@@ -98,10 +114,17 @@ async function deployProtectedAgent(setup, stack, evidence, owned) {
     name: `egress-${runId}`,
     value: credentials.initial,
   });
-  const source = await create(
+  const created = await create(
     "credential-sources",
     protectedSourceBody(`egress-${runId}`, secret.ref, controller.providerOrigin),
   );
+  // This is a fresh, unbound source. Record the maintainer's explicit consent
+  // before binding it. Legacy and narrower approvals require this same PATCH.
+  const source = await api("PATCH", `${namespacePath}/credential-sources/${created.id}`, {
+    adoption: "live",
+    authorityScope: "execution",
+  });
+  assert.equal(source.id, created.id);
   assert.deepEqual(
     source.egress,
     { adoption: "live", retention: "none" },
@@ -211,11 +234,19 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
       for (const pid of fs.readdirSync("/proc").filter(x => /^\d+$/.test(x))) {
         try {
           if (!fs.readlinkSync("/proc/" + pid + "/exe").endsWith("/codex")) continue;
-          const stat = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
+          const proc = "/proc/" + pid;
+          const stat = fs.readFileSync(proc + "/stat", "utf8");
           found.push({ pid, start: stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] });
         } catch (error) { if (error.code !== "ENOENT" && error.code !== "EACCES") throw error; }
       }
       if (found.length === 0) throw new Error("No running Codex process observed");
+      // Only the synthetic marker is supplied, never the provider credential.
+      // A failure to inspect a selected Codex process is a failure of this check.
+      for (const { pid } of [...found, {pid: "self"}]) {
+        if (fs.readFileSync("/proc/" + pid + "/environ").includes("SYNTHETIC-OCE-EGRESS-")) {
+          throw new Error("Provider credential marker present in the Agent environment");
+        }
+      }
       process.stdout.write(JSON.stringify(found.sort((a,b) => Number(a.pid) - Number(b.pid))));`,
       ),
     );
@@ -253,6 +284,9 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
       nonce,
       upstreamBefore: provider.observations.length,
     });
+    const { supervisor } = installed;
+    const events = () => supplierEvents(setup, placement, supervisor);
+    const before = await events();
     const result = await f.requestCodexTurnFromGatewayPod({
       namespace: placement,
       gatewayPod: gatewayPods[0].metadata.name,
@@ -272,31 +306,35 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
       assert.equal(result.assistant, nonce);
     } else {
       assertNoConnectedAssistantOutput(result);
-      if (phase !== "fresh-iam-revoked") {
-        // A malformed fixture, model error or EOF is not response-policy proof.
-        // These markers are emitted by the supplier's pre-return HTTP refusal.
-        const failure = JSON.stringify(result.error);
-        assert.ok(
-          typeof failure === "string" &&
-            failure.includes("http_response_pre_return") &&
-            failure.includes(
-              phase === "oversize" ? "response_delivery_failed" : "egress_response_policy",
-            ),
-          "expected the supplier's explicit pre-return refusal in the terminal Codex error",
-        );
-      }
+      // The selected supplier returns an empty HTTP 502. Its private, content-free
+      // transitions distinguish refusal before access from a blocked provider response.
+      assert.match(
+        JSON.stringify(result.error),
+        /\b502\b/,
+        "expected the supplier's public refusal",
+      );
     }
+    const revoked = phase === "fresh-iam-revoked";
+    const transitions = revoked
+      ? ["resolve_refused", "no_permit", "response_blocked"]
+      : [
+          "resolve_accepted",
+          "permit_accepted",
+          expected === "completed" ? "response_released" : "response_blocked",
+        ];
+    const requestId = exactTransitions(await events(), before, transitions);
     assert.deepEqual(provider.errors, [], "synthetic provider failed independently of enforcement");
     await checkpoint("turn-complete", {
       phase,
       status: result.status,
+      requestId,
       upstreamAfter: provider.observations.length,
     });
-    return nonce;
+    return { nonce, requestId };
   };
   const successfulTurn = async (phase, version) => {
     const before = provider.observations.length;
-    const nonce = await turn(phase);
+    const { nonce, requestId } = await turn(phase);
     const sent = provider.observations.slice(before);
     assert.equal(sent.length, 1, "one Agent operation must cause exactly one provider send");
     assert.equal(sent[0].nonce, nonce);
@@ -310,6 +348,7 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
     );
     assert.equal(sent[0].toolTypes.includes("web_search"), false);
     await unchanged();
+    return requestId;
   };
   return { turn, successfulTurn, unchanged };
 }
@@ -322,7 +361,14 @@ async function observeRunningAgent(setup, stack, evidence, owned, deployment, in
  * @param {InstalledProtection} installed
  * @param {AgentTurns} turns
  */
-async function verifyFirstTurnAndBinaryBypass(setup, stack, evidence, owned, installed, turns) {
+async function verifyManagedClientsAndDirectBypass(
+  setup,
+  stack,
+  evidence,
+  owned,
+  installed,
+  turns,
+) {
   const {
     controller,
     f: { kubectl },
@@ -347,12 +393,27 @@ async function verifyFirstTurnAndBinaryBypass(setup, stack, evidence, owned, ins
     ),
   );
   await checkpoint("startup-provider-traffic", { sends: provider.observations.length });
-  await successfulTurn("permitted", "initial");
-  // An ordinary workload binary must not bypass the Codex-only protected route.
-  // Check the real process outcome and the independent upstream counter together.
-  const beforeBypass = provider.observations.length;
-  const bypass = JSON.parse(
-    await kubectl(
+  const { installation, supervisor } = installed;
+  assert.equal(installation.enforcement.authorityScope, "execution");
+  for (const { binding } of installation.plan.routes) {
+    assert.equal(binding.source.source.generation, 2, "install the explicitly adopted generation");
+    assert.deepEqual(binding.source.provider, { id: "openai-static-https", generation: 2 });
+    assert.deepEqual(binding.grant, {
+      kind: "inference",
+      models: [controller.model],
+      providerTools: "none",
+    });
+  }
+  const events = () => supplierEvents(setup, placement, supervisor);
+  const released = ["resolve_accepted", "permit_accepted", "response_released"];
+  const codexRequest = await successfulTurn("permitted", "initial");
+  const beforeSibling = await events();
+
+  // An ordinary sibling, with no credential, caller claim or binding header,
+  // gets the same managed operation. A Codex-only allowlist fails this control.
+  await checkpoint("managed-sibling-start", { codexRequest });
+  const inAgent = (...args) =>
+    kubectl(
       "exec",
       harness.metadata.name,
       "--namespace",
@@ -360,29 +421,47 @@ async function verifyFirstTurnAndBinaryBypass(setup, stack, evidence, owned, ins
       "--container",
       "agent",
       "--",
-      "node",
-      "-e",
-      String.raw`
-      const { spawnSync } = require("node:child_process");
-      const result = spawnSync("/usr/bin/curl", ["--silent", "--show-error", "--fail", "--max-time", "10",
-        "--request", "POST", "--header", "content-type: application/json", "--data", process.argv[2], process.argv[1]],
-        { encoding: "utf8", timeout: 15000, maxBuffer: 65536 });
-      process.stdout.write(JSON.stringify({ status: result.status, errorCode: result.error?.code }));`,
-      `${controller.providerOrigin}/responses`,
-      JSON.stringify({ model: controller.model, input: "unapproved-binary", store: false }),
-    ),
+      ...args,
+    );
+  const nonce = `OCE-EGRESS-${randomUUID()}`;
+  const model = controller.model;
+  const before = provider.observations.length;
+  const delivered = await inAgent(
+    "curl",
+    "-q",
+    "--silent",
+    "--show-error",
+    "--fail",
+    "--max-time",
+    "35",
+    "--header",
+    "content-type: application/json",
+    "--data-binary",
+    JSON.stringify({ model, input: nonce, stream: true, store: false }),
+    "--write-out",
+    "%{http_code}",
+    `${controller.providerOrigin}/responses`,
   );
-  assert.equal(bypass.errorCode, undefined, "the bypass probe must execute, not fail to start");
+  evidence.excludesCredentials(delivered, "managed sibling response");
+  const expected = encodeSyntheticEvents(syntheticResponsesEvents(model, nonce)).toString() + "200";
   assert.ok(
-    [7, 22, 28, 35, 56].includes(bypass.status),
-    "curl must report a concrete network/proxy refusal",
+    delivered === expected,
+    "sibling receives only the complete approved Responses stream and HTTP 200",
   );
-  assert.equal(
-    provider.observations.length,
-    beforeBypass,
-    "unapproved workload egress reached the provider",
-  );
-  await checkpoint("unapproved-binary-denied", { curlStatus: bypass.status, providerSends: 0 });
+  const [sent, ...extra] = provider.observations.slice(before);
+  assert.ok(sent?.nonce === nonce && sent.status === 200 && sent.credentialVersion === "initial");
+  assert.equal(extra.length, 0, "one authenticated sibling request at the independent origin");
+  const afterSibling = await events();
+  const siblingRequest = exactTransitions(afterSibling, beforeSibling, released);
+  assert.notEqual(siblingRequest, codexRequest, "distinct protected exchanges from two callers");
+  await checkpoint("managed-sibling-received", { codexRequest, siblingRequest, providerSends: 1 });
+
+  // Try raw TCP to the same live destination by IP. The independent listener
+  // counts even a connection that delivered no valid TLS or HTTP request.
+  const observed = await tryDirectTcp(provider, setup.input.provider, inAgent);
+  assert.equal(provider.observations.length, before + 1, "direct probe sent no provider request");
+  await turns.unchanged();
+  await checkpoint("direct-bypass-denied", observed);
 }
 
 /**
@@ -407,7 +486,7 @@ async function revokeExactGrantAndObserveDenial(stack, evidence, owned, deployme
   );
   const knownDenials = new Set(beforeDenials.rows.map(({ id }) => id));
   const beforeDenied = provider.observations.length;
-  await turn("fresh-iam-revoked", "failed");
+  const { requestId } = await turn("fresh-iam-revoked", "failed");
   assert.equal(
     provider.observations.length,
     beforeDenied,
@@ -431,10 +510,7 @@ async function revokeExactGrantAndObserveDenial(stack, evidence, owned, deployme
   assert.equal(denied.details.phase, "before_access");
   assert.equal(denied.details.revisionId, revision.id);
   assert.equal(denied.outcome, "denied");
-  assert.match(
-    denied.details.requestId,
-    /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-  );
+  assert.equal(denied.details.requestId, requestId, "IAM denied the exact supervisor exchange");
   await unchanged();
   await checkpoint("fresh-iam-denial", {
     requestId: denied.details.requestId,
@@ -528,7 +604,7 @@ async function verifyHostileResponsesAndRecovery(owned, turns) {
   ]) {
     provider.setMode(mode);
     const before = provider.observations.length;
-    const nonce = await turn(mode, "failed");
+    const { nonce } = await turn(mode, "failed");
     assert.equal(
       provider.observations.length,
       before + 1,
