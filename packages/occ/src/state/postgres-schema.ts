@@ -1,6 +1,6 @@
 import type {
   InitialWorkspaceFiles,
-  StaticEgressSource,
+  ProtectedEgressSource,
   EgressInstallation,
   AgentDesiredRuntimeState,
   AgentStatus,
@@ -475,7 +475,7 @@ export const credentialSources = occSchema.table(
     name: collatedText("name").notNull(),
     type: text("type").notNull(),
     config: jsonb("config").$type<Readonly<Record<string, string>>>().notNull(),
-    egress: jsonb("egress").$type<StaticEgressSource>(),
+    egress: jsonb("egress").$type<ProtectedEgressSource>(),
     driverId: text("driver_id").notNull(),
     state: text("state").$type<CredentialSourceState>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -483,7 +483,7 @@ export const credentialSources = occSchema.table(
   (table): PgTableExtraConfigValue[] => [
     check(
       "credential_sources_egress_valid",
-      sql`${table.egress} IS NULL OR occ.static_egress_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id})`,
+      sql`${table.egress} IS NULL OR occ.egress_source_is_valid(${table.egress}, ${table.namespaceId}, ${table.id})`,
     ),
     unique("credential_sources_namespace_id_id_unique").on(table.namespaceId, table.id),
     unique("credential_sources_namespace_id_name_unique").on(table.namespaceId, table.name),

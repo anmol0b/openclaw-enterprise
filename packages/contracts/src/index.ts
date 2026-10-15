@@ -1,6 +1,6 @@
 import type {
   ExecutionAdmission,
-  StaticEgressSource,
+  ProtectedEgressSource,
   CredentialInputRead,
   VersionedSecretValue,
   EgressPlan,
@@ -24,6 +24,9 @@ export type {
   EgressRequest,
   InferenceOperation,
   StaticMaterialEvidence,
+  ProtectedEgressSource,
+  EgressOperation,
+  EgressMaterialEvidence,
   EgressRefusal,
   EgressResponse,
   EgressAttachment,
@@ -32,6 +35,7 @@ export type {
   CredentialSourceControl,
   EgressProxyDriver,
 } from "./egress.ts";
+export * from "./prepared-github-egress.ts";
 export { assertExecutionAdmission, assertExecutionReleaseAllowed } from "./egress.ts";
 import type { WorkspaceSetup } from "./workspace-setup.ts";
 
@@ -406,7 +410,7 @@ export type CredentialSourceState = "registering" | "ready" | "deleting";
 
 /** OCC record for a credential held by the selected Credential Gateway; never values. */
 export interface CredentialSource {
-  readonly egress?: StaticEgressSource;
+  readonly egress?: ProtectedEgressSource;
   readonly id: string;
   readonly namespaceId: string;
   readonly name: string;
@@ -419,7 +423,7 @@ export interface CredentialSource {
 }
 
 export interface CredentialSourceMetadata {
-  readonly egress?: Pick<StaticEgressSource, "adoption" | "retention">;
+  readonly egress?: Pick<ProtectedEgressSource, "adoption" | "retention">;
   readonly id: string;
   readonly namespaceId: string;
   readonly name: string;

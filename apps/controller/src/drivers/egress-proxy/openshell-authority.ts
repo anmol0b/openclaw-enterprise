@@ -12,7 +12,7 @@ import {
   type sendUnaryData,
   type ServerDuplexStream,
 } from "@grpc/grpc-js";
-import type { StaticMaterialEvidence } from "@openclaw-enterprise/contracts";
+import type { EgressMaterialEvidence } from "@openclaw-enterprise/contracts";
 import type { EgressForwarder } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 import { OpenShellEgressIdentity } from "./openshell-identity.ts";
@@ -203,11 +203,11 @@ export function createOpenShellEgressAuthority(
     }
     const context = record(call.request.context);
     const wireEvidence = record(call.request.evidence);
-    let evidence: StaticMaterialEvidence;
+    let evidence: EgressMaterialEvidence;
     try {
       evidence = JSON.parse(
         bytes(wireEvidence.authority_evidence).toString("utf8"),
-      ) as StaticMaterialEvidence;
+      ) as EgressMaterialEvidence;
     } catch {
       return refused("denied");
     }

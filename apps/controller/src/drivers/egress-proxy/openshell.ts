@@ -1,3 +1,5 @@
+import type { PreparedGitHubEgressLifecycle } from "@openclaw-enterprise/contracts";
+import { githubMetadataProvider } from "./github-metadata.ts";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -186,7 +188,7 @@ export function openShellEgressConfiguration(
     new Set(plan.routes.map((route) => route.binding.binding.id)).size !== 1 ||
     plan.routes.length === 0
   ) {
-    throw new Error("The protected inference slice requires exactly one binding.");
+    throw new Error("Protected egress requires exactly one explicit binding.");
   }
   const hosts = [...new Set(plan.routes.map((route) => new URL(route.origin).hostname))];
   return immutableCopy({
@@ -197,7 +199,11 @@ export function openShellEgressConfiguration(
           `oce-egress-${index}`,
           {
             name: `oce-egress-${index}`,
-            binaries: options.binaries.map((path) => ({ path })),
+            // Only a fresh GitHub source consented to authority: execution. Preserve narrower installed inference policies.
+            binaries:
+              route.binding.grant.kind === "github_repository_metadata"
+                ? []
+                : options.binaries.map((path) => ({ path })),
             endpoints: [
               {
                 host: origin.hostname,
@@ -266,6 +272,7 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
       readonly id: string;
       readonly backend: Backend<OpenShellGateway>;
       readonly sandbox: SandboxDriver;
+      readonly preparedGitHub?: PreparedGitHubEgressLifecycle;
     },
   ) {
     OpenShellEgressProxyDriver.validateConfiguration(options);
@@ -285,7 +292,10 @@ export class OpenShellEgressProxyDriver implements EgressProxyDriver {
       backend: { id: selection.backend.id, generation: 1 },
       sender: { id: `${selection.backend.id}/supervisor`, generation: 1 },
       resolver: { id: `${selection.id}/resolver`, generation: 1 },
-      providers: [openAiStaticProvider],
+      providers: selection.preparedGitHub
+        ? [openAiStaticProvider, githubMetadataProvider]
+        : [openAiStaticProvider],
+      ...(selection.preparedGitHub ? { preparedGitHub: selection.preparedGitHub } : {}),
       assertAvailable: async (signal: AbortSignal) => {
         const client = this.backend.client.clientForNamespace("");
         if (!client.getGatewayInfo) {

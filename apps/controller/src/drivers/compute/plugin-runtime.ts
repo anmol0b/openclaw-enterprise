@@ -180,7 +180,14 @@ export function pluginRuntimeSpecForRevision(
 
 function protectedProviderTools(revision: Readonly<AgentRevision>): "none" {
   const routes = revision.egressPlan?.routes;
-  if (!routes?.length || routes.some((route) => route.binding.grant.providerTools !== "none")) {
+  if (
+    !routes?.length ||
+    routes.some((route) =>
+      route.binding.grant.kind === "inference"
+        ? route.binding.grant.providerTools !== "none"
+        : route.binding.grant.kind !== "github_repository_metadata",
+    )
+  ) {
     throw new Error("Unsupported protected inference tool grant.");
   }
   return "none";

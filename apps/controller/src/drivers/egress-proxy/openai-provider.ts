@@ -2,7 +2,7 @@ import type {
   CredentialProviderDefinition,
   EgressRequest,
   EgressResponse,
-  InferenceOperation,
+  EgressOperation,
 } from "@openclaw-enterprise/contracts";
 import { asRecord, immutableCopy } from "@openclaw-enterprise/utils";
 import { normalizeOpenAiBaseUrl } from "../openai-endpoint.ts";
@@ -47,9 +47,10 @@ function protectedResponse(
   response: EgressResponse,
   credential: string,
   request: EgressRequest,
-  operation: InferenceOperation,
+  operation: EgressOperation,
 ): EgressResponse | undefined {
   if (
+    operation.kind !== "inference" ||
     response.status < 200 ||
     response.status >= 600 ||
     (response.status >= 300 && response.status < 400) ||
@@ -162,7 +163,7 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       if (models.length !== 1 || !models[0] || models[0].length > 256) {
         throw new Error("Protected inference requires one explicit model.");
       }
-      return immutableCopy({ kind: "inference", models, providerTools: "none" });
+      return immutableCopy({ kind: "inference", models, providerTools: "none" as const });
     },
     routes(source, binding) {
       const base = new URL(this.normalizeConfig(source.config).base_url!);
@@ -206,6 +207,7 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       if (
         !body ||
         typeof body.model !== "string" ||
+        route.binding.grant.kind !== "inference" ||
         route.binding.grant.providerTools !== "none" ||
         !route.binding.grant.models.includes(body.model) ||
         (body.store !== undefined && body.store !== false)

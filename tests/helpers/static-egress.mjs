@@ -64,6 +64,10 @@ export async function staticEgressFixture(
     inertProviderRule = false,
     serviceTransport,
     admitRevision = true,
+    preparedGitHub,
+    createPreparedGitHub,
+    secretValue,
+    admitSource,
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "oce-egress-wire-"));
@@ -386,6 +390,9 @@ export async function staticEgressFixture(
   );
   const egress = new OpenShellEgressProxyDriver(egressOptions, {
     id: "openshell-egress",
+    preparedGitHub: createPreparedGitHub
+      ? await createPreparedGitHub({ secretDriver })
+      : preparedGitHub,
     backend,
     sandbox,
   });
@@ -471,7 +478,7 @@ export async function staticEgressFixture(
     },
   });
   assert.equal(created.status, 201, JSON.stringify(created.body));
-  const source = created.data;
+  let source = created.data;
   const config = await app.createConfiguration(namespace.id, {
     agents: {
       defaults: {
@@ -490,7 +497,19 @@ export async function staticEgressFixture(
     },
   });
   assert.equal(createdAgent.status, 201, JSON.stringify(createdAgent.body));
-  const agent = createdAgent.data;
+  let agent = createdAgent.data;
+  if (admitSource) {
+    // A prepared provider may have a distinct issuer input; never pass it to the inference source.
+    let issuer = secret;
+    if (secretValue !== undefined) {
+      const enrolled = await app.request("POST", `/namespaces/${namespace.id}/secrets`, {
+        body: { name: "prepared-github-issuer", value: secretValue },
+      });
+      assert.equal(enrolled.status, 201);
+      issuer = enrolled.data;
+    }
+    ({ agent, source } = await admitSource({ app, agent, namespace, secret: issuer, path }));
+  }
   // Grant the real service principal through the supported policy API. Revocation later
   // commits between independent RPC transactions and must affect the final send check.
   const role = await app.request("POST", `/namespaces/${namespace.id}/iam/roles`, {
