@@ -103,6 +103,7 @@ export interface ExchangeLimits {
 }
 export type ResponsePolicy = {
   headers(status: number, headers: HeaderFields): HeaderFields;
+  readonly parseJson?: (source: string) => JsonValue;
   readonly rewriteJson: ((value: JsonValue) => JsonValue) | undefined;
 } & (
   | { readonly body: "stream"; readonly trailers?: never }
@@ -122,17 +123,27 @@ export interface RequestPlan {
   readonly inputPolicy?: (body: Uint8Array) => InputVerdict;
   /** Bind the validated complete request to a one-use prepared material selection. */
   readonly bindRequestDigest?: true;
+  /** Immutable, non-secret operation scope included in the digest, never upstream headers. */
+  readonly digestScope?: readonly string[];
 }
 /**
  * `true` admits the body; `false` refuses it as 400 `unsupported-request`; a refusal
  * object answers with its own status, stable code and service-owned message instead.
  */
 export type InputVerdict =
-  boolean | Readonly<{ status: 400 | 413; code: string; message?: string }>;
+  | boolean
+  | Readonly<{ body: Uint8Array }>
+  | Readonly<{ status: 400 | 413; code: string; message?: string }>;
 export interface PrivateUpstreamRequest {
   readonly plan: RequestPlan;
   readonly headers: HeaderFields;
+  /** If supplied, the service returns only the durable receipt, never the provider response.
+   * Settlement has its own bounded lifetime even if the client has gone away. */
+  readonly settle?: (
+    result: { created: JsonValue } | "not-submitted" | "outcome_unknown",
+  ) => Promise<OperationReceipt>;
 }
+export type OperationReceipt = Readonly<{ kind: "recorded"; status: number; body: JsonValue }>;
 export type Denied = Readonly<{ kind: "denied"; status: number; code: string }>;
 export interface RepositoryBackend {
   readonly binding: RepositoryCredentialGrantIdentity;
@@ -177,11 +188,13 @@ export interface PreparedRepositoryBackend {
     requestDigestSha256: string,
     bounds: Bounds,
   ): Promise<
-    Readonly<{
-      headers: HeaderFields;
-      /** Checked synchronously at the actual upstream request start. */
-      assertSendStart(): void;
-    }>
+    | Readonly<{
+        headers: HeaderFields;
+        settle?: NonNullable<PrivateUpstreamRequest["settle"]>;
+        /** Checked synchronously at the actual upstream request start. */
+        assertSendStart(): void;
+      }>
+    | OperationReceipt
   >;
 }
 

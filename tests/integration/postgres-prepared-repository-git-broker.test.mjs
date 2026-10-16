@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { request, Agent } from "node:https";
+import { randomUUID } from "node:crypto";
+import { createServer as createHttpServer } from "node:http";
+import { createNativeClientMaterial } from "../fixtures/repository-credentials/clients.mjs";
 import { connect, createServer as createTcpServer } from "node:net";
 import { readFile, writeFile } from "node:fs/promises";
 import test from "node:test";
@@ -75,6 +78,7 @@ async function startBroker(
     clock,
     socketPath,
     gitOrigin,
+    apiOrigin: gh.origin,
     gatewayOrigin,
     limits: config.limits,
   });
@@ -91,14 +95,16 @@ async function startBroker(
   });
   t.after(() => server.close());
   const address = gatewayOrigin + ":" + server.address.port;
-  const opened = service.open({
-    durationSeconds: 600,
-    namespaceId,
-    repositoryRef: binding.repositoryRef,
-    profile: binding.profile,
-    expectedBinding: binding.grant,
-    deadlineWallMs,
-  });
+  const openSession = () =>
+    service.open({
+      durationSeconds: 600,
+      namespaceId,
+      repositoryRef: binding.repositoryRef,
+      profile: binding.profile,
+      expectedBinding: binding.grant,
+      deadlineWallMs,
+    });
+  const opened = openSession();
   const authorization =
     "Basic " + Buffer.from("gateway-session:" + opened.bearer).toString("base64");
   const agent = new Agent({ ca: tls.ca, keepAlive: true, maxSockets: 1 });
@@ -109,7 +115,11 @@ async function startBroker(
         address + path,
         { agent, method, headers: { authorization, host: "127.0.0.1", ...headers } },
         (res) => {
-          res.resume().once("end", () => resolve({ status: res.statusCode }));
+          const chunks = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.once("end", () =>
+            resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString() }),
+          );
         },
       );
       req.once("error", reject);
@@ -146,6 +156,7 @@ async function startBroker(
     origin,
     observed,
     opened,
+    openSession,
     env,
     pushRef,
     repository,
@@ -318,3 +329,193 @@ test(
     assert.equal(f.gh.issuesOfTokens.length, 1);
   },
 );
+
+for (const mode of ["Git only", "created", "lost provider reply", "mismatched provider 201"]) {
+  test("prepared draft pull: " + mode, { ...requiresPostgres, timeout: 45000 }, async (t) => {
+    const draftPull = mode !== "Git only";
+    const f = await fixture(t, {
+      draftPull,
+      draftResponse:
+        mode === "mismatched provider 201" ? (body) => ({ ...body, base: body.head }) : undefined,
+      openBroker: (input) => startBroker(t, input),
+    });
+    const b = f.broker;
+    const path = "/repos/" + b.repository + "/pulls";
+    const head = b.pushRef.slice("refs/heads/".length);
+    const base = "main";
+    const title = "Scoped review";
+    const body = "";
+    const operationId = randomUUID();
+    const packet = { title, head, base, body, draft: true };
+    const headers = {
+      "content-type": "application/json",
+      authorization: "Bearer " + b.opened.bearer,
+      "x-oce-operation-id": operationId,
+    };
+    const send = (input = {}) =>
+      b.http(path, { method: "POST", headers, body: JSON.stringify(packet), ...input });
+    const observed = () => f.gh.trace.filter((q) => q.method === "POST" && q.target === path);
+    if (!draftPull) {
+      await prepare(f);
+      assert.equal((await send()).status, 400);
+      assert.equal(observed().length, 0);
+      return;
+    }
+    // A cold request cannot mint a token or leave a durable operation.
+    assert.equal((await send()).status, 503);
+    assert.equal(f.gh.issuesOfTokens.length, 0);
+    await prepare(f);
+    for (const input of [
+      { body: JSON.stringify({ ...packet, head: "main" }) },
+      { body: JSON.stringify({ ...packet, base: "other" }) },
+      { body: JSON.stringify({ ...packet, draft: false }) },
+      { body: JSON.stringify(packet).replace('"head":', '"he\\u0061d":"wrong","head":') },
+      { headers: { ...headers, "x-github-api-version": "2022-01-01" } },
+      { method: "GET", body: undefined },
+    ]) {
+      assert.equal((await send(input)).status, 400);
+    }
+    assert.equal(observed().length, 0);
+    assert.equal(f.gh.issuesOfTokens.length, 1);
+
+    if (mode === "created") {
+      // Exercise the shipping client and real computed manifest through an obligatory CONNECT.
+      // The TLS broker listens on a random port unreachable at the client's selected port 443.
+      const { root } = await createNativeClientMaterial(
+        t,
+        [{ opened: b.opened, repositoryRef: "source" }],
+        { ca: f.gh.tls.ca },
+      );
+      const proxy = createHttpServer();
+      const tunnels = [];
+      proxy.on("connect", (req, socket, early) => {
+        tunnels.push(req.url);
+        const upstream = connect(Number(new URL(b.address).port), "127.0.0.1", () => {
+          socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          upstream.write(early);
+          socket.pipe(upstream).pipe(socket);
+        });
+        upstream.on("error", () => socket.destroy());
+        socket.on("error", () => upstream.destroy());
+      });
+      const proxyAddress = (await listen(t, proxy)).replace(/^https:/, "http:");
+      const client = new URL(
+        "../../apps/controller/src/drivers/repo/github/credentials/client/draft-pr.ts",
+        import.meta.url,
+      ).href;
+      const args = [
+        "pr-create",
+        "--operation-id",
+        operationId,
+        "--draft",
+        "--head",
+        head,
+        "--base",
+        base,
+        "--title",
+        title,
+      ];
+      const command =
+        "import {createDraftPull} from " +
+        JSON.stringify(client) +
+        "; await createDraftPull(process.argv.slice(2),process.argv[1]);";
+      const output = await run(
+        process.execPath,
+        ["--input-type=module", "-e", command, root, ...args],
+        {
+          env: { ...cleanEnvironment(), HTTPS_PROXY: proxyAddress },
+          allowFailure: true,
+        },
+      );
+      assert.equal(output.code, 0, output.stderr);
+      assert.deepEqual(tunnels, ["127.0.0.1:443"]);
+      const receipt = JSON.parse(output.stdout);
+      assert.equal(receipt.operationId, operationId);
+      assert.equal(receipt.head.ref, head);
+      assert.equal(receipt.base.ref, base);
+      assert.equal(receipt.draft, true);
+      assert.equal(receipt.url, "https://github.com/" + b.repository + "/pull/" + receipt.number);
+      assert.ok(
+        !output.stdout.includes("must-not-escape"),
+        "upstream nested credentials must never be returned",
+      );
+      const repeat = await send();
+      assert.equal(repeat.status, 201);
+      assert.deepEqual(
+        JSON.parse(repeat.text),
+        receipt,
+        "same operation returns the committed safe projection",
+      );
+    } else {
+      // Provider creates the PR and drops its response. We can inspect that projection here;
+      // the production broker must preserve uncertainty rather than claim that evidence or re-POST.
+      if (mode === "lost provider reply") {
+        f.gh.disconnectAfterMutation("POST", path);
+      }
+      for (let i = 0; i < 2; i++) {
+        const response = await send();
+        assert.equal(response.status, 409);
+        const value = JSON.parse(response.text);
+        assert.equal(value.operationId, operationId);
+        assert.equal(value.error, "outcome_unknown");
+      }
+    }
+    const other = await send({ headers: { ...headers, "x-oce-operation-id": randomUUID() } });
+    assert.equal(other.status, 409);
+    assert.equal(JSON.parse(other.text).error, "operation_conflict");
+    const changed = await send({ body: JSON.stringify({ ...packet, title: "different" }) });
+    assert.equal(JSON.parse(changed.text).error, "operation_conflict");
+    // An independently authenticated observer reconciles by reading, never by trying another create.
+    // Its observation cannot be presented as a delivered result to the Agent which lost the reply.
+    const observer = randomUUID();
+    f.gh.acceptStatic(observer);
+    const query = new URLSearchParams({ base, head: b.repository.split("/")[0] + ":" + head });
+    const visible = await new Promise((resolve, reject) => {
+      request(
+        f.gh.origin + path + "?" + query,
+        { ca: f.gh.tls.ca, headers: { authorization: "Bearer " + observer } },
+        async (res) => {
+          assert.equal(res.statusCode, 200);
+          const chunks = [];
+          for await (const chunk of res) {
+            chunks.push(chunk);
+          }
+          resolve(JSON.parse(Buffer.concat(chunks).toString()));
+        },
+      )
+        .once("error", reject)
+        .end();
+    });
+    assert.equal(visible.length, 1);
+    const [created] = visible;
+    assert.equal(created.head.ref, head);
+    assert.equal(created.base.ref, base);
+    assert.equal(created.maintainer_can_modify, false);
+    assert.equal(f.gh.pulls.size, 1);
+    if (mode !== "lost provider reply") {
+      assert.equal(observed()[0].usedBearer, true);
+      assert.equal(observed()[0].forwardedOperationId, false);
+    }
+    assert.equal(observed()[0].apiVersion, "2026-03-10");
+    assert.equal(observed()[0].tokenIndex, 1);
+    assert.equal(
+      observed().length,
+      1,
+      "exactly one provider create attempt, including ambiguous response",
+    );
+    await f.withdraw();
+    assert.equal((await send()).status, 503, "cannot replay even a receipt after withdrawal");
+    assert.equal(observed().length, 1);
+    // A legitimate replacement with the identical grant and old client operation cannot obtain
+    // the prior admission's receipt, a second permit, or a fresh token by trying this endpoint.
+    const replacement = b.openSession();
+    await f.admitReplacement(replacement.session.sessionId);
+    const next = await send({
+      headers: { ...headers, authorization: "Bearer " + replacement.bearer },
+    });
+    assert.equal(next.status, 409);
+    assert.deepEqual(JSON.parse(next.text), { error: "operation_conflict" });
+    assert.equal(observed().length, 1);
+    assert.equal(f.gh.issuesOfTokens.length, 1, "no request-time mint or permission escalation");
+  });
+}

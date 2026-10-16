@@ -17,6 +17,7 @@ export interface GitHubPreparationAdmission {
     profile: GitHubTokenProfile;
     /** Only the repository Git family has an exact admitted review ref. */
     pushRef?: string;
+    pullRequestBase?: string;
   }>;
 }
 
@@ -96,7 +97,8 @@ export function samePreparationAdmission(
     a.grant.repositoryId === b.grant.repositoryId &&
     a.grant.repository === b.grant.repository &&
     a.grant.profile === b.grant.profile &&
-    a.grant.pushRef === b.grant.pushRef
+    a.grant.pushRef === b.grant.pushRef &&
+    a.grant.pullRequestBase === b.grant.pullRequestBase
   );
 }
 

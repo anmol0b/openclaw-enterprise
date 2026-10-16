@@ -581,7 +581,7 @@ jobs:
         run: |
           host=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
           OCC_DEVELOPMENT_PREPARED_GIT_HOST_IP="$host" \
-            node scripts/qualification/skipper-private-git-fixture.mjs -- node scripts/ci/skipper-prepared-git-installed.mjs
+            node scripts/qualification/skipper-private-git-fixture.mjs --team-review -- node scripts/ci/skipper-prepared-git-installed.mjs
           echo 'Private Git origin, synthetic issuer and credential inputs removed.' >> "$GITHUB_STEP_SUMMARY"
       # The runner writes only verified test metadata here, after checking proof and cleanup.
       - name: Upload selected test and cleanup outcome

@@ -30,7 +30,8 @@ export function createGitHubDriverFactory(options: GitHubFactoryOptions): GitHub
   }
   if (
     options.binding &&
-    (Object.hasOwn(options.binding, "transport") || options.binding.profile === "git-ref-write")
+    (Object.hasOwn(options.binding, "transport") ||
+      ["git-ref-write", "git-ref-draft-pr"].includes(options.binding.profile))
   ) {
     throw new Error("invalid-binding");
   }

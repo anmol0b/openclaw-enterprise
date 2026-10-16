@@ -44,6 +44,7 @@ type SelectedBackend =
       readonly registry: GitHubRepositoryRegistry;
       readonly socketPath: string;
       readonly gitOrigin?: string;
+      readonly apiOrigin?: string;
     }
   | {
       readonly kind: "github-app-registry";
@@ -98,7 +99,9 @@ export async function loadConfiguration(
               "kind",
               "backendId",
               "registryFile",
-              ...(prepared ? ["socketPath", "gitOrigin", "gitCaFile"] : ["privateKeyFile"]),
+              ...(prepared
+                ? ["socketPath", "gitOrigin", "apiOrigin", "gitCaFile"]
+                : ["privateKeyFile"]),
             ].includes(key),
         )
       ) {
@@ -136,7 +139,15 @@ export async function loadConfiguration(
         if (backendInput.gitCaFile !== undefined) {
           upstreamCa = await loadPublicCa(string(backendInput.gitCaFile));
         }
-        selected = { kind: "github-prepared-git-registry", registry, socketPath, ...origin };
+        selected = {
+          kind: "github-prepared-git-registry",
+          registry,
+          socketPath,
+          ...origin,
+          ...(backendInput.apiOrigin === undefined
+            ? {}
+            : { apiOrigin: string(backendInput.apiOrigin) }),
+        };
       } else {
         selected = {
           kind: "github-app-registry",
@@ -218,6 +229,7 @@ export async function loadConfiguration(
           registry: selected.registry,
           socketPath: selected.socketPath,
           ...(selected.gitOrigin === undefined ? {} : { gitOrigin: selected.gitOrigin }),
+          ...(selected.apiOrigin === undefined ? {} : { apiOrigin: selected.apiOrigin }),
         });
         break;
       }

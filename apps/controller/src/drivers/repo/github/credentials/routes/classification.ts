@@ -325,7 +325,7 @@ export function classifyRoute(
   }
   const git = classifyGitRoute(head, target, policy.repository, policy.profile);
   // A Git-only App grant has no REST or GraphQL path around its receive-pack ref check.
-  if (git || policy.profile === "git-ref-write") {
+  if (git || policy.profile === "git-ref-write" || policy.profile === "git-ref-draft-pr") {
     return git;
   }
   if (head.contentEncoding !== "identity") {

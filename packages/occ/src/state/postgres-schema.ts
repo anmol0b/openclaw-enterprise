@@ -1819,7 +1819,9 @@ export const preparedGitHubFamilies = occSchema.table(
    AND admission->>'familyId' = source_id AND jsonb_typeof(issuer->'backendRef') = 'object')
   OR
   (source->>'adoption' = 'prepared_repository_git' AND source_id = 'repository-git:' || (source #>> '{session,admissionId}')
-   AND source #>> '{grant,profile}' = 'git-ref-write' AND source #>> '{grant,pushRef}' LIKE 'refs/heads/%'
+   AND ((source #>> '{grant,profile}' = 'git-ref-write' AND NOT (source->'grant' ? 'pullRequestBase'))
+       OR (source #>> '{grant,profile}' = 'git-ref-draft-pr' AND length(source #>> '{grant,pullRequestBase}') > 0))
+   AND source #>> '{grant,pushRef}' LIKE 'refs/heads/%'
    AND admission->>'familyId' = source_id AND admission->'grant' = source->'grant'
    AND source #>> '{grant,id}' = source #>> '{session,grant,grantId}'
    AND source #>> '{grant,repositoryId}' = source #>> '{session,grant,repositoryId}'
@@ -1897,6 +1899,49 @@ export const preparedRepositoryGitUses = occSchema.table(
     check(
       "prepared_repository_git_uses_request_digest_sha256_check",
       sql`${t.requestDigestSha256} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+export const preparedRepositoryDraftPulls = occSchema.table(
+  "prepared_repository_draft_pulls",
+  {
+    grantId: text("grant_id").primaryKey(),
+    operationId: uuid("operation_id").notNull(),
+    receiptId: uuid("receipt_id").notNull().unique(),
+    admissionId: text("admission_id")
+      .notNull()
+      .references(() => repositorySessionAttempts.admissionId),
+    attemptId: uuid("attempt_id")
+      .notNull()
+      .references(() => preparedGitHubAttempts.id),
+    materialVersion: uuid("material_version").notNull(),
+    requestDigestSha256: text("request_digest_sha256").notNull(),
+    scope: jsonb("scope").notNull(),
+    admittedAt: timestamp("admitted_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    sendStartBy: timestamp("send_start_by", { withTimezone: true }).notNull(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    outcome: text("outcome").notNull().default("outcome_unknown"),
+    projection: jsonb("projection"),
+  },
+  (t) => [
+    check(
+      "prepared_repository_draft_pulls_request_digest_sha256_check",
+      sql`${t.requestDigestSha256} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "prepared_repository_draft_pulls_outcome_check",
+      sql`${t.outcome} IN ('created','not-submitted','outcome_unknown')`,
+    ),
+    check(
+      "prepared_repository_draft_pulls_check",
+      sql`(${t.outcome}='created') = (${t.projection} IS NOT NULL)`,
+    ),
+    check(
+      "prepared_repository_draft_pulls_check1",
+      sql`${t.settledAt} IS NOT NULL OR ${t.outcome}='outcome_unknown'`,
     ),
   ],
 );

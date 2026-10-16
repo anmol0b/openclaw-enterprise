@@ -148,7 +148,12 @@ export interface PreparedGitHubUseRequest {
   readonly sessionId: string;
   readonly exchangeId: string;
   readonly operation:
-    "advertise-upload-pack" | "upload-pack" | "advertise-receive-pack" | "receive-pack";
+    | "advertise-upload-pack"
+    | "upload-pack"
+    | "advertise-receive-pack"
+    | "receive-pack"
+    | "create-draft-pull";
+  readonly pull?: PreparedGitHubPullScope;
   readonly requestDigestSha256: string;
   /** The admitted full review ref, also required on reads to bind the policy. */
   readonly pushRef: string;
@@ -163,3 +168,23 @@ export interface PreparedGitHubUseResponse {
   readonly preparationAttemptId: string;
   readonly materialVersion: string;
 }
+
+/** Additional, explicitly admitted one-draft capability. All fields are nonsecret. */
+export interface PreparedGitHubPullScope {
+  operationId: string;
+  apiOrigin: string;
+  repository: string;
+  head: string;
+  base: string;
+}
+export interface PreparedGitHubPullProjection {
+  id: string;
+  number: number;
+  url: string;
+  state: "open";
+  draft: true;
+  head: { repositoryId: string; ref: string; sha: string };
+  base: { repositoryId: string; ref: string; sha: string };
+}
+export type PreparedGitHubPullResult =
+  { created: PreparedGitHubPullProjection } | "not-submitted" | "outcome_unknown";

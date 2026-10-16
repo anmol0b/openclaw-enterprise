@@ -1,12 +1,40 @@
 import type {
   PreparedGitHubUseRequest,
+  PreparedGitHubPullResult,
+  PreparedGitHubPullScope,
+  PreparedGitHubPullProjection,
   PreparedGitHubUseResponse,
   RepositoryRevisionState,
 } from "@openclaw-enterprise/contracts";
 import type { PostgresPool } from "@openclaw-enterprise/occ";
+import type { OperationReceipt } from "../../credentials/backend-contracts.ts";
+import { draftOperationId, validateDraftProjection } from "./prepared-draft-pull.ts";
 import { isDeepStrictEqual } from "node:util";
 import { PreparedGitHubPostgres } from "./prepared-postgres.ts";
 import type { GitHubPreparationAdmission } from "./prepared-contracts.ts";
+
+const pulls = "occ.prepared_repository_draft_pulls";
+type PullRow = {
+  settled_at?: Date;
+  scope: PreparedGitHubPullScope & { repositoryId: string };
+  admission_id: string;
+  operation_id: string;
+  receipt_id: string;
+  request_digest_sha256: string;
+  outcome: "outcome_unknown" | "created" | "not-submitted";
+  projection: PreparedGitHubPullProjection;
+};
+function pullReceipt(row: PullRow, conflict = false): OperationReceipt {
+  const { operation_id: operationId, receipt_id: receiptId, outcome } = row;
+  if (conflict) {
+    return { kind: "recorded", status: 409, body: { error: "operation_conflict" } };
+  }
+  if (outcome !== "created") {
+    return { kind: "recorded", status: 409, body: { operationId, receiptId, error: outcome } };
+  }
+  const result = validateDraftProjection(row.projection, row.scope);
+  return { kind: "recorded", status: 201, body: { operationId, receiptId, ...result } };
+}
 
 const adoption = "prepared_repository_git";
 const families = "occ.prepared_github_families";
@@ -49,7 +77,7 @@ export interface PreparedRepositoryGitSource {
   readonly key: { source: { id: string } };
   readonly session: PreparedRepositorySession;
   readonly grant: GitHubPreparationAdmission["grant"] & {
-    profile: "git-ref-write";
+    profile: "git-ref-write" | "git-ref-draft-pr";
     pushRef: string;
   };
 }
@@ -129,7 +157,10 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
 
   /** Lock against admission withdrawal and material rotation. If commit is uncertain the copy is
    * discarded, but its non-secret use receipt may have committed. Never retry an exchange. */
-  async use(q: PreparedGitHubUseRequest, signal: AbortSignal): Promise<PreparedGitHubUseResponse> {
+  async use(
+    q: PreparedGitHubUseRequest,
+    signal: AbortSignal,
+  ): Promise<PreparedGitHubUseResponse | OperationReceipt> {
     const deadline = Date.parse(q.deadlineAt);
     const valid = (until: number) => !signal.aborted && Date.now() < until;
     const fail = (): never => {
@@ -163,6 +194,42 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
         ) {
           return fail();
         }
+        // Authority and live-session locks above apply equally to reads of an existing receipt.
+        const grant = source.grant;
+        let scope: PullRow["scope"] | undefined;
+        if (q.operation === "create-draft-pull") {
+          const pull = q.pull;
+          if (
+            !pull ||
+            grant.profile !== "git-ref-draft-pr" ||
+            !draftOperationId.test(pull.operationId) ||
+            pull.repository !== grant.repository ||
+            "refs/heads/" + pull.head !== grant.pushRef ||
+            pull.head === pull.base ||
+            pull.base !== grant.pullRequestBase ||
+            !pull.apiOrigin ||
+            pull.apiOrigin !== this.authority.split("#")[0]
+          ) {
+            return fail();
+          }
+          const { operationId, apiOrigin, repository, head, base } = pull;
+          scope = { operationId, apiOrigin, repository, head, base, repositoryId: q.repositoryId };
+          const {
+            rows: [prior],
+          } = await c.query(`SELECT * FROM ${pulls} WHERE grant_id=$1`, [q.grantId]);
+          if (prior) {
+            const row = prior as PullRow;
+            return pullReceipt(
+              row,
+              row.admission_id !== current.session.admissionId ||
+                row.operation_id !== pull.operationId ||
+                row.request_digest_sha256 !== q.requestDigestSha256 ||
+                !isDeepStrictEqual(row.scope, scope),
+            );
+          }
+        } else if (q.pull) {
+          return fail();
+        }
         const { rows: found } = await c.query(
           `SELECT a.id,a.admission,a.material_version, a.usable_until, a.sealed
           FROM ${families} f JOIN ${attempts} a USING(source_id)
@@ -194,20 +261,44 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
           return fail();
         }
         const sendStartBy = new Date(until).toISOString();
-        await c.query(
-          `INSERT INTO occ.prepared_repository_git_uses
+        if (scope) {
+          // The primary key admits only ONE create for this repository/ref/base grant,
+          // across process or session replacement. Unknown/expired permits are never reissued.
+          const claim = await c.query(
+            `INSERT INTO ${pulls}
+             (grant_id,operation_id,receipt_id,admission_id,attempt_id,material_version,request_digest_sha256,scope,send_start_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (grant_id) DO NOTHING RETURNING receipt_id`,
+            [
+              q.grantId,
+              scope.operationId,
+              q.exchangeId,
+              current.session.admissionId,
+              m.id,
+              m.material_version,
+              q.requestDigestSha256,
+              scope,
+              sendStartBy,
+            ],
+          );
+          if (!claim.rowCount) {
+            return fail();
+          }
+        } else {
+          await c.query(
+            `INSERT INTO occ.prepared_repository_git_uses
           (exchange_id,admission_id,attempt_id,material_version,operation,request_digest_sha256,send_start_by)
           VALUES($1,$2,$3,$4,$5,$6,$7)`,
-          [
-            q.exchangeId,
-            current.session.admissionId,
-            m.id,
-            m.material_version,
-            q.operation,
-            q.requestDigestSha256,
-            sendStartBy,
-          ],
-        );
+            [
+              q.exchangeId,
+              current.session.admissionId,
+              m.id,
+              m.material_version,
+              q.operation,
+              q.requestDigestSha256,
+              sendStartBy,
+            ],
+          );
+        }
         if (!valid(until)) {
           return fail();
         }
@@ -219,6 +310,9 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
           materialVersion: m.material_version,
         };
       });
+      if ("kind" in result) {
+        return result;
+      }
       if (!bytes || !valid(Date.parse(result.sendStartBy))) {
         return fail();
       }
@@ -226,5 +320,35 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     } finally {
       bytes?.fill(0);
     }
+  }
+
+  /** The original sender may settle once, including after withdrawal; no authority is released here. */
+  async finishPull(receiptId: string, result: PreparedGitHubPullResult): Promise<OperationReceipt> {
+    if (!draftOperationId.test(receiptId)) {
+      throw new Error("invalid-operation-receipt");
+    }
+    return this.transaction(async (c) => {
+      const {
+        rows: [saved],
+      } = await c.query(`SELECT * FROM ${pulls} WHERE receipt_id=$1 FOR UPDATE`, [receiptId]);
+      const row = saved as PullRow | undefined;
+      if (!row || row.settled_at) {
+        throw new Error("operation-already-settled");
+      }
+      if (typeof result === "object" && result && "created" in result) {
+        row.projection = validateDraftProjection(result.created, row.scope);
+        row.outcome = "created";
+      } else if (result === "outcome_unknown" || result === "not-submitted") {
+        row.outcome = result;
+      } else {
+        throw new Error("invalid-operation-result");
+      }
+      await c.query(
+        `UPDATE ${pulls} SET outcome=$2, projection=$3::jsonb, settled_at=clock_timestamp()
+        WHERE receipt_id=$1 AND settled_at IS NULL`,
+        [receiptId, row.outcome, row.projection],
+      );
+      return pullReceipt(row);
+    });
   }
 }

@@ -3,8 +3,9 @@
 export function parseJsonMembers(
   text: string,
   onDuplicate: (decodedName: string, depth: number) => void,
+  reviver?: (key: string, value: unknown, context?: { source?: string }) => unknown,
 ): unknown {
-  const parsed: unknown = JSON.parse(text);
+  const parsed: unknown = JSON.parse(text, reviver);
   const stack: { keys: Set<string> | undefined; expectingKey: boolean }[] = [];
   for (const [token] of text.matchAll(/"(?:\\.|[^"\\])*"|[{}[\],:]/gs)) {
     if (token === "{" || token === "[") {

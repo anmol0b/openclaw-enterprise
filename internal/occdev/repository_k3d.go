@@ -158,9 +158,11 @@ func (r *runner) loadDevelopmentRepositoryInputs(sandboxDriver string) (*develop
 			if len(refs) == 1 {
 				ref, _ = refs[0].(string)
 			}
-			if policy["transport"] != "git-only" || !reflect.DeepEqual(profiles, []any{"git-write"}) ||
+			transportOK := policy["transport"] == "git-only" ||
+				(policy["transport"] == "git-and-draft-pr" && policy["pullRequestBase"] == "main")
+			if !transportOK || !reflect.DeepEqual(profiles, []any{"git-write"}) ||
 				!strings.HasPrefix(ref, "refs/heads/review/") || len(ref) <= len("refs/heads/review/") {
-				return nil, fmt.Errorf("prepared Git qualification requires git-only, git-write and one review ref")
+				return nil, fmt.Errorf("prepared Git qualification requires explicit Git or draft PR transport, git-write and one review ref")
 			}
 		}
 		seenProfiles := map[string]bool{}
@@ -375,7 +377,7 @@ func (r *runner) enableDevelopmentRepository(ctx context.Context, state *develop
 	backend := map[string]any{"kind": "github-app-registry", "backendId": inputs.backendID}
 	if inputs.preparedOrigin != "" {
 		backend["kind"] = "github-prepared-git-registry"
-		backend["gitOrigin"], backend["gitCaFile"] = inputs.preparedOrigin, preparedCA
+		backend["gitOrigin"], backend["apiOrigin"], backend["gitCaFile"] = inputs.preparedOrigin, inputs.preparedOrigin, preparedCA
 	}
 	config, err := json.Marshal(map[string]any{
 		"gateway":       map[string]any{"listen": "0.0.0.0:8443", "controlSocket": "/run/openclaw/repository-control/private/control.sock"},

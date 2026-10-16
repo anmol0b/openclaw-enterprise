@@ -505,6 +505,14 @@
       "tag": "0063_prepared_repository_git",
       "breakpoints": true,
       "sha256": "5fbb2769ec51c46a48c4e6dd9102baba46d71321b39c4176cdd864e1ad178575"
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1787000000064,
+      "tag": "0064_prepared_repository_draft_pulls",
+      "breakpoints": true,
+      "sha256": "4cfa28c47b246638a7e3831b93f1eac25a6e6ffca4e7cbd454e4ade306089b07"
     }
   ],
   "initialSchemaStates": {

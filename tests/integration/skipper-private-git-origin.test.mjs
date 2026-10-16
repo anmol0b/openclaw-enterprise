@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  fetchAfterWithdrawalCommand,
   startSkipperPrivateGitOrigin,
   withdrawDuringFetchCommand,
 } from "../fixtures/skipper-private-git-origin.mjs";
@@ -45,6 +46,7 @@ test(
     const fixture = await startSkipperPrivateGitOrigin({
       repositoryRef: "qualification-private",
       approvalRef: "refs/heads/qualification/approved",
+      teamReview: true,
     });
     t.after(() => fixture.close());
     const directory = await mkdtemp(join(tmpdir(), "private-git-client-"));
@@ -188,6 +190,27 @@ test(
     assert.equal(witness.refs["refs/heads/main"], fixture.initialSha);
     assert.match(witness.commit, /Approved fixture change/);
     assert.match(witness.tree, /\tapproved.txt\n/);
+    const draftPermissions = { metadata: "read", contents: "write", pull_requests: "write" };
+    const draftToken = await issue(draftPermissions);
+    assert.equal(draftToken.status, 201);
+    const draft = (token) =>
+      api(fixture, "POST", "/repos/" + fixture.repository + "/pulls", "Bearer " + token, {
+        title: "Review qualification",
+        body: "Native push independently inspected",
+        draft: true,
+        base: "main",
+        head: "qualification/approved",
+        maintainer_can_modify: false,
+      });
+    assert.equal((await draft(token)).status, 403, "Git-only token must not create a draft");
+    assert.equal(await fixture.observePullRequest(), null);
+    const { status, body: pull } = await draft(draftToken.body.token);
+    assert.equal(status, 201, "separately scoped draft creation accepted at controlled provider");
+    assert.equal(pull.head.sha, sha);
+    assert.equal(pull.head.repo.full_name, fixture.repository);
+    assert.equal(pull.base.sha, fixture.initialSha);
+    assert.deepEqual(await fixture.observePullRequest(), pull);
+    assert.equal(fixture.snapshot().endpoints["pull-create:201"], 1);
     await git(["clone", "--branch", "qualification/approved", fixture.cloneUrl, "reader"], token);
     assert.equal(
       await readFile(join(directory, "reader", "approved.txt"), "utf8"),
@@ -235,6 +258,17 @@ test(
       1,
       "fixture observed the second authenticated POST",
     );
+    const fresh = fetchAfterWithdrawalCommand(".", 401);
+    const beforeFresh = fixture.snapshot().requests;
+    const refused = await run("sh", ["-c", fresh], {
+      cwd: client,
+      env: { ...env, ...envAuth },
+      allowFailure: true,
+    });
+    assert.equal(refused.code, 0, "new authenticated Git process sees the explicit refusal");
+    assert.ok(fixture.snapshot().requests > beforeFresh);
+    const uncredentialed = await run("sh", ["-c", fresh], { cwd: client, env, allowFailure: true });
+    assert.notEqual(uncredentialed.code, 0, "anonymous refusal must fail the withdrawal oracle");
     assert.notEqual(
       (await git(["clone", fixture.cloneUrl, "revoked"], token, { allowFailure: true })).code,
       0,
@@ -254,7 +288,7 @@ test(
       401,
     );
     const snapshot = fixture.snapshot();
-    assert.equal(snapshot.issued, 3);
+    assert.equal(snapshot.issued, 4);
     assert.ok(snapshot.endpoints["upload-pack:200"] >= 2);
     assert.ok(snapshot.endpoints["receive-pack:200"] >= 4);
     assert.ok(snapshot.endpoints["other:404"] >= 1);

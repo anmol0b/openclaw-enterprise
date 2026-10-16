@@ -3,6 +3,7 @@ import type {
   Bounds,
   Denied,
   PrivateUpstreamRequest,
+  OperationReceipt,
   RequestHead,
   RequestPlan,
 } from "./backend-contracts.ts";
@@ -15,6 +16,7 @@ export interface DispatchGate {
   track(io: Promise<void>): void;
 }
 export type ExchangeOutcome =
+  | OperationReceipt
   | Readonly<{ kind: "completed"; status: number }>
   | Readonly<{ kind: "not-dispatched" | "possibly-dispatched"; code: string }>;
 export type ExchangeSender = (

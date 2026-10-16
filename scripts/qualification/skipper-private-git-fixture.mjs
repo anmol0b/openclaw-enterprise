@@ -14,19 +14,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startSkipperPrivateGitOrigin } from "../../tests/fixtures/skipper-private-git-origin.mjs";
 
-const [separator, command, ...args] = process.argv.slice(2);
+const teamReview = process.argv[2] === "--team-review";
+const [separator, command, ...args] = process.argv.slice(teamReview ? 3 : 2);
 assert.equal(separator, "--");
 assert.ok(command);
 const host = process.env.OCC_DEVELOPMENT_PREPARED_GIT_HOST_IP;
 assert.ok(isIPv4(host) && /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(host));
 const id = randomBytes(8).toString("hex");
 const repository = "fixture/skipper-" + id;
-const approvalRef = "refs/heads/review/skipper-" + id;
+const approvalRef = "refs/heads/review/skipper-" + (teamReview ? "acceptance-" : "") + id;
 const dir = await mkdtemp(join(tmpdir(), "oce-skipper-"));
 const socketPath = join(dir, "witness.sock");
-const origin = await startSkipperPrivateGitOrigin({ host, repository, approvalRef });
+const origin = await startSkipperPrivateGitOrigin({ host, repository, approvalRef, teamReview });
 const repositoryRef = origin.repositoryRef;
-const publicInput = { id, repository, repositoryRef, approvalRef, initialSha: origin.initialSha };
+const publicInput = {
+  id,
+  repository,
+  repositoryRef,
+  approvalRef,
+  teamReview,
+  initialSha: origin.initialSha,
+};
 const witness = createServer(async ({ url, method }, res) => {
   const out = (v) =>
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(v));
@@ -52,6 +60,8 @@ const witness = createServer(async ({ url, method }, res) => {
       out(await origin.readRefs());
     } else if (method === "GET" && url === "/fetch") {
       out(await origin.witnessCommit());
+    } else if (teamReview && method === "GET" && url === "/pull") {
+      out(await origin.observePullRequest());
     } else if (method === "DELETE" && /^\/review\/[0-9a-f]{40}$/.test(url)) {
       await origin.deleteApprovalRef(url.slice(-40));
       out(await origin.readRefs());
@@ -80,7 +90,9 @@ try {
             namespaceId: "${OCC_INITIAL_NAMESPACE_ID}",
             profiles: ["git-write"],
             pushRefAllowlist: [approvalRef],
-            transport: "git-only",
+            ...(teamReview
+              ? { transport: "git-and-draft-pr", pullRequestBase: "main" }
+              : { transport: "git-only" }),
           },
         ],
       },
@@ -104,6 +116,7 @@ try {
       OCC_DEVELOPMENT_REPOSITORY_INPUT_DIRECTORY: dir,
       OCC_DEVELOPMENT_PREPARED_GIT_PROVIDER_ORIGIN: origin.origin,
       OCC_TEST_SKIPPER_PRIVATE_GIT_WITNESS: socketPath,
+      OCC_TEST_SKIPPER_TEAM_REVIEW: teamReview ? "1" : "0",
     },
   });
   const [code] = await once(child, "exit");

@@ -7,6 +7,7 @@ export function createTokenAuthority({
   publicKey,
   lifetimeMs,
   repositoryId = fixtureRepositoryId,
+  additionalPermissions = [],
 }) {
   const tokens = new Map();
   const issuesOfTokens = [];
@@ -50,6 +51,7 @@ export function createTokenAuthority({
     assert.deepEqual(body.repository_ids.map(String), [String(repositoryId)]);
     const permissions = body.permissions;
     const acceptedPermissions = [
+      ...additionalPermissions,
       { metadata: "read" },
       { metadata: "read", contents: "write" },
       {

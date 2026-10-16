@@ -2,7 +2,10 @@ import { createHash, createPrivateKey, createPublicKey, randomUUID } from "node:
 import { open } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import type { PreparedGitHubUseRequest } from "@openclaw-enterprise/contracts";
+import type {
+  PreparedGitHubUseRequest,
+  PreparedGitHubPullResult,
+} from "@openclaw-enterprise/contracts";
 import type { PostgresPool } from "@openclaw-enterprise/occ";
 import { createSystemClock } from "../../drivers/repo/credentials/clock.ts";
 import { githubProviderOrigin } from "../../drivers/repo/github/credentials/factory.ts";
@@ -52,20 +55,26 @@ function useRequest(input: unknown): PreparedGitHubUseRequest {
     "requestDigestSha256",
     "pushRef",
     "deadlineAt",
+    ...(q?.operation === "create-draft-pull" ? ["pull"] : []),
   ];
   if (
     !input ||
     typeof input !== "object" ||
     Object.keys(input).length !== fields.length ||
     Object.entries(input).some(
-      ([k, v]) => !fields.includes(k) || typeof v !== "string" || !v || v.length > 1024,
+      ([k, v]) =>
+        !fields.includes(k) || (k !== "pull" && (typeof v !== "string" || !v || v.length > 1024)),
     ) ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(q.exchangeId) ||
     !/^[0-9a-f]{64}$/.test(q.requestDigestSha256) ||
     !q.pushRef.startsWith("refs/heads/") ||
-    !["advertise-upload-pack", "upload-pack", "advertise-receive-pack", "receive-pack"].includes(
-      q.operation,
-    )
+    ![
+      "advertise-upload-pack",
+      "upload-pack",
+      "advertise-receive-pack",
+      "receive-pack",
+      "create-draft-pull",
+    ].includes(q.operation)
   ) {
     throw new Error("INVALID_PREPARED_GIT_USE");
   }
@@ -97,7 +106,11 @@ export async function startPreparedGitHubGitOwner(options: Options) {
   const registry = validateGitHubRepositoryRegistry(options.registry, options.backendId);
   for (const repo of registry.repositories) {
     if (
-      repo.namespaces.some((p) => p.transport !== "git-only" || p.pushRefAllowlist?.length !== 1)
+      repo.namespaces.some(
+        (p) =>
+          !["git-only", "git-and-draft-pr"].includes(p.transport ?? "") ||
+          p.pushRefAllowlist?.length !== 1,
+      )
     ) {
       throw new Error("PREPARED_REPOSITORY_REQUIRES_ONE_EXPLICIT_REVIEW_REF");
     }
@@ -115,8 +128,9 @@ export async function startPreparedGitHubGitOwner(options: Options) {
     const { driver, binding, namespaceId } = session;
     const { repositoryRef, profile } = binding;
     const repo = registry.repositories.find((r) => r.repositoryRef === repositoryRef);
-    const pushRef = repo?.namespaces.find((p) => p.namespaceId === namespaceId)
-      ?.pushRefAllowlist?.[0];
+    const policy = repo?.namespaces.find((p) => p.namespaceId === namespaceId);
+    const pushRef = policy?.pushRefAllowlist?.[0];
+    const base = policy?.transport === "git-and-draft-pr" ? policy.pullRequestBase : undefined;
     if (
       !repo ||
       !pushRef ||
@@ -145,7 +159,8 @@ export async function startPreparedGitHubGitOwner(options: Options) {
         installationId: registry.githubInstallationId,
         repositoryId: repo.repositoryId,
         repository: repo.repository,
-        profile: "git-ref-write",
+        profile: base ? "git-ref-draft-pr" : "git-ref-write",
+        ...(base ? { pullRequestBase: base } : {}),
         pushRef,
       },
     };
@@ -156,7 +171,10 @@ export async function startPreparedGitHubGitOwner(options: Options) {
   const server = await servePrivateRepositoryRequest(
     options.controlSocket,
     "prepared-git-use",
-    use,
+    (input, signal) =>
+      input.operation === "record-draft-pull"
+        ? store.finishPull(input.receiptId as string, input.outcome as PreparedGitHubPullResult)
+        : use(input, signal),
   );
   async function maintain() {
     stop.signal.throwIfAborted();

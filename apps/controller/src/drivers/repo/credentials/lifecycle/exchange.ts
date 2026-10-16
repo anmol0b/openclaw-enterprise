@@ -92,12 +92,22 @@ export async function executeExchange(
         // Local close aborts even while waiting on the owner. No cache, reacquisition
         // or retry: once dispatch starts, an inconclusive result stays uncertain.
         const authorized = await prepared.authorize(plan, requestDigestSha256, bounds);
+        if ("kind" in authorized) {
+          return authorized;
+        }
         assertSendStart = authorized.assertSendStart;
         if (signal.aborted) {
-          return failure();
+          return authorized.settle ? authorized.settle("not-submitted") : failure();
         }
         senderEntered = true;
-        senderWork = send({ plan, headers: authorized.headers }, { ...bounds, gate });
+        senderWork = send(
+          {
+            plan,
+            headers: authorized.headers,
+            ...(authorized.settle ? { settle: authorized.settle } : {}),
+          },
+          { ...bounds, gate },
+        );
         outcome = await senderWork;
       } else {
         record = await owned!.lifecycle.acquire(exchange.deadline, signal);

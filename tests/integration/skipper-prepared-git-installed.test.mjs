@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { request } from "node:http";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { withdrawDuringFetchCommand } from "../fixtures/skipper-private-git-origin.mjs";
+import {
+  fetchAfterWithdrawalCommand,
+  withdrawDuringFetchCommand,
+} from "../fixtures/skipper-private-git-origin.mjs";
+import { runTeamReview } from "../fixtures/skipper-team-review-journey.mjs";
 import { assertNativeRepositoryCommit } from "../helpers/repository-native-journey.mjs";
 import { prepareComputeSkipper, waitFor } from "../helpers/skipper-prepared-compute.mjs";
 
@@ -21,7 +25,12 @@ test(
   async (t) => {
     const git = await witness("/input");
     assert.match(git.id, /^[a-f0-9]{16}$/);
-    assert.equal(git.approvalRef, "refs/heads/review/skipper-" + git.id);
+    const team = process.env.OCC_TEST_SKIPPER_TEAM_REVIEW === "1";
+    assert.equal(team, git.teamReview);
+    assert.equal(
+      git.approvalRef,
+      "refs/heads/review/skipper-" + (team ? "acceptance-" : "") + git.id,
+    );
     assert.equal(git.repository, "fixture/skipper-" + git.id);
     const cold = await witness("/evidence");
     assert.equal(cold.issued, 0);
@@ -52,11 +61,11 @@ test(
     );
     assert.equal(sessions.rowCount, 1, "one live, durable admission for this Compute revision");
     const session = sessions.rows[0];
-    const uses = async () =>
+    const uses = async (operation = null) =>
       (
         await query(
-          "SELECT count(*)::int AS n FROM occ.prepared_repository_git_uses WHERE admission_id=$1",
-          [session.admission_id],
+          "SELECT count(*)::int AS n FROM occ.prepared_repository_git_uses WHERE admission_id=$1 AND ($2::text IS NULL OR operation=$2)",
+          [session.admission_id, operation],
         )
       ).rows[0].n;
     await ordinaryChat("chat-before-private-git");
@@ -82,51 +91,70 @@ test(
         git.repository +
         ".git) ;; *) exit 53;; esac",
     ];
-    const native = await sendScript(
-      [
-        ...pre,
-        "git clone -- " + url + " " + dir,
-        "cd " + dir,
-        "git pull --ff-only",
-        'test "$(git rev-parse HEAD)" = ' + git.initialSha,
-        "git config user.name Skipper",
-        "git config user.email skipper@example.invalid",
-        "printf '%s' '" + content + "' > skipper-proof.txt",
-        "git add -- skipper-proof.txt",
-        "git commit -qm 'Private Skipper proof'",
-        "git push origin HEAD:" + git.approvalRef,
-        "git rev-parse HEAD",
-      ].join("\n"),
-      "native-push",
-    );
-    const remote = await witness("/fetch");
-    const { sha, refs } = remote;
-    assert.match(sha, /^[a-f0-9]{40}$/);
-    assert.ok(
-      native.commitShas.includes(sha),
-      "actual native execution must produce the commit independently fetched from fresh storage",
-    );
-    assert.deepEqual(refs, { "refs/heads/main": git.initialSha, [git.approvalRef]: sha });
-    assertNativeRepositoryCommit({
-      baseSha: git.initialSha,
-      parents: [...remote.commit.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]),
-      files: remote.changed.map((line) => ({
-        status: line.startsWith("A\t") ? "added" : "unexpected",
-        filename: line.slice(2),
-      })),
-      file: "skipper-proof.txt",
-      content,
-      observedContent: remote.content,
-    });
-    const before = await witness("/evidence");
-    assert.equal(before.endpoints["receive-pack:200"], 1);
-    await checkpoint("native-commit-confirmed-by-independent-fetch", {
-      sha,
-      baseSha: git.initialSha,
-    });
+    const { sha, refs } = team
+      ? await runTeamReview({
+          git,
+          pre,
+          dir,
+          sendScript,
+          witness,
+          checkpoint,
+          sessionId: session.session_id,
+          uses,
+        })
+      : await gitOnly();
+
+    async function gitOnly() {
+      const native = await sendScript(
+        [
+          ...pre,
+          "git clone -- " + url + " " + dir,
+          "cd " + dir,
+          "git pull --ff-only",
+          'test "$(git rev-parse HEAD)" = ' + git.initialSha,
+          "git config user.name Skipper",
+          "git config user.email skipper@example.invalid",
+          "printf '%s' '" + content + "' > skipper-proof.txt",
+          "git add -- skipper-proof.txt",
+          "git commit -qm 'Private Skipper proof'",
+          "git push origin HEAD:" + git.approvalRef,
+          "git rev-parse HEAD",
+        ].join("\n"),
+        "native-push",
+      );
+      const remote = await witness("/fetch");
+      const { sha, refs } = remote;
+      assert.match(sha, /^[a-f0-9]{40}$/);
+      assert.ok(
+        native.commitShas.includes(sha),
+        "actual native execution must produce the commit independently fetched from fresh storage",
+      );
+      assert.deepEqual(refs, { "refs/heads/main": git.initialSha, [git.approvalRef]: sha });
+      assertNativeRepositoryCommit({
+        baseSha: git.initialSha,
+        parents: [...remote.commit.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]),
+        files: remote.changed.map((line) => ({
+          status: line.startsWith("A\t") ? "added" : "unexpected",
+          filename: line.slice(2),
+        })),
+        file: "skipper-proof.txt",
+        content,
+        observedContent: remote.content,
+      });
+      const before = await witness("/evidence");
+      assert.equal(before.endpoints["receive-pack:200"], 1);
+      await checkpoint("native-commit-confirmed-by-independent-fetch", {
+        sha,
+        baseSha: git.initialSha,
+      });
+      return { sha, refs };
+    }
 
     // The installed Compute path includes the native hook. Keep it, require *its* refusal,
-    // and prove no origin write. Server rejection of the equivalent wire input has a separate test.
+    // and prove no origin write. In this synthetic repository only, separately send the mixed-ref
+    // POST to exercise the broker boundary even for a client that doesn't run its local hook.
+    const writePermits = await uses("receive-pack");
+    assert.ok(writePermits > 0, "successful push must have gone through prepared authority");
     await sendScript(
       [
         ...pre,
@@ -138,17 +166,34 @@ test(
         "denied HEAD:" + git.approvalRef + " HEAD:refs/heads/not-allowed",
         'other="${u%/*}/not-this-repo.git"; if GIT_TERMINAL_PROMPT=0 git ls-remote "$other" >other.out 2>&1; then exit 54; fi',
         "grep -Eiq '400|401|403|404|denied|not found|not-admitted|terminal prompts disabled' other.out",
+        "(set +e; LC_ALL=C GIT_TRACE_REDACT=1 GIT_TRACE_CURL=1 GIT_TRACE_CURL_NO_DATA=1 git -c core.hooksPath=/dev/null push origin HEAD:" +
+          git.approvalRef +
+          " HEAD:refs/heads/not-allowed; printf '\\nmixed-push-exit=%d\\n' \"$?\") 2>&1 | awk '",
+        "/=> Send header: POST .*git-receive-pack / { post=1; basic=0 }",
+        "/=> Send header: Authorization: Basic / { basic=post }",
+        "/<= Recv header: HTTP.* 400 / { if (post && basic) denied++ }",
+        "/^mixed-push-exit=[1-9][0-9]*$/ { failed++ }",
+        "END {exit !(denied == 1 && failed == 1)}'",
       ].join("\n"),
       "installed-push-hook-and-other-repository-deny",
     );
     assert.deepEqual(await witness("/refs"), refs);
     const denies = await witness("/evidence");
-    assert.equal(denies.endpoints["receive-pack:200"], 1);
+    assert.equal(
+      await uses("receive-pack"),
+      writePermits,
+      "no credential release for the forbidden write",
+    );
+    assert.equal(denies.endpoints["receive-pack:200"], team ? 3 : 1);
     assert.equal(
       denies.endpoints["other:404"],
       undefined,
       "broker may not delegate another Git repository to the origin",
     );
+
+    await checkpoint("wrong-repository-hook-refusal-and-broker-denied-mixed-push", {
+      writePermits,
+    });
 
     // Hold discovery at the private origin, PATCH away the binding, release discovery, require the
     // same Git operation to get 503 for its authenticated upload POST. The broker uses one request per TLS.
@@ -198,6 +243,25 @@ test(
         gitSessionId: session.session_id,
         permits,
         uploads: uploads(after),
+      });
+
+      // The previous request crossed withdrawal. Now start a separate authenticated fetch, after
+      // observing both the denial and the committed binding change. The prepared-material owner
+      // records a use before releasing a provider credential; the origin counts even raw TCP opens.
+      const bound = await api("GET", agentPath);
+      assert.equal(bound.activeRevisionId, revision.id);
+      assert.deepEqual(bound.repositoryBindings ?? [], []);
+      const label = "fresh-authenticated-fetch-after-effective-withdrawal";
+      await sendScript(fetchAfterWithdrawalCommand(dir), label);
+      const denied = await witness("/evidence");
+      assert.ok(after.connections > 0 && after.requests > 0);
+      assert.deepEqual(denied, after, "no new origin connection, request, issuance or token use");
+      assert.equal(await uses(), permits, "no new provider credential release by this admission");
+      await checkpoint(label + "-refused", {
+        gitSessionId: session.session_id,
+        permits,
+        connections: denied.connections,
+        requests: denied.requests,
       });
     } finally {
       await witness("/release-if-held", "POST");

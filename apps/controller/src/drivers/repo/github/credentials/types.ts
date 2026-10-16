@@ -5,7 +5,8 @@ import type { ServiceLimits } from "../../credentials/service-contracts.ts";
 
 export type GitHubProfile = "git-read" | "git-write" | "git-full";
 /** The last two scopes are internal; neither is accepted as a user-selected access profile. */
-export type GitHubTokenProfile = GitHubProfile | "metadata-read" | "git-ref-write";
+export type GitHubTokenProfile =
+  GitHubProfile | "metadata-read" | "git-ref-write" | "git-ref-draft-pr";
 interface GitHubConfigurationBase {
   readonly providerInstanceId: string;
   readonly configVersion: string;

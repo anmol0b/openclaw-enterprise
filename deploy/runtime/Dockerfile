@@ -56,7 +56,7 @@ RUN set -eu; \
     cp -R .build/repository-credentials/client/dist "$client/dist"; \
     chmod 0755 .build/runtime-client/opt .build/runtime-client/opt/oce; \
     chmod -R a+rX "$client"; \
-    chmod 0555 "$client/bin/gh"; \
+    chmod 0555 "$client/bin/gh" "$client/bin/oce-github"; \
     test -f "$client/dist/drivers/repo/github/credentials/client/router.js"; \
     test -f "$client/dist/drivers/repo/github/credentials/client/native-git.js"; \
     test -x "$client/dist/drivers/repo/github/credentials/client/hooks/pre-push"; \

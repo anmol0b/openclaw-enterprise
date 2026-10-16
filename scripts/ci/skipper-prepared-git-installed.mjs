@@ -10,6 +10,7 @@ import { once } from "node:events";
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
+import { teamReviewProof } from "../../tests/fixtures/skipper-team-review-journey.mjs";
 import { createInterface } from "node:readline";
 import {
   kubectl,
@@ -62,9 +63,15 @@ const registry = env.OCC_SKIPPER_IMAGE_REGISTRY_CONTAINER;
 assert.match(registry, /^[a-f0-9]{64}$/);
 const cleanup = [() => run("docker", ["rm", "--force", "--volumes", registry])];
 const proof = [
+  "deployed-revision-gateway-and-harness-ready",
+  "chat-before-private-git-verified",
   "prepared-before-native-git",
-  "native-commit-confirmed-by-independent-fetch",
+  ...(env.OCC_TEST_SKIPPER_TEAM_REVIEW === "1"
+    ? teamReviewProof
+    : ["native-commit-confirmed-by-independent-fetch"]),
+  "wrong-repository-hook-refusal-and-broker-denied-mixed-push",
   "native-authenticated-post-after-withdrawal-refused",
+  "fresh-authenticated-fetch-after-effective-withdrawal-refused",
   "same-compute-owned-skipper-chat-after-git-withdrawal-verified",
   "same-compute-owned-skipper-chat-git-and-live-withdrawal-observed",
   "owned-agent-retired-cluster-cleanup-still-required",
@@ -189,6 +196,10 @@ try {
     await output("yq", ["-o=json", ".", join(stack.directory, "installation.yaml")]),
   );
   const images = config.drivers.compute.configuration.images;
+  const { codexSeccompProfile = null } = config.drivers.compute.configuration.runtime;
+  if (codexSeccompProfile !== null) {
+    assert.match(codexSeccompProfile, /^openclaw\/codex-[\w.-]+-[0-9a-f]{64}\.json$/);
+  }
   assert.ok(config.drivers.repo.preparedGitHub && !config.drivers.sandbox);
   assert.equal(helm.repositoryCredentials.authority, "prepared-git");
   assert.equal(images.gateway, images.agent);
@@ -235,6 +246,7 @@ try {
       modelContainer,
       directory,
       runtimeImage: images.agent,
+      codexSeccompProfile,
       kubernetesServer: "https://127.0.0.1:6443",
     }),
     { flag: "wx", mode: 0o600 },
@@ -272,11 +284,12 @@ try {
     (error) => error.result ?? {},
   );
   const ledger = await readFile(join(directory, "compute-journey.jsonl"), "utf8").catch(() => "");
-  const records = ledger
+  const entries = ledger
     .trim()
     .split("\n")
     .filter(Boolean)
-    .map((line) => JSON.parse(line).phase);
+    .map((line) => JSON.parse(line));
+  const records = entries.map((entry) => entry.phase);
   const observed = records.filter((p) => proof.includes(p));
   for (const name of observed) {
     progress(name);
@@ -291,11 +304,43 @@ try {
       (await readFile(join(directory, "runner-state.json.diagnostics.json"), "utf8").catch(
         () => "",
       ));
+    const chat = entries.find((e) => e.phase === "gateway-chat-refused");
+    if (chat) {
+      const { httpStatus, category, modelTurns, modelAnswers, expectedNonceAnswered, tlsErrors } =
+        chat;
+      assert.ok(
+        httpStatus === 0 ||
+          (Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599),
+      );
+      assert.match(
+        category,
+        /^(gateway-credential-unavailable|authentication|permission|workspace|agent-runtime|timeout|unavailable|unclassified)$/,
+      );
+      assert.ok(
+        [modelTurns, modelAnswers, tlsErrors].every((n) => Number.isSafeInteger(n) && n >= 0),
+      );
+      assert.equal(typeof expectedNonceAnswered, "boolean");
+      assert.match(
+        chat.runtimeSignal,
+        /^(thread-filesystem-sandbox-denied|thread-start|model-transport|no-known-signal|logs-unavailable)$/,
+      );
+      console.error(
+        "Gateway HTTP %d, %s, %s. During this request synthetic model turns=%d, answers=%d, expected nonce answered=%s, TLS errors=%d.",
+        httpStatus,
+        category,
+        chat.runtimeSignal,
+        modelTurns,
+        modelAnswers,
+        expectedNonceAnswered,
+        tlsErrors,
+      );
+    }
     const known = [
       ...proof.slice(0, -1), // Retirement can follow a failure before the required proof.
       "create-synthetic-model-secret",
       "deploy-request-started",
-      "chat-before-private-git-verified",
+      "observe-installed-agent-readonly-skill-directories",
+      "gateway-chat-refused",
       "native-command-started",
       "native-command-and-model-observed",
     ];

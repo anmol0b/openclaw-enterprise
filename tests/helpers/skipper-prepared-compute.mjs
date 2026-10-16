@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -192,23 +192,44 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
   assert.equal(revision.harness.mode, "dedicated");
   assert.equal(revision.harness.id, "codex");
   assert.equal(revision.sandboxDriverId, undefined);
+  assert.deepEqual(revision.repositoryCredentials.bindings, [
+    { repositoryRef, profile: "git-write" },
+  ]);
+  const deploymentPath = agentPath + "/deployments/" + revision.id;
   await waitFor(
-    "the admitted Compute-owned revision to activate",
-    async () => (await api("GET", agentPath)).activeRevisionId === revision.id,
+    "the admitted Compute-owned deployment to succeed with its revision active",
+    async () => {
+      const deployment = await api("GET", deploymentPath);
+      assert.notEqual(deployment.status, "failed", "Compute deployment failed");
+      if (deployment.status !== "succeeded") {
+        return false;
+      }
+      const current = await api("GET", agentPath);
+      return current.activeRevisionId === revision.id && current.desiredRuntimeState === "running";
+    },
     720_000,
   );
+  const hash = (id) => createHash("sha256").update(id).digest("hex").slice(0, 12);
+  const configMap = "gateway-" + hash(agent.id) + "-rev-" + hash(revision.id);
   const select = async () => {
     const entries = (await pods()).items;
     const p = (role) => {
       const found = entries.filter(
         ({ metadata: m }) =>
-          !m.deletionTimestamp &&
-          m.labels["openclaw.dev/workload-role"] === role &&
-          (role === "gateway" || m.labels["openclaw.dev/revision"] === revision.id),
+          !m.deletionTimestamp && m.labels["openclaw.dev/workload-role"] === role,
       );
       assert.equal(found.length, 1, "exactly one " + role + " for the dedicated Agent");
       const pod = found[0];
       assert.ok(pod.status.conditions.some((c) => c.type === "Ready" && c.status === "True"));
+      if (role === "gateway") {
+        assert.ok(pod.spec.volumes.some((v) => v.configMap?.name === configMap));
+        assert.equal(
+          pod.spec.containers.find((c) => c.name === "gateway").image,
+          input.runtimeImage,
+        );
+      } else {
+        assert.equal(pod.metadata.labels["openclaw.dev/revision"], revision.id);
+      }
       return pod;
     };
     return { gateway: p("gateway"), harness: p("agent") };
@@ -225,6 +246,13 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
   }
   assert.equal(harness.spec.securityContext.runAsNonRoot, true);
   assert.equal(hc.securityContext.allowPrivilegeEscalation, false);
+  const seccomp = hc.securityContext.seccompProfile ?? harness.spec.securityContext.seccompProfile;
+  assert.deepEqual(
+    seccomp,
+    input.codexSeccompProfile === null
+      ? { type: "RuntimeDefault" }
+      : { type: "Localhost", localhostProfile: input.codexSeccompProfile },
+  );
   assert.notEqual(harness.spec.serviceAccountName, gateway.spec.serviceAccountName);
   assert.doesNotMatch(
     JSON.stringify(harness.spec),
@@ -289,10 +317,107 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
       "--",
       ...args,
     );
+  // The prepared-repository thread profile includes these two read-only paths even when no
+  // plugins are selected. Observe the actual Agent as its normal UID, without reading any file.
+  await checkpoint("observe-installed-agent-readonly-skill-directories");
+  const skillPaths = await kc(
+    "exec",
+    harness.metadata.name,
+    "-n",
+    harness.metadata.namespace,
+    "-c",
+    "agent",
+    "--",
+    "node",
+    "-e",
+    `
+      const {accessSync, constants, realpathSync, statSync} = require("node:fs");
+      const root = "/home/node/openclaw-runtime-assets/plugin-skills";
+      const alias = "/home/node/.openclaw/plugin-skills";
+      if (process.getuid() === 0 || !statSync(root).isDirectory() || realpathSync(alias) !== realpathSync(root)) {
+        throw Error("expected read-only thread skill directory unavailable");
+      }
+      accessSync(alias, constants.R_OK | constants.X_OK);
+      console.log("readable");
+    `,
+  );
+  assert.equal(skillPaths.trim(), "readable");
+  await checkpoint("deployed-revision-gateway-and-harness-ready", {
+    agentId: agent.id,
+    revisionId: revision.id,
+    seccomp,
+  });
   const chat = async (prompt) => {
-    const text = await enter("node", "-e", `(${inGateway.toString()})(process.argv[1])`, prompt);
-    const { status, content } = JSON.parse(text);
-    assert.equal(status, 200);
+    // Readiness isn't a model turn. Record a bounded, content-free failure at the real receiver
+    // before cleanup; never replay a turn whose effect might be unknown.
+    const before = (await modelEvents()).length;
+    const since = new Date().toISOString();
+    const text = await enter(
+      "node",
+      "-e",
+      `(${inGateway.toString()})(process.argv[1], process.argv[2])`,
+      prompt,
+      "agent:main:skipper-acceptance-" + id,
+    );
+    const { status, category, content } = JSON.parse(text);
+    if (status !== 200) {
+      const events = (await modelEvents()).slice(before);
+      const nonce = prompt.match(/OCE_SMOKE_[a-f0-9-]+/)?.[0];
+      // Do not retain runtime logs. An allowlisted signal can distinguish a native thread
+      // sandbox failure before the first model request from an observed transport failure.
+      const runtimeSignal = await Promise.all(
+        [
+          [gateway, "gateway"],
+          [harness, "agent"],
+        ].map(([pod, container]) =>
+          kc(
+            "logs",
+            pod.metadata.name,
+            "-n",
+            pod.metadata.namespace,
+            "-c",
+            container,
+            "--since-time=" + since,
+            "--tail=200",
+            "--limit-bytes=65536",
+          ),
+        ),
+      ).then(
+        (logs) => {
+          const raw = logs.join("\n");
+          if (
+            /fs sandbox helper|bwrap:.*(?:permission denied|operation not permitted)/i.test(raw)
+          ) {
+            return "thread-filesystem-sandbox-denied";
+          }
+          if (/thread\/start|failed to start.*thread/i.test(raw)) {
+            return "thread-start";
+          }
+          if (
+            /websocket.*failed|tls.*failed|certificate verify failed|unable to get local issuer/i.test(
+              raw,
+            )
+          ) {
+            return "model-transport";
+          }
+          return "no-known-signal";
+        },
+        () => "logs-unavailable",
+      );
+      await checkpoint("gateway-chat-refused", {
+        httpStatus: status,
+        category,
+        runtimeSignal,
+        modelTurns: events.filter((e) => e.event === "request" && e.turn).length,
+        modelAnswers: events.filter((e) => e.event === "turn-answered").length,
+        expectedNonceAnswered: Boolean(
+          nonce &&
+          events.some((e) => e.event === "turn-answered" && e.status === 200 && e.text === nonce),
+        ),
+        tlsErrors: events.filter((e) => e.event === "tls-error").length,
+      });
+      assert.fail("gateway chat did not return 200; content-free status and model counts recorded");
+    }
     return content;
   };
   const native = async (marker) => {
@@ -306,7 +431,8 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
     const [command] = t.commands;
     assert.equal(command.status, "completed");
     assert.equal(command.exitCode, 0, "native command failed on the Agent");
-    return command;
+    assert.ok(t.threadId && t.turnId);
+    return { ...command, threadId: t.threadId, turnId: t.turnId };
   };
   const modelEvents = async () =>
     (await exec("docker", ["logs", modelContainer], { maxBuffer: 8 * 1024 * 1024 })).stdout
@@ -336,6 +462,8 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
     await checkpoint("native-command-and-model-observed", {
       label,
       commitShas: completed.commitShas,
+      threadId: completed.threadId,
+      turnId: completed.turnId,
     });
     await unlink(controlFile);
     return completed;
@@ -370,7 +498,11 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
 }
 
 // Use the installed Agent Gateway, as a user of that Agent would. Never exec Git on the host.
-async function inGateway(prompt) {
+export async function inGateway(prompt, sessionKey) {
+  if (!process.env.OPENCLAW_GATEWAY_PASSWORD) {
+    process.stdout.write(JSON.stringify({ status: 0, category: "gateway-credential-unavailable" }));
+    return;
+  }
   const res = await fetch(
     "http://127.0.0.1:" + (process.env.OPENCLAW_GATEWAY_PORT || 8080) + "/v1/chat/completions",
     {
@@ -380,6 +512,7 @@ async function inGateway(prompt) {
       headers: {
         authorization: "Bearer " + process.env.OPENCLAW_GATEWAY_PASSWORD,
         "content-type": "application/json",
+        "x-openclaw-session-key": sessionKey,
       },
       body: JSON.stringify({
         model: "openclaw/default",
@@ -388,7 +521,22 @@ async function inGateway(prompt) {
       }),
     },
   );
-  const body = await res.json();
+  const raw = await res.text();
+  // Only allowlisted categories can leave the receiver on failure; bodies may carry secrets.
+  if (!res.ok) {
+    const category =
+      [
+        [/unauthori[sz]ed|invalid.*password|authentication|invalid.*token/i, "authentication"],
+        [/forbidden|permission|scope/i, "permission"],
+        [/workspace|eacces|read.only/i, "workspace"],
+        [/app.?server|codex|guardian/i, "agent-runtime"],
+        [/timeout|timed out|deadline/i, "timeout"],
+        [/unavailable|no route|econn|refused/i, "unavailable"],
+      ].find(([pattern]) => pattern.test(raw))?.[1] ?? "unclassified";
+    process.stdout.write(JSON.stringify({ status: res.status, category }));
+    return;
+  }
+  const body = JSON.parse(raw);
   process.stdout.write(
     JSON.stringify({ status: res.status, content: body?.choices?.[0]?.message?.content }),
   );

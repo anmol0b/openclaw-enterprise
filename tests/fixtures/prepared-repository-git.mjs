@@ -28,11 +28,23 @@ import { ensurePostgresAgentBootstrap } from "../helpers/postgres-agent-app.mjs"
 
 // This exercises the production use service over real PostgreSQL and a synthetic
 // HTTPS GitHub App issuer. It does not prove a Git subprocess or live GitHub push.
-export async function fixture(t, { openBroker, sessionLifetimeMs = 3_600_000 } = {}) {
+export async function fixture(
+  t,
+  { openBroker, draftPull = false, draftResponse, sessionLifetimeMs = 3_600_000 } = {},
+) {
   const directory = await socketDirectory(t, "prepared-git-");
   const privateKeyPath = join(directory, "app.pem");
   const custodyKeyPath = join(directory, "custody.key");
-  const gh = await startGitHubFixture(t, { clock: createSystemClock() });
+  const permissions = {
+    metadata: "read",
+    contents: "write",
+    ...(draftPull && { pull_requests: "write" }),
+  };
+  const gh = await startGitHubFixture(t, {
+    clock: createSystemClock(),
+    additionalPermissions: [permissions],
+    draftResponse,
+  });
   await writeFile(privateKeyPath, gh.privateKey.export({ type: "pkcs8", format: "pem" }), {
     mode: 0o600,
   });
@@ -60,7 +72,9 @@ export async function fixture(t, { openBroker, sessionLifetimeMs = 3_600_000 } =
           {
             namespaceId,
             profiles: ["git-write"],
-            transport: "git-only",
+            ...(draftPull
+              ? { transport: "git-and-draft-pr", pullRequestBase: "main" }
+              : { transport: "git-only" }),
             pushRefAllowlist: [pushRef],
           },
         ],
@@ -112,41 +126,44 @@ export async function fixture(t, { openBroker, sessionLifetimeMs = 3_600_000 } =
     repository: fixtureRepository,
   });
   const sessionId = broker?.opened.session.sessionId ?? `session-${randomUUID()}`;
-  const generation = randomUUID();
-  // Use State transitions so cleanupContext and liveRevisionId come from the
-  // immutable admitted revision, and the receipt follows reserved -> active.
   await state.transact(async (unit) => {
     assert.ok(
       await unit.agents.compareAndSetActiveRevision(namespaceId, agent.id, undefined, revision.id),
     );
-    const created = await unit.repositorySessions.createAttempt(attempt);
-    assert.deepEqual(created.cleanupContext, { driver, binding });
-    assert.equal(created.liveRevisionId, revision.id);
-    await unit.repositorySessions.createBrokerReceipt({
-      admissionId: attempt.admissionId,
-      state: "reserved",
-      generation,
-    });
-    assert.ok(
-      await unit.repositorySessions.advanceBrokerReceipt({
-        admissionId: attempt.admissionId,
-        expectedState: "reserved",
-        generation,
-        state: "active",
-        sessionId,
-        deadlineWallMs,
-      }),
-    );
-    assert.ok(
-      await unit.repositorySessions.advanceAttempt({
-        admissionId: attempt.admissionId,
-        expectedPhase: "opening",
-        phase: "open",
-        sessionId,
-        updatedAt: new Date().toISOString(),
-      }),
-    );
   });
+  // Use State transitions so the session and its successor have authoritative distinct admission IDs.
+  const admit = (sessionId, admissionId) =>
+    state.transact(async (unit) => {
+      const generation = randomUUID();
+      const created = await unit.repositorySessions.createAttempt({ ...attempt, admissionId });
+      assert.deepEqual(created.cleanupContext, { driver, binding });
+      assert.equal(created.liveRevisionId, revision.id);
+      await unit.repositorySessions.createBrokerReceipt({
+        admissionId,
+        state: "reserved",
+        generation,
+      });
+      assert.ok(
+        await unit.repositorySessions.advanceBrokerReceipt({
+          admissionId,
+          expectedState: "reserved",
+          generation,
+          state: "active",
+          sessionId,
+          deadlineWallMs,
+        }),
+      );
+      assert.ok(
+        await unit.repositorySessions.advanceAttempt({
+          admissionId,
+          expectedPhase: "opening",
+          phase: "open",
+          sessionId,
+          updatedAt: new Date().toISOString(),
+        }),
+      );
+    });
+  await admit(sessionId, attempt.admissionId);
   owner = await startPreparedGitHubGitOwner({
     pool,
     controlSocket: join(directory, "control.sock"),
@@ -163,6 +180,8 @@ export async function fixture(t, { openBroker, sessionLifetimeMs = 3_600_000 } =
   return {
     pool,
     broker,
+    permissions,
+    admitReplacement: (sessionId) => admit(sessionId, "admission-" + randomUUID()),
     state,
     agent,
     revision,
@@ -222,6 +241,6 @@ export async function prepare(f) {
     await f.owner.maintain();
   }
   assert.equal(f.gh.issuesOfTokens.length, 1, "open OCC admission must prepare exactly one token");
-  assert.deepEqual(f.gh.issuesOfTokens[0].permissions, { metadata: "read", contents: "write" });
+  assert.deepEqual(f.gh.issuesOfTokens[0].permissions, f.permissions);
   assert.deepEqual(f.gh.issuesOfTokens[0].repositoryIds.map(String), [String(fixtureRepositoryId)]);
 }

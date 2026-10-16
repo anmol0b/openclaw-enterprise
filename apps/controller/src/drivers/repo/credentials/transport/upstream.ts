@@ -71,6 +71,7 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
     let outbound: ClientRequest | undefined;
     let upstream: IncomingMessage | undefined;
     let dispatched = false;
+    let settling = false;
     let failed = false;
     let inputCompleted = false;
     let receivedHeaders = false;
@@ -234,6 +235,16 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
       }
       const allowed = safeResponseHeaders(plan.responsePolicy.headers(status, raw));
       const noBody = plan.method === "HEAD" || status === 204 || status === 304;
+      if (
+        privateRequest.settle &&
+        (status !== 201 ||
+          noBody ||
+          plan.responsePolicy.body !== "bounded-json" ||
+          plan.responsePolicy.trailers !== "forbid" ||
+          !plan.responsePolicy.rewriteJson)
+      ) {
+        throw new Error("invalid-operation-response");
+      }
       if (noBody) {
         for await (const chunk of upstream) {
           if (chunk.length) {
@@ -261,8 +272,17 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
         }
         let bytes = Buffer.concat(parts);
         if (plan.responsePolicy.rewriteJson !== undefined) {
-          const value: JsonValue = JSON.parse(bytes.toString("utf8"));
-          bytes = Buffer.from(JSON.stringify(plan.responsePolicy.rewriteJson(value)));
+          const parse = plan.responsePolicy.parseJson;
+          const value: JsonValue = parse
+            ? parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes))
+            : JSON.parse(bytes.toString("utf8"));
+          const approved = plan.responsePolicy.rewriteJson(value);
+          if (privateRequest.settle) {
+            await inputDone;
+            settling = true;
+            return await privateRequest.settle({ created: approved });
+          }
+          bytes = Buffer.from(JSON.stringify(approved));
           if (bytes.length > plan.limits.responseBytes) {
             throw new Error("limit-exceeded");
           }
@@ -297,6 +317,13 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
       }
       return { kind: "completed", status };
     } catch {
+      if (privateRequest.settle) {
+        stopUpstream();
+        if (!settling) {
+          return await privateRequest.settle(dispatched ? "outcome_unknown" : "not-submitted");
+        }
+        // A commit may already have happened. Only a same-operation receipt lookup can resolve it.
+      }
       if (dispatched) {
         // An active input pipeline owns the incoming socket. Preserve it for a
         // service error only after the pipeline settles, before response headers.

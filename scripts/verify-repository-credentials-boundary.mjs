@@ -22,6 +22,7 @@ const requiredEntrypoints = [
   "drivers/repo/github/credentials/client/native-git.ts",
   "drivers/repo/github/credentials/client/hook-dispatch.ts",
   "drivers/repo/github/credentials/client/router.ts",
+  "drivers/repo/github/credentials/client/draft-pr.ts",
 ];
 const clientDirectory = "drivers/repo/github/credentials/client/";
 const clientContracts = "drivers/repo/credentials/client-contracts.ts";
@@ -45,6 +46,13 @@ const reviewedImports = {
   "drivers/repo/github/public-read/server.ts": {
     "node:http": ["createServer"],
     "node:https": ["Agent", "get"],
+  },
+  // The image draft helper uses only its selected broker, session bearer and operator-projected public CA.
+  "drivers/repo/github/credentials/client/draft-pr.ts": {
+    "node:crypto": ["randomUUID"],
+    "node:fs/promises": ["readFile"],
+    "node:https": ["Agent", "request"],
+    "node:util": ["parseArgs"],
   },
   "drivers/repo/github/credentials/client/commands.ts": { "node:child_process": ["spawnSync"] },
   "drivers/repo/github/credentials/client/config.ts": {
@@ -271,6 +279,13 @@ const reviewedProcessMembers = {
     "execPath",
     "exitCode",
     "stderr",
+  ],
+  "drivers/repo/github/credentials/client/draft-pr.ts": [
+    "argv",
+    "env",
+    "exitCode",
+    "stderr",
+    "stdout",
   ],
   "drivers/repo/github/credentials/client/router.ts": ["argv", "env", "exitCode", "stderr"],
   "drivers/repo/github/credentials/client/operator.ts": ["argv", "exitCode", "stderr", "stdout"],

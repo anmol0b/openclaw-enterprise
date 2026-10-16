@@ -4,16 +4,18 @@ import type {
   PreparedGitHubUseRequest,
   PreparedGitHubUseResponse,
 } from "@openclaw-enterprise/contracts";
-import type { Bounds, Clock, HeaderFields } from "../../credentials/backend-contracts.ts";
+import type {
+  Bounds,
+  Clock,
+  HeaderFields,
+  OperationReceipt,
+  PrivateUpstreamRequest,
+} from "../../credentials/backend-contracts.ts";
 import { isGitHubWireCredential } from "./wire-credential.ts";
 
 type GitUse = Omit<PreparedGitHubUseRequest, "exchangeId" | "deadlineAt">;
 
-function useOnce(
-  socketPath: string,
-  use: PreparedGitHubUseRequest,
-  signal: AbortSignal,
-): Promise<PreparedGitHubUseResponse> {
+function useOnce<T>(socketPath: string, use: object, signal: AbortSignal): Promise<T> {
   // An ambiguous owner response consumes this exchange. Never retry this request or
   // reuse its material, including when the owner committed but we did not receive it.
   const body = Buffer.from(JSON.stringify(use));
@@ -65,7 +67,7 @@ function useOnce(
         res.once("end", () => {
           const bytes = Buffer.concat(chunks);
           try {
-            resolve(JSON.parse(bytes.toString("utf8")) as PreparedGitHubUseResponse);
+            resolve(JSON.parse(bytes.toString("utf8")) as T);
           } catch {
             reject(new Error("invalid-prepared-git-use"));
           } finally {
@@ -95,7 +97,7 @@ export async function authorizePreparedGitSend(
   }
   const deadline = Math.floor(clock.wallNow()) + remaining;
   const exchangeId = randomUUID();
-  const result = await useOnce(
+  const result = await useOnce<PreparedGitHubUseResponse | OperationReceipt>(
     socketPath,
     {
       ...use,
@@ -105,6 +107,16 @@ export async function authorizePreparedGitSend(
     AbortSignal.any([signal, AbortSignal.timeout(remaining)]),
   );
 
+  if ("kind" in result) {
+    if (
+      use.pull &&
+      result.kind === "recorded" &&
+      (result.status === 201 || result.status === 409)
+    ) {
+      return result;
+    }
+    throw new Error("invalid-prepared-operation");
+  }
   const wall = clock.wallNow();
   const now = clock.monotonicNow();
   const sendBy = Date.parse(result.sendStartBy);
@@ -122,29 +134,38 @@ export async function authorizePreparedGitSend(
   ) {
     throw new Error("invalid-prepared-git-use");
   }
-  const basic = Buffer.from("x-access-token:" + result.value);
+  const basic = use.pull ? undefined : Buffer.from("x-access-token:" + result.value);
+  const authorization = basic ? "Basic " + basic.toString("base64") : "Bearer " + result.value;
+  basic?.fill(0);
+  // The receipt exists as possibly sent before the permit ever leaves the worker.
+  // Finalization neither acquires a second permit nor inherits a cancelled Agent signal.
+  const settle: PrivateUpstreamRequest["settle"] = use.pull
+    ? (outcome) =>
+        useOnce<OperationReceipt>(
+          socketPath,
+          { operation: "record-draft-pull", receiptId: exchangeId, outcome },
+          AbortSignal.timeout(5000),
+        )
+    : undefined;
   let startedSend = false;
-  try {
-    return {
-      headers: Object.freeze({
-        ...requestHeaders,
-        authorization: "Basic " + basic.toString("base64"),
-      }),
-      // Called once after verified TLS and immediately before the first HTTP write.
-      // Withdrawal stops later admissions, but cannot undo a send already authorized.
-      assertSendStart() {
-        if (
-          startedSend ||
-          signal.aborted ||
-          clock.monotonicNow() >= sendByMono ||
-          clock.wallNow() >= sendBy
-        ) {
-          throw new Error("prepared-git-send-expired");
-        }
-        startedSend = true;
-      },
-    };
-  } finally {
-    basic.fill(0);
-  }
+  return {
+    headers: Object.freeze({
+      ...requestHeaders,
+      authorization,
+    }),
+    ...(settle ? { settle } : {}),
+    // Called once after verified TLS and immediately before the first HTTP write.
+    // Withdrawal stops later admissions, but cannot undo a send already authorized.
+    assertSendStart() {
+      if (
+        startedSend ||
+        signal.aborted ||
+        clock.monotonicNow() >= sendByMono ||
+        clock.wallNow() >= sendBy
+      ) {
+        throw new Error("prepared-git-send-expired");
+      }
+      startedSend = true;
+    },
+  };
 }

@@ -20,6 +20,7 @@ export async function startSkipperPrivateGitOrigin({
   repositoryRef = "private-git",
   approvalRef = "refs/heads/approved",
   repositoryId = "73",
+  teamReview = false,
 } = {}) {
   if (!/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/.test(repository)) {
     throw new Error("repository must be owner/name");
@@ -53,6 +54,8 @@ export async function startSkipperPrivateGitOrigin({
   let heldDiscovery;
   let releaseDiscovery;
   let armedDiscovery = false;
+  let connections = 0;
+  let requests = 0;
   const close = () =>
     (closing ??= (async () => {
       for (const socket of sockets) {
@@ -139,7 +142,26 @@ export async function startSkipperPrivateGitOrigin({
       publicKey,
       lifetimeMs: 3600000,
       repositoryId,
+      additionalPermissions: teamReview
+        ? [{ metadata: "read", contents: "write", pull_requests: "write" }]
+        : [],
     });
+    const reviewHead = approvalRef.slice("refs/heads/".length);
+    const pullRoute = "/repos/" + repository + "/pulls";
+    let pullRequest;
+    let pullCreateRequests = 0;
+    const observePullRequest = async () => {
+      if (!pullRequest) {
+        return null;
+      }
+      const refs = await readRefs();
+      const side = (ref) => ({
+        ref,
+        sha: refs["refs/heads/" + ref],
+        repo: { id: Number(repositoryId), full_name: repository },
+      });
+      return { ...pullRequest, head: side(reviewHead), base: side("main") };
+    };
     const counts = {};
     const count = (endpoint, status) => {
       const key = `${endpoint}:${status}`;
@@ -148,6 +170,7 @@ export async function startSkipperPrivateGitOrigin({
     const gitPrefix = `/${repository}.git`;
     const tokenPath = `/app/installations/${fixtureInstallationId}/access_tokens`;
     server = createServer(tls, async (request, response) => {
+      requests++;
       let endpoint = "other";
       const reply = (status, body = {}) => {
         count(endpoint, status);
@@ -202,6 +225,53 @@ export async function startSkipperPrivateGitOrigin({
           }
           authority.revoke(request.headers.authorization);
           reply(204);
+          return;
+        }
+        if (teamReview && request.method === "POST" && url.pathname === pullRoute && !url.search) {
+          endpoint = "pull-create";
+          pullCreateRequests++;
+          const auth = request.headers.authorization;
+          if (
+            !authority.authorize(auth) ||
+            authority.permissions(auth)?.pull_requests !== "write"
+          ) {
+            reply(403);
+            return;
+          }
+          let json = "";
+          for await (const chunk of request) {
+            if (json.length + chunk.length > 32_768) {
+              reply(413);
+              return;
+            }
+            json += chunk;
+          }
+          const { title, body, head, base, draft, maintainer_can_modify } = JSON.parse(json);
+          const refs = await readRefs();
+          if (
+            pullRequest ||
+            head !== reviewHead ||
+            base !== "main" ||
+            draft !== true ||
+            maintainer_can_modify !== false ||
+            !title ||
+            !body ||
+            !refs[approvalRef] ||
+            refs[approvalRef] === refs["refs/heads/main"]
+          ) {
+            reply(422);
+            return;
+          }
+          pullRequest = {
+            id: 7001,
+            number: 1,
+            state: "open",
+            draft,
+            title,
+            body,
+            html_url: "https://github.com/" + repository + "/pull/1",
+          };
+          reply(201, await observePullRequest());
           return;
         }
         const service = url.searchParams.get("service");
@@ -319,6 +389,7 @@ export async function startSkipperPrivateGitOrigin({
     server.requestTimeout = 30000;
     server.maxRequestsPerSocket = 1;
     server.on("connection", (socket) => {
+      connections++;
       sockets.add(socket);
       socket.once("close", () => sockets.delete(socket));
     });
@@ -362,11 +433,15 @@ export async function startSkipperPrivateGitOrigin({
         return `${input}.${sign("sha256", Buffer.from(input), privateKey).toString("base64url")}`;
       },
       snapshot: () => ({
+        connections,
+        requests,
+        pullCreateRequests,
         endpoints: { ...counts },
         issued: authority.issuesOfTokens.length,
         tokens: authority.tokenState(),
       }),
       readRefs,
+      observePullRequest,
       holdNextDiscovery() {
         if (armedDiscovery || heldDiscovery) {
           throw new Error("discovery already armed");
@@ -405,7 +480,13 @@ export async function startSkipperPrivateGitOrigin({
           ).stdout
             .trim()
             .split("\n");
-          return { refs, sha, commit, tree, content, changed };
+          const reviewFiles = {};
+          for (const file of ["review-title.mjs", "review-title.test.mjs"]) {
+            if (tree.includes("\t" + file + "\n")) {
+              reviewFiles[file] = (await git(["-C", witness, "show", sha + ":" + file])).stdout;
+            }
+          }
+          return { refs, sha, commit, tree, content, changed, reviewFiles };
         } finally {
           await rm(witness, { recursive: true, force: true });
         }
@@ -438,5 +519,29 @@ export function withdrawDuringFetchCommand(dir, expectedStatus = 503) {
     "/=> Send header: Authorization: Basic/ {if(sent) authenticated=1}",
     "/<= Recv header: HTTP.* " + expectedStatus + "/ {if(authenticated) denied=1}",
     'END {exit !(sent && denied)}\'; result=$?; set -e; test "$result" = 0; test ! -s withdraw.out',
+  ].join("\n");
+}
+
+// A new Git process, after the first operation has already observed withdrawal. Consume the
+// trace inside the Agent: return only success/failure, never a header or credential. A 401
+// challenge followed by an authenticated refusal is expected; anonymous refusal cannot pass.
+export function fetchAfterWithdrawalCommand(dir, expectedStatus = 503) {
+  if (![401, 503].includes(expectedStatus)) {
+    throw new Error("expected an explicit refusal status");
+  }
+  return [
+    "set -eu; cd " + dir,
+    "(set +e; LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_TRACE_REDACT=1 GIT_TRACE_CURL=1 GIT_TRACE_CURL_NO_DATA=1 git -c protocol.version=2 fetch --no-tags origin HEAD;",
+    "printf '\\nfresh-fetch-exit=%d\\n' \"$?\") 2>&1 | awk '",
+    "/=> Send header: GET .*\\/info\\/refs\\?service=git-upload-pack / { discovery=1; basic=0 }",
+    "/=> Send header: Authorization: Basic / { basic=discovery }",
+    "/<= Recv header: HTTP\\/[0-9.]+ [1-5][0-9][0-9]/ {",
+    "  if (discovery && basic) { authenticated++; if ($0 ~ / " +
+      expectedStatus +
+      "( |$)/) denied++ }",
+    "  discovery=basic=0",
+    "}",
+    "/^fresh-fetch-exit=128$/ { failed++ }",
+    "END { exit !(authenticated == 1 && denied == 1 && failed == 1) }'",
   ].join("\n");
 }
