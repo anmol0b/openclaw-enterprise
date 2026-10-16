@@ -2774,7 +2774,7 @@ async function prepareProductionInstallation(
       `allow-gateway-workspace-node-${hash(agent.data.id, 12)}`,
       gatewayPlacement,
     );
-    const sandboxId = harnessPod.metadata.labels["openshell.ai/sandbox-id"];
+    const sandboxId = harnessPod.metadata.labels["openshell.ai/boundary-pair"];
     assert.ok(sandboxId);
     assert.deepEqual(
       relayPolicy.spec.ingress.flatMap(({ from }) => from),
