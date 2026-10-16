@@ -65,7 +65,9 @@ export function syntheticResponsesEvents(model, text, { mode, credential } = {})
       },
     },
   ];
-  if (mode === "reflect-split-id" || mode === "reflect-encoded-arguments") {
+  if (
+    ["reflect-split-id", "reflect-encoded-arguments", "reflect-message-citation"].includes(mode)
+  ) {
     assert.match(credential, /^SYNTHETIC-OCE-EGRESS-[a-f0-9-]+-v[12]$/);
   }
   if (mode === "reflect-split-id") {
@@ -119,7 +121,30 @@ export function syntheticResponsesEvents(model, text, { mode, credential } = {})
       { ...events.at(-1), response: { ...events.at(-1).response, output: [call] } },
     ];
   }
+  if (mode === "reflect-message-citation") {
+    // Earlier stream events stay benign: only the completed response contains this projection.
+    events.at(-1).response.output = outputWithIndependentCitation(message, credential);
+  }
   return events;
+}
+
+// The first message leaves a citation open. Stripping citations from the joined messages
+// hides the start of text that a reader of the second message sees in full.
+export function outputWithIndependentCitation(message, text) {
+  const split = Math.floor(text.length / 2);
+  const content = (...parts) =>
+    parts.map((text) => ({ type: "output_text", text, annotations: [] }));
+  return [
+    { ...message, content: content("ordinary <oai-mem-citation>unclosed") },
+    {
+      ...message,
+      id: "msg_independent",
+      content: content(
+        text.slice(0, split) + "<oai-mem-citation>note",
+        "</oai-mem-citation>" + text.slice(split),
+      ),
+    },
+  ];
 }
 
 export function encodeSyntheticEvents(events) {
@@ -292,6 +317,7 @@ export async function startSyntheticEgressProvider(t, configuration, credentials
           "reflect-header",
           "reflect-split-id",
           "reflect-encoded-arguments",
+          "reflect-message-citation",
           "oversize",
           "incomplete",
         ].includes(value),

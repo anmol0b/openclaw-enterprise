@@ -87,7 +87,7 @@ export function protectedResponseOutput(value: unknown, scan: Scan): boolean {
   if (!Array.isArray(output)) {
     return true;
   }
-  const parts: { text: string }[] = [];
+  const messages: string[] = [];
   for (const entry of output) {
     const item = asRecord(entry);
     if (
@@ -97,23 +97,24 @@ export function protectedResponseOutput(value: unknown, scan: Scan): boolean {
       return false;
     }
     if (item?.type === "message" && Array.isArray(item.content)) {
-      const messageParts: { text: string }[] = [];
+      const parts: string[] = [];
       for (const entry of item.content) {
         const part = asRecord(entry);
         if (part?.type === "output_text" && typeof part.text === "string") {
-          parts.push({ text: part.text });
-          messageParts.push({ text: part.text });
+          parts.push(part.text);
         }
       }
-      const plan = completedAssistantPlan(assistantText(messageParts));
-      if (plan !== undefined && !scan(plan)) {
+      // Citation and Plan visibility start afresh for each completed assistant message.
+      const text = parts.join("");
+      const plan = completedAssistantPlan(text);
+      if ((plan !== undefined && !scan(plan)) || !protectedAssistantText(text, scan)) {
         return false;
       }
+      messages.push(text);
     }
   }
-  // Responses clients concatenate output_text across all message items without
-  // delimiters. Scan that bounded projection once, including split encodings.
-  return protectedAssistantText(assistantText(parts), scan);
+  // Responses clients also concatenate output_text across messages without a delimiter.
+  return messages.length < 2 || protectedAssistantText(messages.join(""), scan);
 }
 
 /** Inspect the entire bounded response before the provider releases its original bytes. */

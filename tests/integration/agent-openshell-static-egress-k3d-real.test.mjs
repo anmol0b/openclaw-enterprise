@@ -569,6 +569,7 @@ async function verifyHostileResponsesAndRecovery(owned, turns) {
     "reflect-header",
     "reflect-split-id",
     "reflect-encoded-arguments",
+    "reflect-message-citation",
     "oversize",
     "incomplete",
   ]) {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
+import { outputWithIndependentCitation } from "../fixtures/synthetic-egress-provider.mjs";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { readFileSync } from "node:fs";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
@@ -862,6 +863,26 @@ test("Responses assistant projections protect independent items and seeded delta
     assert.ok((await exchange(eventsFor(collapsed, kind))).result.blocked, kind);
   }
   assert.ok((await exchange(eventsFor(collapsed, "envelope"), false)).result.blocked);
+  // An open citation in one message cannot hide visible text in the next.
+  // The preceding stream events remain benign, isolating the terminal envelope check.
+  for (const streaming of [false, true]) {
+    const secret = "synthetic-key-initial";
+    for (const text of [secret, Buffer.from(secret).toString("base64"), "ordinary response"]) {
+      const events = structuredClone(wire.responseEvents);
+      const response = events.at(-1).response;
+      response.output = outputWithIndependentCitation(response.output[0], text);
+      const { result, rawBody } = await exchange(events, streaming);
+      assert.equal(rawBody.includes(text), false, "text should be split by a citation");
+      if (text === "ordinary response") {
+        assert.equal(result.body?.toString(), rawBody, "benign messages must pass unchanged");
+      } else {
+        assert.ok(
+          result.blocked,
+          "citation removal in the second message reveals selected material",
+        );
+      }
+    }
+  }
   for (const [kind, candidate] of [
     ["done", "Answer.<oai-mem-citation>source</oai-mem-citation>"],
     ["added", "Hello <oai-mem-citation>source</oai-mem-citation> world"],
