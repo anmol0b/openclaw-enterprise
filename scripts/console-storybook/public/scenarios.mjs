@@ -358,7 +358,7 @@ const devdayCreateCheckpoint = [
 ];
 const devdayAdminCheckpoint = [
   { selector: 'a[href*="agt_00000000-0000-4000-8000-000000000001"]', click: true },
-  { selector: ".native-admin-access a.primary" },
+  { selector: ".native-admin-access a[href]" },
 ];
 
 const shareExistingPerson = [
@@ -626,7 +626,11 @@ export const scenarios = {
     name: "Checking session",
     rules: [{ path: "/api/auth/session", hold: true }],
     description:
-      "A pending session read. The real client times out after 15 seconds; reset to replay loading.",
+      "Reload with the entry script throttled: “Loading OpenClaw Enterprise…” appears before it runs, then becomes “Checking session…” in the same place.",
+    steps: [
+      "Check that neither console navigation nor a sign-in form appears while the session is unknown.",
+      "Wait for Session unavailable, then choose Retry to repeat the check.",
+    ],
   },
   logoutFailure: {
     group: "Pages/Sign in",
@@ -648,6 +652,21 @@ export const scenarios = {
       "At a narrow viewport, use Open navigation and choose a page; the drawer must close and return focus to the page.",
     ],
   },
+  navigationFirstVisit: {
+    group: "Pages/Navigation",
+    name: "First visits",
+    rules: [
+      { suffix: "/agents/agt_00000000-0000-4000-8000-000000000001", delayMs: 150 },
+      { suffix: "/agents/agt_00000000-0000-4000-8000-000000000002", delayMs: 1200 },
+    ],
+    description:
+      "Open an Agent from the list. The URL and page change together; details appear when access and the Agent read are confirmed. Read times are simulated.",
+    steps: [
+      "Open Research assistant. Its 150 ms read finishes without waiting for a minimum loading time.",
+      "Open Documentation assistant. During its 1200 ms read, choose Back to Agents. Focus returns to that link and the late response does not reopen it.",
+      "Reload the story: the cold visit shows the session status, then Agents, with no loading panels between them.",
+    ],
+  },
   navigationRetained: {
     group: "Pages/Navigation",
     name: "Return to loaded pages",
@@ -661,12 +680,24 @@ export const scenarios = {
       },
     ],
     description:
-      "Returning to unchanged pages and Agent tabs preserves loaded controls, expanded panels, and edits. Access is rechecked before page controls become active. Refresh explicitly reloads. Simulated API; no backend persistence proof.",
+      "Returning to unchanged pages and Agent tabs preserves loaded controls, expanded panels, and edits. Access and reads are rechecked before a retained page is shown. Refresh explicitly reloads. Simulated API; no backend persistence proof.",
     steps: [
-      "Wait for Agents, enter a search, open Create Agent, then return using the Agents breadcrumb. The loaded list and search remain visible while reads are pending.",
+      "Wait for Agents, enter a search, open Create Agent, then return using the Agents breadcrumb. Create Agent stays shown, inactive, while access and reads are rechecked; then the loaded list and search return unchanged. Refocusing the window rechecks the same way, without a loading state.",
       "Use Tab to focus Namespaces, then Enter. After loading, its heading has focus and the next Tab reaches Refresh. Back and Forward focus the destination heading while retaining loaded content.",
       "Open an Agent and expand Native configuration. Visit Credentials and Workspace files, then return to Configuration: the disclosure stays expanded. Return to Agents and use Back: native admin access and the selected tab stay loaded through access checks. Refresh explicitly rereads the page.",
       "Switch Namespace to confirm the previous scope's rows disappear. Reset the story to clear retained state.",
+    ],
+  },
+  navigationSlowRecheck: {
+    group: "Pages/Navigation",
+    name: "Slow rechecks",
+    rules: [{ path: "/api/auth/session", skip: 1, delayMs: 2500 }],
+    description:
+      "Every session check after the first load takes 2.5 s. Returns and refocus keep the shown page and say Still checking after 1 s; Refresh shows loading after 250 ms. Simulated API; no backend proof.",
+    steps: [
+      "Wait for Agents, then select Refresh. The list stays shown, inactive, for 250 ms, then Loading replaces it. When the list returns, focus is on Refresh.",
+      "Open Namespaces and wait for it, then use browser Back. The Namespaces page stays shown, inactive; after 300 ms it dims with a progress cursor, without moving, and after 1 s Still checking… appears beside Refresh until the unchanged Agents list returns.",
+      "Switch to another window and back: the list stays shown, undimmed, and says Still checking… after 1 s.",
     ],
   },
   navigationAgentReturn: {
@@ -1143,11 +1174,26 @@ export const scenarios = {
     actions: [
       ...form,
       { selector: 'select[aria-label="Default plugin approvers mode"]', value: "chosen" },
-      { selector: '[aria-label="Default plugin approvers people"]', focus: true },
     ],
     description:
-      "New Agents inherit OpenClaw's existing approval routing until an operator selects a default. The directory explains that a Slack bot Secret must be selected under Channels before names can be resolved.",
+      "Choose a Slack bot Secret here to search by name, or enter exact IDs. The search choice does not bind the Secret to the Agent.",
     gap: "The fixture does not prove Secret permissions or OpenClaw approval enforcement.",
+  },
+  createPluginApproversLookup: {
+    group: "Pages/Create Agent",
+    name: "Search for plugin approvers",
+    path: create,
+    pluginCapabilities,
+    actions: [
+      ...form,
+      { selector: 'select[aria-label="Default plugin approvers mode"]', value: "chosen" },
+      { selector: "#approver-directory-secret", value: "Slack bot token (simulated)" },
+      { selector: '[aria-label="Default plugin approvers people"]', value: "Alex" },
+      { selector: '[aria-label="Default plugin approvers people results"] [role="option"]' },
+    ],
+    description:
+      "A search-only Secret resolves people by name before the Agent has a Slack channel. Select Alex Chen: their name and handle stay visible while the saved selection resolves.",
+    gap: "The Secret and directory are simulated; no Slack request or permission check is made.",
   },
   createPluginsSetupReminder: {
     group: "Pages/Create Agent",
@@ -2663,7 +2709,12 @@ export const scenarios = {
     path: draft,
     actions: [click("Edit Configuration")],
     description:
-      "Edit native JSON on the current draft. Save Configuration persists values; deployment remains a separate action.",
+      "Save this draft without leaving the editor’s place on the page. Deployment is a separate action.",
+    steps: [
+      "Change a draft setting, then choose Save Configuration.",
+      "Look for “Configuration saved.” Focus returns to Edit Configuration, with that confirmation as its description.",
+      "Open the editor again and choose Cancel. Focus returns to Edit Configuration without saving.",
+    ],
   },
   gatewayPasswordAccess: {
     group: "Pages/Agent detail",
@@ -2733,7 +2784,7 @@ export const scenarios = {
       "In Available, select Calendar, filter tools by create, and expand Create event. Switch to Configured, filter plugins by Calendar, and choose Calendar with a different tool filter. Round-trip the tabs: each keeps its selection, query, tool filter, and expanded rows without another catalog request.",
       "Remove Calendar from Configured: its details clear even though Available still lists it. Add Calendar again from Available; Configured must not restore the removed detail state.",
       "In Configure plugins, change Calendar's tool policy, add Documents from the next page, and select Done.",
-      "Select Save plugin selections, then Deploy new version. Compare the new version with the earlier immutable plugin snapshot.",
+      "Select Save plugin selections. The tab updates in place: the page keeps its scroll and focus moves to Plugin selections saved. Then select Deploy new version and compare the new version with the earlier immutable plugin snapshot.",
     ],
     gap: "Catalog and deployment responses are simulated. This does not verify plugin access, installation, policy enforcement, or a live Agent turn.",
   },
@@ -2783,7 +2834,7 @@ export const scenarios = {
       "Calendar explicitly has no Slack approvers, while Create event overrides it with a different user. The UI distinguishes both from inherited lists.",
     steps: [
       "Change Calendar to Inherit Agent default approvers and inspect Plugin selections JSON.",
-      "Search Create event tool approvers people to choose between duplicate Alex Chen names by exact ID.",
+      "Search Create event tool approvers people to distinguish the two Alex Chen results by their handles.",
     ],
     gap: overrideApproverGap,
   },
@@ -2805,7 +2856,7 @@ export const scenarios = {
       { selector: '[aria-label="Default plugin approvers people results"] [role="option"]' },
     ],
     description:
-      "The selected bot Secret resolves names within Demo workspace. The open Alex search keeps its results on browser refocus; choosing one saves a team-qualified selector.",
+      "The selected bot Secret resolves names within Demo workspace. The open Alex search keeps its results on browser refocus; choosing one shows their name and handle and saves a team-qualified selector.",
     steps: [
       "Switch to another browser tab and return. The open query and results remain while Agent access is checked.",
       "Move focus to another Console control to close the list, then focus the search field to reopen it.",
@@ -2838,7 +2889,7 @@ export const scenarios = {
       "When the API reports channel directory lookup as unavailable, the approver field still accepts a raw Slack user ID and saves it on the draft Agent.",
     steps: [
       "Confirm the directory error explains that exact IDs can still be entered.",
-      "Review the saved default plugin approver chip: UDEMO123 remains visible because names could not be resolved.",
+      "Review the saved default plugin approver chip: Name unavailable keeps the selection visible and removable when the directory cannot resolve it.",
       "Open Plugin selections JSON or inspect the saved Agent response in browser tools to confirm the plugin policy JSON was not changed by the approver save.",
     ],
     gap: "The 501 directory response, Slack user ID, and Agent save are simulated. This proves Console behavior only, not Slack identity validity or runtime approval delivery.",
@@ -2870,7 +2921,10 @@ export const scenarios = {
     path: revision,
     deployed: true,
     description:
-      "The selected immutable version has recorded deployment success. It is not proof of current live serving health.",
+      "v1 is selected, its recorded deployment completed, and live serving is not verified.",
+    steps: [
+      "Open Deployment details with Enter to inspect the completed stages. Refresh deployment; your disclosure choice is preserved.",
+    ],
   },
   repositoryDraft: {
     group: "Pages/Agent detail",
@@ -3085,7 +3139,11 @@ export const scenarios = {
     candidateDeploymentStatus: "failed",
     candidateModelProbeCause: { kind: "PROBE_STATUS", detail: "format" },
     description:
-      "v7 failed its startup model check; the recorded error states the next step, the record names the runtime's classified cause (the provider rejected the model or request format), and Open Configuration links the draft.",
+      "Recovery comes first: v7 failed its startup model check, while selected v6 may have stopped. The detailed record preserves the reported cause without assuming a credential problem.",
+    steps: [
+      "Open v7 Logs and confirm the failed version, then go Back. Open Configuration goes to the draft without deploying.",
+      "At phone width, the failure, both recovery links, and selected version are still near the top.",
+    ],
   },
   deploymentFailedAfterSelection: {
     group: "Pages/Agent detail",
@@ -3219,6 +3277,19 @@ export const scenarios = {
       "Select Follow, confirm it changes to Following, then select Following to stop. Resize the preview to 390px and check that controls remain usable and log metadata wraps without clipping messages.",
     ],
     gap: "Runtime records and refreshes are simulated UI evidence; source reads, filtering, and following require real backend verification.",
+  },
+  runtimeLogsSlowFirstStatus: {
+    group: "Pages/Agent detail",
+    name: "Open Logs on a phone while runtime status is loading",
+    path: `${candidateVersion}&tab=logs`,
+    deployed: true,
+    candidateDeploymentStatus: "succeeded",
+    mobile: true,
+    // Let the Console place the reader; a fixture scroll would conceal a jump on entry.
+    scrollToTabs: false,
+    rules: [{ suffix: "/runtime", delayMs: 700, once: true }],
+    description:
+      "Open the direct Logs link at 390 px. The first runtime status takes 700 ms; status and log output appear together instead of moving the output after it appears.",
   },
   runtimeLogsStartupWarnings: {
     group: "Pages/Agent detail",
@@ -4118,7 +4189,7 @@ export const scenarios = {
       "Save the selected model Secret, then confirm the exact Agent grant through Namespace IAM. Saving does not establish model readiness.",
     steps: [
       "Click Save authentication source.",
-      "The refreshed form retains Service Accounts; the request log shows the Agent PATCH followed by exact Secret access creation.",
+      "Look for “Authentication source saved.” Focus stays at Save authentication source; the request log shows the Agent PATCH followed by access for that Secret.",
     ],
   },
   authSecretGrantDenied: {
@@ -4202,7 +4273,11 @@ export const scenarios = {
     deployed: true,
     nativeAdmin: "available",
     description:
-      "Authorized launch link and warning. The fixture opens an explanatory page instead of a real gateway.",
+      "The Agent overview puts the authorized admin launch beside its access and configuration warning. The link opens a fixture, not a gateway.",
+    steps: [
+      "Check the selected version, completed deployment, and unverified live serving at desktop and phone widths.",
+      "Expand Deployment details, then open the admin console. Compare Denied and hidden: there is no launch or access warning there.",
+    ],
   },
   nativeStopped: {
     group: "Components/Native admin",
@@ -4366,6 +4441,7 @@ export const scenarios = {
     steps: [
       "Focus Refresh deletion status and press Enter. When Checking finishes, focus returns to Refresh.",
       "Refresh again and press Tab during Checking. The response leaves focus where you moved it.",
+      "Leave the page open: the 3 s status polls do not change Refresh to Checking or rewrite the deletion notice.",
     ],
     description:
       "An already deleting Agent retains manual confirmed recovery and status refresh controls; worker progress is simulated.",
@@ -4654,7 +4730,7 @@ export const scenarios = {
     steps: [
       "Start on the Agents list and open oceclaw.",
       "Confirm the Console shows a selected deployed revision, simulated deployment status, and available native admin access.",
-      "Click Open native admin UI. The target fixture opens with an existing #openclaw-feedback message.",
+      "Click Open admin console. The target fixture opens with an existing #openclaw-feedback message.",
       "Enter a new message, click Send in the simulated Admin UI, and confirm the visible assistant reply.",
     ],
     gap: "The Admin UI target is a fixture page. It demonstrates the link target and chat-shaped result only; it does not connect to a gateway, Slack, credentials, or a model.",
@@ -4737,6 +4813,10 @@ export const scenarios = {
     deployed: true,
     actions: [click("Stop Agent")],
     description: "Confirm stopping the Agent or cancel without changing its requested state.",
+    steps: [
+      "Confirm Stop Agent. The result stays in view, focus moves to Refresh stop status, and the version detail does not reload.",
+      "For the revision clearing while Workspace is open, use Flows / Stop an Agent.",
+    ],
   },
   stopRequested: {
     group: "Components/Stop Agent",
@@ -4818,17 +4898,20 @@ export const scenarios = {
   stopFlow: {
     group: "Flows",
     name: "Stop an Agent",
-    path: revision,
+    path: `${revision}&tab=workspace`,
     deployed: true,
+    clearRevisionOnStopReadback: true,
     description:
       "Open the Stop Agent confirmation and request the stopped desired state while preserving draft, revisions, credentials, and workspace data.",
     steps: [
       "Open Stop Agent and review the confirmation copy.",
-      "Confirm Stop Agent. The page reports Stop requested and keeps revision/workspace inspection available.",
+      "With Workspace files open, confirm Stop Agent. The result stays in view, focus moves to Refresh stop status, and the current version still has file editors.",
+      "Refresh stop status. The fixture now clears the current version; Workspace shows why files are unavailable, without reloading the page.",
+      "Open Configuration, then Workspace files again. The unavailable notice remains; the old editors do not return.",
       "Focus Request Stop again, press Enter, then Cancel or Escape. Focus returns to Request Stop again without submitting. Reopen and confirm if recovery is needed; refresh an uncertain outcome before retrying.",
       "Return to Create new version and Deploy new version to request running again.",
     ],
-    gap: "Stop Agent confirms OCC accepted the stopped desired state and selected revision metadata only. Verify live gateway shutdown outside Console if required. Disabling a channel does not stop the Agent; deletion is destructive.",
+    gap: "The fixture separates Stop acceptance from the next read clearing the selected revision. Neither establishes that a live gateway shut down. Disabling a channel does not stop the Agent; deletion is destructive.",
   },
   deleteFlow: {
     group: "Flows",

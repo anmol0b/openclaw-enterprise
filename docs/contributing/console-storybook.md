@@ -59,7 +59,7 @@ Stories reach error states through real controls after loading fixture data.
 
 | Group                   | Coverage                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Sign in                 | Password and GitHub sign-in, discovery failure, GitHub errors, disabled account, rejected login, expired session, session-read failure, loading, unconfirmed logout.                                                                                                                                                                                                                                              |
+| Sign in                 | Password and GitHub sign-in, discovery failure, GitHub errors, disabled account, rejected login, expired session, delayed session status, failure and retry, unconfirmed logout.                                                                                                                                                                                                                                  |
 | Agents                  | Populated and empty collections, no search matches, inaccessible Namespace, no readable Namespaces, permission denial, read failure, loading.                                                                                                                                                                                                                                                                     |
 | Backends                | Configured, empty, and discovery failure.                                                                                                                                                                                                                                                                                                                                                                         |
 | Namespaces              | Ready and provisioning, empty, permission denial.                                                                                                                                                                                                                                                                                                                                                                 |
@@ -79,9 +79,9 @@ loading.
 
 ## Return navigation
 
-Use **Pages/Navigation → Return to loaded pages** and **Return to Agent panels**.
-Search, expanded configuration, native admin access, and Credentials should survive
-Back/Forward and tab changes. Refresh reloads.
+Use **Pages/Navigation → Return to loaded pages**, **Return to Agent panels**, and
+**Slow rechecks**. Search, expanded configuration, native admin access, and Credentials
+survive Back/Forward and tab changes. Refresh reloads; slow checks say so.
 
 ## Agent flows and UI gaps
 

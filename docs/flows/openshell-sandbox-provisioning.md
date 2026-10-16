@@ -8,8 +8,7 @@ last_updated_session: authoring-run/acc80b35-b98a-4e59-83ac-8fd4bf78050e
 
 ## Overview
 
-Kubernetes Compute delegates dedicated Codex and native OpenClaw Harnesses to
-OpenShell. Operator mode owns Namespace Workspaces; managed mode fails before mutation.
+Kubernetes Compute delegates dedicated Harnesses to OpenShell. Operator mode owns Namespace Workspaces; managed mode fails before mutation.
 [Credential sources](credential-source-lifecycle.md) provide model access without
 Agent Secret permission. Codex authenticates Gateway requests through revision-owned
 provider files and OpenShell's bearer-passthrough endpoint, replacing the direct
@@ -133,11 +132,11 @@ readiness comes first. Development uses the central Gateway endpoint.
 endpoints, including bracketed IPv6, unchanged to the gRPC client. HTTP
 origins keep port 80 explicit; HTTPS and nondefault ports retain their behavior.
 
-The Driver uses Compute's physical namespace name for the Workspace. It reads
-it, creates it if missing, or rereads after concurrent `ALREADY_EXISTS`.
-Adoption requires its expected name, OCC Namespace ID label, managed-by label
-and active phase; conflicts fail Namespace preparation. Compute's `oce-` plus
-15-character digest fits OpenShell's 19-character limit.
+The Workspace uses Compute's physical namespace name (`oce-` plus a 15-character
+digest, within OpenShell's 19-character limit). The Driver reads it, creates it
+if missing, or rereads after concurrent `ALREADY_EXISTS`. Adoption requires the
+expected name, OCC Namespace ID label, managed-by label and active phase;
+conflicts fail Namespace preparation.
 
 ### 2. Derive the provider-owned Harness request
 
@@ -160,9 +159,12 @@ adds only its SHA-256 verifier as `APP_TOKEN_SHA`. It converts the admitted plug
 snapshot into `runtime.json`/`config.toml` workload files and removes their ConfigMap
 paths from the environment.
 
-OCC supplies admitted login metadata to `OpenShellSandboxDriver.configureAgent`.
-API-key sources select `danger-full-access`; PAT and unresolved sources retain
-`workspace-write`. Both require user review.
+`OpenShellSandboxDriver.configureAgent` selects full access with user review.
+`deploy/runtime/openclaw-codex-full-access-profile.patch` sends `:danger-full-access` on thread and turn requests only when the OpenShell
+endpoint selects that profile. If native policy returns a constrained thread,
+the Gateway fails the request before starting a turn. First Agent can read a
+prior PAT revision frozen with `workspace-write`; a new deployment must freeze
+the current policy and leaves the prior revision unchanged.
 OpenShell blocks nested bubblewrap user namespaces; model readiness does not
 prove shell execution.
 
@@ -296,7 +298,8 @@ process-group signaling returns `EPERM`.
 
 Compute verifies revision ownership and resolves `harnessEndpoint` before
 replacing the fail-closed Gateway. It sets `APP_SERVER_URL`,
-`OPENCLAW_REMOTE_WORKSPACE_ROOT` and the configured provider host alias.
+`OPENCLAW_REMOTE_WORKSPACE_ROOT` and the configured provider host alias. It projects
+`codexPermissionProfile` as `OPENCLAW_CODEX_PROVIDER_PERMISSION_PROFILE`.
 `apps/controller/src/drivers/compute/kubernetes/index.ts:reconcileHarnessTrust`
 validates `tls.caBundle` into a separate immutable revision ConfigMap, preserving
 the earlier snapshot. Only that Gateway mounts the combined public endpoint/execution
@@ -338,12 +341,9 @@ namespace only after this cleanup succeeds.
 
 ## Debugging and verification
 
-See [OpenShell tests](../testing/openshell.md) for commands and prerequisites.
+See [OpenShell tests](../testing/openshell.md) for prerequisites and proof coverage.
 In Compose, `network.providerHarness.address` must match the `openshell-gateway`
-ClusterIP, the Agent Gateway must use `ws://*.openshell.localhost:8080/`, and its
-direct Service stays inactive. Protected k3d must prove provider files,
-verifier-only authorization, enrollment, model turns, cleanup, containment and
-networking. Native OpenClaw remains verification-only.
+ClusterIP and the Agent Gateway must use `ws://*.openshell.localhost:8080/`.
 
 ## Related docs
 
@@ -360,6 +360,8 @@ networking. Native OpenClaw remains verification-only.
 ## Changelog
 
 - 2026-10-15 18:46: Defer protected development worker startup. (authoring-run/acc80b35-b98a-4e59-83ac-8fd4bf78050e - 05750c084)
+
+- 2026-10-15 08:47: Select explicit Codex permissions. (authoring-run/7eb24321-3670-4154-adde-41a0f1b36728 - 04514330688378316bd0641b8d5560da56aeff85)
 
 - 2026-10-15 02:25: Distinguish API-key and PAT isolation. (authoring-run/c11897e0-33a6-4276-b620-aaec6d57ab00 - 07eb950b5)
 
