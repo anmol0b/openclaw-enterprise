@@ -1800,7 +1800,7 @@ function createIntegrationSandboxDriverFactory(
               sandboxServiceAccountName: agentSandboxServiceAccount(context),
               exact: context.requirements.workloadIdentity !== undefined,
             });
-            // The production Codex proof hands the real Driver exactly what Compute rendered;
+            // Both production Harness proofs hand the real Driver exactly what Compute rendered;
             // unsupported shapes fail closed before OpenShell creates provider resources.
             return await delegate(
               context.requirements,
@@ -2026,7 +2026,13 @@ function withFirstPrepareRevisionFailureDiagnostic(computeDriver) {
 
 async function prepareProductionInstallation(
   context,
-  { harnessId = "codex", controllerPort, controlUiOrigin, withOAuthToolSources = true } = {},
+  {
+    harnessId = "codex",
+    controllerPort,
+    controlUiOrigin,
+    withOAuthToolSources = true,
+    enableCompatibilityBridges = harnessId === "openclaw",
+  } = {},
 ) {
   const kubeconfig = await validateOpenShellPrerequisites();
   const identifier = randomUUID();
@@ -2114,8 +2120,9 @@ async function prepareProductionInstallation(
   configuration.drivers.compute.configuration.network.pluginStatusProxySourceCidrs =
     await apiServerPodProxySourceCidrs();
   if (harnessId === "openclaw") {
-    // scripts/k3d builds this runtime from an OpenClaw source with native worker support.
-    configuration.runtime = { nativeWorkerSupport: "custom-image" };
+    if (enableCompatibilityBridges) {
+      configuration.runtime = { nativeWorkerSupport: "custom-image" };
+    }
     configuration.drivers.compute.configuration.runtime.nativeOpenClawSessionCapacity = 2;
     // The node and two retained session workers share one container; the single-Harness
     // 2 GiB budget OOM-kills the second turn. Keep Compute and Sandbox budgets aligned.
@@ -2124,20 +2131,25 @@ async function prepareProductionInstallation(
       configuration.drivers.compute.configuration.resources.agent.limits.memory;
     configuration.drivers.compute.configuration.resources.namespace.quota["limits.memory"] = "16Gi";
     configuration.drivers.credential_gateway.configuration.binaries = ["/usr/local/bin/node"];
-    // Automatic enrollment egress belongs to the Driver's Codex runtime provider. The native
-    // verification bridge must admit only its Node executable and exact Gateway endpoint.
-    configuration.drivers.sandbox.configuration.policy.networkPolicies.push({
-      name: "native-bridge-node-enrollment",
-      binaries: [{ path: "/usr/local/bin/node" }],
-      endpoints: [
-        {
-          host: workspaceGateway.routing.hostname,
-          ports: [workspaceGateway.routing.endpointPort],
-          tls: "skip",
-          enforcement: "enforce",
-        },
-      ],
-    });
+    if (enableCompatibilityBridges) {
+      // The legacy native bridge supplies its own enrollment grant. The production
+      // provider derives that grant from the exact revision's setup envelope.
+      configuration.drivers.sandbox.configuration.policy.networkPolicies.push({
+        name: "native-bridge-node-enrollment",
+        binaries: [{ path: "/usr/local/bin/node" }],
+        endpoints: [
+          {
+            host: workspaceGateway.routing.hostname,
+            ports: [workspaceGateway.routing.endpointPort],
+            tls: "skip",
+            enforcement: "enforce",
+          },
+        ],
+      });
+    }
+  }
+  if (!enableCompatibilityBridges) {
+    configuration.drivers.compute.configuration.servicePrincipalCredentials = { mode: "disabled" };
   }
   // A disposable Keycloak issues OAuth2 tokens over HTTPS signed by a private CA. The Namespace
   // gateway is configured to trust that CA so it can mint and refresh tokens itself.
@@ -2172,11 +2184,13 @@ async function prepareProductionInstallation(
   configuration.drivers.compute.configuration.network.gatewayTrustedProxyCidrs =
     workspaceGateway.nativeOptions.gatewayAuth.trustedProxies;
   delete configuration.drivers.compute.configuration.network.gatewayClients;
-  configuration.drivers.sandbox.configuration.policy.filesystem.readWrite.push(
-    "/home/node/.openclaw-node",
-  );
-  // For Codex, the Sandbox Driver adds the workspace node's Gateway egress rule itself
-  // (`workspace-node-enrollment`); a second rule for the same host and port is ambiguous.
+  if (harnessId === "codex" || enableCompatibilityBridges) {
+    configuration.drivers.sandbox.configuration.policy.filesystem.readWrite.push(
+      "/home/node/.openclaw-node",
+    );
+  }
+  // The unbridged Driver adds the workspace node's exact Gateway egress itself;
+  // a second rule for the same host and port is ambiguous.
   configuration.drivers.secret.configuration.authentication = controller.authentication;
   const gatewayApiKeyPath = join(directory, "workspace-gateway-api-key");
   await writeFile(gatewayApiKeyPath, workspaceGateway.apiKey, { mode: 0o600 });
@@ -2196,7 +2210,7 @@ async function prepareProductionInstallation(
     OpenShellGateway,
     operatorKubernetes,
     {
-      enableCompatibilityBridges: harnessId === "openclaw",
+      enableCompatibilityBridges,
       ...(keycloak === undefined ? {} : { gatewayTrustPem: keycloak.caPem }),
     },
   );
@@ -2707,14 +2721,75 @@ async function prepareProductionInstallation(
     );
     assertNoProjectedAgentIdentity(harnessPod);
     assertApprovedOpenShellPrivileges(harnessPod);
-  } else {
+  } else if (enableCompatibilityBridges) {
     assertBridgedNativeStateMount(harnessPod);
     await assertBridgedServicePrincipalToken(
       placement,
       harnessPod,
       configuration.drivers.compute.configuration.servicePrincipalCredentials,
     );
-    assertApprovedOpenShellPrivileges(harnessPod, { compatibilityBridge: true });
+    assertApprovedOpenShellPrivileges(harnessPod);
+  } else {
+    assertNoProjectedAgentIdentity(harnessPod);
+    assertApprovedOpenShellPrivileges(harnessPod);
+    const mounts = harnessContainer.volumeMounts ?? [];
+    const environment = harnessContainer.env ?? [];
+    const nodeState = environment.find(({ name }) => name === "OPENCLAW_NODE_STATE_DIR")?.value;
+    assert.match(nodeState ?? "", /^\/sandbox\/\.openclaw-mounts\/[a-f0-9]{16}\/state$/u);
+    const stateMount = mounts.find(({ mountPath }) => `${mountPath}/state` === nodeState);
+    assert.equal(
+      stateMount?.subPath,
+      `workspace-node-${hash(agent.data.id, 12)}-${hash("harness:openclaw", 12)}`,
+    );
+    assert.notEqual(stateMount.readOnly, true);
+    for (const [mountPath, subPath] of [
+      ["/sandbox/enterprise", "workspace"],
+      ["/sandbox/.openclaw-runtime", `openshell-runtime-${hash(deployed.data.id, 16)}`],
+    ]) {
+      const mount = mounts.find((entry) => entry.mountPath === mountPath);
+      assert.equal(mount?.subPath, subPath);
+      assert.notEqual(mount.readOnly, true);
+    }
+    for (const name of ["APP_SERVER_TOKEN", "APP_TOKEN_SHA", "OPENCLAW_NODE_SETUP_CODE"]) {
+      assert.equal(
+        environment.some((entry) => entry.name === name),
+        false,
+        `native enrollment must use the provider's setup-envelope file without ${name}`,
+      );
+    }
+    await kubectl(
+      "exec",
+      harnessPod.metadata.name,
+      "-n",
+      placement,
+      "-c",
+      "agent",
+      "--",
+      "test",
+      "-w",
+      nodeState,
+    );
+    const relayPolicy = await resource(
+      "networkpolicy",
+      `allow-gateway-workspace-node-${hash(agent.data.id, 12)}`,
+      gatewayPlacement,
+    );
+    const sandboxId = harnessPod.metadata.labels["openshell.ai/sandbox-id"];
+    assert.ok(sandboxId);
+    assert.deepEqual(
+      relayPolicy.spec.ingress.flatMap(({ from }) => from),
+      [
+        {
+          namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": placement } },
+          podSelector: {
+            matchLabels: {
+              "openshell.ai/sandbox-id": sandboxId,
+              "openshell.ai/boundary-role": "supervisor",
+            },
+          },
+        },
+      ],
+    );
   }
   process.stderr.write(
     "OpenShell integration: approved mounts and privileges verified; checking secret exposure.\n",
@@ -6128,6 +6203,7 @@ test(
       harnessId: selectedHarness,
       controlUiOrigin,
       withOAuthToolSources: false,
+      enableCompatibilityBridges: false,
     });
     const apiSecret = await resource(
       "secret",
