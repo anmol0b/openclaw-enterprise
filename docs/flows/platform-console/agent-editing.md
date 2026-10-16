@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
 updated: 2026-10-15
-last_updated_session: authoring-run/2aecf15b-82ac-4724-94d9-45b8c1c99fc6
+last_updated_session: authoring-run/6d9b833d-e4fc-4f58-98a8-f0fac29f709d
 ---
 
 # Console Agent editing and runtime requests
@@ -76,10 +76,13 @@ payload-decode failures into metadata plus `configurationReadError`; queries
 and operational reads remain strict. Drafts and revisions decode independently.
 The UI retains navigation, blocks editing/deployment of unreadable drafts, and
 never substitutes defaults. Exact-resource permissions still apply.
-**Current version** uses `activeRevisionId`; **View version vN** opens read-only
+**Selected version** uses `activeRevisionId`; **View version vN** opens read-only
 details without activating it. **Deployment activity** shows the newest readable
 version's persisted `queued`, `running`, `succeeded`, or `failed` status, not live
-health. Viewed versions show their own results. Pending activity is reread every
+health. Routine completion folds; pending work, read errors, warnings, and cleanup
+stay visible. A failed deployment links its Logs, unless this tab saw them denied,
+and draft settings once `update` is confirmed. A hidden or unlisted current version
+suppresses this recovery. Viewed versions show their own results. Pending activity is reread every
 `DEPLOYMENT_POLL_MS` (`apps/controller/src/console/agents/detail.mjs`) until a
 result or read error; a new result also rereads selection. **Refresh deployment** rereads
 activity and selection. **Current observations** requests timestamped
@@ -99,7 +102,7 @@ Writes can race after these reads; the API owns authorization and generation.
 admitted versions remain unchanged; Cancel discards the edit. On deployment, Kubernetes `gatewayConfiguration` detects the reference;
 `deployment` delivers the generated password environment variable.
 
-Saving reloads the draft without changing admitted snapshots. Invalid input,
+Saving refreshes the draft in place, keeping scroll and focus; admitted snapshots stay. Invalid input,
 denial, and stale drafts retain editor text. Uncertain saves require readback.
 Unsaved edits block deployment; pending saves block tab and version changes.
 
@@ -112,10 +115,10 @@ admitted revisions. Driver validation precedes deployment's immutable snapshot. 
 PATCHes `repositoryAccess`. Dirty, pending, or uncertain saves block tabs and
 deployment; failed discovery leaves access unverified.
 
-Deployment rereads Agent and Configuration, requires harness authentication and
+Deployment rereads Agent and Configuration, requires authentication and
 Slack bindings, and blocks Teams. Changed association, generation, authentication,
 plugins, execution mode, Backend, or repository access require reload; controls
-stay locked while the request is pending. Snapshot views deploy current settings. Failed reads
+stay locked while pending. Snapshot views deploy current settings. Failed reads
 send no bodyless deploy POST; success opens the revision. Uncertain POSTs require
 history readback before retry; browser reads are not atomic with admission.
 
@@ -177,10 +180,9 @@ uncertain outcomes block retries until refresh. The
 recovery. Metadata and Credentials links open new tabs, preserving edits.
 Values are never retrieved.
 
-Saving channels rereads Agent and Configuration and checks their association and
-generation. The PATCH sends `{ values: updatedValues }`, adding `secretBindings`
-only for changed selections and preserving others. A rejected PATCH writes no
-new Secret grant.
+Saving channels rereads Agent and Configuration; a changed association or
+generation offers Reload draft. The PATCH sends `{ values: updatedValues }`, adding
+`secretBindings` only for changed selections. A rejected PATCH writes no Secret grant.
 
 After PATCH, `apps/controller/src/console/agents/secret-access.mjs:ensureSecretOperateBinding`
 grants the Agent service principal access to selected Secrets through Namespace
@@ -289,7 +291,7 @@ revision; the Console cannot inspect history or candidate cleanup. With no selec
 and no readable versions yet (`setNoReadableVersions`), it shows no Stop control.
 
 Refresh reads desired state and selected revision, not live health. Denial stays inline; changed
-state reloads the page. An uncertain write blocks another Stop until readback succeeds.
+state updates panels in place. An uncertain write blocks another Stop until readback succeeds.
 [Deploy to resume](../../reference/agents/deployment.md#stop-and-resume); the lifecycle
 reference covers worker shutdown and preservation of revisions, credentials, and state.
 
@@ -356,6 +358,7 @@ worker cleanup and the Namespace-owned resources it preserves.
 
 ## Changelog
 
+- 2026-10-15 21:30: Separate selected version, recorded deployment, and live-serving uncertainty; surface failed-version recovery. (authoring-run/6d9b833d-e4fc-4f58-98a8-f0fac29f709d - 7adac57cc03545bdd3cdc383c88219396a677fd9)
 - 2026-10-15 04:40: Hide stop controls for a never-deployed Agent in the accompanying change. (authoring-run/2aecf15b-82ac-4724-94d9-45b8c1c99fc6 - c78f96b706ce94dbfe6aadfdac9c40e7e7e759ae)
 - 2026-10-10 20:00: Keep untouched CRLF workspace files clean; only an edit enables Save. (public-pr/2000 - a3ca862c37d05ba850d3c9595e5668917d7f480d)
 - 2026-10-10 08:46: Trace keyboard focus after Stop confirmation cancellation. (authoring-run/9c1f0e85-9f16-436e-900f-b3d0e6e8cdd9 - b8783d7942e875c6eb751222329c63fac5c028a1)

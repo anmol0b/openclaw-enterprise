@@ -1,4 +1,4 @@
-import { element, button, dismissOnBackdrop } from "../dom.mjs";
+import { element, button, dismissOnBackdrop, focusSaveOutcome } from "../dom.mjs";
 import { renderSecretReference } from "../agents/secret-picker.mjs";
 
 const clone = (value) => (value === undefined ? undefined : structuredClone(value));
@@ -136,12 +136,14 @@ function renderCard(section, state, provider) {
   const canOpen =
     !state.readOnly &&
     !state.outcomeUnknown &&
+    !state.reloadRequired &&
     !disabledByMode &&
     !blockReason &&
     support.supported;
   const canDisable =
     !state.readOnly &&
     !state.outcomeUnknown &&
+    !state.reloadRequired &&
     status.enabled &&
     isRecord(providerConfig(state.values, provider.id));
   const action =
@@ -228,14 +230,16 @@ async function disableProvider(state, provider) {
     return;
   }
   const config = { ...current, enabled: false };
-  await save(state, withProvider(state.values, provider.id, config));
+  await save(state, withProvider(state.values, provider.id, config), null, null, null, provider);
 }
 
-async function save(state, values, dialog, targetError, secretBindingUpdate) {
-  if (state.pending || state.outcomeUnknown) {
+async function save(state, values, dialog, targetError, secretBindingUpdate, provider) {
+  if (state.pending || state.outcomeUnknown || state.reloadRequired) {
     return;
   }
   state.pending = true;
+  // A later save's result replaces the previous save's notice.
+  state.savedNotice = "";
   state.onStateChange({ pending: true, outcomeUnknown: false });
   const controlsRoot = dialog ?? state.section;
   const errorNode = targetError ?? state.error;
@@ -261,22 +265,54 @@ async function save(state, values, dialog, targetError, secretBindingUpdate) {
     dialog?.remove();
   } catch (error) {
     state.outcomeUnknown = Boolean(error.outcomeUnknown);
-    (state.outcomeUnknown ? state.error : errorNode).replaceChildren(
+    // Another save moved the Configuration: every later save from this page fails the same
+    // way, so the section offers Reload draft instead of the editor (finding 1480).
+    state.reloadRequired = !state.outcomeUnknown && Boolean(error.reloadRequired && state.onReload);
+    const sectionError = state.outcomeUnknown || state.reloadRequired;
+    (sectionError ? state.error : errorNode).replaceChildren(
       element("p", { className: "error", role: "alert" }, errorText(error)),
     );
-    if (state.outcomeUnknown) {
+    if (sectionError) {
+      if (state.reloadRequired) {
+        // Reload draft rebuilds the editor from the saved state; the stale draft goes with it.
+        state.drawerContext.drafts?.forget("channels");
+      }
       dialog?.close();
       dialog?.remove();
     }
   } finally {
     state.pending = false;
-    state.onStateChange({ pending: false, outcomeUnknown: state.outcomeUnknown });
-    if (succeeded || !dialog || state.outcomeUnknown) {
+    state.onStateChange({
+      pending: false,
+      outcomeUnknown: state.outcomeUnknown,
+      reloadRequired: state.reloadRequired,
+    });
+    if (succeeded && state.onSaved) {
+      // The owner rebuilds the section from the saved state and focuses this provider's
+      // action; until then the section shows the state before the save, so keep it disabled.
+      for (const node of state.section.querySelectorAll("button, input, select")) {
+        node.disabled = true;
+      }
+      void state.onSaved(provider ? `Edit ${provider.name}` : null);
+    } else if (succeeded || !dialog || state.outcomeUnknown || state.reloadRequired) {
       state.rerender();
+      if (!succeeded) {
+        focusSaveOutcome(
+          state.section,
+          [state.section.querySelector(".channel-reload")],
+          state.error.firstElementChild,
+        );
+      }
     } else {
       for (const { node, disabled } of controls) {
         node.disabled = disabled;
       }
+      // Disabling the pressed button while saving dropped focus out of the dialog (finding 1481).
+      focusSaveOutcome(
+        dialog,
+        [dialog.querySelector('button[type="submit"]')],
+        errorNode.firstElementChild,
+      );
     }
   }
 }
@@ -286,7 +322,7 @@ export function input(id, value, attrs = {}) {
 }
 
 function openDrawer(section, state, provider, retained) {
-  if (state.pending || state.outcomeUnknown) {
+  if (state.pending || state.outcomeUnknown || state.reloadRequired) {
     return;
   }
   const support = provider.support(state.values);
@@ -417,7 +453,14 @@ function openDrawer(section, state, provider, retained) {
     }
     const nextValues = provider.updatedValues(state.values, body);
     const secretBindingUpdate = provider.updatedSecretBindings?.(drawerContext);
-    void save(state, withPlugin(nextValues, provider), dialog, feedback, secretBindingUpdate);
+    void save(
+      state,
+      withPlugin(nextValues, provider),
+      dialog,
+      feedback,
+      secretBindingUpdate,
+      provider,
+    );
   });
   dialog.addEventListener("cancel", (event) => {
     if (state.pending) {
@@ -442,6 +485,8 @@ export function renderChannelSection(
     onSave,
     onStateChange = () => {},
     onReload,
+    onSaved,
+    savedNotice = "",
     copy = {},
     drawerContext = {},
   },
@@ -455,11 +500,14 @@ export function renderChannelSection(
     onSave,
     onStateChange,
     onReload,
+    onSaved,
+    savedNotice,
     section,
     copy,
     drawerContext,
     pending: false,
     outcomeUnknown: false,
+    reloadRequired: false,
     error: element("div", { "aria-live": "polite" }),
     rerender: () => render(),
   };
@@ -483,12 +531,26 @@ export function renderChannelSection(
           ),
         ),
       ),
+      ...(state.savedNotice
+        ? [element("p", { className: "hint", role: "status" }, state.savedNotice)]
+        : []),
       state.error,
-      ...(state.outcomeUnknown && state.onReload
-        ? [element("div", { className: "form-actions" }, button("Reload draft", state.onReload))]
+      ...((state.outcomeUnknown || state.reloadRequired) && state.onReload
+        ? [element("div", { className: "form-actions" }, reloadButton())]
         : []),
       ...providers.map((provider) => renderCard(section, state, provider)),
     );
+  }
+  function reloadButton() {
+    const reload = button(
+      "Reload draft",
+      () => {
+        reload.disabled = true;
+        void state.onReload();
+      },
+      { className: "channel-reload" },
+    );
+    return reload;
   }
   render();
   const retained = drawerContext.drafts?.get("channels");
