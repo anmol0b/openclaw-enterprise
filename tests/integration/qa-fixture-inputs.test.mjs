@@ -1463,7 +1463,7 @@ test("native cron positive control requires its own successful completed run", a
   }
 });
 
-test("native tool evidence reads compressed transcript rows and separate prompt snapshots", async (t) => {
+test("native tool evidence reads compressed rows, prompt snapshots and command exit status", async (t) => {
   const { DatabaseSync } = await import("node:sqlite");
   const { zstdCompressSync } = await import("node:zlib");
   const { createNativePluginAssertions } = await import("../helpers/plugin-driver-real.mjs");
@@ -1497,6 +1497,8 @@ test("native tool evidence reads compressed transcript rows and separate prompt 
       toolCallId: "allowed-call",
       toolName: "exec",
       content: [{ type: "text", text: "TOOL-SUCCESS" }],
+      isError: false,
+      details: { exitCode: 0 },
     },
     { role: "assistant", content: [{ type: "text", text: "allowed-fixture" }], stopReason: "stop" },
     { role: "user", content: "denied-fixture" },
@@ -1563,12 +1565,42 @@ test("native tool evidence reads compressed transcript rows and separate prompt 
     waitFor: async (_description, check) => check(),
     proofMode: "openclaw",
   });
+  const shellEvidence = {
+    sessionKey,
+    turnMarker: "allowed-fixture",
+    toolName: "exec",
+    resultPattern: "TOOL-SUCCESS",
+  };
   const allowed = await native.assertSessionToolCallEvidence(
     {},
-    { sessionKey, turnMarker: "allowed-fixture", toolName: "exec", resultPattern: "TOOL-SUCCESS" },
+    {
+      ...shellEvidence,
+      expectedExitCode: 0,
+    },
   );
   assert.equal(allowed.toolCallId, "allowed-call");
   assert.equal(allowed.promptAdvertised, true);
+  assert.equal(allowed.exitCode, 0);
+  for (const details of [{ exitCode: 1 }, undefined]) {
+    const text = JSON.stringify({ type: "message", message: { ...rows[2], details } });
+    const update = new DatabaseSync(databasePath);
+    try {
+      update
+        .prepare("UPDATE transcript_events SET event_zstd = ?, event_utf8_bytes = ? WHERE seq = 2")
+        .run(zstdCompressSync(text), Buffer.byteLength(text));
+    } finally {
+      update.close();
+    }
+    await assert.rejects(
+      native.assertSessionToolCallEvidence({}, { ...shellEvidence, expectedExitCode: 0 }),
+      /must exit with code 0/,
+    );
+  }
+  // Tools without structured exit status retain their existing evidence contract.
+  assert.equal(
+    (await native.assertSessionToolCallEvidence({}, shellEvidence)).toolCallId,
+    "allowed-call",
+  );
   const denial = {
     sessionKey,
     turnMarker: "denied-fixture",

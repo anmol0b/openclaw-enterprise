@@ -6370,9 +6370,16 @@ test(
     const taskMarker = `TASK-${randomUUID()}`;
     const taskPath = `/tmp/${taskMarker}`;
     await turn(
-      `Use your shell tool to run node -e ${JSON.stringify(`require('node:fs').writeFileSync('${taskPath}',process.env.HOSTNAME);console.log('${taskMarker}')`)}. Report the real tool output.`,
+      `Use your shell tool to run node -e ${JSON.stringify(`require('node:fs').writeFileSync('${taskPath}',require('node:os').hostname());console.log('${taskMarker}')`)}. Report the real tool output.`,
       taskMarker,
     );
+    const taskEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: taskMarker,
+      toolName: selectedHarness === "codex" ? "bash" : "exec",
+      resultPattern: taskMarker,
+      ...(selectedHarness === "openclaw" ? { expectedExitCode: 0 } : {}),
+    });
     const taskHost = (
       await execPod(topology.harnessPod, topology.placement, [
         "node",
@@ -6383,12 +6390,6 @@ test(
     ).stdout;
     assert.equal(taskHost, topology.harnessPod.metadata.name);
     assert.equal(await exists(topology.gatewayPod, topology.gatewayPlacement, taskPath), false);
-    const taskEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
-      sessionKey,
-      turnMarker: taskMarker,
-      toolName: selectedHarness === "codex" ? "bash" : "exec",
-      resultPattern: taskMarker,
-    });
     proof.modelTurns.push({
       ...taskEvidence,
       kind: "workspace-task",

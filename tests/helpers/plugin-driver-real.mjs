@@ -616,6 +616,7 @@ const sessionEvidenceScript = String.raw`
           toolCallId: message.toolCallId,
           toolName: message.toolName,
           isError: message.isError === true,
+          exitCode: Number.isInteger(message.details?.exitCode) ? message.details.exitCode : undefined,
           errorText: message.isError === true ? textOf(message.content) : undefined,
           // Native Codex emits this terminal reason when MCP approval is denied.
           deniedByUser: textOf(message.content).includes("user rejected MCP tool call"),
@@ -1468,6 +1469,13 @@ export function createNativePluginAssertions({
         candidate.isError === false &&
         candidate.matchesResult === true,
     );
+    if (options.expectedExitCode !== undefined) {
+      assert.equal(
+        result.exitCode,
+        options.expectedExitCode,
+        `native tool ${matched.name} must exit with code ${options.expectedExitCode}`,
+      );
+    }
     if (proofMode === "codex") {
       const callPrefix = codexToolTurnPrefix(matched.mirrorIdentity, ":call");
       const resultPrefix = codexToolTurnPrefix(result?.mirrorIdentity, ":result");
@@ -1511,6 +1519,7 @@ export function createNativePluginAssertions({
       promptAdvertised: proofMode === "openclaw",
       ...(proofMode === "codex" ? { codexMirrorTurnVerified: true } : {}),
       resultMatched: true,
+      ...(options.expectedExitCode === undefined ? {} : { exitCode: result.exitCode }),
       approvedReviewIds: approvedReviews.map((review) => review.id),
     };
   }
