@@ -1,5 +1,10 @@
 import { element, button } from "./dom.mjs";
-import { renderAgentList, renderCreateAgent, renderAgentDetail } from "./agents.mjs";
+import {
+  clearResolvedSecretNames,
+  renderAgentList,
+  renderCreateAgent,
+  renderAgentDetail,
+} from "./agents.mjs";
 import { createApiClient } from "./api-client.mjs";
 import { createViewLifetime } from "./view-lifetime.mjs";
 import { createNavigation, pages } from "./navigation.mjs";
@@ -447,6 +452,10 @@ let mountedRouteKey = null;
 let mountedAgent = null;
 let mountedViewState = null;
 let resumePending = null;
+// The lifetime of a load that opened an Agent with the pending "Loading agent details…" panel.
+// That load is itself the access check, so refocus checks wait until it finishes, Agent detail
+// included, and the panel and its way back stay (finding 1460).
+let openingAgentLoad = null;
 
 function sessionOwnerKey(value) {
   const userId = value?.user?.id;
@@ -685,6 +694,7 @@ function clearPrivate() {
   installationAccessProbe = null;
   installationAdmin = null;
   clearRetainedViews();
+  clearResolvedSecretNames();
 }
 
 function clearDrafts() {
@@ -938,6 +948,8 @@ async function loadPage({
   reuseView = fromNavigation,
   fromRefresh = false,
   openingAgent = false,
+  // Set only by the load that follows a chat-link lookup that failed (finding 1450).
+  chatLinkFailure = null,
 } = {}) {
   if (loggingOut) {
     return;
@@ -1012,8 +1024,18 @@ async function loadPage({
     !held && (!knownPrivateState || app.firstElementChild?.classList.contains("startup") === true);
   // Only a link from the open list sets openingAgent, so Back returns to that history entry.
   // No Agent name, fields or controls are shown until the ordinary access checks and read pass.
-  const backToAgents = () => history.back();
+  // A second press before the first traversal lands would go back twice and can leave the
+  // console, so only the first press navigates (finding 1459).
+  let leaving = false;
+  const backToAgents = (event) => {
+    event.currentTarget.setAttribute("aria-disabled", "true");
+    if (!leaving) {
+      leaving = true;
+      history.back();
+    }
+  };
   if (openingAgent && !startup) {
+    openingAgentLoad = active;
     shell = renderShell(current.feature, true);
     pendingAgentHeading = app.querySelector(".content h1");
     pendingAgentHeading.textContent = "Agent details";
@@ -1168,6 +1190,7 @@ async function loadPage({
     }
     const destination = pendingIntent;
     if (destination?.kind === "native" && validIntent(destination)) {
+      let failure = null;
       try {
         const resolved = await request(`/native-admin/return/${destination.key}`);
         if (!lifetime.isCurrent(active)) {
@@ -1182,14 +1205,15 @@ async function loadPage({
         };
         pendingIntent = null;
         history.replaceState(null, "", intentUrl(target) ?? "/console/agents");
-      } catch {
+      } catch (error) {
         if (!lifetime.isCurrent(active)) {
           return;
         }
         pendingIntent = null;
+        failure = [400, 403, 404].includes(error.status) ? "unavailable" : "interrupted";
         history.replaceState(null, "", "/console/agents");
       }
-      void loadPage();
+      void loadPage({ chatLinkFailure: failure });
       return;
     }
     if (destination || current.feature === "login") {
@@ -1330,6 +1354,10 @@ async function loadPage({
       stopLoadingTimer();
       forgetRetainedView(taken);
       shell = mountRetainedView(current, retainedView);
+      // The chat-link notice belongs to that landing: a refocus keeps it, a return does not.
+      if (!resumingView) {
+        shell.view.querySelector(":scope > .unopened-chat-link")?.remove();
+      }
       mountedViewState = retainedState;
       retainedState.active = active;
       retainedState.resumeDrafts?.();
@@ -1444,7 +1472,19 @@ async function loadPage({
         }
       },
       setTitle: (title) => {
-        app.querySelector("h1").textContent = title;
+        const heading = app.querySelector("h1");
+        heading.textContent = title;
+        // The opening panel's heading had focus and the shell replaced it. Focus the Agent's
+        // heading as it appears, not once its tab's reads settle: on a slow link that left
+        // focus on body for 0.5-0.9 s (finding 1483).
+        if (
+          focusAgentResult &&
+          document.activeElement === document.body &&
+          lifetime.isCurrent(active)
+        ) {
+          heading.tabIndex = -1;
+          heading.focus({ preventScroll: true });
+        }
       },
       url: current.url,
       setTabNavigation(handler) {
@@ -1507,6 +1547,7 @@ async function loadPage({
     );
     if (current.feature === "agents") {
       renderAgentList({ ...agentContext, items });
+      showChatLinkFailure(shell.view, chatLinkFailure);
     } else {
       renderRows(shell.view, current.feature, items);
     }
@@ -1547,7 +1588,10 @@ async function loadPage({
         clearRetainedViewsForNamespace(selection);
       }
     }
-    focusAgentResult = document.activeElement === pendingAgentHeading;
+    // setTitle may already have moved that focus to the Agent's heading (finding 1483).
+    focusAgentResult =
+      document.activeElement === pendingAgentHeading ||
+      (focusAgentResult && document.activeElement === app.querySelector(".content h1"));
     shell = renderShell(current.feature);
     if (current.agentId && error.status === 404 && current.namespace === null) {
       // A typed or shared link has no Namespace, so the console read the Agent in
@@ -1624,6 +1668,9 @@ async function loadPage({
     );
   } finally {
     stopLoadingTimer();
+    if (openingAgentLoad === active) {
+      openingAgentLoad = null;
+    }
     if (lifetime.isCurrent(active) && shell) {
       shell.refresh.disabled = false;
       shell.view.setAttribute("aria-busy", "false");
@@ -1652,6 +1699,25 @@ async function loadPage({
         });
       }
     }
+  }
+}
+
+// Static text only: a refused lookup never says whether the link expired or was denied.
+const chatLinkFailures = {
+  unavailable:
+    "This Agent chat link could not be opened. It may have expired, or your access may not include its Agent.",
+  interrupted: "This Agent chat link could not be opened. Try the link again.",
+};
+
+function showChatLinkFailure(view, failure) {
+  if (Object.hasOwn(chatLinkFailures, failure ?? "")) {
+    view.prepend(
+      element(
+        "p",
+        { className: "notice unopened-chat-link", role: "status" },
+        chatLinkFailures[failure],
+      ),
+    );
   }
 }
 
@@ -1845,6 +1911,9 @@ function resumePage() {
     return;
   }
   if (resumePending) {
+    return;
+  }
+  if (openingAgentLoad !== null && lifetime.isCurrent(openingAgentLoad)) {
     return;
   }
   const current = route();

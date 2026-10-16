@@ -125,7 +125,8 @@ stops reads. Missing provenance stays explicit.
 
 `loadPage` starts a request generation with `GET /api/auth/session`. Opening an Agent
 from the list shows its destination immediately, without Agent data or detail actions.
-**Back to Agents** cancels the read and returns to the list. Other first visits and
+**Back to Agents** cancels the read and returns to the list; a second press does
+nothing. A refocus during that read keeps this page. Other first visits and
 Refresh show loading after 250 ms. A return to a retained view or a refocus keeps the
 shown page inert and says **Still checking…** after one second. The Console retains up
 to 16 views by route, Namespace, and session owner, excluding passwords and discovery
@@ -284,7 +285,8 @@ preflight.
 `deploymentFailure` for **Open vN Logs**. Client navigation selects the failed
 revision's `tab=logs`, even from the draft or a different version. Once the
 snapshot read and the panel's first reads settle, it focuses the Logs tab and
-scrolls the panel into view if the view is still current. The panel's
+scrolls the panel into view if the view is still current. Until then the tab keeps
+its height and hides Stop and Delete, which appear in place. The panel's
 `agents/logs.mjs:renderAgentLogs` reads that revision's runtime status and output,
 or displays its access or availability error;
 [Agent runtime logs](agent-runtime-logs.md) owns those reads.
@@ -294,7 +296,8 @@ or displays its access or availability error;
 `apps/controller/src/console/console.mjs:loadPage`, `logout`
 
 After full-page navigation settles, `loadPage` focuses the destination heading if
-focus fell to the body, using `preventScroll` to preserve return position. Tabs and
+focus fell to the body, using `preventScroll` to preserve return position. An Agent
+opened from the list focuses its heading when the title renders. Tabs and
 focused controls keep focus. Navigation, Namespace changes, and logout invalidate
 reads; generations reject late responses. Refocus coalesces events. Agent detail
 rechecks access in place, preserving controls, input, and saves; failures clear it.

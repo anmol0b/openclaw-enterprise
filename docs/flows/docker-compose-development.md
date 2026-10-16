@@ -1,7 +1,7 @@
 ---
 created: 2026-08-24
-updated: 2026-10-14
-last_updated_session: issue-2406
+updated: 2026-10-15
+last_updated_session: authoring-run/92de1204-326a-4c11-a868-5b3f1b9de0c1
 ---
 
 # Compose development flow
@@ -116,6 +116,10 @@ calls the same check through `occ dev check-profile` before temporary-state crea
 or engine probes; Kubernetes script startup dispatches to the guarded CLI.
 Invalid or incompatible selections stop startup. Unset or `0` protected egress
 preserves ordinary startup when its related selectors are absent.
+
+Both shell wrappers locate the checkout with command-local `CDPATH="" cd`,
+so shell search paths cannot change the selected repository or contaminate the
+captured path; the delegated CLI retains the caller's original `CDPATH`.
 
 [Docker or Podman Compose startup](docker-compose-development/startup.md) owns
 engine selection, database initialization, local API admission and worker startup.
@@ -289,6 +293,8 @@ distinguishes local proof from pending connected runtime qualification.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-15 23:41: Isolate development-wrapper path resolution from CDPATH while preserving the CLI environment. (authoring-run/92de1204-326a-4c11-a868-5b3f1b9de0c1 - 04514330688378316bd0641b8d5560da56aeff85)
 
 - 2026-10-14 18:14: Bound declared and streamed Docker API response bodies before complete buffering. (issue-2406 - 1fc3258afdd73b2888c524092b988a2110449bbb)
 - 2026-10-14 17:03: Validate protected development selectors before CLI dispatch and direct Docker script effects. (authoring-run/5607c5fd-a268-466b-a5c9-93e0cc984807 - 3fba9be5bae09aa9c33483a768221f44079edc3b)

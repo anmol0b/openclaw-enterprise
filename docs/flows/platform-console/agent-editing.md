@@ -79,9 +79,10 @@ never substitutes defaults. Exact-resource permissions still apply.
 **Selected version** uses `activeRevisionId`; **View version vN** opens read-only
 details without activating it. **Deployment activity** shows the newest readable
 version's persisted `queued`, `running`, `succeeded`, or `failed` status, not live
-health. Routine completion folds its details. Pending work, read errors, warnings,
-and cleanup stay visible; a failed deployment links its own Logs and the relevant
-draft settings, even if an older version remains selected. Viewed versions show their own results. Pending activity is reread every
+health. Routine completion folds; pending work, read errors, warnings, and cleanup
+stay visible. A failed deployment links its Logs, unless this tab saw them denied,
+and draft settings once `update` is confirmed. A hidden or unlisted current version
+suppresses this recovery. Viewed versions show their own results. Pending activity is reread every
 `DEPLOYMENT_POLL_MS` (`apps/controller/src/console/agents/detail.mjs`) until a
 result or read error; a new result also rereads selection. **Refresh deployment** rereads
 activity and selection. **Current observations** requests timestamped
@@ -114,10 +115,10 @@ admitted revisions. Driver validation precedes deployment's immutable snapshot. 
 PATCHes `repositoryAccess`. Dirty, pending, or uncertain saves block tabs and
 deployment; failed discovery leaves access unverified.
 
-Deployment rereads Agent and Configuration, requires harness authentication and
+Deployment rereads Agent and Configuration, requires authentication and
 Slack bindings, and blocks Teams. Changed association, generation, authentication,
 plugins, execution mode, Backend, or repository access require reload; controls
-stay locked while the request is pending. Snapshot views deploy current settings. Failed reads
+stay locked while pending. Snapshot views deploy current settings. Failed reads
 send no bodyless deploy POST; success opens the revision. Uncertain POSTs require
 history readback before retry; browser reads are not atomic with admission.
 
@@ -179,10 +180,9 @@ uncertain outcomes block retries until refresh. The
 recovery. Metadata and Credentials links open new tabs, preserving edits.
 Values are never retrieved.
 
-Saving channels rereads Agent and Configuration and checks their association and
-generation. The PATCH sends `{ values: updatedValues }`, adding `secretBindings`
-only for changed selections and preserving others. A rejected PATCH writes no
-new Secret grant.
+Saving channels rereads Agent and Configuration; a changed association or
+generation offers Reload draft. The PATCH sends `{ values: updatedValues }`, adding
+`secretBindings` only for changed selections. A rejected PATCH writes no Secret grant.
 
 After PATCH, `apps/controller/src/console/agents/secret-access.mjs:ensureSecretOperateBinding`
 grants the Agent service principal access to selected Secrets through Namespace

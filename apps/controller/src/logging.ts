@@ -85,6 +85,7 @@ const ALLOWED_FIELDS = new Set([
   "skippedUserIdsTruncated",
   "status",
   "step",
+  "stopYields",
   "validationCategory",
   "workId",
 ]);
@@ -213,6 +214,9 @@ function safeNumber(key: string, value: number): number | undefined {
 }
 
 function safeScalar(key: string, value: unknown): string | number | boolean | undefined {
+  if (key === "stopYields") {
+    return typeof value === "number" && value >= 0 ? safeNumber(key, value) : undefined;
+  }
   if (key === "grpcStatus") {
     return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 16
       ? value

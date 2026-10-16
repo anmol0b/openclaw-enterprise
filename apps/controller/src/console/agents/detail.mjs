@@ -1,4 +1,4 @@
-import { button, element, replaceChildrenIfChanged, setText } from "../dom.mjs";
+import { button, element, focusSaveOutcome, replaceChildrenIfChanged, setText } from "../dom.mjs";
 import {
   configuredHarnessId,
   createHarnessAuthFields,
@@ -13,7 +13,7 @@ import { repositoryProfile, repositoryWriteAccessHelp } from "./repository-profi
 import { createRepositoryFields } from "./repositories.mjs";
 import { renderChannels } from "../channels.mjs";
 import { renderWorkspaceFiles } from "./workspace.mjs";
-import { renderAgentLogs } from "./logs.mjs";
+import { logTextDenied, renderAgentLogs } from "./logs.mjs";
 import {
   displayDate,
   shortId,
@@ -862,12 +862,18 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     return;
   }
   context.setTitle(agent.name);
-  // A missing summary leaves each control on its usual path. The API authorizes the actual request.
+  // A missing summary leaves each control on its usual path, except the failed-version
+  // recovery's draft link, which needs update (finding 1478). The API authorizes the actual request.
   let callerPermissions = null;
-  const callerPermissionsRead = request(`${path}/permissions`).then(
-    (permissions) => (callerPermissions = permissions),
-    () => null,
-  );
+  let callerPermissionsSettled = false;
+  const callerPermissionsRead = request(`${path}/permissions`)
+    .then(
+      (permissions) => (callerPermissions = permissions),
+      () => null,
+    )
+    .finally(() => {
+      callerPermissionsSettled = true;
+    });
   let deleting = agent.status === "deleting";
   let currentRevisionId = agent.activeRevisionId;
   // The Agent as last read; Stop and finished deployments update it in place.
@@ -1010,7 +1016,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   function showDeleting() {
     deleting = true;
     headerActions.replaceChildren(element("span", { className: "badge" }, "Deleting"));
-    view.classList.remove("agent-detail-pending");
+    view.classList.remove("agent-detail-pending", "agent-logs-opening");
     view.replaceChildren(header, deletion);
   }
   if (deleting) {
@@ -1479,11 +1485,20 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     const neutral = latestDeploymentStatus === "superseded" || latestDeploymentStatus === "stopped";
     const current = visibleRevisions.find((revision) => revision.id === currentRevisionId);
     const currentLabel = current ? `v${current.revision}` : shortId(currentRevisionId ?? "");
+    // The caller cannot read the current version, so it may be newer than every version shown.
+    const currentHidden = currentRevisionId !== latest.id && revisionHidden(currentRevisionId);
+    // The current version is not on the pages loaded so far, yet not known to be hidden either:
+    // it may be on an older page or one the caller cannot read (finding 1477).
+    const currentUnknown = Boolean(currentRevisionId) && !current && !currentHidden;
     // A succeeded deployment becomes current, so a different current version is newer.
-    const newerHidden =
-      latestDeploymentStatus === "succeeded" &&
-      currentRevisionId !== latest.id &&
-      revisionHidden(currentRevisionId);
+    const newerHidden = latestDeploymentStatus === "succeeded" && currentHidden;
+    // A failed deployment never becomes current, so a hidden current version may be newer or
+    // older: the page cannot say whether that failure still matters (finding 1458).
+    const failureBehindHidden = latestDeploymentStatus === "failed" && currentHidden;
+    const failureBehindUnknown = latestDeploymentStatus === "failed" && currentUnknown;
+    // Likewise a succeeded deployment behind an unlisted current version may be older than a
+    // hidden newer one (finding 1485).
+    const successBehindUnknown = latestDeploymentStatus === "succeeded" && currentUnknown;
     const requestedHidden = selected !== currentRevisionId && revisionHidden(selected);
     // Deploying a dedicated Agent stops the previous version's workload before the new
     // one starts, so a failed newer deployment usually leaves nothing serving.
@@ -1536,8 +1551,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     if (latestDeploymentValue.dataset.outcome !== outcome) {
       latestDeploymentValue.dataset.outcome = outcome;
     }
-    statusLine.hidden = !requestedHidden && !newerHidden;
-    if (requestedHidden || newerHidden) {
+    const hiddenNotice = requestedHidden || newerHidden || failureBehindHidden;
+    statusLine.hidden = !hiddenNotice && !failureBehindUnknown && !successBehindUnknown;
+    if (!statusLine.hidden) {
       setText(
         statusLine,
         [
@@ -1547,14 +1563,31 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           newerHidden
             ? `The current version, ${shortId(currentRevisionId)}, is one you cannot read; v${latest.revision} is an older version.`
             : null,
-          readAccessHint,
+          failureBehindHidden
+            ? `The current version, ${shortId(currentRevisionId)}, is one you cannot read, so this page cannot tell whether the failed v${latest.revision} deployment affects it.`
+            : null,
+          failureBehindUnknown
+            ? `The current version, ${shortId(currentRevisionId)}, is not among the versions listed, so this page cannot tell whether the failed v${latest.revision} deployment affects it.${olderCursor ? " Show older versions to check." : ""}`
+            : null,
+          successBehindUnknown
+            ? `The current version, ${shortId(currentRevisionId)}, is not among the versions listed, so this page cannot tell whether it is newer than v${latest.revision}.${olderCursor ? " Show older versions to check." : ""}`
+            : null,
+          hiddenNotice ? readAccessHint : null,
         ]
           .filter(Boolean)
           .join(" "),
       );
     }
 
-    recovery.hidden = latestDeploymentStatus !== "failed";
+    // Recovery speaks for the current version, so it needs that version to be readable. It
+    // waits for the caller's permission answer, which decides its draft link, so it never
+    // shows a draft link the answer then withdraws (finding 1478). That read starts first, so
+    // it has usually settled by now.
+    recovery.hidden =
+      latestDeploymentStatus !== "failed" ||
+      currentHidden ||
+      currentUnknown ||
+      !callerPermissionsSettled;
     if (!recovery.hidden) {
       const version = `v${latest.revision}`;
       const code = latestDeploymentErrorCode;
@@ -1568,27 +1601,48 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       const failure = modelCheck
         ? `${version} failed its startup model check.`
         : `${version} did not deploy successfully.`;
-      let impact = "Check the failed version’s logs before deploying a new version.";
+      // Offer only links the caller's permission answer and this tab's remembered denials
+      // allow; the API still authorizes each page they open (finding 1458).
+      const logsAllowed =
+        !logTextDenied(context, agentId) &&
+        !context.deniedReads?.has(`${path}/revisions/${encodeURIComponent(latest.id)}`);
+      // Only an answer that allows update offers the draft; a failed answer offers none.
+      const draftAllowed = callerPermissions?.update === true;
+      let impact = logsAllowed
+        ? "Check the failed version’s logs before deploying a new version."
+        : "Ask someone with log access to check the failed version’s logs before deploying a new version.";
       if (replacementFailed) {
         impact = `${currentLabel} is still selected, but its runtime was probably stopped for this deployment.`;
       } else if (selectedFailed) {
         impact = `${currentLabel} is still selected, but its runtime replaced the previous version before deployment finished.`;
+      }
+      if ((replacementFailed || selectedFailed) && !logsAllowed) {
+        // Without the Logs link this is the reader's only next step (finding 1484).
+        impact += " Ask someone with log access to check the failed version’s logs.";
       }
       setText(recoveryMessage, `${failure} ${impact}`);
       const guidance = Object.hasOwn(DEPLOYMENT_FAILURE_LINKS, code)
         ? DEPLOYMENT_FAILURE_LINKS[code]
         : null;
       const tab =
-        guidance === "credentials" && agent.harnessAuth?.method === "runtime" ? null : guidance;
-      const actionsFor = `${latest.id}/${tab}`;
+        !draftAllowed || (guidance === "credentials" && agent.harnessAuth?.method === "runtime")
+          ? null
+          : guidance;
+      const actionsFor = `${latest.id}/${tab}/${logsAllowed}`;
       if (recoveryTarget !== actionsFor) {
         recoveryTarget = actionsFor;
-        const logs = link(`Open ${version} Logs`, target(latest.id, "logs"), context);
-        logs.className = "overview-primary";
+        const logs = logsAllowed
+          ? link(`Open ${version} Logs`, target(latest.id, "logs"), context)
+          : null;
         const next = tab
           ? link(DEPLOYMENT_FAILURE_LINK_LABELS[tab], target("draft", tab), context)
           : null;
-        recoveryActions.replaceChildren(logs, ...(next ? [next] : []));
+        const actions = [logs, next].filter(Boolean);
+        if (actions.length) {
+          actions[0].className = "overview-primary";
+        }
+        recoveryActions.replaceChildren(...actions);
+        recoveryActions.hidden = actions.length === 0;
       }
     }
   }
@@ -1765,7 +1819,14 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   }
   let refreshDeployControls = () => {};
   void callerPermissionsRead.then((permissions) => {
-    if (!context.isCurrent() || !permissions) {
+    if (!context.isCurrent()) {
+      return;
+    }
+    // A failed-version recovery held for this answer can now show, with or without its draft link.
+    if (latestDeploymentStatus === "failed" && !deleting) {
+      renderLatestDeployment();
+    }
+    if (!permissions) {
       return;
     }
     if (permissions.update === false) {
@@ -2330,6 +2391,8 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   }
 
   async function renderTab() {
+    // A Logs view left before it showed no longer holds the cards below it back.
+    view.classList.remove("agent-logs-opening");
     const resumeDrafts = context.suspendDrafts();
     if (mountedTab) {
       mountedTab.resumeDrafts = resumeDrafts;
@@ -2404,10 +2467,28 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       details ??= loadDetails();
       // Polling views are rebuilt on every visit instead of being retained.
       state.reusable = false;
-      const logs = renderAgentLogs(tabContext, { agent, revisionId: selected });
+      const logs = renderAgentLogs(tabContext, {
+        agent,
+        revisionId: selected,
+        // The failed-version recovery stops offering Logs as soon as they are denied.
+        onLogsDenied: () => {
+          if (tabContext.isCurrent() && !recovery.hidden) {
+            renderLatestDeployment();
+          }
+        },
+      });
       content.append(logs.section);
       state.loading = false;
-      content.style.minHeight = "";
+      // The pending view is nearly empty: Stop and Delete sat under it, then the strip and
+      // output pushed them down 0.6-1.7 s later (finding 1479). Until the view shows, keep the
+      // reserved height and keep those cards hidden; they appear in place in the same frame.
+      view.classList.add("agent-logs-opening");
+      void logs.firstView.then(() => {
+        if (mountedTab === state) {
+          content.style.minHeight = "";
+          view.classList.remove("agent-logs-opening");
+        }
+      });
       // Finish the overview layout and the Logs view's first reads before bringing this
       // version's output into view, so nothing above it grows afterwards (finding 1413).
       await Promise.all([details, revealed, logs.firstView]);
@@ -2490,6 +2571,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         drawerContext: {
           drafts: context.drafts,
           baseline: JSON.stringify([snapshot.id, snapshot.generation]),
+          operatorId: context.operatorId,
           namespaceId,
           request,
           agentName: agent.name,
@@ -2520,8 +2602,13 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
               freshAgent.configurationId !== snapshot.id ||
               freshConfig.generation !== snapshot.generation
             ) {
-              throw new Error(
-                "The saved Configuration changed while you were editing. Close this editor and refresh before saving.",
+              // The section offers Reload draft; reopening the editor kept failing against
+              // the page's old generation until a browser reload (finding 1480).
+              throw Object.assign(
+                new Error(
+                  "The saved Configuration changed while you were editing. Reload this draft before saving.",
+                ),
+                { reloadRequired: true },
               );
             }
             mutationStarted = true;
@@ -2579,9 +2666,14 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
             throw error;
           }
         },
-        onStateChange: ({ pending, outcomeUnknown }) => {
+        onStateChange: ({ pending, outcomeUnknown, reloadRequired = false }) => {
           if (context.isCurrent()) {
-            data.setDraftEditorState({ dirty: false, saving: pending, outcomeUnknown });
+            data.setDraftEditorState({
+              dirty: false,
+              saving: pending,
+              outcomeUnknown,
+              reloadRequired,
+            });
           }
         },
         savedNotice,
@@ -3209,6 +3301,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           pending = false;
           updateState();
           render();
+          if (container.isConnected) {
+            // A conflict or failure leaves Reload draft (or Save again) as the next step
+            // (finding 1481).
+            focusSaveOutcome(container, [reload, save], feedback);
+          }
         }
       }
     }
@@ -3292,6 +3389,10 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       return false;
     }
     selectedTab = nextTab;
+    // A Logs visit may have just been denied: the recovery stops offering its Logs link.
+    if (!recovery.hidden) {
+      renderLatestDeployment();
+    }
     void renderTab();
     return true;
   });
