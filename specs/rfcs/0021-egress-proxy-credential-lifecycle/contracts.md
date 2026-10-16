@@ -9,6 +9,10 @@ rfc: index.md
 migration](security.md) define qualification and retirement requirements. These are
 behavioral contracts, not a prescribed wire format.
 
+For the MVP's [online authorization profile](online-authorization.md), the trust and
+release requirements there apply. The stronger dispatch and response guarantees below
+remain a distinct profile; an existing admission does not change meaning.
+
 ## Admission and configuration
 
 OpenClaw Control Plane (OCC) records the version 2 `ExecutionAdmission` decision in

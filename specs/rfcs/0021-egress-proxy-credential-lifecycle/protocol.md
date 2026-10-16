@@ -9,6 +9,10 @@ The [interfaces and records](contracts.md) name the parties and data; the
 [verification requirements](security.md) define the evidence needed to use them.
 A configuration, a credential and an authorization are separate decisions.
 
+For the MVP's [online authorization profile](online-authorization.md), the trust and
+release requirements there apply. The stronger dispatch and response guarantees below
+remain a distinct profile; an existing admission does not change meaning.
+
 ## Establish protected execution
 
 An OpenShell composition may implement Credential Proxy and Sandbox. One way to establish the
