@@ -934,6 +934,164 @@ test("Responses assistant projections protect independent items and seeded delta
   assert.equal(result.body?.toString(), rawBody);
 });
 
+test("signed Responses Plan projections protect completed and response-wide streamed text", async (t) => {
+  const f = await staticEgressFixture(t);
+  const wire = JSON.parse(
+    readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
+  );
+  const encode = (events) =>
+    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const parts = (text) => [{ type: "output_text", text, annotations: [] }];
+  const added = (index, text) => ({
+    type: "response.output_item.added",
+    output_index: index,
+    item: { type: "message", id: `msg_plan_${index}`, role: "assistant", content: parts(text) },
+  });
+  const done = (event, text = "READY") => ({
+    ...event,
+    type: "response.output_item.done",
+    item: { ...event.item, content: parts(text) },
+  });
+  const response = (...events) => [wire.responseEvents[0], ...events, wire.responseEvents.at(-1)];
+  async function check(events, blocked, label) {
+    const rawBody = encode(events);
+    const captured = f.capture(wire.request);
+    const ready = (await f.resolve(captured)).ready;
+    assert.ok(ready);
+    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
+    const before = f.providerRequests.length;
+    f.setResponse({ status: 200, contentType: "text/event-stream", rawBody });
+    const result = await f.protect(captured, await f.send(captured, ready));
+    assert.equal(f.providerRequests.length - before, 1, label);
+    if (blocked) {
+      // protect also requires zero response messages, including the head.
+      assert.ok(result.blocked, label);
+    } else {
+      assert.equal(result.response_complete, true, label);
+      assert.equal(result.body?.toString(), rawBody, label);
+    }
+  }
+  for (const unsafe of [false, true]) {
+    const expected = unsafe ? ["synthetic", "key", "initial"].join("-") : "ready to proceed";
+    const split = expected.lastIndexOf(unsafe ? "-" : " ") + 1;
+    const left = expected.slice(0, split);
+    const right = expected.slice(split);
+    // Completed Plan extracts the raw block before stripping its citations.
+    // Ordinary citation-visible text and the terminal envelope stay harmless.
+    const completed = structuredClone(wire.responseEvents);
+    const markup = `<oai-mem-citation>outer\n<proposed_plan>\n${left}<oai-mem-citation>note</oai-mem-citation>${right}\n</proposed_plan>\n`;
+    completed[6].item.content = parts(markup);
+    assert.ok(!encode(completed).includes(expected));
+    await check(completed, unsafe, "completed Plan and benign twin");
+    // Each completed message owns its Plan; a later safe message must not
+    // erase an unsafe earlier message from the response-envelope projection.
+    const envelope = structuredClone(wire.responseEvents);
+    envelope.at(-1).response.output = [
+      { ...completed[6].item, content: parts(markup) },
+      {
+        ...completed[6].item,
+        id: "msg_later_plan",
+        content: parts("<proposed_plan>\nSafe final message\n</proposed_plan>"),
+      },
+    ];
+    await check(envelope, unsafe, "independent completed Plan in envelope");
+    // The response has one streamed Plan, even though each seed has its own
+    // assistant parser and both completed messages independently say READY.
+    const a = added(0, `<proposed_plan>\n${left}`);
+    const b = added(1, `<proposed_plan>\n${right}`);
+    const streamed = response(a, done(a), b, done(b));
+    assert.ok(!encode(streamed).includes(expected));
+    await check(streamed, unsafe, "cross-message Plan and benign twin");
+  }
+  assert.equal(wire.responseEvents.length, 8);
+  await check(wire.responseEvents, false, "captured finite eight-event response");
+  const generated =
+    "Intro\n<proposed_plan>\n- Inspect <oai-mem-citation>source</oai-mem-citation>code\n</proposed_plan>\nDone";
+  for (const split of [false, true]) {
+    const events = structuredClone(wire.responseEvents);
+    events[4].text = generated;
+    events[5].part.text = generated;
+    events[6].item.content = parts(generated);
+    events[7].response.output[0].content = parts(generated);
+    events.splice(
+      3,
+      1,
+      ...(split
+        ? [
+            "Intro\n<pro",
+            "posed_plan>\n- Inspect <oai-mem-",
+            "citation>source</oai-mem-citation>code\n</proposed_plan>\nDone",
+          ]
+        : [generated]
+      ).map((delta) => ({ ...wire.responseEvents[3], delta })),
+    );
+    await check(events, false, `coherent generated plan, split=${split}`);
+  }
+  // These opposite verdicts distinguish the actual stream from a last-block,
+  // per-message, close-completes, or raw-before-citations approximation.
+  const a = added(0, "<proposed_plan>\nsynthetic-key-");
+  const b = added(1, "<proposed_plan>\ninitial");
+  await check(
+    response(a, done(a, "<proposed_plan>\nfinished\n</proposed_plan>"), b, done(b)),
+    false,
+    "completed Plan stops later Plan deltas",
+  );
+  const spanning = added(0, "<proposed_plan>\nsynthetic-key-");
+  const delta = (text) => ({ ...wire.responseEvents[3], item_id: spanning.item.id, delta: text });
+  await check(
+    response(
+      spanning,
+      delta(
+        "<oai-mem-citation>\n</proposed_plan>\nignored\n<proposed_plan>\n</oai-mem-citation>initial",
+      ),
+      done(spanning),
+    ),
+    true,
+    "stream strips citations before recognizing tags",
+  );
+  // A partial citation opener stays buffered when another assistant or
+  // reasoning item displaces its owner. Flushing early would insert the opener
+  // between the credential halves and miss the actual streamed Plan text.
+  for (const next of [
+    b,
+    {
+      type: "response.output_item.added",
+      output_index: 1,
+      item: { type: "reasoning", id: "rs_plan", summary: [] },
+    },
+  ]) {
+    const tail = added(0, "<proposed_plan>\nsynthetic-key-<oai-mem-");
+    const suffix = next.item.type === "message" ? [] : [added(2, "<proposed_plan>\ninitial")];
+    const endNext =
+      next.item.type === "message" ? done(next) : { ...next, type: "response.output_item.done" };
+    // done(tail) flushes the currently active, unrelated assistant first.
+    await check(
+      response(tail, next, ...suffix, done(tail), endNext, ...suffix.map((event) => done(event))),
+      true,
+      `deferred citation tail after ${next.item.type}`,
+    );
+  }
+  const tail = added(0, "<proposed_plan>\nsynthetic-key-<oai-mem-");
+  await check(
+    response(tail, done(tail), b, done(b)),
+    false,
+    "done before displacement really flushes the partial opener",
+  );
+  const blocks = added(0, "<proposed_plan>\n</proposed_plan>\n<proposed_plan>\nsynthetic-key-");
+  await check(
+    response(blocks, done(blocks), b, done(b)),
+    true,
+    "closing a block does not complete the streamed Plan",
+  );
+  // Completed Plan selects the last raw block, not every prior block. Ordinary
+  // citation-visible text stays harmless while the earlier Plan would be unsafe.
+  const last = structuredClone(wire.responseEvents);
+  last[6].item.content = parts(
+    "<oai-mem-citation>outer\n<proposed_plan>\nsynthetic-key-<oai-mem-citation>note</oai-mem-citation>initial\n</proposed_plan>\n<proposed_plan>\nfinal safe plan\n</proposed_plan>",
+  );
+  await check(last, false, "completed Plan selects only the last block");
+});
+
 test("Responses incremental text snapshots cannot reveal selected material", async (t) => {
   const f = await staticEgressFixture(t);
   const wire = JSON.parse(

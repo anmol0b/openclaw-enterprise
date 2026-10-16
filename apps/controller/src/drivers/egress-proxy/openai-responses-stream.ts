@@ -7,6 +7,12 @@ import {
   type ResponsesEvent,
 } from "./openai-responses.ts";
 
+import {
+  AssistantPlanStream,
+  completedAssistantPlan,
+  withoutCitations,
+} from "./openai-assistant-projections.ts";
+
 type Scan = (value: unknown) => boolean;
 
 interface ResponseProtection {
@@ -18,32 +24,6 @@ interface ResponseProtection {
 // The supported assistant consumer joins message parts without a delimiter.
 function assistantText(parts: readonly { text: string }[]): string {
   return parts.map((part) => part.text).join("");
-}
-
-// Compare consumer projections only; the accepted wire response is never rewritten.
-// Each walk advances through the bounded input and joins its retained slices once.
-function withoutCitations(text: string): string {
-  const open = "<oai-mem-citation>";
-  const close = "</oai-mem-citation>";
-  if (text.indexOf(open) === -1) {
-    return text;
-  }
-  const visible: string[] = [];
-  let start = 0;
-  while (start < text.length) {
-    const next = text.indexOf(open, start);
-    if (next === -1) {
-      visible.push(text.slice(start));
-      break;
-    }
-    visible.push(text.slice(start, next));
-    const end = text.indexOf(close, next + open.length);
-    if (end === -1) {
-      break;
-    }
-    start = end + close.length;
-  }
-  return visible.join("");
 }
 
 function withoutPlan(text: string): string {
@@ -117,11 +97,17 @@ export function protectedResponseOutput(value: unknown, scan: Scan): boolean {
       return false;
     }
     if (item?.type === "message" && Array.isArray(item.content)) {
+      const messageParts: { text: string }[] = [];
       for (const entry of item.content) {
         const part = asRecord(entry);
         if (part?.type === "output_text" && typeof part.text === "string") {
           parts.push({ text: part.text });
+          messageParts.push({ text: part.text });
         }
+      }
+      const plan = completedAssistantPlan(assistantText(messageParts));
+      if (plan !== undefined && !scan(plan)) {
+        return false;
       }
     }
   }
@@ -204,12 +190,20 @@ interface TrackedItem {
   textTails: string[];
 }
 
+interface AssistantConsumer {
+  chunks: string[];
+  plan: AssistantPlanStream;
+}
+
 class ResponsesStream {
   private readonly policy: ResponseProtection;
   private readonly items = new Map<number, TrackedItem>();
   private readonly itemIds = new Set<string>();
   private readonly fragments = new Map<string, string>();
-  private assistantChunks: string[] | undefined;
+  private assistant: AssistantConsumer | undefined;
+  private readonly assistants = new Set<AssistantConsumer>();
+  private readonly planDeltas: string[] = [];
+  private planCompleted = false;
   private responseId?: string;
   private sequence = -1;
   private terminal = false;
@@ -219,9 +213,7 @@ class ResponsesStream {
   }
 
   get complete(): boolean {
-    return (
-      this.terminal && this.finishAssistant() && [...this.items.values()].every((item) => item.done)
-    );
+    return this.terminal && [...this.items.values()].every((item) => item.done);
   }
 
   accept(event: ResponsesEvent): boolean {
@@ -246,7 +238,7 @@ class ResponsesStream {
       }
       this.responseId = id;
       return (
-        (!this.terminal || this.finishAssistant()) &&
+        (!this.terminal || this.finishResponse()) &&
         protectedResponseOutput(event.response, this.policy.scan)
       );
     }
@@ -254,9 +246,31 @@ class ResponsesStream {
   }
 
   private finishAssistant(): boolean {
-    const chunks = this.assistantChunks;
-    this.assistantChunks = undefined;
-    return chunks === undefined || protectedAssistantText(chunks.join(""), this.policy.scan);
+    const assistant = this.assistant;
+    this.assistant = undefined;
+    if (assistant === undefined) {
+      return true;
+    }
+    assistant.plan.finish();
+    this.assistants.delete(assistant);
+    return protectedAssistantText(assistant.chunks.join(""), this.policy.scan);
+  }
+
+  private finishResponse(): boolean {
+    // Displaced parsers drain in unspecified map order in the consumer. One
+    // nonempty Plan tail is unambiguous; multiple tails cannot be ordered safely.
+    let planTails = 0;
+    for (const assistant of this.assistants) {
+      const before = this.planDeltas.length;
+      this.assistant = assistant;
+      if (!this.finishAssistant()) {
+        return false;
+      }
+      if (this.planDeltas.length !== before && ++planTails > 1) {
+        return false;
+      }
+    }
+    return this.policy.scan(this.planDeltas.join(""));
   }
 
   private outputItem({ type, output_index, item }: ItemEvent): boolean {
@@ -277,10 +291,20 @@ class ResponsesStream {
       // Assistant deltas have no item/content IDs in the supported consumer.
       // They extend the active message's joined seed, not an indexed part.
       if (text !== undefined || item.type === "reasoning") {
-        if (!this.finishAssistant()) {
-          return false;
+        this.assistant = undefined;
+        if (text !== undefined) {
+          const assistant: AssistantConsumer = {
+            chunks: [text],
+            plan: new AssistantPlanStream((delta) => {
+              if (!this.planCompleted) {
+                this.planDeltas.push(delta);
+              }
+            }),
+          };
+          this.assistants.add(assistant);
+          this.assistant = assistant;
+          assistant.plan.push(text);
         }
-        this.assistantChunks = text === undefined ? undefined : [text];
       }
       this.itemIds.add(item.id);
       this.items.set(output_index, {
@@ -306,6 +330,15 @@ class ResponsesStream {
     if (!this.finishAssistant()) {
       return false;
     }
+    if (text !== undefined) {
+      const plan = completedAssistantPlan(text);
+      if (plan !== undefined) {
+        if (!this.policy.scan(plan)) {
+          return false;
+        }
+        this.planCompleted = true;
+      }
+    }
     tracked.done = true;
     return (
       item.type !== "function_call" || argumentsMatch(tracked, item.arguments, this.policy.scan)
@@ -318,7 +351,8 @@ class ResponsesStream {
       return false;
     }
     if (event.type === "response.output_text.delta" && event.delta !== undefined) {
-      this.assistantChunks?.push(event.delta);
+      this.assistant?.chunks.push(event.delta);
+      this.assistant?.plan.push(event.delta);
     }
     if (event.delta !== undefined) {
       // Codex exposes output deltas without item IDs. Protect the concatenation the
