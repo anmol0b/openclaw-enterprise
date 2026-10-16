@@ -577,6 +577,29 @@ func TestAgentLogsNameTheOrderOfAnOtherRevisionWithPods(t *testing.T) {
 	}
 }
 
+// Selection reads the active revision's metadata once, and the notice uses that
+// same observation: a second read that failed would misname a Podless Harness
+// revision as "another readable revision that still has Pods".
+func TestAgentRuntimeNamesHarnessSelectionFromOneMetadataRead(t *testing.T) {
+	stub := &runtimeLogStub{t: t, activeID: "rev_1", revisions: `[{"id":"rev_2","revision":2},{"id":"rev_1","revision":1}]`, podless: []string{"rev_2"}, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
+	_, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "notice: reading revision rev_2, newer than the active revision rev_1 and not yet active; pass --revision rev_1 for the active revision\n"; notices != want {
+		t.Fatalf("notice = %q, want %q", notices, want)
+	}
+	reads := 0
+	for _, path := range stub.paths {
+		if path == "/namespaces/ns_1/agents/agt_1/revisions/rev_1" {
+			reads++
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("active revision metadata read %d times, want 1 (requests %v)", reads, stub.paths)
+	}
+}
+
 func TestAgentCommandsSelectNewerPodlessHarnessStatus(t *testing.T) {
 	for _, state := range []string{"running", "starting", "lost", "unknown"} {
 		for _, action := range []string{"runtime", "logs"} {

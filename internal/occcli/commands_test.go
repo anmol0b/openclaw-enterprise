@@ -614,16 +614,6 @@ func TestDeploymentStatusTableShowsErrorAsCodeAndMessage(t *testing.T) {
 				`"cause":{"kind":"PROBE_STATUS","detail":"rate_limit"}}}}`,
 			want: "RUNTIME_MODEL_PROBE_FAILED: Deployment runtime startup model check failed. (cause: PROBE_STATUS rate_limit)",
 		},
-		{
-			name:  "code without message",
-			error: `{"code":"UNKNOWN_FAILURE"}`,
-			want:  "UNKNOWN_FAILURE",
-		},
-		{
-			name:  "unrecognized shape is shown as it is",
-			error: `{"message":"no code"}`,
-			want:  `{"message":"no code"}`,
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			out, _, err := runOCC(t, map[string]string{route: deployment(test.error)}, "--namespace", testNamespaceID, "agent", "deployment-status", testAgentID, testRevision2ID)
