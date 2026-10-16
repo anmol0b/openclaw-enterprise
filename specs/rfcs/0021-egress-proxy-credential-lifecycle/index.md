@@ -36,6 +36,12 @@ sandbox identity per execution. If qualified, OCE decides whether the execution 
 request; OpenShell holds the scoped provider credential and sends it. An allow decision is not
 a send receipt.
 
+OCE already has an [experimental OpenShell-owned Codex OAuth path](../../../docs/testing/openshell-oauth.md).
+OpenShell keeps the refresh grant, the Harness uses a stable alias, and a separate
+operator connection can retrieve an access token. That credential lifecycle does
+not establish the three release requirements above. In particular, the released
+access-token RPC is not the proposed credential-access and dispatch protocol.
+
 Keep [exact dispatch](protocol.md) for installations that must bind the selected credential,
 one send attempt and its response to the same execution. Select the level explicitly at
 admission. Never satisfy an exact-dispatch requirement with online authorization, or either
