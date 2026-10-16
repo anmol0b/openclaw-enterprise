@@ -11,6 +11,10 @@ that read and see the permitted response. Another execution, even of the same Ag
 on that exchange. The [protocol](protocol.md) specifies how to enforce this boundary. The evidence
 below is required before relying on it.
 
+For the MVP's [online authorization profile](online-authorization.md), the trust and
+release requirements there apply. The stronger dispatch and response guarantees below
+remain a distinct profile; an existing admission does not change meaning.
+
 ## Trust boundary
 
 The protected Sandbox must prevent bypass and establish the request's execution and

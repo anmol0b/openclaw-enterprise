@@ -89,7 +89,10 @@ function downloadFileName(agentId, revisionId, source, pod, previous) {
 }
 
 /** Logs tab: runtime status strip, source picker, bounded log pane and follow. */
-export function renderAgentLogs(context, { agent, revisionId, onLogsDenied = () => {} }) {
+export function renderAgentLogs(
+  context,
+  { agent, revisionId, shown = Promise.resolve(), onLogsDenied = () => {} },
+) {
   const base = `${namespacePath(context.namespaceId)}/agents/${encodeURIComponent(agent.id)}/deployments/${encodeURIComponent(revisionId)}/runtime`;
   const deniedKey = logViewKey(context, agent.id);
   const statusKey = JSON.stringify([
@@ -112,8 +115,15 @@ export function renderAgentLogs(context, { agent, revisionId, onLogsDenied = () 
     clearTimeout(firstViewTimer);
     if (section.classList.contains("agent-logs-pending")) {
       section.classList.remove("agent-logs-pending");
-      // A hidden pane cannot scroll; open at the newest output as a shown one would.
-      pane.scrollTop = pane.scrollHeight;
+      // A hidden pane cannot scroll; open at the newest output as a shown one would. The page
+      // holding the view can still be hidden (an Agent page waits for its overview), so scroll
+      // once it shows. Scrolled to the top, the pane would read as scrolled up and Follow would
+      // stay paused (finding 1536).
+      void shown.then(() => {
+        if (current()) {
+          pane.scrollTop = pane.scrollHeight;
+        }
+      });
     }
     markFirstView();
   }
@@ -229,7 +239,16 @@ export function renderAgentLogs(context, { agent, revisionId, onLogsDenied = () 
   const current = () => context.isCurrent();
   // Runtime reads are live and audited: a view restored by Back resumes them instead of
   // having the console replay every one of them to revalidate the cached view.
-  const read = (path, options = {}) => context.request(path, { ...options, revalidate: false });
+  // Answers Back's check already read, taken once by the resumed view's first reads.
+  const checked = new Map();
+  const read = (path, options = {}) => {
+    if (checked.has(path)) {
+      const answer = checked.get(path);
+      checked.delete(path);
+      return Promise.resolve(answer);
+    }
+    return context.request(path, { ...options, revalidate: false });
+  };
 
   function selectedSource() {
     return description?.sources.find(({ id }) => id === sourceSelect.value);
@@ -755,15 +774,61 @@ export function renderAgentLogs(context, { agent, revisionId, onLogsDenied = () 
   if (logsDenied) {
     showLogError(runtimeErrorText({ status: 403 }, "logs"));
   }
+  // Back reuses this view only while what it shows is still readable: the check reads on from
+  // where the view stopped, as its polls would, and a refusal rebuilds the page instead
+  // (finding 1553). The resumed view takes those answers rather than asking again.
+  const logsPath = `${base}/logs?`;
+  const forgetCheck = context.onRevalidate?.(async () => {
+    checked.clear();
+    // A Logs view left for another tab is no longer part of the page.
+    if (!context.view?.contains(section)) {
+      forgetCheck?.();
+      return;
+    }
+    const reads = [];
+    if (description !== null && !statusDenied) {
+      reads.push(base);
+    }
+    if (cursor && !logsDenied && readableSelection()) {
+      const query = logQuery(selectedSource(), selectedPod());
+      query.set("cursor", cursor);
+      reads.push(`${logsPath}${query}`);
+    }
+    // Output that cannot be read on from (no cursor, no readable source, or denied since it
+    // showed) is not shown again from the cache.
+    if (rows > 0 && !reads.some((path) => path.startsWith(logsPath))) {
+      throw new Error("The shown output cannot be checked.");
+    }
+    const answers = await Promise.all(
+      reads.map((path) =>
+        context.request(path, { revalidate: false }).catch((error) => {
+          // Each refusal is audited: the rebuilt view takes it as known instead of asking again.
+          if (error.status === 403) {
+            if (path === base) {
+              deniedStatusViews.add(statusKey);
+            } else {
+              deniedLogViews.add(deniedKey);
+            }
+          }
+          throw error;
+        }),
+      ),
+    );
+    reads.forEach((path, index) => checked.set(path, answers[index]));
+  });
   // Timers that fired while Back's cache held this view stopped; pick both polls up again.
   context.onResume?.(() => {
     if (current()) {
       pane.scrollTop = paneAtBottom ? pane.scrollHeight : paneScrollTop;
       void loadStatus();
-      if (following) {
+      if (following && [...checked.keys()].some((path) => path.startsWith(logsPath))) {
+        void readLogs({ restart: false });
+      } else if (following) {
         scheduleFollow(0);
       }
     }
+    // An unfollowed view drops the page Back read; its cursor still starts there.
+    checked.clear();
   });
   applyFilters();
   void loadStatus()

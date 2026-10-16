@@ -25,9 +25,23 @@ The deployment selects an egress implementation; it does not separately select a
 | Mode | What it means |
 |---|---|
 | **Unprotected** · minimal CI or simple local development | OCE knows the Agent exists but does not authenticate or govern its direct requests. No managed route, clone, or provider credential. Asking for one fails admission, rather than silently using ambient credentials. |
-| **Protected** · OpenShell, in production or locally | Authenticate the whole Agent execution, prevent direct egress, and authorize each operation. A route may explicitly require no provider credential; zero allowed routes means deny all. Failure to establish protection never selects unprotected mode. |
+| **Protected** · OpenShell, in production or locally | Authenticate the whole Agent execution, prevent direct egress, and authorize each operation at the admitted level of protection. A route may explicitly require no provider credential; zero allowed routes means deny all. Failure to establish protection never selects unprotected mode. |
 
-## From startup to one repository read
+## Two levels of protection
+
+We propose qualifying [online request authorization](online-authorization.md) with a released,
+unmodified OpenShell for the MVP. **OpenShell v0.1.4 is NOT QUALIFIED.** Release requires a
+mandatory check of each actual request, verified encrypted transport, and one never-reused
+sandbox identity per execution. If qualified, OCE decides whether the execution may make the
+request; OpenShell holds the scoped provider credential and sends it. An allow decision is not
+a send receipt.
+
+Keep [exact dispatch](protocol.md) for installations that must bind the selected credential,
+one send attempt and its response to the same execution. Select the level explicitly at
+admission. Never satisfy an exact-dispatch requirement with online authorization, or either
+protected level with an unprotected execution.
+
+## From startup to one repository read with exact dispatch
 
 1. **Admit the execution.** The OpenClaw Control Plane (OCC) admits the routes and grants. Sandbox enforces the plan and authenticates the execution and supervisor installation.
 2. **Prepare the credential.** OCE obtains and stores a scoped GitHub installation token in the background. The request path never issues or renews it.

@@ -660,7 +660,7 @@ export const scenarios = {
       { suffix: "/agents/agt_00000000-0000-4000-8000-000000000002", delayMs: 1200 },
     ],
     description:
-      "Open an Agent from the list. The URL and page change together; details appear when access and the Agent read are confirmed. Read times are simulated.",
+      "Open an Agent from the list. The destination and Back to Agents appear immediately. The Agent’s name, actions, and overview appear together after the access checks. Read times are simulated.",
     steps: [
       "Open Research assistant. Its 150 ms read finishes without waiting for a minimum loading time.",
       "Open Documentation assistant. During its 1200 ms read, choose Back to Agents. Focus returns to that link and the late response does not reopen it.",
@@ -820,6 +820,14 @@ export const scenarios = {
       "Find the explanation beside Create Agent. The action is unavailable; opening a readable Agent still works.",
     ],
   },
+  agentsCreateRestrictedEmpty: {
+    group: "Pages/Agents",
+    name: "Empty, Create Agent unavailable",
+    emptyAgents: true,
+    readOnlyPermissionSummary: true,
+    description:
+      "A caller who cannot create Agents in an empty Namespace is told shared Agents appear here, not invited to create one.",
+  },
   agentsDenied: {
     group: "Pages/Agents",
     name: "Access denied",
@@ -877,6 +885,14 @@ export const scenarios = {
     path: "/console/backends",
     rules: [{ path: "/backends", status: 503 }],
     description: "Backend discovery fails and can be retried.",
+  },
+  backendsDenied: {
+    group: "Pages/Backends",
+    name: "Access denied",
+    path: "/console/backends",
+    rules: [{ path: "/backends", status: 403 }],
+    description:
+      "A caller without Installation access is told Backends apply to the whole Installation. The Namespace selector is hidden, since another Namespace would not change the answer.",
   },
   namespaces: {
     group: "Pages/Namespaces",
@@ -2299,6 +2315,14 @@ export const scenarios = {
       "A member without Installation access can open the form, but Create Agent stays disabled and the page says an Installation administrator must create the Agent. No retry is offered.",
     gap: "Namespace IAM cannot grant create; the live check is a member account on a real Installation.",
   },
+  createRestricted: {
+    group: "Pages/Create Agent",
+    name: "Create Agent unavailable for this caller",
+    path: create,
+    readOnlyPermissionSummary: true,
+    description:
+      "Opened by URL, Create Agent refuses up front when the permission summary says this caller cannot create an Agent here. The API still decides.",
+  },
   createCapabilitiesError: {
     group: "Pages/Create Agent",
     name: "Capability check failure",
@@ -2574,7 +2598,7 @@ export const scenarios = {
     ],
     actions: [...readyForm, click("Create Agent")],
     description:
-      "Provisioning admission conflicts before any separate Configuration save. Edit the request and retry from the same draft.",
+      "Provisioning admission conflicts before any separate Configuration save. The refusal replaces the submitting status and takes focus. Edit the request and retry from the same draft.",
   },
   createUnknown: {
     group: "Pages/Create Agent",
@@ -2750,7 +2774,8 @@ export const scenarios = {
         status: 403,
       },
     ],
-    description: "A denied save retains the draft and does not change the saved Configuration.",
+    description:
+      "A denied save names the Configuration update grant it needs, retains the draft and does not change the saved Configuration.",
   },
   gatewayPasswordSaving: {
     group: "Pages/Agent detail",
@@ -2766,6 +2791,20 @@ export const scenarios = {
     ],
     description:
       "A pending save blocks further Configuration edits and deployment; a timed-out write requires draft readback.",
+  },
+  pluginsUpdateDenied: {
+    group: "Pages/Agent detail",
+    name: "Plugin selections, viewer cannot update the Agent",
+    path: `${draft}&tab=plugins`,
+    deployed: true,
+    auth: "codex_pat",
+    agentPlugins: JSON.parse(pluginSelections),
+    pluginCapabilities,
+    pluginDiscovery,
+    readOnlyPermissionSummary: true,
+    description:
+      "The permission answer denies Agent update, so Save plugin selections and the plugin fields are disabled, the saved selections stay in view, and the note names the grant to ask for. The API still decides.",
+    gap: "The permission answer is simulated; the API still authorizes every save.",
   },
   pluginsDraft: {
     group: "Pages/Agent detail",
@@ -2916,6 +2955,41 @@ export const scenarios = {
     ],
     description: "Invalid JSON retains editor contents and sends no Configuration write.",
   },
+  configurationChangedElsewhereMerged: {
+    group: "Pages/Agent detail",
+    name: "Configuration edits merged over another browser's save",
+    path: draft,
+    configurationChangedElsewhere: {
+      values: { gateway: { bind: "loopback" }, agents: { defaults: { model: "codex/gpt-5.1" } } },
+    },
+    actions: [
+      click("Edit Configuration"),
+      {
+        selector: "#configuration-json",
+        value: JSON.stringify(
+          {
+            gateway: { mode: "local", bind: "lan" },
+            agents: {
+              defaults: {
+                model: "codex/gpt-4.1",
+                models: { "codex/gpt-4.1": { agentRuntime: { id: "codex" } } },
+              },
+            },
+            channels: {},
+          },
+          null,
+          2,
+        ),
+      },
+      click("Save Configuration"),
+      click("Reload draft"),
+    ],
+    description:
+      "Another browser changed the model and the gateway bind while this editor set the bind. Reload draft merges this reader's edit over the reread document and names the value both changed.",
+    steps: [
+      "Check the note names /gateway/bind with the saved value, and the editor keeps the other browser's model with this reader's bind.",
+    ],
+  },
   admitted: {
     group: "Pages/Agent detail",
     name: "Current version",
@@ -2955,6 +3029,20 @@ export const scenarios = {
     ],
     description:
       "Reopening the desired configuration keeps the Agent default and each explicit override. Saving changes updates the draft; admitted revisions retain their prior access.",
+  },
+  repositoryEditorUpdateDenied: {
+    group: "Pages/Agent detail",
+    name: "Repository access, viewer cannot update the Agent",
+    path: `${draft}&tab=repositories`,
+    repositoryAccess: {
+      defaultProfile: "git-full",
+      repositories: [{ repositoryRef: "application" }],
+    },
+    repositoryBindings: [{ repositoryRef: "application", profile: "git-full" }],
+    readOnlyPermissionSummary: true,
+    description:
+      "The permission answer denies Agent update, so Save repository access and the repository fields are disabled (Cancel stays), and the note names the grant to ask for.",
+    gap: "The permission answer is simulated; the API still authorizes every save.",
   },
   repositoryAdmitted: {
     group: "Pages/Agent detail",
@@ -3034,8 +3122,9 @@ export const scenarios = {
     bootstrapFailure: true,
     path: "/console/agents?namespace=ns_00000000-0000-4000-8000-000000000001",
     description:
-      "The list shows the newest visible failure beside the current version, without asserting serving health.",
+      "The list shows the newest visible failure beside the current version, without asserting serving health. The failure keeps to one line, so the row keeps its height when the read lands; its title and the Agent page give the whole text.",
     steps: [
+      "Hover the one-line failure to read its whole text.",
       "Open the failed v7 deployment link and inspect retained credential preparation evidence.",
     ],
   },
@@ -4018,11 +4107,67 @@ export const scenarios = {
         path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
         method: "PATCH",
         status: 409,
+        code: "RESOURCE_CONFLICT",
+        message:
+          "The Configuration changed since it was read. Read its current generation before updating it.",
+        details: [{ path: "/expectedGeneration", code: "INVALID_VALUE" }],
+      },
+    ],
+    actions: [click("Edit Slack"), click("Save configuration")],
+    description:
+      "The API refuses the Configuration write with 409: another save landed after the page's reread. The editor closes and the section offers Reload draft, with focus on it.",
+  },
+  channelProvisioningReserved: {
+    group: "Components/Channels",
+    name: "Save refused during provisioning",
+    path: `${draft}&tab=channels`,
+    slack: true,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
+        method: "PATCH",
+        status: 409,
+        code: "RESOURCE_CONFLICT",
+        message:
+          "The Configuration is reserved for provisioning and is not available for this operation.",
+      },
+    ],
+    actions: [click("Edit Slack"), click("Save configuration")],
+    description:
+      "The API refuses the write because the Configuration is reserved for provisioning. That 409 has no stale-generation detail, so the editor stays open with the refusal instead of offering a Reload draft that would meet it again.",
+  },
+  channelSaveRejected: {
+    group: "Components/Channels",
+    name: "Save rejected",
+    path: `${draft}&tab=channels`,
+    slack: true,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
+        method: "PATCH",
+        status: 400,
       },
     ],
     actions: [click("Edit Slack"), click("Save configuration")],
     description:
       "A rejected Configuration write keeps the drawer and feedback visible, with focus back on Save configuration.",
+  },
+  channelSaveDenied: {
+    group: "Components/Channels",
+    name: "Save denied",
+    path: `${draft}&tab=channels`,
+    slack: true,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
+        method: "PATCH",
+        status: 403,
+        code: "FORBIDDEN",
+      },
+    ],
+    actions: [click("Edit Slack"), click("Save configuration")],
+    description:
+      "A caller without Configuration update is refused. The drawer stays open with the edits and names the grant to ask an administrator for; the text is the same for every refusal.",
   },
   channelChangedElsewhere: {
     group: "Components/Channels",
@@ -4036,6 +4181,55 @@ export const scenarios = {
     steps: [
       "Check that focus is on Reload draft and the alert says the saved Configuration changed while you were editing.",
       "Select Reload draft: the tab rebuilds in place with Draft reloaded., and Edit Slack saves again.",
+    ],
+  },
+  channelChangedElsewhereWithEdits: {
+    group: "Components/Channels",
+    name: "Configuration changed elsewhere with unsaved edits",
+    path: `${draft}&tab=channels`,
+    slack: true,
+    configurationChangedElsewhere: true,
+    actions: [
+      click("Edit Slack"),
+      { selector: "#slack-dm-policy", value: "disabled" },
+      click("Save configuration"),
+    ],
+    description:
+      "Another browser saved this Configuration while Edit Slack had unsaved changes. The alert says Reload draft reopens them over the saved settings.",
+    steps: [
+      "Check that focus is on Reload draft and the alert ends with Reload draft reopens your Slack edits over the saved settings.",
+      "Select Reload draft: Edit Slack reopens with Direct-message policy still Disabled and says the edits are applied over the reloaded settings; Save configuration saves them.",
+    ],
+  },
+  channelChangedElsewhereMerged: {
+    group: "Components/Channels",
+    name: "Edits merged over another browser's save",
+    path: `${draft}&tab=channels`,
+    slack: true,
+    slackPolicy: "open",
+    configurationChangedElsewhere: {
+      values: {
+        channels: {
+          slack: {
+            dmPolicy: "allowlist",
+            allowFrom: ["UDDDD111", "UEEEE222"],
+            channels: { CDEMO123: { users: ["UDEMO123", "UOTHER99"] } },
+          },
+        },
+      },
+    },
+    actions: [
+      click("Edit Slack"),
+      { selector: "#slack-allowed-user-ids", value: "UDEMO123, UNEW4567" },
+      { selector: "#slack-dm-policy", value: "pairing" },
+      click("Save configuration"),
+      click("Reload draft"),
+    ],
+    description:
+      "Another browser added a channel user and set a DM allowlist while this editor added a user and chose Pairing. Reload draft adds only this reader's user to the reread list and names the DM policy both browsers changed.",
+    steps: [
+      "Check the note: Allowed people in these channels (added UNEW4567), and Direct-message policy also changed in another browser, saved as Allowlist.",
+      "Check that the channel list keeps UOTHER99 and the DM list keeps UDDDD111 and UEEEE222; Save configuration saves the merge.",
     ],
   },
   channelSavePending: {
@@ -4079,6 +4273,15 @@ export const scenarios = {
     description:
       "The saved harness authentication source can be reviewed or changed before deployment.",
   },
+  credentialsUpdateDenied: {
+    group: "Components/Credentials",
+    name: "Model authentication, viewer cannot update the Agent",
+    path: `${draft}&tab=credentials`,
+    readOnlyPermissionSummary: true,
+    description:
+      "The permission answer denies Agent update, so Save authentication source and its fields are disabled, and the note names the grant to ask for.",
+    gap: "The permission answer is simulated; the API still authorizes every save.",
+  },
   credentialsSlack: {
     group: "Components/Credentials",
     name: "Slack tokens missing",
@@ -4104,6 +4307,20 @@ export const scenarios = {
     actions: [{ selector: "#runtime-slack-app-token", value: "sec_demo_slack_backup_token" }],
     description:
       "The app token binding is staged to a different Secret while the bot token binding remains unchanged.",
+  },
+  credentialsSlackCarried: {
+    group: "Components/Credentials",
+    name: "Slack token choice carried through a conflict",
+    path: `${draft}&tab=credentials`,
+    slack: true,
+    configurationChangedElsewhere: true,
+    actions: [
+      { selector: "#runtime-slack-app-token", value: "sec_demo_slack_backup_token" },
+      click("Save channel Secrets"),
+      click("Reload draft"),
+    ],
+    description:
+      "Another browser saved this Configuration first. The chosen app token stays shown, and Reload draft applies it over the reread bindings for Save channel Secrets.",
   },
   credentialsSecretListDenied: {
     group: "Components/Credentials",
@@ -4407,6 +4624,22 @@ export const scenarios = {
       },
     ],
     description: "Unauthorized reads do not enable blank overwrites.",
+  },
+  workspaceSaveDenied: {
+    group: "Components/Workspace",
+    name: "Save denied",
+    path: `${revision}&tab=workspace`,
+    deployed: true,
+    rules: [{ suffix: "/AGENTS.md", method: "PUT", status: 403 }],
+    actions: [
+      {
+        selector: '[id="workspace-AGENTS.md"]',
+        value: "# Updated guidance\nReview changes before applying them.",
+      },
+      click("Save AGENTS.md"),
+    ],
+    description:
+      "A refused save names the Agent operate grant it needs and keeps the edit on screen.",
   },
   workspaceMissing: {
     group: "Components/Workspace",

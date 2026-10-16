@@ -113,21 +113,24 @@ function classifyReceipts(receipts, manifest) {
     ];
     if (receiptsMatchEntries(receipts, providerEntries)) {
       if (receipts.length === 55) {
-        return "preStaticEgress";
+        return "preHeldAuthenticationSession";
       }
       if (receipts.length === 56) {
-        return "preSendReceipts";
+        return "preStaticEgress";
       }
       if (receipts.length === 57) {
-        return "prePreparedGitHubCustody";
+        return "preSendReceipts";
       }
       if (receipts.length === 58) {
-        return "prePreparedGitHubEgress";
+        return "prePreparedGitHubCustody";
       }
       if (receipts.length === 59) {
-        return "preCredentialFreeMetadata";
+        return "prePreparedGitHubEgress";
       }
       if (receipts.length === 60) {
+        return "preCredentialFreeMetadata";
+      }
+      if (receipts.length === 61) {
         return "preRevisionHarnessAuthShape";
       }
       if (receipts.length === manifest.entries.length) {
@@ -220,21 +223,24 @@ function classifyReceipts(receipts, manifest) {
     return "main";
   }
   if (receipts.length === 55) {
-    return "preStaticEgress";
+    return "preHeldAuthenticationSession";
   }
   if (receipts.length === 56) {
-    return "preSendReceipts";
+    return "preStaticEgress";
   }
   if (receipts.length === 57) {
-    return "prePreparedGitHubCustody";
+    return "preSendReceipts";
   }
   if (receipts.length === 58) {
-    return "prePreparedGitHubEgress";
+    return "prePreparedGitHubCustody";
   }
   if (receipts.length === 59) {
-    return "preCredentialFreeMetadata";
+    return "prePreparedGitHubEgress";
   }
   if (receipts.length === 60) {
+    return "preCredentialFreeMetadata";
+  }
+  if (receipts.length === 61) {
     return "preRevisionHarnessAuthShape";
   }
   if (receipts.length === manifest.entries.length) {

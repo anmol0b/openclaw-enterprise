@@ -84,6 +84,7 @@
     "tests/conformance/compute-lifecycle-hooks.test.mjs",
     "tests/conformance/utils.test.mjs",
     "tests/conformance/console-api-client.test.mjs",
+    "tests/conformance/console-carry.test.mjs",
     "tests/integration/bootstrap-output.test.mjs",
     "tests/conformance/slack-configuration.test.mjs",
     "tests/conformance/grafana-overview-dashboard.test.mjs",
@@ -91,6 +92,7 @@
     "tests/conformance/split-layout-adopt.test.mjs",
     "tests/conformance/url-authority.test.mjs",
     "tests/integration/static-egress.test.mjs",
+    "tests/integration/egress-stock-online-authority.test.mjs",
     "tests/integration/egress-enrollment.test.mjs",
     "tests/integration/egress-installation-exchange.test.mjs",
     "tests/integration/egress-prepared-github-metadata.test.mjs"
@@ -113,6 +115,9 @@
     },
     {
       "path": "tests/conformance/console-api-client.test.mjs"
+    },
+    {
+      "path": "tests/conformance/console-carry.test.mjs"
     },
     {
       "path": "tests/conformance/contracts.test.mjs"
@@ -395,6 +400,9 @@
         "Responses incremental text snapshots cannot reveal selected material",
         "signed Responses Plan projections protect completed and response-wide streamed text"
       ]
+    },
+    {
+      "path": "tests/integration/egress-stock-online-authority.test.mjs"
     },
     {
       "path": "tests/integration/egress-enrollment.test.mjs"
