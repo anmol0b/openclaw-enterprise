@@ -2019,7 +2019,7 @@ function withFirstPrepareRevisionFailureDiagnostic(computeDriver) {
 
 async function prepareProductionInstallation(
   context,
-  { harnessId = "codex", controllerPort, controlUiOrigin } = {},
+  { harnessId = "codex", controllerPort, controlUiOrigin, withOAuthToolSources = true } = {},
 ) {
   const kubeconfig = await validateOpenShellPrerequisites();
   const identifier = randomUUID();
@@ -2135,7 +2135,7 @@ async function prepareProductionInstallation(
   // A disposable Keycloak issues OAuth2 tokens over HTTPS signed by a private CA. The Namespace
   // gateway is configured to trust that CA so it can mint and refresh tokens itself.
   const keycloak =
-    harnessId === "codex"
+    harnessId === "codex" && withOAuthToolSources
       ? await startKeycloak({
           context,
           kubectl,
@@ -6066,6 +6066,7 @@ test(
     const topology = await prepareProductionInstallation(context, {
       harnessId: selectedHarness,
       controlUiOrigin,
+      withOAuthToolSources: false,
     });
     const apiSecret = await resource(
       "secret",
