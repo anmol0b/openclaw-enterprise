@@ -3,6 +3,11 @@
 // probes. Both files start the wrapper through the same scenario helper.
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  failureInputLimit,
+  failureSecrets,
+  redactOutputLines,
+} from "../../scripts/ci/failure-redaction.mjs";
 import { imageSmokeTimeoutMultiplier } from "../helpers/image-smoke-timeout.mjs";
 import {
   imageTestOptions,
@@ -31,7 +36,7 @@ const promptTerminationMs = 15_000;
 
 // Sends SIGTERM as the kubelet does and measures how long the container takes
 // to stop. Container exit ends its PID namespace, so no child outlives it.
-async function assertPromptTermination(t, { containerName, collect }, description, phase) {
+async function assertPromptTermination(t, { containerName, collect, wrapper }, description, phase) {
   const budgetMs = promptTerminationMs * imageSmokeTimeoutMultiplier;
   const signalledAt = Date.now();
   await runDocker(["kill", "--signal", "TERM", containerName]);
@@ -58,6 +63,31 @@ async function assertPromptTermination(t, { containerName, collect }, descriptio
     })}`,
   );
   if (state.running) {
+    const wrapperEnv = Object.fromEntries(
+      wrapper.environment.map((entry) => {
+        const separator = entry.indexOf("=");
+        return [entry.slice(0, separator), entry.slice(separator + 1)];
+      }),
+    );
+    const secrets = failureSecrets([process.env, wrapperEnv]);
+    // Retain every captured line in the job log before the bounded assertion.
+    // Docker capture limits and the redactor's per-line bound still apply.
+    for (const [stream, output] of [
+      ["stdout", state.stdout],
+      ["stderr", state.stderr],
+    ]) {
+      const lines = redactOutputLines(
+        output.split("\n"),
+        secrets,
+        process.cwd(),
+        failureInputLimit,
+      );
+      t.diagnostic(
+        `${phase}: captured ${stream} from ${containerName}; ` +
+          `SIGTERM at ${new Date(signalledAt).toISOString()}; redacted, per-line bounded\n` +
+          lines.join("\n"),
+      );
+    }
     // Keep both streams: stderr warnings must not crowd stdout shutdown spans out.
     // Reserve space for stream labels and omission markers in the existing budget.
     const streamTailLimit = failureOutputLimit / 2 - 128;
