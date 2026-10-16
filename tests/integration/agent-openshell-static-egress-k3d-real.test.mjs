@@ -85,8 +85,8 @@ test(
       await withdrawAndObserveSandboxAbsence(setup, stack, evidence, deployment, installed);
       assert.equal(
         owned.provider.observations.length,
-        17,
-        "one startup probe, fifteen measured Codex sends and one managed sibling send; no retries",
+        19,
+        "one startup probe, seventeen measured Codex sends and one managed sibling send; no retries",
       );
     } catch (error) {
       throw safeConnectedFailure(error, progress.stage);
