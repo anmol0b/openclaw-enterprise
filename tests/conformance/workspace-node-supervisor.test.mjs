@@ -16,7 +16,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { AGENT_WITH_NODE_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
+import {
+  AGENT_WITH_NODE_ENTRYPOINT,
+  NATIVE_WORKER_ENTRYPOINT,
+} from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { nodeProgramArguments } from "../../apps/controller/src/drivers/compute/node-program.ts";
 
 // Reads a JSON-lines file; a file that does not exist yet has no rows. Children append
@@ -80,7 +83,11 @@ const pendingIdentityProbe = [
 //   that replace other external bodies.
 // - Events: children append JSON rows to `directory`/events.jsonl.
 // - Cleanup kills the supervisor and every recorded pid, then removes `directory`.
-async function startSupervisor(t, directory, { child, stubs = [], env }) {
+async function startSupervisor(
+  t,
+  directory,
+  { child, stubs = [], env, entrypoint = AGENT_WITH_NODE_ENTRYPOINT },
+) {
   const eventsPath = join(directory, "events.jsonl");
   const childPath = join(directory, "child.cjs");
   await writeFile(childPath, child.join("\n"));
@@ -93,10 +100,9 @@ async function startSupervisor(t, directory, { child, stubs = [], env }) {
       JSON.stringify(eventsPath) +
       ', args[0] === "/app/openclaw.mjs" ? "node" : "codex", JSON.stringify(args)], options);',
     ...stubs,
-    AGENT_WITH_NODE_ENTRYPOINT.replace(
-      "\ninitializeRuntimeAssets();\npublishAgentPluginSkillPath();\n",
-      "\n",
-    ),
+    entrypoint
+      .replace("\ninitializeRuntimeAssets();\npublishAgentPluginSkillPath();\n", "\n")
+      .replace("\ninitializeRuntimeAssets();\n", "\n"),
   ].join("\n");
   // Launch through the same bounded program pieces the container receives.
   const supervisor = spawn(process.execPath, ["-e", ...nodeProgramArguments(launch)], {
@@ -148,6 +154,108 @@ async function startSupervisor(t, directory, { child, stubs = [], env }) {
   };
   return { supervisor, exited, events, waitFor, output: () => output };
 }
+
+test("native worker starts with provider-owned or Compute-owned readiness", async (t) => {
+  for (const [name, port] of [
+    ["provider-owned without a private listener", undefined],
+    ["Compute-owned with a private listener", "18791"],
+    ["invalid configured private port", ""],
+  ]) {
+    await t.test(name, { timeout: 10_000 }, async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), "oce-native-worker-readiness-"));
+      const eventsPath = join(directory, "events.jsonl");
+      const { exited, events, waitFor, output } = await startSupervisor(t, directory, {
+        entrypoint: NATIVE_WORKER_ENTRYPOINT,
+        child: [
+          'const fs = require("node:fs");',
+          "const [events, kind, args] = process.argv.slice(2);",
+          "fs.appendFileSync(events, JSON.stringify({ kind, pid: process.pid,",
+          "args: JSON.parse(args), config: JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH, 'utf8')) }) + '\\n');",
+          "setInterval(() => {}, 1000);",
+        ],
+        stubs: [
+          "const fs = require('node:fs');",
+          `const record = (value) => fs.appendFileSync(${JSON.stringify(eventsPath)}, JSON.stringify(value) + '\\n');`,
+          "cp.spawnSync = () => ({ status: 0, stdout: JSON.stringify({ auth: { probes: { results: [{",
+          "provider: 'fixture', model: 'fixture/model', source: 'env', status: 'ok' }] } } }) });",
+          "cp.execFile = (command, args, options, callback) => {",
+          "  record({ kind: 'identity', args });",
+          "  callback(null, JSON.stringify({ deviceId: 'a'.repeat(64) }));",
+          "};",
+          "require('node:http').createServer = (handler) => ({ listen(port, host) {",
+          "  record({ kind: 'listener', port, host });",
+          "  handler({ method: 'GET', url: '/readyz' }, {",
+          "    writeHead(status) { record({ kind: 'ready', status }); }, end() {},",
+          "  });",
+          "} });",
+        ],
+        env: {
+          TMPDIR: directory,
+          OPENCLAW_NATIVE_INFERENCE_CONFIG: JSON.stringify({}),
+          OPENCLAW_NATIVE_WORKER_CAPACITY: "2",
+          OPENCLAW_NODE_SETUP_CODE: "fixture-native-node-setup",
+          OPENCLAW_HARNESS_MODEL: "fixture/model",
+          OPENCLAW_HARNESS_PROVIDER: "fixture",
+          OPENCLAW_HARNESS_CREDENTIAL_ENV: "FIXTURE_MODEL_KEY",
+          FIXTURE_MODEL_KEY: "fixture-only-model-key",
+          OPENCLAW_HARNESS_PROBE_CONFIG: JSON.stringify({
+            agents: { defaults: { model: "fixture/model" } },
+          }),
+          ...(port === undefined ? {} : { OPENCLAW_RUNTIME_STATUS_PORT: port }),
+        },
+      });
+      if (port === "") {
+        const [code] = await exited;
+        assert.notEqual(code, 0);
+        assert.match(output(), /Runtime status port is invalid\./);
+        assert.deepEqual(await events(), []);
+        return;
+      }
+      const rows = await waitFor(
+        "native worker did not start with its expected readiness",
+        (rows) =>
+          rows.some(({ kind }) => kind === "node") &&
+          (port === undefined || rows.some(({ kind }) => kind === "ready")),
+      );
+      const child = rows.find(({ kind }) => kind === "node");
+      assert.deepEqual(child.args, [
+        "/app/openclaw.mjs",
+        "connect",
+        "--target-file",
+        join(directory, "node-state", "connect-target"),
+        "--ephemeral",
+        "--display-name",
+        "OpenClaw Enterprise native worker",
+      ]);
+      assert.equal(await readFile(child.args[3], "utf8"), "fixture-native-node-setup");
+      assert.equal(child.config.nodeHost.workerRuns.enabled, true);
+      assert.equal(child.config.nodeHost.workerRuns.capacity, 2);
+      assert.equal(child.config.agents.defaults.workspace, join(directory, "workspace"));
+      if (port === undefined) {
+        assert.deepEqual(
+          rows.filter(({ kind }) => kind !== "node"),
+          [],
+        );
+      } else {
+        assert.deepEqual(
+          rows.find(({ kind }) => kind === "listener"),
+          {
+            kind: "listener",
+            port: 18791,
+            host: "0.0.0.0",
+          },
+        );
+        assert.deepEqual(rows.find(({ kind }) => kind === "identity")?.args, [
+          "/app/openclaw.mjs",
+          "node",
+          "identity",
+          "--json",
+        ]);
+        assert.equal(rows.find(({ kind }) => kind === "ready")?.status, 200);
+      }
+    });
+  }
+});
 
 // This proves process supervision with real child processes. It does not prove
 // native pairing, Codex startup or container integration.
