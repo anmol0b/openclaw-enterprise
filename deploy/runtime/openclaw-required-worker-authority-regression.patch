@@ -1,7 +1,7 @@
 diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/server.required-placement-scopes.test.ts
 --- a/src/gateway/server.required-placement-scopes.test.ts
 +++ b/src/gateway/server.required-placement-scopes.test.ts
-@@ -115,223 +115,281 @@
+@@ -115,223 +115,282 @@
    },
  );
  
@@ -253,7 +253,8 @@ diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/
 +        hold = { committed, resume: resume.promise, afterAcknowledgment };
 +        settled = { remaining: 2, done: createDeferredCore() };
 +        const sessionKey = `agent:main:required-source-${timing.replaceAll(" ", "-")}-${email.split("@")[0]}`;
-+        const created = rpcReq(ws, "sessions.create", { key: sessionKey });
++        // Cold full-Gateway preparation can exceed the default 10s before reaching our barrier.
++        const created = rpcReq(ws, "sessions.create", { key: sessionKey }, 30_000);
 +        void created.catch(() => {});
 +        try {
 +          if (afterAcknowledgment) {
