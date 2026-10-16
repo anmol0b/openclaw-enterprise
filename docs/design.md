@@ -29,11 +29,11 @@ token authentication to OCC, and general credential-free model inference remain
 planned. The two-cluster profile is experimental.
 
 <a id="openclaw-as-the-open-enterprise-agent-platform"></a>
-Optional [protected static inference](reference/credential-sources/protected-inference.md)
-retains request-bound authority, current Secret resolution and response protection
-for synthetic protocol verification. Protected admission is unavailable with all
-shipped Compute Drivers pending Compute-owned release and incompatible-reader
-fencing. This slice does not complete RFC 0020 or qualify a deployed runtime.
+Kubernetes Compute supports [protected execution](reference/credential-sources/protected-inference.md)
+with the selected Credential Proxy and a matching OpenShell Sandbox. Compute verifies
+the current installation before it signs the workload release. Other Compute Drivers
+and readers that cannot interpret the admission refuse it. The bundled OpenShell
+release cannot enforce this path; qualify the exact pair before rollout.
 
 <a id="summary"></a>
 <a id="motivation"></a>
