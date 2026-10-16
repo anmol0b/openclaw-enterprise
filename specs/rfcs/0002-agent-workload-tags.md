@@ -1,13 +1,13 @@
 ---
 author: kevinlin-openai
-implementation_status: Not implemented
+implementation_status: Partially implemented
 status: Proposed
 ---
 
 # Feature Spec: Agent workload tags
 
 **Date:** 2026-09-03
-**Status:** Implemented locally — PR/CI and live OpenShell verification pending
+**Status:** Proposed. This PR implements the tag contract. Live OpenShell verification is pending.
 **Owner:** OCC and Compute/Sandbox Driver maintainers
 
 ## Problem and Decision
@@ -56,7 +56,7 @@ Extend the existing [Agent routes](../../packages/contracts/src/api/routes.ts):
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `POST /namespaces/:namespaceId/agents`                 | Optional; omission creates `{}`.                                                                                                           |
 | `PATCH /namespaces/:namespaceId/agents/:agentId`       | Optional; omission preserves tags, a supplied object replaces the whole map, `{}` clears it. Keep the existing required `configurationId`. |
-| Agent and revision list/read responses                 | Include `tags` in the existing `data` envelope.                                                                                            |
+| Agent list/read and revision detail responses          | Include `tags` in the existing `data` envelope. Revision lists remain summaries.                                                           |
 | `POST /namespaces/:namespaceId/agents/:agentId/deploy` | Remains bodyless; snapshots the saved Agent tags.                                                                                          |
 
 Example Agent update body: `{"configurationId":"<existing-configuration-id>","tags":{"usage":"personal","team":"developer-tools"}}`.
@@ -90,6 +90,11 @@ preparation, not loading the driver once at controller startup.
 Edits affect only later deployments. Already queued, active, or retiring
 revisions retain their original tags, including after worker restart. Drivers
 must not reread mutable Agent tags through `bindAgent` to make revision decisions.
+
+When upgrading an existing installation, record an empty tag map on every Agent and
+historical revision: Agent-owned tags did not exist when those revisions were admitted.
+The migration preserves the rest of each admitted snapshot and its update protection.
+
 Keep stable Agent/revision resource identities, existing retry/cancellation
 semantics, and exact-resource cleanup; changing tags cannot redirect cleanup.
 

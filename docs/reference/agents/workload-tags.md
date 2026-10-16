@@ -39,3 +39,8 @@ tag editor/filter.
 Saving tags affects future deployments only. Bodyless deployment snapshots the
 saved map transactionally; queued, active, and retiring revisions retain their
 original tags after Agent edits and worker restarts.
+
+Upgrading an existing installation sets tags to `{}` on each Agent and historical
+revision, because Agent-owned tags did not exist at admission. Migration 0057
+rewrites those revision rows while holding the table lock; allow time for that
+work in your migration window. You do not need to delete or recreate revisions.

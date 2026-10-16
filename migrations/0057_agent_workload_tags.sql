@@ -1,13 +1,3 @@
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM occ.agent_revisions) THEN
-    RAISE EXCEPTION
-      'Agent workload tag migration requires AgentRevisions to be recreated with explicit tag snapshots'
-      USING ERRCODE = '23514';
-  END IF;
-END;
-$$;
---> statement-breakpoint
 CREATE FUNCTION occ.agent_tags_are_valid(candidate jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
 SET search_path = pg_catalog
@@ -32,6 +22,16 @@ ALTER TABLE occ.agents ADD CONSTRAINT agents_tags_valid CHECK (
 --> statement-breakpoint
 ALTER TABLE occ.agent_revisions
   DROP CONSTRAINT agent_revisions_admitted_snapshot;
+--> statement-breakpoint
+-- Agent-owned tags did not exist before this migration; every historical map is empty.
+-- This transaction holds the table lock until both the constraint and immutability are restored.
+ALTER TABLE occ.agent_revisions DISABLE TRIGGER agent_revisions_are_immutable;
+--> statement-breakpoint
+UPDATE occ.agent_revisions
+SET admitted_spec = admitted_spec || '{"tags": {}}'::jsonb
+WHERE NOT (admitted_spec ? 'tags');
+--> statement-breakpoint
+ALTER TABLE occ.agent_revisions ENABLE TRIGGER agent_revisions_are_immutable;
 --> statement-breakpoint
 ALTER TABLE occ.agent_revisions
   ADD CONSTRAINT agent_revisions_admitted_snapshot CHECK (

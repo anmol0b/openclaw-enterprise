@@ -460,6 +460,10 @@ function validAuthorizationEvidence(value: unknown): value is AuthorizationEvide
   ].every((entries) => Array.isArray(entries) && entries.every(isNonEmptyString));
 }
 
+function acceptsAgentTags(operationId: string | undefined): boolean {
+  return operationId === "createAgent" || operationId === "updateAgent";
+}
+
 function validateConfiguration(value: unknown, depth = 0, path = ""): void {
   // The JSON body parser already refuses deeper bodies; this keeps the rule for any other input.
   if (depth > MAX_JSON_BODY_DEPTH) {
@@ -1236,13 +1240,18 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     app.initialConfig.onProtoPoisoning ?? "error",
     app.initialConfig.onConstructorPoisoning ?? "error",
   );
+  // Agent tags can use any string key, including "__proto__". JSON.parse preserves such
+  // keys as data; the Agent schema requires string values and perform checks all other fields.
+  const parseAgentJson = app.getDefaultJsonParser("ignore", "ignore");
   app.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
     const tooDeep = tooDeepJsonPath(body as string);
     if (tooDeep !== undefined) {
       done(tooDeepFailure(tooDeep), undefined);
       return;
     }
-    parseJson(request, body as string, done);
+    const operationId = (request.routeOptions.schema as DocumentedFastifySchema)?.operationId;
+    const parse = acceptsAgentTags(operationId) ? parseAgentJson : parseJson;
+    parse(request, body as string, done);
   });
   app.addSchema(JsonValue);
   app.addSchema(PluginDriverIdentitySchema);
@@ -2042,7 +2051,7 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     const params = request.params as Record<string, string>;
     const body = request.body as Record<string, unknown> | undefined;
     if (body !== undefined) {
-      if (operation.operationId === "createAgent" || operation.operationId === "updateAgent") {
+      if (acceptsAgentTags(operation.operationId)) {
         const { tags: _tags, ...fields } = body;
         validateConfiguration(fields);
       } else {
@@ -4075,23 +4084,6 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
       preHandler: async (request) => resolveIdentity(request, nativeAdminStatusOperation),
       handler: nativeAdmin.status,
     });
-    const ordinaryJsonParser = routes.getDefaultJsonParser("error", "error");
-    const agentJsonParser = routes.getDefaultJsonParser("ignore", "ignore");
-    routes.removeContentTypeParser("application/json");
-    routes.addContentTypeParser(
-      "application/json",
-      { parseAs: "string" },
-      (request, body, done) => {
-        const operationId = (request.routeOptions.schema as DocumentedFastifySchema)?.operationId;
-        // Agent schemas permit arbitrary own keys only in the string-valued tags map.
-        // JSON parsing defines __proto__ as data; OCC copies the map before persistence.
-        const parser =
-          operationId === "createAgent" || operationId === "updateAgent"
-            ? agentJsonParser
-            : ordinaryJsonParser;
-        parser(request, body as string, done);
-      },
-    );
     for (const operation of occApiRoutes) {
       const permissions = requiredPermissions(operation);
       const schema: DocumentedFastifySchema = {

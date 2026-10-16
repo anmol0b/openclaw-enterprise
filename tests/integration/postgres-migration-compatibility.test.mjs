@@ -1204,7 +1204,7 @@ function receiptsMatchEntries(receipts, entries) {
   );
 }
 
-async function seedCanonicalData(db, { preset = false, revisions = true } = {}) {
+async function seedCanonicalData(db, { preset = false } = {}) {
   const installation = `ins_${randomUUID()}`;
   const namespace = `ns_${randomUUID()}`;
   const configuration = `cfg_${randomUUID()}`;
@@ -1235,25 +1235,23 @@ async function seedCanonicalData(db, { preset = false, revisions = true } = {}) 
       "INSERT INTO occ.agents(id,namespace_id,name,configuration_id,backend_id,execution_mode,service_principal_id,created_at) VALUES($1,$2,$3,$4,NULL,'dedicated',$5,now())",
       [agent, namespace, `agent-${randomUUID()}`, configuration, servicePrincipal],
     );
-    if (revisions) {
-      await db.app.query(
-        "INSERT INTO occ.agent_revisions(id,namespace_id,agent_id,revision_number,admitted_spec,backend_id,admitted_at) VALUES($1,$2,$3,1,$4,NULL,now())",
-        [
-          revision,
-          namespace,
-          agent,
-          {
-            configuration_id: configuration,
-            configuration_kind: "agent",
-            configuration_generation: 1,
-            draft_spec: {},
-            harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
-            harness_auth: { method: "runtime" },
-            compute: { id: "kubernetes", implementation: "test" },
-          },
-        ],
-      );
-    }
+    await db.app.query(
+      "INSERT INTO occ.agent_revisions(id,namespace_id,agent_id,revision_number,admitted_spec,backend_id,admitted_at) VALUES($1,$2,$3,1,$4,NULL,now())",
+      [
+        revision,
+        namespace,
+        agent,
+        {
+          configuration_id: configuration,
+          configuration_kind: "agent",
+          configuration_generation: 1,
+          draft_spec: {},
+          harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
+          harness_auth: { method: "runtime" },
+          compute: { id: "kubernetes", implementation: "test" },
+        },
+      ],
+    );
     await db.app.query("COMMIT");
   } catch (error) {
     await db.app.query("ROLLBACK");
@@ -1522,6 +1520,16 @@ async function assertUpgradedAuthentication(db) {
   );
 }
 
+async function assertRevisionStillImmutable(db) {
+  // The application lacks update permission; even an owner update hits the immutability trigger.
+  const update = "UPDATE occ.agent_revisions SET admitted_spec = admitted_spec";
+  await assert.rejects(db.app.query(update), { code: "42501" });
+  await assert.rejects(db.migrator.query(update), {
+    code: "55000",
+    message: "agent_revisions is immutable",
+  });
+}
+
 async function canonicalData(db) {
   const result = { presets: [] };
   const hasPresets =
@@ -1551,7 +1559,6 @@ async function canonicalData(db) {
         : table === "agents"
           ? [
               "repository_bindings",
-              "tags",
               "repository_access",
               "harness_auth_credential_source_id",
               "plugin_approvers",
@@ -1643,7 +1650,7 @@ test(
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
-        await seedCanonicalData(db, { preset: prefix >= 25, revisions: false });
+        await seedCanonicalData(db, { preset: prefix >= 25 });
         const before = await canonicalData(db);
         const receipts = await historyReceipts(db.migrator);
         assert.deepEqual(await runHistoryMigration(db, "production", true), {
@@ -1652,9 +1659,20 @@ test(
         });
         assert.deepEqual(await runHistoryMigration(db), { ok: true, history });
         await assertCompletedHistory(db, receipts);
-        assert.deepEqual(await canonicalData(db), before);
+        // Workload tags did not exist at any of these prefixes. Add only the exact
+        // empty maps to the expected data; compare every other stored field unchanged.
+        assert.equal(before.agents.length, 1);
+        assert.equal(before.agent_revisions.length, 1);
+        assert.deepEqual(await canonicalData(db), {
+          ...before,
+          agents: before.agents.map(({ value }) => ({ value: { ...value, tags: {} } })),
+          agent_revisions: before.agent_revisions.map(({ value }) => ({
+            value: { ...value, admitted_spec: { ...value.admitted_spec, tags: {} } },
+          })),
+        });
         await assertUpgradedAuthentication(db);
-        if (prefix === 55) {
+        if (prefix === 56) {
+          await assertRevisionStillImmutable(db);
           const upgradedReceipts = await historyReceipts(db.migrator);
           const sessions = await db.app.query("SELECT count(*)::integer AS count FROM occ.session");
           child.diagnostic(
@@ -1725,8 +1743,8 @@ test(
       ok: true,
       history: "repositoryCredentials",
     });
-    await installCanonicalPrefix(db, 56);
-    assert.deepEqual((await historyReceipts(db.migrator)).slice(0, receipts.length), receipts);
+    assert.deepEqual(await runHistoryMigration(db), { ok: true, history: "repositoryCredentials" });
+    await assertCompletedHistory(db, receipts);
     const retained = (
       await db.app.query(
         "SELECT to_jsonb(attempt) AS value FROM occ.repository_session_attempts AS attempt",
@@ -1743,13 +1761,10 @@ test(
         },
       })),
     );
-    // Historical revisions have no tag snapshot; refuse without rewriting them or receipts.
-    const beforeTags = await historySnapshot(db);
     assert.deepEqual(await runHistoryMigration(db, "production"), {
-      ok: false,
-      code: "MIGRATION_FAILED",
+      ok: true,
+      history: "completed",
     });
-    assert.deepEqual(await historySnapshot(db), beforeTags);
   },
 );
 
@@ -2010,7 +2025,7 @@ test(
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
         if (prefix) {
-          await seedCanonicalData(db, { preset: prefix >= 25, revisions: false });
+          await seedCanonicalData(db, { preset: prefix >= 25 });
         }
         const before = await historySnapshot(db);
         const data = prefix ? await canonicalData(db) : undefined;
@@ -2018,6 +2033,7 @@ test(
         // roll back every preceding SQL statement and receipt in that transaction.
         // 0051's final GRANT runs after it dropped both withdrawal triggers.
         // Abort 0056 after its function was created, before the deferred trigger exists.
+        // Abort 0057 after it added tags to the populated, immutable revision.
         const rollbackTag = [
           [56, "GRANT"],
           [55, "CREATE TRIGGER"],
@@ -2042,6 +2058,9 @@ test(
         assert.deepEqual(await migrationCatalog(db.migrator), before.occ);
         if (prefix) {
           assert.deepEqual(await canonicalData(db), data);
+          if (prefix === 56) {
+            await assertRevisionStillImmutable(db);
+          }
         } else {
           assert.equal(
             (
@@ -2185,7 +2204,7 @@ test(
       ]) {
         void context.test(`${history} ${kind}`, async (child) => {
           const db = await historyDatabase(child, fixture, "defaults", { prefix: 25 });
-          await seedCanonicalData(db, { preset: true, revisions: false });
+          await seedCanonicalData(db, { preset: true });
           if (history === "completed") {
             assert.deepEqual(await runHistoryMigration(db, "production"), {
               ok: true,

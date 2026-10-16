@@ -7918,6 +7918,24 @@ test("Agent tag routes enforce map limits without coercion or prototype poisonin
   valid["k0"] = "😀".repeat(1024);
   delete valid.k1;
   valid["😀".repeat(128)] = "case preserved";
+  // An ordinary duplicate takes the last value, even for an own key named "__proto__".
+  const writeTags = (tags) =>
+    controller.request("PATCH", target, {
+      rawBody: `{"configurationId":"${agent.configurationId}","tags":{${tags}}}`,
+      headers: { "content-type": "application/json" },
+    });
+  const duplicate = await writeTags('"__proto__":"first","__proto__":"last"');
+  assert.equal(duplicate.status, 200, JSON.stringify(duplicate.body));
+  assert.deepEqual(duplicate.data.tags, { ["__proto__"]: "last" });
+
+  // Scan the raw body: parsing first would discard the over-deep value and accept this write.
+  const deep = `${"[".repeat(30)}0${"]".repeat(30)}`;
+  const refused = await writeTags(`"__proto__":${deep},"__proto__":"last"`);
+  assert.equal(refused.status, 400);
+  assert.deepEqual(refused.body.error.details, [
+    { path: `/tags/__proto__${"/0".repeat(23)}`, code: "TOO_DEEP" },
+  ]);
+
   const boundary = await controller.request("PATCH", target, {
     body: { configurationId: agent.configurationId, tags: valid },
   });
@@ -7958,6 +7976,7 @@ test("Agent tag routes enforce map limits without coercion or prototype poisonin
   assert.equal(missingConfiguration.status, 400);
   for (const rawBody of [
     `{"configurationId":"${agent.configurationId}","__proto__":"outside tags"}`,
+    `{"configurationId":"${agent.configurationId}","constructor":{"prototype":{"polluted":true}}}`,
     `{"configurationId":"${agent.configurationId}","tags":{"__proto__":{"polluted":true}}}`,
   ]) {
     assert.equal(
