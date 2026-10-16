@@ -198,6 +198,38 @@ test("GitHub factory snapshots a registry-selected write grant through session a
   service.close(opened.session.sessionId);
 });
 
+test("Git-only registry policy binds its transport and exact ref before opening a session", () => {
+  const input = registryInput();
+  const policy = input.repositories[0].namespaces[0];
+  policy.profiles = ["git-write"];
+  const registry = () => validateGitHubRepositoryRegistry(input);
+  const grant = () =>
+    resolveGitHubRepositoryBinding(registry(), {
+      namespaceId: "namespace-a",
+      repositoryRef: "application",
+    }).grant.grantId;
+  policy.pushRefAllowlist = ["refs/heads/review/exact"];
+  const legacyGrant = grant();
+  policy.transport = "git-only";
+  const scopedGrant = grant();
+  assert.notEqual(scopedGrant, legacyGrant, "legacy client-only ref policy is not the same grant");
+  policy.pushRefAllowlist = [];
+  assert.notEqual(grant(), scopedGrant, "ref authorization is bound to the grant");
+  delete policy.pushRefAllowlist;
+  assert.throws(
+    registry,
+    /invalid-repository-registry/,
+    "a Git-only policy requires explicit refs",
+  );
+  policy.pushRefAllowlist = [];
+  policy.profiles = ["git-full"];
+  assert.throws(
+    registry,
+    /invalid-repository-registry/,
+    "Git-only cannot silently widen a profile",
+  );
+});
+
 test("push-ref policy normalizes branch refs and changes grant identity", () => {
   const request = { namespaceId: "namespace-a", repositoryRef: "application" };
   const resolvePolicy = (policy) => {

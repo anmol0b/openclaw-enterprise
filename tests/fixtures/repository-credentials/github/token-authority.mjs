@@ -51,6 +51,7 @@ export function createTokenAuthority({
     const permissions = body.permissions;
     const acceptedPermissions = [
       { metadata: "read" },
+      { metadata: "read", contents: "write" },
       {
         metadata: "read",
         contents: "read",

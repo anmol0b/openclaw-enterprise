@@ -31,6 +31,7 @@ export function createGitHubRegistryDriverFactory(
       profile: GitHubProfile;
       identity: RepositoryCredentialGrantIdentity;
       pushRefAllowlist?: readonly string[];
+      transport?: "git-only";
     }>
   >();
   const factories = new Map<string, GitHubDriverFactory>();
@@ -49,6 +50,7 @@ export function createGitHubRegistryDriverFactory(
           ...(policy.pushRefAllowlist === undefined
             ? {}
             : { pushRefAllowlist: policy.pushRefAllowlist }),
+          ...(policy.transport === undefined ? {} : { transport: policy.transport }),
         });
       }
     }
@@ -75,6 +77,7 @@ export function createGitHubRegistryDriverFactory(
           ...(grant.pushRefAllowlist === undefined
             ? {}
             : { pushRefAllowlist: grant.pushRefAllowlist }),
+          ...(grant.transport === undefined ? {} : { transport: grant.transport }),
         },
         configuration: {
           kind: "github-app",

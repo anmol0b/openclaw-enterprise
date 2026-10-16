@@ -4,7 +4,11 @@ import type {
   RepositoryBindingRequest,
 } from "@openclaw-enterprise/contracts";
 import type { GitHubProfile } from "./types.ts";
-import { githubCapabilityPolicy, permissionsForProfile } from "./profiles.ts";
+import {
+  githubCapabilityPolicy,
+  gitOnlyCapabilityPolicy,
+  permissionsForProfile,
+} from "./profiles.ts";
 import {
   hasControlCharacter,
   normalizePushRefAllowlist,
@@ -20,6 +24,7 @@ export interface GitHubRepositoryRegistration {
     namespaceId: string;
     profiles: readonly GitHubProfile[];
     pushRefAllowlist?: readonly string[];
+    transport?: "git-only";
   }>[];
 }
 
@@ -117,7 +122,12 @@ export function validateGitHubRepositoryRegistry(
   const repositories = array(root.repositories, 1000).map((candidate) => {
     const entry = object(candidate, ["repositoryRef", "repositoryId", "repository", "namespaces"]);
     const namespaces = array(entry.namespaces, 128).map((candidatePolicy) => {
-      const policy = object(candidatePolicy, ["namespaceId", "profiles", "pushRefAllowlist"]);
+      const policy = object(candidatePolicy, [
+        "namespaceId",
+        "profiles",
+        "pushRefAllowlist",
+        "transport",
+      ]);
       const profiles = array(policy.profiles, 3).map(profile).sort();
       unique(profiles);
       let pushRefAllowlist: readonly string[] | undefined;
@@ -128,11 +138,23 @@ export function validateGitHubRepositoryRegistry(
           return invalid();
         }
       }
+      const { transport } = policy;
+      // An explicit empty list denies ref updates. Never turn a missing allowlist into an unrestricted push.
+      if (
+        transport !== undefined &&
+        (transport !== "git-only" ||
+          pushRefAllowlist === undefined ||
+          profiles.length !== 1 ||
+          profiles[0] !== "git-write")
+      ) {
+        return invalid();
+      }
       namespaceRows += 1;
       return Object.freeze({
         namespaceId: text(policy.namespaceId),
         profiles: Object.freeze(profiles),
         ...(pushRefAllowlist === undefined ? {} : { pushRefAllowlist }),
+        ...(transport === undefined ? {} : { transport }),
       });
     });
     unique(namespaces.map((policy) => policy.namespaceId));
@@ -198,8 +220,11 @@ export function resolveGitHubRepositoryBinding(
           ? {}
           : { pushRefAllowlist: policy.pushRefAllowlist }),
         profile: selectedProfile,
-        permissions: permissionsForProfile(selectedProfile),
-        capabilityPolicy: githubCapabilityPolicy,
+        permissions: permissionsForProfile(
+          policy.transport === "git-only" ? "git-ref-write" : selectedProfile,
+        ),
+        capabilityPolicy:
+          policy.transport === "git-only" ? gitOnlyCapabilityPolicy : githubCapabilityPolicy,
       }),
     )
     .digest("hex");

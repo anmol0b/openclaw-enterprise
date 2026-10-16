@@ -32,6 +32,7 @@ export function createGitHubDriverFactory(options: GitHubFactoryOptions): GitHub
     options.binding &&
     Object.freeze({
       profile: options.binding.profile,
+      ...(options.binding.transport === undefined ? {} : { transport: options.binding.transport }),
       identity: snapshotBinding(options.binding.identity),
       ...(options.binding.pushRefAllowlist === undefined
         ? {}
@@ -41,7 +42,12 @@ export function createGitHubDriverFactory(options: GitHubFactoryOptions): GitHub
     permissionsForProfile(selectedBinding.profile);
     if (
       selectedBinding.identity.providerInstanceId !== config.providerInstanceId ||
-      selectedBinding.identity.repositoryId !== config.repositoryId
+      selectedBinding.identity.repositoryId !== config.repositoryId ||
+      (selectedBinding.transport !== undefined &&
+        (selectedBinding.transport !== "git-only" ||
+          config.kind !== "github-app" ||
+          selectedBinding.profile !== "git-write" ||
+          selectedBinding.pushRefAllowlist === undefined))
     ) {
       throw new Error("invalid-binding");
     }
@@ -66,6 +72,11 @@ export function createGitHubDriverFactory(options: GitHubFactoryOptions): GitHub
     selectedBinding,
     ...(options.metadataOnly ? { metadataOnly: true } : {}),
   });
+  // This profile is selected only by a bound registry policy, never by the client.
+  const gitOnly = selectedBinding?.transport === "git-only";
+  const pushRefAllowlist = gitOnly
+    ? (selectedBinding.pushRefAllowlist ?? [])
+    : source.pushRefAllowlist;
   const policy = (profile: GitHubTokenProfile) =>
     createRoutePolicy({
       repository: config.repository,
@@ -85,11 +96,9 @@ export function createGitHubDriverFactory(options: GitHubFactoryOptions): GitHub
             }
           : options.limits,
       graphql: source.graphql(profile),
-      ...(source.pushRefAllowlist === undefined
-        ? {}
-        : { pushRefAllowlist: source.pushRefAllowlist }),
+      ...(pushRefAllowlist === undefined ? {} : { pushRefAllowlist }),
     });
-  const unauthenticatedPolicy = policy("git-write");
+  const unauthenticatedPolicy = policy(gitOnly ? "git-ref-write" : "git-write");
   const authentication = createGatewayAuthentication({
     isGitRoute: (head) => {
       const route = unauthenticatedPolicy.route(head);
@@ -102,10 +111,11 @@ export function createGitHubDriverFactory(options: GitHubFactoryOptions): GitHub
     ...authentication,
     create({ authority: input, custody, clock }): RepositoryBackend {
       const authority = Object.freeze({ ...input });
-      const { profile, grant } = grants.forAuthority(authority);
+      const admitted = grants.forAuthority(authority);
+      const profile = gitOnly ? "git-ref-write" : admitted.profile;
       return createGitHubDriver({
         authority,
-        binding: grant.binding,
+        binding: admitted.grant.binding,
         custody,
         clock,
         routes: policy(profile),
