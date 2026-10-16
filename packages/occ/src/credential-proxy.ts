@@ -92,7 +92,13 @@ export type EgressSendDecision =
       readonly noMaterialRequired: boolean;
     };
 
+// One global slot is shared by the live handle and every still-running phase.
+interface OperationCharge {
+  holds: number;
+}
+
 interface OperationRecord {
+  readonly charge: OperationCharge;
   readonly use: CapturedEgressUse;
   readonly provider: CredentialProviderDefinition;
   readonly source: ProtectedEgressSource;
@@ -146,18 +152,29 @@ export function egressInjectionDigest(headers: readonly (readonly [string, strin
 export class CredentialProxy {
   private readonly records = new Map<string, OperationRecord>();
   private readonly requests = new Map<string, number>();
-  private pendingResolutions = 0;
+  private activeOperations = 0;
   private readonly ports: EgressAuthorityPorts;
 
   constructor(ports: EgressAuthorityPorts) {
     this.ports = ports;
   }
 
+  private releaseCharge(charge: OperationCharge): void {
+    charge.holds -= 1;
+    if (charge.holds === 0) {
+      this.activeOperations -= 1;
+    }
+  }
+
   private discard(handle: string, record: OperationRecord): void {
+    if (this.records.get(handle) !== record) {
+      return;
+    }
     clearTimeout(record.timer);
     record.release?.();
     record.value = undefined;
     this.records.delete(handle);
+    this.releaseCharge(record.charge);
   }
 
   private prune(): void {
@@ -186,10 +203,11 @@ export class CredentialProxy {
     this.prune();
     // Reserve before authentication or any other await. Pending Secret/policy I/O
     // consumes the same capacity as an outstanding material handle.
-    if (this.pendingResolutions + this.records.size >= 1024) {
+    if (this.activeOperations >= 1024) {
       return { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
     }
-    this.pendingResolutions += 1;
+    this.activeOperations += 1;
+    const charge: OperationCharge = { holds: 1 };
     try {
       // Copy body bytes separately without moving the field: the sender's request digest
       // covers their original serialization order. Uint8Array also detaches a Node Buffer.
@@ -197,9 +215,9 @@ export class CredentialProxy {
         ...immutableCopy({ ...input, body: undefined }),
         body: new Uint8Array(input.body),
       };
-      return await this.resolveReserved(authorization, sandboxId, request, signal);
+      return await this.resolveReserved(authorization, sandboxId, request, signal, charge);
     } finally {
-      this.pendingResolutions -= 1;
+      this.releaseCharge(charge);
     }
   }
 
@@ -208,6 +226,7 @@ export class CredentialProxy {
     sandboxId: string,
     request: EgressRequest,
     signal: AbortSignal,
+    charge: OperationCharge,
   ): Promise<EgressResolution> {
     if (signal.aborted) {
       return { kind: "refused", error: { kind: "cancelled" } };
@@ -329,6 +348,7 @@ export class CredentialProxy {
       const digest = egressInjectionDigest(headers);
       const handle = randomUUID();
       const record: OperationRecord = {
+        charge,
         use: captured,
         association: immutableCopy(association),
         provider,
@@ -347,6 +367,7 @@ export class CredentialProxy {
         value: material.value,
         phase: "resolved",
       };
+      charge.holds += 1;
       this.records.set(handle, record);
       const closed = () => this.discard(handle, record);
       signal.addEventListener("abort", closed, { once: true });
@@ -511,6 +532,39 @@ export class CredentialProxy {
   ): Promise<EgressSendDecision> {
     this.prune();
     const record = this.records.get(handle);
+    if (record) {
+      record.charge.holds += 1;
+    }
+    try {
+      return await this.authorizeSendReserved(
+        authorization,
+        sandboxId,
+        requestId,
+        handle,
+        selection,
+        injectionDigest,
+        deadlineAt,
+        signal,
+        record,
+      );
+    } finally {
+      if (record) {
+        this.releaseCharge(record.charge);
+      }
+    }
+  }
+
+  private async authorizeSendReserved(
+    authorization: string,
+    sandboxId: string,
+    requestId: string,
+    handle: string,
+    selection: EgressMaterialEvidence | true,
+    injectionDigest: string,
+    deadlineAt: string,
+    signal: AbortSignal,
+    record: OperationRecord | undefined,
+  ): Promise<EgressSendDecision> {
     const peer = await this.ports.exchangeOwner.verify(authorization);
     if (
       !record ||
@@ -682,6 +736,7 @@ export class CredentialProxy {
     }
     // Consume even while persistence is pending; no second stream/body can reuse this response.
     record.phase = "observing";
+    record.charge.holds += 1;
     try {
       const rejected =
         inspect &&
@@ -719,6 +774,7 @@ export class CredentialProxy {
         : undefined;
     } finally {
       this.discard(handle, record);
+      this.releaseCharge(record.charge);
     }
   }
 }

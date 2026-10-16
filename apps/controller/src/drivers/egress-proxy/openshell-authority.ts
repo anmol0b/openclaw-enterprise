@@ -94,6 +94,9 @@ export function createOpenShellEgressAuthority(
     "grpc.max_receive_message_length": 5 * 1024 * 1024,
     "grpc.max_send_message_length": 5 * 1024 * 1024,
   });
+  // Count openings across all streams on this authority, independently of the
+  // identity's limit on exchanges that have already proved possession.
+  let pendingOpenings = 0;
   const unary =
     (work: (call: ServerUnaryCall<Wire, Wire>) => Promise<Wire>) =>
     (call: ServerUnaryCall<Wire, Wire>, callback: sendUnaryData<Wire>) => {
@@ -297,8 +300,32 @@ export function createOpenShellEgressAuthority(
   });
   server.addService(service.HttpInstallationExchange!.service, {
     Exchange(call: ServerDuplexStream<Wire, Wire>) {
-      const challenge = randomBytes(32);
       const bearer = authorization(call.metadata);
+      // This is only a preliminary check. acceptExchange repeats it and verifies
+      // possession against the exact opening and challenge before granting authority.
+      if (!identity.supervisor(bearer)) {
+        call.emit("error", {
+          message: "Installation exchange refused.",
+          code: status.PERMISSION_DENIED,
+        });
+        return;
+      }
+      if (pendingOpenings >= 1024) {
+        call.emit("error", {
+          message: "Installation exchange unavailable.",
+          code: status.RESOURCE_EXHAUSTED,
+        });
+        return;
+      }
+      pendingOpenings += 1;
+      let openingPending = true;
+      const releaseOpening = () => {
+        if (openingPending) {
+          openingPending = false;
+          pendingOpenings -= 1;
+        }
+      };
+      const challenge = randomBytes(32);
       const signal = new AbortController();
       let capability: string | undefined;
       let context: Wire = {};
@@ -307,6 +334,7 @@ export function createOpenShellEgressAuthority(
       const timer = setTimeout(() => fail(), 30_000).unref();
       const close = () => {
         clearTimeout(timer);
+        releaseOpening();
         signal.abort();
         phase = "done";
       };
@@ -357,6 +385,7 @@ export function createOpenShellEgressAuthority(
             fail();
             return;
           }
+          releaseOpening();
         } else if (phase === "authorize" && event.authorize !== undefined) {
           request = record(event.authorize);
         } else if (phase === "response" && event.response !== undefined) {

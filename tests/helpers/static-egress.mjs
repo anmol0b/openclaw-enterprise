@@ -931,6 +931,9 @@ export async function staticEgressFixture(
     gatewayClient: backend.client.clientForNamespace(runtimeNamespace.name),
     observed,
     clients,
+    get authority() {
+      return authority;
+    },
     metadata,
     beginExchange,
     resolve,

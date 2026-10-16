@@ -1125,6 +1125,135 @@ test("in-flight Secret selection and outstanding handles consume the same bounde
   assert.deepEqual(await use(other), saturated);
 });
 
+test("cancelled and denied exchanges retain capacity until receipt work settles", async (t) => {
+  for (const phase of ["begin", "authorize", "deny", "observe", "expiry"]) {
+    await t.test(phase, async (t) => {
+      const f = await syntheticDispatchFixture(t);
+      const waiting = Promise.withResolvers();
+      const entered = Promise.withResolvers();
+      const fillerGate = Promise.withResolvers();
+      const cancellation = new AbortController();
+      const fillerCancellation = new AbortController();
+      let now = f.ports.now();
+      let filling = 0;
+      const pause = async (name) => {
+        if (phase === name || (phase === "expiry" && name === "authorize")) {
+          entered.resolve();
+          await waiting.promise;
+        }
+      };
+      const proxy = new CredentialProxy({
+        ...f.ports,
+        now: () => now,
+        exchangeOwner: {
+          ...f.ports.exchangeOwner,
+          async verify(authorization) {
+            if (authorization === "filler") {
+              filling += 1;
+              return fillerGate.promise;
+            }
+            if (authorization === "probe") {
+              return undefined;
+            }
+            return f.ports.exchangeOwner.verify(authorization);
+          },
+        },
+        check: async (use, evidence) =>
+          phase === "deny" && evidence
+            ? { kind: "denied", code: "withdrawn" }
+            : f.ports.check(use, evidence),
+        receipts: {
+          async begin() {
+            await pause("begin");
+            return { created: true };
+          },
+          async authorize(_sender, _attempt, authorization) {
+            await pause("authorize");
+            return { authorization };
+          },
+          async record() {
+            await pause("deny");
+          },
+          async observe() {
+            await pause("observe");
+          },
+        },
+      });
+      const sandboxId = f.association.installation.sandboxId;
+      const resolve = (authorization, signal) =>
+        proxy.resolve(authorization, sandboxId, f.request, signal);
+      const fillers = Array.from({ length: 1023 }, () =>
+        resolve("filler", fillerCancellation.signal),
+      );
+      assert.equal(filling, 1023);
+      const saturated = { kind: "refused", error: { kind: "unavailable", code: "resolver" } };
+      const target = (async () => {
+        const ready = await resolve("synthetic-peer", cancellation.signal);
+        assert.equal(ready.kind, "ready");
+        assert.deepEqual(await resolve("probe", fillerCancellation.signal), saturated);
+        const decision = await proxy.authorizeSend(
+          "synthetic-peer",
+          sandboxId,
+          f.request.id,
+          ready.handle,
+          ready.evidence,
+          ready.injectionDigest,
+          f.request.deadlineAt,
+          cancellation.signal,
+        );
+        if (phase !== "observe") {
+          assert.equal(decision.kind, "refused");
+          return;
+        }
+        assert.equal(decision.kind, "allow");
+        const handle = await proxy.beginResponse("synthetic-peer", sandboxId, f.request.id);
+        assert.ok(handle);
+        assert.equal(
+          await proxy.protectResponse(
+            handle,
+            { status: 200, headers: [], body: new Uint8Array(), trailers: [] },
+            cancellation.signal,
+            false,
+          ),
+          undefined,
+        );
+      })();
+      try {
+        await Promise.race([
+          entered.promise,
+          target.then(() => {
+            throw new Error("receipt work did not reach the expected phase");
+          }),
+        ]);
+        if (phase === "expiry") {
+          now = Date.parse(f.request.deadlineAt);
+        } else if (phase !== "deny") {
+          cancellation.abort();
+        }
+        assert.deepEqual(
+          await resolve("probe", fillerCancellation.signal),
+          saturated,
+          "revoking the handle must not release pending receipt work",
+        );
+        waiting.resolve();
+        await target;
+        assert.deepEqual(
+          await resolve("probe", fillerCancellation.signal),
+          { kind: "refused", error: { kind: "denied", code: "identity" } },
+          "capacity returns when the final outstanding work settles",
+        );
+        assert.equal(f.arrivals, 0);
+      } finally {
+        cancellation.abort();
+        fillerCancellation.abort();
+        waiting.resolve();
+        fillerGate.resolve(undefined);
+        await Promise.allSettled([target, ...fillers]);
+      }
+    });
+  }
+});
+
 function receiptAttempt(f, captured, ready) {
   return {
     sender: f.egress.sourceControl.sender,

@@ -1,7 +1,117 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { generateKeyPairSync } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { staticEgressFixture, unary } from "../helpers/static-egress.mjs";
+
+test("the TLS exchange refuses missing, invalid, expired and gateway identity before challenge", async (t) => {
+  const f = await staticEgressFixture(t);
+  const baselineReads = f.secretReads;
+  const missing = f.metadata();
+  missing.remove("authorization");
+  const invalid = f.metadata();
+  invalid.set("authorization", "Bearer invalid");
+  const expired = f.metadata({ iat: 1, exp: 2 });
+  const gateway = f.metadata({
+    caller_kind: "gateway",
+    sub: "https://gateway.example.test",
+    sandbox_id: undefined,
+    instance_id: undefined,
+    exchange_key: undefined,
+  });
+  for (const peer of [missing, invalid, expired, gateway]) {
+    const stream = f.clients.HttpInstallationExchange.Exchange(peer, {
+      deadline: Date.now() + 5000,
+    });
+    const received = [];
+    stream.on("data", (message) => received.push(message));
+    const failure = await new Promise((resolve) => stream.on("error", resolve));
+    assert.equal(failure.code, 7);
+    assert.deepEqual(received, [], "no challenge or other reply is disclosed");
+  }
+  assert.equal(f.secretReads, baselineReads);
+  assert.deepEqual(f.providerRequests, []);
+  const admitted = await f.beginExchange();
+  assert.equal(admitted.challenge.length, 32);
+  admitted.stream.cancel();
+});
+
+test("pending openings are bounded per authority and slots follow stream lifecycle", async (t) => {
+  const f = await staticEgressFixture(t);
+  // A genuine signed exchange supplies the signing helper. The remainder exercises
+  // the actual registered handler without opening 1,024 network connections.
+  const signer = await f.beginExchange();
+  signer.stream.write(signer.opening({ ...f.capture(), audience: "wrong" }));
+  assert.ok((await signer.next()).resolved.refused);
+
+  const handler = f.authority.handlers.get(
+    "/openshell.middleware.v1.HttpInstallationExchange/Exchange",
+  ).func;
+  const peer = f.metadata();
+  class Call extends EventEmitter {
+    constructor() {
+      super();
+      this.metadata = peer;
+      this.replies = [];
+      this.on("error", (error) => {
+        this.failure = error;
+      });
+    }
+    write(reply) {
+      this.replies.push(reply);
+    }
+    end() {
+      this.ended = true;
+    }
+  }
+  const open = () => {
+    const call = new Call();
+    handler(call);
+    return call;
+  };
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = Array.from({ length: 1024 }, open);
+  assert.ok(pending.every((call) => call.replies[0]?.challenge?.length === 32));
+  const assertFull = () => {
+    const overflow = open();
+    assert.equal(overflow.failure?.code, 8);
+    assert.deepEqual(overflow.replies, []);
+  };
+  assertFull();
+  for (const event of ["cancelled", "error", "end", "invalid", "accepted"]) {
+    const call = pending.pop();
+    if (event === "invalid") {
+      call.emit("data", {
+        open: { resolve_request: Buffer.alloc(0), signature: Buffer.alloc(64) },
+      });
+      assert.equal(call.failure?.code, 7, "invalid proof must be refused");
+    } else if (event === "accepted") {
+      call.emit(
+        "data",
+        signer.opening({ ...f.capture(), audience: "wrong" }, undefined, call.replies[0].challenge),
+      );
+      assert.equal(
+        call.failure,
+        undefined,
+        "signed opening must be accepted before releasing its slot",
+      );
+    } else {
+      call.emit(event, ...(event === "error" ? [new Error("transport closed")] : []));
+    }
+    const replacement = open();
+    assert.equal(replacement.replies[0]?.challenge?.length, 32, `${event} must release a slot`);
+    pending.push(replacement);
+    // Duplicate terminal events must not release a second stream's slot.
+    call.emit("cancelled");
+    assertFull();
+  }
+  t.mock.timers.tick(30_000);
+  assert.ok(pending.every((call) => call.failure?.code === 7));
+  const afterTimeout = open();
+  assert.equal(afterTimeout.replies[0]?.challenge?.length, 32);
+  afterTimeout.emit("cancelled");
+  t.mock.timers.reset();
+});
 
 // Real TLS gRPC, issuer/possession verification, OCC capture, IAM, material read,
 // synthetic HTTPS origin, and actual gRPC reply stream. Installed policy is a

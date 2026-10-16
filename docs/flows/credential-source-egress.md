@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
-updated: "2026-10-15"
-last_updated_session: authoring-run/a87e5b92-3e56-47e2-8112-82aa89ca28c4
+updated: "2026-10-16"
+last_updated_session: authoring-run/3c418cc2-68fe-4c9a-a34e-9ecb83372b88
 ---
 
 # Protected credential request flow
@@ -138,9 +138,12 @@ see the [supported recovery boundary](../reference/credential-sources/protected-
 `packages/occ/src/credential-proxy.ts:resolve`
 
 The TLS adapter accepts one operation on `HttpInstallationExchange.Exchange`.
-It issues a random 32-byte challenge on that actual stream. Before asynchronous
-work, `OpenShellEgressIdentity.acceptExchange` verifies the gateway-signed
-`exchange_key` binding and the supervisor's Ed25519 signature over the domain
+It authenticates the supervisor bearer before issuing a random 32-byte challenge
+on that stream. Each authority allows at most 1,024 openings awaiting proof.
+Accepting the signed opening, closing the stream, or reaching the 30-second
+opening deadline releases that slot. `OpenShellEgressIdentity.acceptExchange`
+rechecks the bearer, then verifies the gateway-signed `exchange_key` binding
+and the supervisor's Ed25519 signature over the domain
 `openshell-exchange-v1` plus a zero byte, challenge, and exact binary opening
 request. Request JSON cannot introduce a key. Bearer-only legacy RPCs refuse.
 
@@ -153,7 +156,10 @@ and headers. It then captures the peer, exchange identity and installation.
 Both authorization and response claiming must
 match that identity. Another stream cannot claim the response even with the same
 bearer, key, request ID or handle. Closing the stream invalidates its capability
-and aborts its pending work. Pipelining is refused.
+and signals cancellation. A canceled or expired handle drops its material
+reference immediately. If policy or receipt work is still running, the operation
+keeps its capacity slot until that work settles. An idle handle releases the slot
+when closed. Pipelining is refused.
 
 The Forwarder maps the captured peer to persisted installation state and
 classifies one exact route through its registered provider. It reserves the
@@ -311,6 +317,8 @@ image compatibility.
 None.
 
 ## Changelog
+
+- 2026-10-16 00:27: Bound openings before proof and keep canceled operations charged until pending work settles. (authoring-run/3c418cc2-68fe-4c9a-a34e-9ecb83372b88 - 8df404d0635fa00e8d452cd0b846be3c68d3c4b0)
 
 - 2026-10-15 20:14: Pin request ciphertext access to selected material and its expiry in the accompanying implementation. (authoring-run/a87e5b92-3e56-47e2-8112-82aa89ca28c4 - ab675985805a9d4a855f441a3ba91e836d42a532)
 
