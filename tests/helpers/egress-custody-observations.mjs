@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { createConnection } from "node:net";
 import { repository, repositoryPath } from "../fixtures/egress-custody-repository-origin.mjs";
 
-export const refusal = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+// The same exact refusal covers each dispatch state; the retry hint is advisory.
+export const refusal =
+  "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\nx-should-retry: false\r\n\r\n";
 
 export function faultObserver(socket, command = "status") {
   return new Promise((resolve, reject) => {
