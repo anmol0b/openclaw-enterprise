@@ -124,7 +124,8 @@ type newerRevision struct {
 	// number is latest's revision number from the revision list.
 	number float64
 	// order is "newer" or "older" when the active revision's exact metadata
-	// proves latest's order, else "". It is read only for a candidate with runtime.
+	// proves latest's order, else "". It is read only for a candidate with Pods
+	// or running, starting or lost Harness status.
 	order string
 	// hasRuntime reports Pods, or a concrete provider-owned Harness status on a
 	// revision proven newer.
