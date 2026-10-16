@@ -583,6 +583,77 @@ func TestDeploymentStatusTableShowsStartupWarnings(t *testing.T) {
 	}
 }
 
+func TestDeploymentStatusTableShowsErrorAsCodeAndMessage(t *testing.T) {
+	// D608: the ERROR cell read as raw {code,message} JSON, with any diagnostic data inline.
+	agentPath := "/namespaces/" + testNamespaceID + "/agents/" + testAgentID
+	route := "GET " + agentPath + "/deployments/" + testRevision2ID
+	deployment := func(deploymentError string) string {
+		return `{"deploymentId":"` + testRevision2ID + `","agentId":"` + testAgentID + `","namespaceId":"` +
+			testNamespaceID + `","status":"failed","error":` + deploymentError + `}`
+	}
+	preparation := `{"code":"DEPLOYMENT_PREPARATION_FAILED","message":"Deployment preparation failed.\n\tCheck its Pods.",` +
+		`"data":{"preparation":{"reason":"retry_limit","observedAt":"2026-10-16T08:00:00.000Z","startedAt":null,` +
+		`"finishedAt":null,"workload":{"kind":"Job","name":"prep","namespace":"ns","uid":"u1"},"pods":[]}}}`
+	for _, test := range []struct {
+		name, error, want string
+	}{
+		{
+			name:  "code and message",
+			error: `{"code":"RUNTIME_AUTHENTICATION_FAILED","message":"The model provider rejected this version's credential. Update the credential, then deploy a new version."}`,
+			want:  "RUNTIME_AUTHENTICATION_FAILED: The model provider rejected this version's credential. Update the credential, then deploy a new version.",
+		},
+		{
+			name:  "diagnostic data stays in structured output",
+			error: preparation,
+			want:  "DEPLOYMENT_PREPARATION_FAILED: Deployment preparation failed. Check its Pods. (details: -o json)",
+		},
+		{
+			name: "model check cause",
+			error: `{"code":"RUNTIME_MODEL_PROBE_FAILED","message":"Deployment runtime startup model check failed.","data":{"runtimeFailure":` +
+				`{"component":"gateway","check":"model-probe","checkedAt":"2026-10-03T08:00:00.000Z","code":"MODEL_PROBE_FAILED",` +
+				`"cause":{"kind":"PROBE_STATUS","detail":"rate_limit"}}}}`,
+			want: "RUNTIME_MODEL_PROBE_FAILED: Deployment runtime startup model check failed. (cause: PROBE_STATUS rate_limit)",
+		},
+		{
+			name:  "code without message",
+			error: `{"code":"UNKNOWN_FAILURE"}`,
+			want:  "UNKNOWN_FAILURE",
+		},
+		{
+			name:  "unrecognized shape is shown as it is",
+			error: `{"message":"no code"}`,
+			want:  `{"message":"no code"}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out, _, err := runOCC(t, map[string]string{route: deployment(test.error)}, "--namespace", testNamespaceID, "agent", "deployment-status", testAgentID, testRevision2ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			if len(lines) != 2 || !strings.HasSuffix(lines[1], "  "+test.want+"  -") {
+				t.Fatalf("expected ERROR cell %q:\n%s", test.want, out)
+			}
+		})
+	}
+
+	// Structured output keeps the whole error, the message's line break included.
+	for output, message := range map[string]string{
+		"json": `"Deployment preparation failed.\n\tCheck its Pods."`,
+		"yaml": "Deployment preparation failed.\n        \tCheck its Pods.",
+	} {
+		out, _, err := runOCC(t, map[string]string{route: deployment(preparation)}, "--namespace", testNamespaceID, "--output", output, "agent", "deployment-status", testAgentID, testRevision2ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"retry_limit", "pods", message} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s output lacks %q:\n%s", output, want, out)
+			}
+		}
+	}
+}
+
 func TestDeploymentStatusWithoutRevisionsExplainsHowToDeploy(t *testing.T) {
 	_, _, err := runOCC(t, map[string]string{
 		"GET /namespaces/" + testNamespaceID + "/agents/" + testAgentID + "/revisions": `[]`,
