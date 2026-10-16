@@ -603,7 +603,7 @@ func TestDeploymentStatusTableShowsErrorAsCodeAndMessage(t *testing.T) {
 			want:  "RUNTIME_AUTHENTICATION_FAILED: The model provider rejected this version's credential. Update the credential, then deploy a new version.",
 		},
 		{
-			name:  "diagnostic data stays in structured output",
+			name:  "diagnostic data is replaced by a pointer",
 			error: preparation,
 			want:  "DEPLOYMENT_PREPARATION_FAILED: Deployment preparation failed. Check its Pods. (details: -o json)",
 		},
@@ -638,18 +638,23 @@ func TestDeploymentStatusTableShowsErrorAsCodeAndMessage(t *testing.T) {
 	}
 
 	// Structured output keeps the whole error, the message's line break included.
-	for output, message := range map[string]string{
-		"json": `"Deployment preparation failed.\n\tCheck its Pods."`,
-		"yaml": "Deployment preparation failed.\n        \tCheck its Pods.",
-	} {
+	for _, output := range []string{"json", "yaml"} {
 		out, _, err := runOCC(t, map[string]string{route: deployment(preparation)}, "--namespace", testNamespaceID, "--output", output, "agent", "deployment-status", testAgentID, testRevision2ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"retry_limit", "pods", message} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("%s output lacks %q:\n%s", output, want, out)
-			}
+		var decoded struct {
+			Error struct {
+				Message string         `yaml:"message"`
+				Data    map[string]any `yaml:"data"`
+			} `yaml:"error"`
+		}
+		if err := yaml.Unmarshal([]byte(out), &decoded); err != nil {
+			t.Fatalf("%s output: %v\n%s", output, err, out)
+		}
+		prepared, _ := decoded.Error.Data["preparation"].(map[string]any)
+		if decoded.Error.Message != "Deployment preparation failed.\n\tCheck its Pods." || prepared["reason"] != "retry_limit" {
+			t.Fatalf("%s output must keep the whole error:\n%s", output, out)
 		}
 	}
 }

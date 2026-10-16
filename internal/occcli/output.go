@@ -244,6 +244,8 @@ func (app *application) printDeploymentStatus(value any) error {
 // line, then the classified cause of a failed startup model check (finding 323)
 // or a pointer to the diagnostic data that only structured output shows. A
 // value without a string code is left as it is, so the table still shows it.
+// Free text (message, cause detail) is collapsed to one line; code and cause
+// kind are schema tokens, and tableCell escapes anything hidden in any of them.
 func deploymentErrorText(value any) any {
 	deploymentError, ok := value.(map[string]any)
 	if !ok {
