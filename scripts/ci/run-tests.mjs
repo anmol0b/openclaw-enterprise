@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, readdirSync, readFileSync } from "node:fs";
 import { availableParallelism, cpus, constants as osConstants } from "node:os";
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
 import { startAgentNamespaceCapture } from "./k3d-diagnostics.mjs";
+import { stopCleanupCommands } from "./cleanup.mjs";
 import {
   failureInputLimit,
   failureSecrets,
@@ -439,15 +440,17 @@ function laneDeadlineMs() {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
+// Past the deadline, or too close to it (under minStepMs) for a file to start: a test process
+// started then would be stopped before it ran anything (finding 1215).
 function laneDeadlinePassed() {
   const deadline = laneDeadlineMs();
-  return deadline !== undefined && Date.now() >= deadline;
+  return deadline !== undefined && deadline - Date.now() < minStepMs;
 }
 
 function laneDeadlineIssue(relativePath) {
   return issue(
     "lane-deadline",
-    `the lane deadline passed before this file started: ${relativePath}`,
+    `the lane deadline passed, or was under ${minStepMs} ms away, before this file started: ${relativePath}`,
     {
       file: relativePath,
     },
@@ -527,14 +530,19 @@ function withinLimit(step, limitMs) {
   });
 }
 
-// The file's timeout: the per-file limit, cut to what is left before the lane deadline.
+// The file's timeout: the per-file limit, cut to what is left before the lane deadline, but
+// never under minStepMs. A file starts only with at least that much left (laneDeadlinePassed),
+// so the floor only absorbs the moments between that check and the start. A file started with a
+// second or two left can still be stopped during Node's startup; its timeout then says no test
+// was running.
 function fileTimeout() {
   const limitMs = testTimeoutMs();
   const deadline = laneDeadlineMs();
   if (deadline === undefined || deadline - Date.now() >= limitMs) {
     return { timeoutMs: limitMs, laneDeadline: false };
   }
-  return { timeoutMs: Math.max(1, deadline - Date.now()), laneDeadline: true };
+  const timeoutMs = Math.min(limitMs, Math.max(minStepMs, deadline - Date.now()));
+  return { timeoutMs, laneDeadline: timeoutMs < limitMs };
 }
 
 // The lane's audited files may share up to fileConcurrency slots, capped by the CPUs
@@ -1218,7 +1226,7 @@ async function runFile(root, lane, file, statePath, prepareFile, setup = (step) 
     issues.push(
       issue(
         "test-timeout",
-        `selected file exceeded the runner timeout (${timeout.timeoutMs} ms${timeout.laneDeadline ? ", cut to the lane deadline" : ""}): ${relativePath}${running.length === 0 ? "" : ` while running ${running.join(", ")}`}`,
+        `selected file exceeded the runner timeout (${timeout.timeoutMs} ms${timeout.laneDeadline ? ", cut to the lane deadline" : ""}): ${relativePath}${running.length === 0 ? "; no test was running (stopped in a hook, teardown or top-level code)" : ` while running ${running.join(", ")}`}`,
         { file: relativePath },
       ),
     );
@@ -1704,6 +1712,63 @@ async function main() {
   return summary.status === "passed" ? 0 : 1;
 }
 
+// Parent pid of every process, from /proc on Linux (CI runners) or ps elsewhere. Synchronous,
+// so a step still running in this process cannot start a command between listing and killing.
+function processParents() {
+  const parents = new Map();
+  let entries;
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    const listed = spawnSync("ps", ["-A", "-o", "pid=", "-o", "ppid="], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    for (const line of listed.stdout?.split("\n") ?? []) {
+      const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+      if (pid > 0) {
+        parents.set(pid, ppid);
+      }
+    }
+    return parents;
+  }
+  for (const entry of entries.filter((name) => /^\d+$/.test(name))) {
+    try {
+      // "pid (comm) state ppid ...": comm can hold spaces and parentheses.
+      const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+      parents.set(Number(entry), Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]));
+    } catch {
+      // The process has exited.
+    }
+  }
+  return parents;
+}
+
+// Every process this runner started that is still running, with their descendants. The whole
+// tree is listed before any is killed: a killed parent's children move to another parent.
+function killDescendants() {
+  // Stop owned cleanup groups before the snapshot can kill their supervisors
+  // alone. A command's already-orphaned descendants are absent from this tree.
+  stopCleanupCommands();
+  const children = new Map();
+  for (const [pid, ppid] of processParents()) {
+    children.set(ppid, [...(children.get(ppid) ?? []), pid]);
+  }
+  const descendants = [];
+  for (let queue = [process.pid]; queue.length > 0;) {
+    const next = children.get(queue.shift()) ?? [];
+    descendants.push(...next);
+    queue.push(...next);
+  }
+  for (const pid of descendants) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // It has exited.
+    }
+  }
+}
+
 try {
   process.exitCode = await main();
 } catch (error) {
@@ -1711,7 +1776,10 @@ try {
   process.exitCode = 1;
 }
 // An abandoned preparation or cleanup can keep this process alive (a child it waits for, a
-// timer); the results are written, so stop here.
+// timer); the results are written, so stop here. Its commands run in this process's group and
+// would outlive it as orphans on a self-hosted runner (finding 1225), so end them first. Every
+// test file's process group has exited by now.
 if (abandonedSteps > 0) {
+  killDescendants();
   process.exit();
 }

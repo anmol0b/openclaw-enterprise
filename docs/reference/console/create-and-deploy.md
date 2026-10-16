@@ -15,7 +15,7 @@ Starters enable native Control UI at `http://127.0.0.1:18789` and
 `http://localhost:18789`. Compute renders gateway authentication from Installation
 trust; starters supply no token and reference only the generated
 `OPENCLAW_GATEWAY_PASSWORD`. Do not expose the gateway publicly.
-**Open native admin UI** requires [native admin setup](../../guides/deploy/native-admin.md):
+**Open admin console** requires [native admin setup](../../guides/deploy/native-admin.md):
 trusted-proxy authentication and the exact Agent HTTPS origin. Loopback origins alone
 are insufficient. Presets and edited Configuration JSON retain their settings.
 
@@ -76,7 +76,8 @@ still block initial workspace files and Secret-backed environment projection.
    repositories, and workspace files for supported Dedicated provisioning.
    Provisioning stays pending until the first deployment activates or fails.
    Success opens Agent details. Failure links to the same Agent and revision;
-   correct its cause and deploy again through **Deployment activity**.
+   correct its cause and deploy again through **Deployment activity**. If the
+   first deployment was stopped, no repair is needed before deploying again.
    Ordinary creation saves Configuration first and opens a draft on **Create new version**,
    without a workload. After deployment, use the
    [workspace editor](../console.md#edit-workspace-files). Pending inputs have no
@@ -149,13 +150,12 @@ provider acceptance or runtime readiness. See
 Successful draft-save steps retain IDs and freeze inputs, including authentication.
 Correct conflicting names or permissions, then retry those resources.
 Ordinary draft creation grants the Agent's service principal exact `operate`
-access to the model Secret and each unique same-Namespace Secret in the saved
-Configuration's environment bindings, including Preset bindings. Delegation
-requires [Installation administration](../authorization.md#manage-namespace-policy);
-Secret-use permission is insufficient.
-If a grant fails after creation, **Retry credential access** reuses the saved
-Agent and Configuration without duplicating grants. An administrator can check
-its grants.
+access to the model Secret and unique same-Namespace environment Secrets in its
+saved Configuration, including Preset bindings.
+[Installation administration](../authorization.md#manage-namespace-policy) is required;
+Secret-use permission cannot delegate.
+**Retry credential access** reuses the saved Agent, Configuration, and existing
+grants.
 Uncertain responses block another attempt: check displayed IDs and the Agents list;
 give the request ID to your operator if the outcome remains unknown.
 
@@ -168,9 +168,9 @@ Secrets are reused, never deleted automatically. After a lost Secret save, check
 existing Namespace Secrets before starting again.
 See the [provisioning flow](../../flows/agent-provisioning.md) for the API sequence.
 
-After the first revision is admitted, a deployment failure cannot retry
-provisioning or create another Agent. Open the retained Agent, correct its
-settings or credential source, and submit a new deployment.
+A failed or stopped first deployment, or a Stop before it
+(`PROVISIONING_CANCELLED`), keeps the Agent and its name; provisioning cannot
+retry. Open that Agent and deploy. If it failed for another reason, correct that cause first.
 
 Repository discovery is independent of model authentication. Small catalogs offer
 **Add**; larger ones support search and paging.

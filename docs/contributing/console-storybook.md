@@ -59,9 +59,9 @@ Stories reach error states through real controls after loading fixture data.
 
 | Group                   | Coverage                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Sign in                 | Password and GitHub sign-in, discovery failure, GitHub errors, disabled account, rejected login, expired session, session-read failure, loading, unconfirmed logout.                                                                                                                                                                                                                                              |
+| Sign in                 | Password and GitHub sign-in, discovery failure, GitHub errors, disabled account, rejected login, expired session, delayed session status, failure and retry, unconfirmed logout.                                                                                                                                                                                                                                  |
 | Agents                  | Populated and empty collections, no search matches, inaccessible Namespace, no readable Namespaces, permission denial, read failure, loading.                                                                                                                                                                                                                                                                     |
-| Backends                | Configured, empty, and discovery failure.                                                                                                                                                                                                                                                                                                                                                                         |
+| Backends                | Configured, empty, discovery failure, and access denied.                                                                                                                                                                                                                                                                                                                                                          |
 | Namespaces              | Ready and provisioning, empty, permission denial.                                                                                                                                                                                                                                                                                                                                                                 |
 | Settings and navigation | Signed-in account and unknown route.                                                                                                                                                                                                                                                                                                                                                                              |
 | Create Agent            | Installed default, missing/loading/denied Presets, Preset variables, fixed model choices before credential entry and manual model IDs, OpenAI Codex/OpenClaw and Anthropic OpenClaw harnesses, Service Accounts switching and bound Presets, seeded workspace files, storage/grant denial, repository selection/discovery and rejected-grant recovery, invalid JSON, partial save/conflict, unknown save outcome. |
@@ -79,9 +79,9 @@ loading.
 
 ## Return navigation
 
-Use **Pages/Navigation → Return to loaded pages** and **Return to Agent panels**.
-Search, expanded configuration, native admin access, and Credentials should survive
-Back/Forward and tab changes. Refresh reloads.
+Use **Pages/Navigation → Return to loaded pages**, **Return to Agent panels**, and
+**Slow rechecks**. Search, expanded configuration, native admin access, and Credentials
+survive Back/Forward and tab changes. Refresh reloads; slow checks say so.
 
 ## Agent flows and UI gaps
 
@@ -123,10 +123,6 @@ IDENTITY.md and clearing USER.md first.
 OpenClaw and unsupported-runtime stories keep the draft workflow: provision
 credentials and deploy from Agent detail.
 
-**Preset Secret access retry** binds one tool Secret twice. Denial retains IDs
-and locks fields. Check **Open saved Agent**, then **Retry credential access**.
-IAM responses are simulated.
-
 **Plugins Curated** exercises token-free discovery against simulated Driver
 responses, leaving access unverified. Hosted discovery requires an eligible Codex
 service-account token. Workspace and Standard OpenClaw stories preview file and
@@ -160,6 +156,9 @@ for the supported installation workflow, prerequisites, and Teams deployment lim
 
 Repository previews cover access levels, empty or pending discovery, unavailable
 choices, denied or unverified authorization, and reselection after a rejected save.
+In **Locale-stable repository search**, search `ibm`, select `acme/platform`, and
+confirm reference `IBM-platform`. Simulated data does not prove GitHub App access
+or credential delivery.
 In **Repository choices unavailable**, follow the setup link or retry; creation
 without repository access stays available. The recovery story keeps its saved
 Configuration and needs a current nonempty repository selection to retry.
