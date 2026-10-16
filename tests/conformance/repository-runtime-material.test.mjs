@@ -698,7 +698,7 @@ test("Dedicated repository custody and networking belong only to Codex", async (
   );
 });
 
-test("prepared Git admits only the dedicated Harness peer and retires it without evicting another Agent", async () => {
+async function preparedIngressFixture({ hostname, servicePort = 443, targetPort = 8443 } = {}) {
   const worker = {
     "app.kubernetes.io/name": "openclaw-enterprise",
     "app.kubernetes.io/instance": "oce",
@@ -708,11 +708,6 @@ test("prepared Git admits only the dedicated Harness peer and retires it without
     preparedRepositoryIngress: true,
     repositoryPodLabels: worker,
   });
-  const revision = f.revision;
-  assert.throws(
-    () => f.driver.validateRepositoryCredentials({ id: "openclaw", mode: "embedded" }),
-    /dedicated Compute-owned Codex Harness/,
-  );
   const name = "openclaw-enterprise-prepared-repository-ingress";
   const metadata = { name, namespace: "credentials", uid: "policy-uid", resourceVersion: "1" };
   const start = { podSelector: { matchLabels: worker }, policyTypes: ["Ingress"], ingress: [] };
@@ -720,13 +715,31 @@ test("prepared Git admits only the dedicated Harness peer and retires it without
   savePolicy(start);
   f.save({
     kind: "Service",
-    metadata: { namespace: "credentials", name: "git" },
+    metadata: {
+      namespace: "credentials",
+      name: "git",
+      ...(hostname === undefined
+        ? {}
+        : { annotations: { "openclaw.dev/repository-credentials-hostname": hostname } }),
+    },
     spec: {
       type: "ClusterIP",
       selector: worker,
-      ports: [{ port: 443, targetPort: 8443, protocol: "TCP" }],
+      ports: [{ port: servicePort, targetPort, protocol: "TCP" }],
     },
   });
+  return { f, worker, name, metadata, start, savePolicy };
+}
+
+test("prepared Git admits only the dedicated Harness peer and retires it without evicting another Agent", async () => {
+  const { f, worker, name, metadata, savePolicy } = await preparedIngressFixture({
+    hostname: "git.credentials.svc.cluster.local",
+  });
+  const revision = f.revision;
+  assert.throws(
+    () => f.driver.validateRepositoryCredentials({ id: "openclaw", mode: "embedded" }),
+    /dedicated Compute-owned Codex Harness/,
+  );
 
   const networking = f.clients.networking;
   const read = async () => (await networking.readNamespacedNetworkPolicy(metadata)).spec;
@@ -791,6 +804,37 @@ test("prepared Git admits only the dedicated Harness peer and retires it without
   // Namespace retirement prunes the last peer. No peers must mean no rule, not an empty 'from'.
   await f.driver.deleteNamespace({ id: revision.namespaceId, name: "Repository material tenant" });
   assert.deepEqual((await read()).ingress, []);
+});
+
+test("prepared Git binds the session origin to the selected broker Service", async (t) => {
+  const custom = "git.credentials.svc.cluster.internal";
+  for (const scenario of [
+    { name: "custom cluster domain", hostname: custom, origin: custom, admitted: true },
+    { name: "foreign suffix", hostname: custom, origin: "git.credentials.svc.attacker.example" },
+    { name: "missing Service hostname", origin: custom },
+    { name: "wrong Service port", hostname: custom, origin: custom, servicePort: 444 },
+    { name: "wrong worker port", hostname: custom, origin: custom, targetPort: 9443 },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const { f, metadata, start } = await preparedIngressFixture(scenario);
+      const prepare = () =>
+        f.driver.prepareRevision(
+          f.revision,
+          f.context([runtimeBinding(undefined, undefined, `https://${scenario.origin}`)]),
+        );
+      if (scenario.admitted) {
+        await prepare();
+      } else {
+        await assert.rejects(prepare(), /selected broker/);
+      }
+      const { spec } = await f.clients.networking.readNamespacedNetworkPolicy(metadata);
+      if (scenario.admitted) {
+        assert.equal(spec.ingress[0]._from.length, 1);
+      } else {
+        assert.deepEqual(spec, start, "a refused origin must not admit a broker peer");
+      }
+    });
+  }
 });
 
 test("Dedicated credential refresh preserves its enrolled workspace node", async () => {

@@ -35,6 +35,9 @@ Select `repositoryCredentials.authority: prepared-git` in the chart and
 keys in the worker; do not copy them to the Agent or broker. OCE must be able to
 bind this repository session to the admitted revision and restrict broker ingress.
 If it cannot, do not fall back to an ambient token or grant broader broker access.
+The broker Service must record the same hostname selected for the session and route
+HTTPS on port 443 to the selected worker on port 8443. A missing or mismatched
+Service binding prevents admission, including when the chart and controller versions differ.
 
 Before team use, chat with the Agent, then use that same Agent to clone, fetch an
 independently known commit, and push a new commit to the allowed review ref. Read

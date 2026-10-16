@@ -110,13 +110,17 @@ export async function reconcilePreparedRepositoryIngress(input: {
       service.metadata?.name !== name ||
       service.metadata.namespace !== ns ||
       service.metadata.deletionTimestamp != null ||
+      service.metadata.annotations?.["openclaw.dev/repository-credentials-hostname"] !==
+        brokerHostname ||
       service.spec?.type !== "ClusterIP" ||
       !isDeepStrictEqual(service.spec.selector, podSelector.matchLabels) ||
       !service.spec.ports?.some(
         (p) => p.port === 443 && p.targetPort === brokerPort && p.protocol === "TCP",
       )
     ) {
-      throw new Error("Prepared repository Service must route TLS to the selected broker worker.");
+      throw new Error(
+        "Prepared repository Service must bind the selected broker hostname and TLS port.",
+      );
     }
   }
   for (let conflicts = 0; ; conflicts++) {

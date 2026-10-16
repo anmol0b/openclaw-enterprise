@@ -1700,6 +1700,7 @@ test(
     const { stdout } = await render({
       ...repositoryCredentialValues,
       "repositoryCredentials.authority": "prepared-git",
+      "repositoryCredentials.clusterDomain": "cluster.internal",
       "repositoryCredentials.preparedCustodySecretName": "test-git-custody",
       "repositoryCredentials.preparedProviderCaConfigMapName": "test-git-provider-ca",
     });
@@ -1725,6 +1726,18 @@ test(
     ).spec.template.spec;
     const broker = pod.containers.find(({ name }) => name === "repository-credentials");
     assert.deepEqual(broker.args.slice(-2), ["--authority", "prepared-git"]);
+    const service = objects.find(
+      ({ kind, metadata }) => kind === "Service" && metadata.name === "git",
+    );
+    const hostname = "git.openclaw-system.svc.cluster.internal";
+    assert.equal(
+      service.metadata.annotations["openclaw.dev/repository-credentials-hostname"],
+      hostname,
+    );
+    assert.equal(broker.args[broker.args.indexOf("--public-origin") + 1], `https://${hostname}`);
+    assert.deepEqual(service.spec.ports, [
+      { name: "https", port: 443, targetPort: 8443, protocol: "TCP" },
+    ]);
     const owner = "prepared-repository-owner";
     assert.deepEqual(
       [...pod.containers, ...(pod.initContainers ?? [])]
