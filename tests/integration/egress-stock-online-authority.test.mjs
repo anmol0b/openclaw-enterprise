@@ -1,99 +1,20 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
-import { createOpenShellOnlineAuthority } from "../../apps/controller/src/drivers/egress-proxy/openshell-online-authority.ts";
+import { grpc, invoke, openShellOnlineWire, token } from "../helpers/openshell-online-wire.mjs";
 
-const require = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
-const grpc = require("@grpc/grpc-js");
-const loader = require("@grpc/proto-loader");
 const contract = "openshell.supervisor-middleware.contract";
 const registrationName = "online-authorization";
 const binding = { fields: { binding_id: { stringValue: "binding_0123456789abcdefghijklmn" } } };
-
-function token(keys, kind, sandboxId, audience = "online-authorizer") {
-  const now = Math.floor(Date.now() / 1000);
-  const header = Buffer.from(
-    JSON.stringify({ alg: "EdDSA", typ: "openshell-ext+jwt", kid: "gateway-key" }),
-  ).toString("base64url");
-  const claims = Buffer.from(
-    JSON.stringify({
-      iss: "https://gateway.example.test",
-      aud: audience,
-      sub:
-        kind === "gateway"
-          ? "https://gateway.example.test"
-          : `spiffe://openshell/sandbox/${sandboxId}`,
-      iat: now,
-      exp: now + 300,
-      jti: randomUUID(),
-      caller_kind: kind,
-      ...(kind === "supervisor" ? { sandbox_id: sandboxId } : {}),
-    }),
-  ).toString("base64url");
-  const signed = `${header}.${claims}`;
-  return `Bearer ${signed}.${sign(null, Buffer.from(signed), keys.privateKey).toString("base64url")}`;
-}
-
-function invoke(client, method, request, bearer) {
-  const metadata = new grpc.Metadata();
-  metadata.set("authorization", bearer);
-  return new Promise((resolve, reject) => {
-    client[method](request, metadata, { deadline: Date.now() + 5000 }, (error, result) =>
-      error ? reject(error) : resolve(result),
-    );
-  });
-}
 
 test(
   "stock pre-credential wire rechecks a current grant and rejects identity and request mismatches",
   { timeout: 10000 },
   async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), "oce-online-authority-"));
-    t.after(() => rm(directory, { recursive: true, force: true }));
-    const keyFile = join(directory, "tls.key");
-    const certFile = join(directory, "tls.crt");
-    const generated = spawnSync(
-      "openssl",
-      [
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-days",
-        "1",
-        "-keyout",
-        keyFile,
-        "-out",
-        certFile,
-        "-subj",
-        "/CN=localhost",
-        "-addext",
-        "subjectAltName=DNS:localhost,IP:127.0.0.1",
-      ],
-      { encoding: "utf8" },
-    );
-    assert.equal(generated.status, 0, generated.stderr);
-    const [key, cert] = await Promise.all([readFile(keyFile), readFile(certFile)]);
-    const keys = generateKeyPairSync("ed25519");
     const seen = [];
     const cancellationStarted = Promise.withResolvers();
     const cancellationObserved = Promise.withResolvers();
     let grant = true;
-    const server = createOpenShellOnlineAuthority({
-      identity: {
-        issuer: "https://gateway.example.test",
-        audience: "online-authorizer",
-        keyId: "gateway-key",
-        publicKey: keys.publicKey.export({ type: "spki", format: "pem" }),
-      },
-      registrationName,
+    const { client, keys } = await openShellOnlineWire(t, registrationName, {
       budgetMs: 100,
       authorize: async (request, signal) => {
         seen.push(request);
@@ -128,34 +49,6 @@ test(
           : "deny";
       },
     });
-    const port = await new Promise((resolve, reject) =>
-      server.bindAsync(
-        "127.0.0.1:0",
-        grpc.ServerCredentials.createSsl(null, [{ private_key: key, cert_chain: cert }], false),
-        (error, bound) => (error ? reject(error) : resolve(bound)),
-      ),
-    );
-    t.after(() => server.forceShutdown());
-    // An independently supplied released OpenShell proto can serve as the client decoder.
-    const proto =
-      process.env.OCC_TEST_OPENSHELL_MIDDLEWARE_PROTO ??
-      fileURLToPath(
-        new URL(
-          "../../apps/controller/src/drivers/egress-proxy/proto/supervisor_middleware.proto",
-          import.meta.url,
-        ),
-      );
-    const definition = loader.loadSync(proto, {
-      keepCase: true,
-      longs: String,
-      enums: Number,
-      defaults: false,
-      oneofs: true,
-    });
-    const Client =
-      grpc.loadPackageDefinition(definition).openshell.middleware.v1.SupervisorMiddleware;
-    const client = new Client(`localhost:${port}`, grpc.credentials.createSsl(cert));
-    t.after(() => client.close());
     const gateway = token(keys, "gateway");
     const supervisor = token(keys, "supervisor", "immutable-sandbox-id");
     const describe = {

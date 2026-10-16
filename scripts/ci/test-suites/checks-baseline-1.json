@@ -93,6 +93,7 @@
     "tests/conformance/url-authority.test.mjs",
     "tests/integration/static-egress.test.mjs",
     "tests/integration/egress-stock-online-authority.test.mjs",
+    "tests/integration/credential-free-online-grant.test.mjs",
     "tests/integration/egress-enrollment.test.mjs",
     "tests/integration/egress-installation-exchange.test.mjs",
     "tests/integration/egress-prepared-github-metadata.test.mjs"
@@ -403,6 +404,15 @@
     },
     {
       "path": "tests/integration/egress-stock-online-authority.test.mjs"
+    },
+    {
+      "path": "tests/integration/credential-free-online-grant.test.mjs",
+      "expectedTests": [
+        "signed stock request observes an OCC credential-free grant and its withdrawal",
+        "a signed stock request cannot carry a credential-free grant across revision replacement",
+        "a signed stock request loses a credential-free grant when OCC IAM access is removed",
+        "OCC cannot observe a live credential grant as credential-free metadata"
+      ]
     },
     {
       "path": "tests/integration/egress-enrollment.test.mjs"

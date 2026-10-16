@@ -548,7 +548,7 @@ export async function staticEgressFixture(
   });
   assert.equal(grant.status, 201, JSON.stringify(grant.body));
   if (!admitRevision) {
-    return { ...app, namespace, agent };
+    return { ...app, namespace, agent, source, grant: grant.data };
   }
   const revisionMetadata = await app.deployAgent(namespace.id, agent.id);
   const revision = await app.controller.transact((unit) =>

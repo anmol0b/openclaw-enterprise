@@ -14,7 +14,9 @@ import { EgressSendReceipts } from "./egress-send-receipts.ts";
 import type {
   StaticEgressSource,
   ProxyPlan,
+  EgressBinding,
   EgressRefusal,
+  EgressRoute,
   EgressSelectionEvidence,
   CredentialFreeEgressSource,
   PreparedGitHubEgressSource,
@@ -1017,6 +1019,35 @@ function revisionHoldsCredentialSource(
     (revision.harnessAuth.method === "credential_source" &&
       revision.harnessAuth.sourceId === credentialSourceId) ||
     (revision.credentialSources ?? []).some(({ sourceId }) => sourceId === credentialSourceId)
+  );
+}
+
+/** The source, binding and single permitted metadata operation must describe the same grant. */
+function matchesCredentialFreeMetadataGrant(
+  source: Readonly<CredentialSource>,
+  route: EgressRoute,
+) {
+  const admitted = source.egress;
+  const { binding } = route;
+  if (
+    source.type !== credentialFreeMetadataType ||
+    admitted?.adoption !== "credential_free" ||
+    !isDeepStrictEqual(admitted.key.provider, credentialFreeProviderRef) ||
+    !isDeepStrictEqual(binding.source, admitted.key)
+  ) {
+    return false;
+  }
+  const grant = credentialFreeMetadataGrant(source.config);
+  return (
+    admitted.origin === source.config.origin &&
+    route.origin === admitted.origin &&
+    route.method === "GET" &&
+    route.path === `/repos/${grant.repository}` &&
+    grant.isolationId === binding.execution.agentId &&
+    grant.isolationId === binding.isolationId &&
+    isDeepStrictEqual(admitted.grant, grant) &&
+    isDeepStrictEqual(binding.grant, grant) &&
+    binding.grantHash === createHash("sha256").update(JSON.stringify(grant)).digest("hex")
   );
 }
 
@@ -4654,6 +4685,83 @@ export class OpenClawController {
     });
   }
 
+  /**
+   * Observe current policy for one already-admitted credential-free metadata binding. The caller
+   * owns the association with the execution; reported target fields do not authenticate it.
+   * This is neither execution admission nor authority to release material, dispatch a request, or
+   * release its response. Never substitute this observation for the protected exchange below.
+   */
+  async observeCredentialFreeMetadataGrant(
+    admittedBinding: EgressBinding,
+    target: Readonly<{ method: "GET"; origin: string; path: string }>,
+  ): Promise<"current" | "not_current"> {
+    if (this.transactionContext.getStore() !== undefined) {
+      return "not_current"; // Never reuse a policy snapshot from an enclosing request.
+    }
+    const { binding, method, origin, path } = immutableCopy({
+      ...target,
+      binding: admittedBinding,
+    });
+    const execution = binding.execution;
+    return this.transact(async (state) => {
+      const { namespaceId, agentId, revisionId, servicePrincipalId } = execution;
+      const namespace = await state.namespaces.findNamespace(namespaceId);
+      const agent = await state.agents.findAgent(namespaceId, agentId);
+      if (
+        execution.installationId !== this.installation.id ||
+        namespace?.status !== "ready" ||
+        agent?.status !== "active" ||
+        agent.executionMode !== "dedicated" ||
+        agent.desiredRuntimeState !== "running" ||
+        agent.servicePrincipalId !== servicePrincipalId ||
+        agent.activeRevisionId !== revisionId
+      ) {
+        return "not_current";
+      }
+      const revision = await state.revisions.findRevision(namespaceId, agentId, revisionId);
+      const plan = revision?.egressPlan;
+      const route = plan?.routes.length === 1 ? plan.routes[0] : undefined;
+      if (
+        revision?.executionAdmission?.mode !== "protected" ||
+        !route ||
+        !isDeepStrictEqual(plan?.execution, execution) ||
+        !isDeepStrictEqual(route.binding, binding) ||
+        route.method !== method ||
+        route.origin !== origin ||
+        route.path !== path
+      ) {
+        return "not_current";
+      }
+      const id = binding.source.source.id;
+      const source = await state.credentialSources.findCredentialSource(namespaceId, id);
+      if (
+        source?.state !== "ready" ||
+        !matchesCredentialFreeMetadataGrant(source, route) ||
+        (await state.credentialSources.findCredentialWithdrawal(namespaceId, revisionId, id)) !==
+          undefined
+      ) {
+        return "not_current";
+      }
+      const driver = this.selectedDriver("credential_proxy");
+      const { backend, sender, resolver } = driver.sourceControl;
+      const { egress } = source;
+      if (
+        driver.id !== plan?.egressDriverId ||
+        !isDeepStrictEqual(egress?.key.backend, backend) ||
+        !isDeepStrictEqual(egress?.sender, sender) ||
+        !isDeepStrictEqual(egress?.resolver, resolver)
+      ) {
+        return "not_current";
+      }
+      const { decision } = await this.authorizationDecision(servicePrincipalId, "operate", {
+        kind: "credential_source",
+        namespaceId,
+        id,
+      });
+      return decision.allowed ? "current" : "not_current";
+    });
+  }
+
   private async checkEgressUse(
     use: CapturedEgressUse,
     material?: EgressSelectionEvidence,
@@ -4799,26 +4907,17 @@ export class OpenClawController {
         throw error;
       }
       if (admitted.adoption === "credential_free") {
-        const grant = credentialFreeMetadataGrant(source.config);
         const { binding } = use.route;
         if (
-          source.type !== credentialFreeMetadataType ||
           use.operation.kind !== "credential_free_repository_metadata" ||
-          !isDeepStrictEqual(admitted.key.provider, credentialFreeProviderRef) ||
-          admitted.origin !== source.config.origin ||
-          use.route.origin !== admitted.origin ||
-          grant.isolationId !== execution.agentId ||
-          grant.isolationId !== binding.isolationId ||
-          !isDeepStrictEqual(admitted.grant, grant) ||
-          !isDeepStrictEqual(binding.grant, grant) ||
-          binding.grantHash !== createHash("sha256").update(JSON.stringify(grant)).digest("hex") ||
+          !matchesCredentialFreeMetadataGrant(source, use.route) ||
           (material !== undefined &&
             !isDeepStrictEqual(material, {
               kind: "no_material_required",
               source: binding.source,
               binding: binding.binding,
               grantHash: binding.grantHash,
-              isolationId: grant.isolationId,
+              isolationId: binding.isolationId,
             }))
         ) {
           return deny("scope_mismatch");
