@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { createServer } from "node:https";
@@ -503,6 +504,26 @@ export async function startSkipperPrivateGitOrigin({
     await close();
     throw error;
   }
+}
+
+// Git and the installation API share this origin. Only the background DELETE may reach it
+// after withdrawal; compare the whole snapshot so extra traffic cannot hide behind retirement.
+export function assertOnlyTokenRetirement(before, after) {
+  const [token] = before.tokens;
+  assert.equal(before.issued, 1);
+  assert.equal(token.revoked, false);
+  assert.equal(before.endpoints["revoke:204"], undefined);
+  assert.deepEqual(
+    after,
+    {
+      ...before,
+      connections: before.connections + 1,
+      requests: before.requests + 1,
+      endpoints: { ...before.endpoints, "revoke:204": 1 },
+      tokens: [{ ...token, attempts: token.attempts + 1, uses: token.uses + 1, revoked: true }],
+    },
+    "only the prepared-token owner retired its credential; no Git request reached the origin",
+  );
 }
 
 export function withdrawDuringFetchCommand(dir, expectedStatus = 503) {

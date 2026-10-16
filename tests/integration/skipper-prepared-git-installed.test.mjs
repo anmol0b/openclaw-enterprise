@@ -3,6 +3,7 @@ import { request } from "node:http";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import {
+  assertOnlyTokenRetirement,
   fetchAfterWithdrawalCommand,
   withdrawDuringFetchCommand,
 } from "../fixtures/skipper-private-git-origin.mjs";
@@ -251,11 +252,17 @@ test(
       const bound = await api("GET", agentPath);
       assert.equal(bound.activeRevisionId, revision.id);
       assert.deepEqual(bound.repositoryBindings ?? [], []);
+      // Admission already refused the in-flight upload. Observe the background owner's one
+      // expected provider call before measuring that the fresh denied fetch opens no connection.
+      const retired = await waitFor("provider confirms retirement of the only token", async () => {
+        const state = await witness("/evidence");
+        return state.endpoints["revoke:204"] ? state : undefined;
+      });
+      assertOnlyTokenRetirement(prior, retired);
       const label = "fresh-authenticated-fetch-after-effective-withdrawal";
       await sendScript(fetchAfterWithdrawalCommand(dir), label);
       const denied = await witness("/evidence");
-      assert.ok(after.connections > 0 && after.requests > 0);
-      assert.deepEqual(denied, after, "no new origin connection, request, issuance or token use");
+      assert.deepEqual(denied, retired, "no new origin connection, request, issuance or token use");
       assert.equal(await uses(), permits, "no new provider credential release by this admission");
       await checkpoint(label + "-refused", {
         gitSessionId: session.session_id,

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  assertOnlyTokenRetirement,
   fetchAfterWithdrawalCommand,
   startSkipperPrivateGitOrigin,
   withdrawDuringFetchCommand,
@@ -17,6 +18,7 @@ function api(fixture, method, path, authorization, body) {
       new URL(path, fixture.origin),
       {
         method,
+        agent: false,
         ca: fixture.tls.ca ?? fixture.tls.cert,
         headers: { authorization, "content-type": "application/json" },
         timeout: 10000,
@@ -324,5 +326,14 @@ test(
       { repository_ids: [73], permissions: { metadata: "read", contents: "write" } },
     );
     assert.equal(issued.status, 201);
+    const before = bridge.snapshot();
+    const bearer = "Bearer " + issued.body.token;
+    const revoke = () => api(bridge, "DELETE", "/installation/token", bearer);
+    assert.equal((await revoke()).status, 204);
+    assertOnlyTokenRetirement(before, bridge.snapshot());
+    assert.equal((await revoke()).status, 401);
+    assert.throws(() => assertOnlyTokenRetirement(before, bridge.snapshot()), {
+      code: "ERR_ASSERTION",
+    });
   },
 );
