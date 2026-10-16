@@ -6263,7 +6263,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
           ...(proxyWiring === undefined ? {} : { proxyWiring }),
           environment: [
             ...renderedRequirements.environment,
-            ...this.credentialSourceEnvironment(revision, attachments),
+            ...this.credentialSourceEnvironment(
+              revision,
+              attachments,
+              harnessAuth.credentialSource,
+            ),
             ...(proxyWiring === undefined
               ? []
               : [
@@ -9861,12 +9865,30 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private credentialSourceEnvironment(
     revision: AgentRevision,
     attachments: readonly CredentialSourceAttachment[],
+    source?: Readonly<CredentialSource>,
   ): readonly SandboxEnvironmentVariable[] {
     if (revision.harnessAuth.method !== "credential_source") {
       return [];
     }
     const sourceId = revision.harnessAuth.sourceId;
     const attachment = attachments.find((entry) => entry.sourceId === sourceId);
+    // Protected sources belong to the Credential Proxy, never the legacy Gateway.
+    if (source?.egress !== undefined) {
+      if (
+        source.id !== sourceId ||
+        revision.executionAdmission.mode !== "protected" ||
+        revision.harnessAuth.loginMode !== "api_key" ||
+        attachment !== undefined ||
+        !revision.egressPlan?.routes.some((route) =>
+          isDeepStrictEqual(route.binding.source, source.egress!.key),
+        )
+      ) {
+        throw new OwnershipFailure(
+          "Protected Harness authentication does not match its admitted source.",
+        );
+      }
+      return [];
+    }
     if (attachment === undefined) {
       throw new ConfigurationFailure(
         "The Credential Gateway did not attach the Harness authentication source.",

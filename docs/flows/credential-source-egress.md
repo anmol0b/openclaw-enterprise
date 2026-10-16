@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-16"
-last_updated_session: authoring-run/68ecede6-d2bc-4d49-ae2c-c04150ccb307
+last_updated_session: authoring-run/bf50675b-2b74-4724-aeaf-8daecd2a5a29
 ---
 
 # Protected credential request flow
@@ -85,7 +85,11 @@ Qualification must exercise both release and installed deny-all behavior.
 `apps/controller/src/drivers/compute/kubernetes/index.ts:prepareRevision`,
 `apps/controller/src/drivers/egress-proxy/openshell.ts:attachmentStatus`
 
-Compute passes the selected Driver's attachment to Sandbox provisioning. The
+Compute passes Credential Proxy wiring to Sandbox provisioning.
+`apps/controller/src/drivers/compute/kubernetes/index.ts:credentialSourceEnvironment`
+requires protected admission, API-key login, an exact source-key match in the plan,
+and no Gateway attachment. Protected sources receive no Gateway authentication
+environment; Gateway-owned sources still require their exact attachment. The
 Sandbox returns its complete prepared source policy from
 `apps/controller/src/drivers/sandbox/openshell.ts:provisionHarness`.
 The adapter compares the full source revision against that output and checks the
@@ -324,6 +328,8 @@ selected installation, with independent observations at the origin and caller.
 None.
 
 ## Changelog
+
+- 2026-10-16 22:49: Preserve Credential Proxy ownership when deriving Harness authentication environment. (authoring-run/bf50675b-2b74-4724-aeaf-8daecd2a5a29 - 6e302a4851b20191990bcb83d20b045a1462257a)
 
 - 2026-10-16 02:06: Protect independent assistant items and bounded seeded runs, including citation and plan-mode projections. (authoring-run/68ecede6-d2bc-4d49-ae2c-c04150ccb307 - 3ed0e1cbd553b753e3f7d97b720cb7a43b6b5109)
 

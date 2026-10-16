@@ -936,6 +936,17 @@ test("provider Harness protected execution is released only on current signed in
     },
     currentEgressInstallation: async () => observation,
   };
+  // A source cannot claim Proxy ownership under a different admitted source key.
+  const conflictingSource = structuredClone(source);
+  conflictingSource.egress.key.source.generation += 1;
+  await assert.rejects(
+    driver.prepareRevision(protectedRevision, {
+      ...protectedContext,
+      harnessAuth: { ...protectedAuth, source: conflictingSource },
+    }),
+    /Protected Harness authentication does not match its admitted source/,
+  );
+  assert.deepEqual(events.splice(0), []);
   observation = undefined;
   assert.equal((await driver.prepareRevision(protectedRevision, protectedContext)).ready, false);
   assert.deepEqual(events.splice(0), ["observe"]);

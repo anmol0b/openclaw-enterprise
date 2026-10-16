@@ -1398,7 +1398,7 @@ test(
     const grpc = require("@grpc/grpc-js");
     const loader = require("@grpc/proto-loader");
     const proto = await loader.load(
-      new URL("../fixtures/openshell-v0.1.3-pre.2-wire.proto", import.meta.url).pathname,
+      new URL("../fixtures/openshell-v0.1.4-wire.proto", import.meta.url).pathname,
       { keepCase: true, enums: String },
     );
     const OpenShell = grpc.loadPackageDefinition(proto).openshell.v1.OpenShell;
