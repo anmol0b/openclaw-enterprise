@@ -1408,6 +1408,61 @@ test("failed native Gateway turns capture private bounded logs for the original 
   }
 });
 
+test("native cron positive control requires its own successful completed run", async (t) => {
+  const { assertNativeCronRunSucceeded } = await import("../helpers/plugin-driver-real.mjs");
+  const accepted = { ok: true, enqueued: true, runId: "control-run" };
+  const finished = {
+    jobId: "control-job",
+    runId: "control-run",
+    action: "finished",
+    status: "ok",
+  };
+  async function exercise(ack, entry) {
+    const calls = [];
+    const proof = await assertNativeCronRunSucceeded({
+      jobId: "control-job",
+      async request(method, params) {
+        calls.push({ method, params });
+        if (method === "cron.run") {
+          return ack;
+        }
+        assert.equal(method, "cron.runs");
+        return { entries: entry === undefined ? [] : [entry] };
+      },
+      // One observation represents completion or exhausted polling, without a real timer.
+      waitFor: async (_description, inspect) => inspect(),
+    });
+    return { proof, calls };
+  }
+
+  await t.test("records the accepted run only after its successful terminal result", async () => {
+    const { proof, calls } = await exercise(accepted, finished);
+    assert.deepEqual(proof, { jobId: "control-job", runId: "control-run", status: "ok" });
+    assert.deepEqual(calls, [
+      {
+        method: "cron.run",
+        params: { id: "control-job", mode: "force", waitTimeoutMs: 5_000 },
+      },
+      { method: "cron.runs", params: { id: "control-job", runId: "control-run", limit: 1 } },
+    ]);
+  });
+  for (const [name, ack, entry, expected] of [
+    [
+      "a successful RPC that did not run the job",
+      { ok: true, ran: false, reason: "invalid-spec" },
+      finished,
+      /must enqueue a run/,
+    ],
+    ["a different completed run", accepted, { ...finished, runId: "other-run" }, /enqueued run/],
+    ["an unfinished run", accepted, { ...finished, action: "started" }, /must finish/],
+    ["a failed terminal run", accepted, { ...finished, status: "error" }, /must succeed/],
+  ]) {
+    await t.test(`rejects ${name}`, async () => {
+      await assert.rejects(exercise(ack, entry), expected);
+    });
+  }
+});
+
 test("native tool evidence reads compressed transcript rows and separate prompt snapshots", async (t) => {
   const { DatabaseSync } = await import("node:sqlite");
   const { zstdCompressSync } = await import("node:zlib");

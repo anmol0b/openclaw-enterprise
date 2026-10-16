@@ -27,7 +27,10 @@ import { inflateRawSync } from "node:zlib";
 import { createAuthenticatedControllerRequest } from "../helpers/auth-session.mjs";
 import { ensureDevelopmentBootstrap } from "../helpers/bootstrap-installation.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
-import { createNativePluginAssertions } from "../helpers/plugin-driver-real.mjs";
+import {
+  assertNativeCronRunSucceeded,
+  createNativePluginAssertions,
+} from "../helpers/plugin-driver-real.mjs";
 import {
   createOpenShellInstallationConfiguration,
   createOpenShellKubernetesFixture,
@@ -6350,7 +6353,7 @@ test(
       humanUpdateSucceeded: true,
     });
 
-    const commandPath = `/tmp/COMMAND-${randomUUID()}`;
+    const commandPath = `/tmp/DENIED-COMMAND-${randomUUID()}`;
     await client.request("cron.update", {
       id: job.id,
       patch: {
@@ -6359,7 +6362,7 @@ test(
           argv: [
             "node",
             "-e",
-            `require('node:fs').writeFileSync('${commandPath}','human-command')`,
+            `require('node:fs').writeFileSync('${commandPath}','denied-command')`,
           ],
           toolsAllow: [],
         },
@@ -6380,12 +6383,39 @@ test(
     });
     assert.deepEqual(await client.request("cron.get", { id: job.id }), commandBefore);
     assert.equal(await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath), false);
-    await client.request("cron.run", { id: job.id, mode: "force" });
-    await waitFor(
-      "human command positive control",
-      async () =>
-        (await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath)) || undefined,
+    const humanCommandMarker = `HUMAN-COMMAND-${randomUUID()}`;
+    const humanCommandPath = `/tmp/${humanCommandMarker}`;
+    const humanCommandJob = await client.request("cron.add", {
+      ...jobDefinition,
+      name: `human-command-${randomUUID()}`,
+      payload: {
+        kind: "command",
+        argv: [
+          "node",
+          "-e",
+          `require('node:fs').writeFileSync('${humanCommandPath}','${humanCommandMarker}')`,
+        ],
+        toolsAllow: [],
+      },
+    });
+    const humanCommandRun = await assertNativeCronRunSucceeded({
+      request: (method, params) => client.request(method, params),
+      waitFor,
+      jobId: humanCommandJob.id,
+    });
+    assert.equal(
+      (
+        await execPod(topology.gatewayPod, topology.gatewayPlacement, [
+          "node",
+          "-e",
+          "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8'))",
+          humanCommandPath,
+        ])
+      ).stdout,
+      humanCommandMarker,
     );
+    assert.equal(await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath), false);
+    assert.deepEqual(await client.request("cron.get", { id: job.id }), commandBefore);
     proof.modelTurns.push({
       kind: "command-run-denied",
       ...commandEvidence,
@@ -6393,6 +6423,8 @@ test(
       rejectingOwner: "caller scope",
       unchangedAfterModel: true,
       humanCommandSucceeded: true,
+      humanCommandRun: { ...humanCommandRun, marker: humanCommandMarker },
+      deniedMarkerAbsentAfterControl: true,
     });
 
     const password = await diagnosticGatewayPassword(topology);

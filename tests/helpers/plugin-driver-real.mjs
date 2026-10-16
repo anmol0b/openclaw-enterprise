@@ -901,6 +901,28 @@ function assertDiagnosticText(value, secrets) {
   return text;
 }
 
+export async function assertNativeCronRunSucceeded({ request, waitFor, jobId }) {
+  const accepted = await request("cron.run", { id: jobId, mode: "force", waitTimeoutMs: 5_000 });
+  assert.equal(accepted.ok, true, "human command request must succeed");
+  assert.equal(accepted.enqueued, true, "human command request must enqueue a run");
+  assert.equal(typeof accepted.runId, "string", "human command request must identify its run");
+  assert.ok(accepted.runId.length > 0, "human command run ID must not be empty");
+  const run = await waitFor(
+    "human command run completion",
+    async () => {
+      const page = await request("cron.runs", { id: jobId, runId: accepted.runId, limit: 1 });
+      const entry = page.entries?.[0];
+      return entry?.action === "finished" ? entry : undefined;
+    },
+    60_000,
+  );
+  assert.equal(run?.action, "finished", "human command run must finish");
+  assert.equal(run.jobId, jobId, "human command result must belong to its control job");
+  assert.equal(run.runId, accepted.runId, "human command result must belong to its enqueued run");
+  assert.equal(run.status, "ok", "human command run must succeed");
+  return { jobId, runId: accepted.runId, status: run.status };
+}
+
 export function createNativePluginAssertions({
   gatewayUrl,
   execGateway,
