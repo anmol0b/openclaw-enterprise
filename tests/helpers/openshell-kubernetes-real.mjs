@@ -612,14 +612,14 @@ export function createOpenShellKubernetesFixture({
     await applyOpenShellGatewayNetworkPolicies(namespace);
     await ensureOpenShellJwtSecret(namespace);
     const instance = openShellGatewayServiceName(namespace);
+    // Workspace preparation uses the chart-owned default account before an Agent's
+    // account is selected. Keep that account across later Gateway reconfiguration.
     const workspaceValues = [
       `--set-string=fullnameOverride=${instance}-workspace`,
       "--set=gateway.allowDriverConfig=true",
       `--set-string=gateway.serviceAccount.name=${instance}`,
       `--set-string=gateway.serviceAccount.namespace=${namespace}`,
       `--set-string=gateway.networkPolicy.podSelector.app\\.kubernetes\\.io/instance=${instance}`,
-      "--set=sandboxServiceAccount.create=false",
-      `--set-string=sandboxServiceAccount.name=${sandboxServiceAccountName ?? "openshell-sandbox"}`,
     ];
     await execute(
       openShellHelmPath,
