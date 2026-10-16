@@ -53,6 +53,16 @@ export interface PreparedGitHubMaterialEvidence extends Omit<PreparedGitHubSelec
   readonly isolationId: string;
 }
 
+/** Non-secret proof on the caller's active platform transaction. */
+export interface PreparedGitHubCurrentProof {
+  current(
+    source: PreparedGitHubEgressSource,
+    evidence: PreparedGitHubMaterialEvidence,
+    issuerAuthority: string,
+    lifetime: CredentialReadLifetime,
+  ): Promise<boolean>;
+}
+
 /** Private composition of the OCE lifecycle owner, not a new Driver capability.
  * Management methods are deliberately separate from the three read-only observations.
  */
@@ -73,7 +83,8 @@ export interface PreparedGitHubEgressLifecycle {
   current(
     source: PreparedGitHubEgressSource,
     evidence: PreparedGitHubMaterialEvidence,
-    signal: AbortSignal,
+    lifetime: CredentialReadLifetime,
+    proof: PreparedGitHubCurrentProof,
   ): Promise<boolean>;
 }
 

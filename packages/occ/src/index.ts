@@ -1,3 +1,4 @@
+export { preparedGitHubLive, readPreparedGitHubMetadata } from "./state/prepared-github-state.ts";
 import {
   assertExecutionAdmission,
   assertExecutionReleaseAllowed,
@@ -4842,7 +4843,12 @@ export class OpenClawController {
             !isDeepStrictEqual(material.source, admitted.key) ||
             !isDeepStrictEqual(material.binding, use.route.binding.binding) ||
             (await state.credentialSources.isEgressMaterialRejected(material)) ||
-            !(await lifecycle.current(admitted, material, AbortSignal.timeout(Math.ceil(left))))
+            !(await lifecycle.current(
+              admitted,
+              material,
+              { signal: AbortSignal.timeout(Math.ceil(left)), deadlineAt: use.request.deadlineAt },
+              state.preparedGitHubProof,
+            ))
           ) {
             return deny("withdrawn");
           }

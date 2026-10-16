@@ -251,7 +251,14 @@
       "path": "tests/integration/postgres-prepared-github-lifecycle.test.mjs",
       "expectedTests": [
         "PostgreSQL prepared custody: source consent, proactive renewal, restart, issuer rotation and withdrawal",
-        "signed PostgreSQL dispatch permits exact prepared material on the accepted exchange"
+        "current proof preserves caller SQL limits and restores them in its unit",
+        "signed PostgreSQL dispatch uses one shared connection for current material proof",
+        "concurrent signed checks drain the shared single-connection pool",
+        "before-send bounds a real PostgreSQL lock wait and refuses late permission",
+        "before-send refuses expired material and an elapsed signed deadline",
+        "before-send refuses displaced material and accepts renewed material",
+        "before-send refuses a rejected prepared selection",
+        "before-send refuses a withdrawn prepared family"
       ]
     },
     {

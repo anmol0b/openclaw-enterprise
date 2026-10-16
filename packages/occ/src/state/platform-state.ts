@@ -1,3 +1,4 @@
+import type { PreparedGitHubCurrentProof } from "@openclaw-enterprise/contracts";
 import { assertExecutionAdmission } from "@openclaw-enterprise/contracts";
 import { memoryEgressSendReceipts } from "./egress-send-receipts.ts";
 import type { EgressSendReceiptRepository, StoredSendReceipt } from "../egress-send-receipts.ts";
@@ -931,6 +932,7 @@ export interface PlatformReadView {
 }
 
 export interface PlatformUnitOfWork extends PlatformReadView {
+  readonly preparedGitHubProof: PreparedGitHubCurrentProof;
   readonly egressSendReceipts: EgressSendReceiptRepository;
   readonly installations: InstallationRepository;
   readonly namespaces: NamespaceRepository;
@@ -3123,6 +3125,7 @@ function repositories(
     revisions,
     iamPolicy,
     repositorySessions,
+    preparedGitHubProof: { current: async () => false },
     egressSendReceipts: memoryEgressSendReceipts(snapshot.egressSendReceipts),
     provisioning: {
       findByWorkId: provisioningAbsent,

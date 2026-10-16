@@ -5,6 +5,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import pg from "pg";
 import { setTimeout as delay } from "node:timers/promises";
 import { captureMetadata, dispatchMetadata } from "../helpers/github-metadata-exchange.mjs";
 import { postgresApp } from "../helpers/postgres-egress-app.mjs";
@@ -53,7 +54,10 @@ test(
         return lifecycle;
       },
       async appFactory(t, opts) {
-        const app = await postgresApp(t, opts);
+        const app = await postgresApp(t, {
+          ...opts,
+          poolOptions: { max: 1, connectionTimeoutMillis: 2000 },
+        });
         await lifecycle.connect(app.pool);
         t.after(() => lifecycle.close());
         return app;
@@ -114,10 +118,125 @@ test(
     const { ready } = await f.resolve(captured);
     assert.ok(ready, "signed resolve must select the prepared family");
     const evidence = JSON.parse(ready.evidence.authority_evidence);
-    assert.equal(await lifecycle.current(source, evidence, signal), true);
+    assert.equal(
+      await f.state.transact((unit) =>
+        lifecycle.current(
+          source,
+          evidence,
+          { signal, deadlineAt: deadlineAt() },
+          unit.preparedGitHubProof,
+        ),
+      ),
+      true,
+    );
     await t.test(
-      "signed PostgreSQL dispatch permits exact prepared material on the accepted exchange",
+      "current proof preserves caller SQL limits and restores them in its unit",
+      async (t) => {
+        const query = pg.Client.prototype.query;
+        let observed;
+        let expireAfterLookup = false;
+        let deadline;
+        // Observe real server settings on the proof's actual connection; the lookup itself
+        // still executes unchanged against PostgreSQL, including every evidence predicate.
+        t.mock.method(pg.Client.prototype, "query", function (sql, ...args) {
+          if (typeof sql !== "string" || !sql.startsWith("SELECT f.admission,id,")) {
+            return query.call(this, sql, ...args);
+          }
+          return (async () => {
+            observed = (
+              await query.call(
+                this,
+                "SELECT name, setting FROM pg_catalog.pg_settings WHERE name IN ('statement_timeout', 'lock_timeout') ORDER BY name",
+              )
+            ).rows;
+            const result = await query.call(this, sql, ...args);
+            if (expireAfterLookup) {
+              t.mock.timers.enable({ apis: ["Date"], now: deadline + 1 });
+            }
+            return result;
+          })();
+        });
+        for (const [statement, lock] of [
+          ["250ms", "100ms"],
+          ["8s", "3s"],
+          ["0", "0"],
+        ]) {
+          for (const outcome of ["current", "wrong material", "expired after lookup"]) {
+            await f.state.transact(async (unit) => {
+              const sql = (text, values) => f.state.queryInTransaction(unit, text, values);
+              await sql(
+                "SELECT pg_catalog.set_config('statement_timeout', $1, true), pg_catalog.set_config('lock_timeout', $2, true)",
+                [statement, lock],
+              );
+              const settings = () =>
+                sql(
+                  "SELECT pg_catalog.current_setting('statement_timeout') AS statement, pg_catalog.current_setting('lock_timeout') AS lock",
+                );
+              const original = (await settings()).rows;
+              deadline = Date.now() + 20_000;
+              expireAfterLookup = outcome === "expired after lookup";
+              observed = undefined;
+              try {
+                assert.equal(
+                  await lifecycle.current(
+                    source,
+                    outcome === "wrong material"
+                      ? { ...evidence, materialVersion: "different" }
+                      : evidence,
+                    { signal, deadlineAt: new Date(deadline).toISOString() },
+                    unit.preparedGitHubProof,
+                  ),
+                  outcome === "current",
+                );
+                assert.deepEqual(observed, [
+                  { name: "lock_timeout", setting: lock === "100ms" ? "100" : "1000" },
+                  { name: "statement_timeout", setting: statement === "250ms" ? "250" : "4000" },
+                ]);
+                assert.deepEqual(
+                  (await settings()).rows,
+                  original,
+                  "later work retains exact caller settings",
+                );
+                assert.equal((await sql("SELECT 1 AS ok")).rows[0].ok, 1);
+              } finally {
+                t.mock.timers.reset();
+              }
+            });
+          }
+        }
+        // Every part of the selected evidence must still match the authoritative row.
+        for (const changed of [
+          { family: { ...evidence.family, id: "different" } },
+          { family: { ...evidence.family, generation: evidence.family.generation + 1 } },
+          { ownerEpoch: evidence.ownerEpoch + 1 },
+          { inputVersion: "different" },
+          { grantHash: "different" },
+          { isolationId: "different" },
+          { preparationAttemptId: "different" },
+          { materialId: "different" },
+          { materialVersion: "different" },
+          { providerExpiresAt: new Date(0).toISOString() },
+          { usableUntil: new Date(Date.parse(old.usableUntil) + 1).toISOString() },
+        ]) {
+          expireAfterLookup = false;
+          assert.equal(
+            await f.state.transact((unit) =>
+              lifecycle.current(
+                source,
+                { ...evidence, ...changed },
+                { signal, deadlineAt: deadlineAt() },
+                unit.preparedGitHubProof,
+              ),
+            ),
+            false,
+          );
+        }
+      },
+    );
+    await t.test(
+      "signed PostgreSQL dispatch uses one shared connection for current material proof",
       async () => {
+        assert.equal(f.pool.options.max, 1);
         const safe = await dispatchMetadata(f, gh, captured, ready);
         assert.equal(
           safe.body.toString(),
@@ -125,6 +244,17 @@ test(
         );
       },
     );
+    await t.test("concurrent signed checks drain the shared single-connection pool", async () => {
+      const requests = [captureMetadata(f), captureMetadata(f), captureMetadata(f)];
+      const selections = await Promise.all(requests.map((request) => f.resolve(request)));
+      const decisions = await Promise.all(
+        requests.map((request, i) => f.authorize(f.permitRequest(request, selections[i].ready))),
+      );
+      assert.ok(decisions.every((decision) => decision.allowed));
+      assert.equal((await f.pool.query("SELECT 1 AS ok")).rows[0].ok, 1);
+      assert.equal(f.pool.waitingCount, 0);
+      assert.equal(f.pool.idleCount, 1);
+    });
     await t.test(
       "signed access and material expiry bound ciphertext selection, projection and decryption",
       async (t) => {
@@ -228,6 +358,83 @@ test(
         }
       },
     );
+    await t.test(
+      "before-send bounds a real PostgreSQL lock wait and refuses late permission",
+      async () => {
+        const request = captureMetadata(f);
+        request.deadline = wireTime(Date.now() + 3000);
+        const selection = (await f.resolve(request)).ready;
+        assert.ok(selection);
+        // A separate contention actor holds only the table lock. Authority and custody still
+        // use the exact same max=1 pool; this connection never serves an application read.
+        const blocker = new pg.Client({ connectionString: f.pool.options.connectionString });
+        await blocker.connect();
+        try {
+          await blocker.query("BEGIN");
+          await blocker.query("LOCK TABLE occ.prepared_github_attempts IN ACCESS EXCLUSIVE MODE");
+          const pending = f.authorize(f.permitRequest(request, selection));
+          let waited = false;
+          for (let i = 0; i < 50; i += 1) {
+            const { rows } = await blocker.query(
+              "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation='occ.prepared_github_attempts'::regclass AND NOT granted) AS waiting",
+            );
+            if (rows[0].waiting) {
+              waited = true;
+              break;
+            }
+            await delay(10);
+          }
+          const decision = await pending;
+          assert.equal(waited, true, "the real currentness query must encounter contention");
+          assert.ok(decision.refused, "a timed-out proof must never grant a send");
+        } finally {
+          await blocker.query("ROLLBACK");
+          await blocker.end();
+        }
+        assert.equal((await f.pool.query("SELECT 1 AS ok")).rows[0].ok, 1);
+        assert.equal(f.pool.waitingCount, 0);
+        assert.equal(f.pool.idleCount, 1);
+      },
+    );
+    await t.test(
+      "before-send refuses expired material and an elapsed signed deadline",
+      async (t) => {
+        const request = captureMetadata(f);
+        const selection = (await f.resolve(request)).ready;
+        assert.ok(selection);
+        await f.pool.query(
+          "UPDATE occ.prepared_github_attempts SET usable_until=clock_timestamp() - interval '1 second' WHERE material_version=$1",
+          [old.materialVersion],
+        );
+        try {
+          assert.equal(
+            (await f.authorize(f.permitRequest(request, selection))).refused?.code,
+            f.refusalCode("DENIED"),
+          );
+        } finally {
+          await f.pool.query(
+            "UPDATE occ.prepared_github_attempts SET usable_until=$1 WHERE material_version=$2",
+            [new Date(old.usableUntil), old.materialVersion],
+          );
+        }
+        const late = captureMetadata(f);
+        const lateDeadline = Date.now() + 20_000;
+        late.deadline = wireTime(lateDeadline);
+        const selected = (await f.resolve(late)).ready;
+        assert.ok(selected);
+        // Preparation completes with real time; advance only Date after that checkpoint.
+        t.mock.timers.enable({ apis: ["Date"], now: lateDeadline + 1 });
+        try {
+          assert.equal(
+            (await f.authorize(f.permitRequest(late, selected))).refused?.code,
+            f.refusalCode("DENIED"),
+          );
+        } finally {
+          t.mock.timers.reset();
+        }
+        assert.equal(f.pool.waitingCount, 0);
+      },
+    );
     const status = (value) =>
       new Promise((resolve, reject) => {
         get(
@@ -273,6 +480,9 @@ test(
         "UPDATE occ.prepared_github_families SET next_check_at=now() WHERE source_id=$1",
         [source.key.source.id],
       );
+    const staleRequest = captureMetadata(f);
+    const staleSelection = (await f.resolve(staleRequest)).ready;
+    assert.ok(staleSelection);
     let renewed;
     await t.test(
       "renewal after committed metadata cannot open replacement for the old request",
@@ -421,10 +631,37 @@ test(
         assert.equal(await status(old.value), 200, "A still accepts the displaced token");
       },
     );
+    await t.test(
+      "before-send refuses displaced material and accepts renewed material",
+      async () => {
+        assert.equal(
+          (await f.authorize(f.permitRequest(staleRequest, staleSelection))).refused?.code,
+          f.refusalCode("DENIED"),
+        );
+        const request = captureMetadata(f);
+        const selected = (await f.resolve(request)).ready;
+        assert.ok(selected);
+        assert.ok((await f.authorize(f.permitRequest(request, selected))).allowed);
+      },
+    );
     await fresh.maintain(signal); // Drains the displaced token. GitHub confirms DELETE independently.
     assert.equal(await status(old.value), 401);
     assert.equal(await status(renewed.value), 200);
 
+    await t.test("before-send refuses a rejected prepared selection", async () => {
+      const request = captureMetadata(f);
+      const selected = (await f.resolve(request)).ready;
+      assert.ok(selected);
+      await f.state.transact((unit) =>
+        unit.credentialSources.rejectEgressMaterial(
+          JSON.parse(selected.evidence.authority_evidence),
+        ),
+      );
+      assert.equal(
+        (await f.authorize(f.permitRequest(request, selected))).refused?.code,
+        f.refusalCode("DENIED"),
+      );
+    });
     // A genuine update advances the authoritative issuer resourceVersion even with identical PEM.
     const changed = await f.request("PATCH", `/namespaces/${f.namespace.id}/secrets/${issuer.id}`, {
       body: { value: secretValue },
@@ -438,6 +675,9 @@ test(
     assert.equal(await status(rotated.value), 200);
     // A issued a real token, but its response cannot qualify the token for use. Withdrawal
     // under B must preserve that exceptional cleanup candidate and A's now-displaced current token.
+    const withdrawnRequest = captureMetadata(f);
+    const withdrawnSelection = (await f.resolve(withdrawnRequest)).ready;
+    assert.ok(withdrawnSelection);
     invalidScope = true;
     await due();
     assert.equal(await fresh.maintain(signal), "quarantined");
@@ -467,6 +707,15 @@ test(
         );
       },
     );
+    await t.test("before-send refuses a withdrawn prepared family", async () => {
+      assert.equal(
+        (await f.authorize(f.permitRequest(withdrawnRequest, withdrawnSelection))).refused?.code,
+        f.refusalCode("DENIED"),
+      );
+      assert.equal((await f.pool.query("SELECT 1 AS ok")).rows[0].ok, 1);
+      assert.equal(f.pool.waitingCount, 0);
+      assert.equal(f.pool.idleCount, 1);
+    });
     await fresh.withdraw(source, signal);
     assert.equal(
       gh.tokenState().every((r) => r.revoked),

@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   githubMetadataGrant,
   type PreparedGitHubEgressLifecycle,
+  type PreparedGitHubCurrentProof,
   type CredentialReadLifetime,
   type PreparedGitHubEgressSource as Source,
   type PreparedGitHubMaterialEvidence as Evidence,
@@ -219,7 +220,13 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     }
   }
 
-  async current(source: Source, ev: Evidence, signal: AbortSignal) {
+  async current(
+    source: Source,
+    ev: Evidence,
+    lifetime: CredentialReadLifetime,
+    proof: PreparedGitHubCurrentProof,
+  ) {
+    const { signal } = lifetime;
     const until = Date.parse(ev.usableUntil);
     if (
       signal.aborted ||
@@ -231,19 +238,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     ) {
       return false;
     }
-    const m = await this.db.metadata(source);
-    if (!m) {
-      return false;
-    }
-    const { usableUntil, family, ...match } = evidence(m);
-    // OCC checks the exact binding. Its send permit can shorten, but cannot extend, this expiry.
-    return (
-      !signal.aborted &&
-      until > Date.now() &&
-      until <= Date.parse(usableUntil) &&
-      isDeepStrictEqual(ev.family, family) &&
-      Object.entries(match).every(([k, v]) => ev[k as keyof Evidence] === v)
-    );
+    return proof.current(source, ev, this.issuerAuthority, lifetime);
   }
 
   private async retire(familyId: string | null, outer: AbortSignal) {

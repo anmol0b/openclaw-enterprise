@@ -216,6 +216,16 @@ returns `not_ready` unless the signed deadline has elapsed. Bytes already projec
 cannot be recalled. Background preparation has separate custody,
 so rotation and cleanup can still handle material ineligible for requests.
 
+Before send, `packages/occ/src/state/prepared-github-state.ts:postgresPreparedGitHubProof`
+queries current material metadata on the active platform transaction, without another
+checkout. The lifecycle supplies issuer/trust identity; shared metadata predicates and
+exact evidence checks fence stale selections. The port exposes neither ciphertext
+nor caller-supplied SQL. Statement and lock timeouts bound waits without relaxing
+tighter caller limits. Successful SQL restores the original settings in the same
+unit before cancellation and absolute expiry are rechecked; SQL errors leave rollback
+to the transaction owner. OCC retains withdrawal, rejection and binding
+checks in the same unit.
+
 The authorization frame on that same stream must echo the original deadline, evidence and injection digest.
 The registry reserves the handle, then uses
 `packages/occ/src/egress-send-receipts.ts:EgressSendReceipts.begin` to commit
@@ -329,6 +339,8 @@ None.
 ## Changelog
 
 - 2026-10-16 02:06: Protect independent assistant items and bounded seeded runs, including citation and plan-mode projections. (authoring-run/68ecede6-d2bc-4d49-ae2c-c04150ccb307 - 3ed0e1cbd553b753e3f7d97b720cb7a43b6b5109)
+
+- 2026-10-16 02:04: Bind prepared currentness proof to the active platform transaction in the accompanying implementation. (authoring-run/61a459b9-beed-4357-a96a-8483ab7cc2b9 - 3ed0e1cbd553b753e3f7d97b720cb7a43b6b5109)
 
 - 2026-10-16 01:00: Protect incremental Responses SDK text snapshots and reject ambiguous appended indexes. (authoring-run/92d1c2e7-e68d-4684-b8d1-8bfa0ed99a09 - ed532ec5496e87da37c086cf71949f12a17250c9)
 

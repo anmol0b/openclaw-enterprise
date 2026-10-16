@@ -115,6 +115,8 @@ const reviewedImports = {
   },
   // AES-GCM binds encrypted material to family and attempt; readiness selects no sealed bytes.
   "drivers/repo/github/credentials/prepared-postgres.ts": {
+    // Reuse the platform transaction's metadata predicates; no new material or I/O authority.
+    "@openclaw-enterprise/occ": ["preparedGitHubLive", "readPreparedGitHubMetadata"],
     "node:crypto": ["createCipheriv", "createDecipheriv", "randomBytes", "randomUUID"],
     "node:util": ["isDeepStrictEqual"],
   },

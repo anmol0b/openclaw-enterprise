@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { PreparedGitHubEgressSource, Secret } from "@openclaw-enterprise/contracts";
+import { preparedGitHubLive as live, readPreparedGitHubMetadata } from "@openclaw-enterprise/occ";
 import type { PostgresClient, PostgresPool } from "@openclaw-enterprise/occ";
 import type {
   GitHubPreparationAdmission as Admission,
@@ -9,6 +10,9 @@ import type {
   GitHubPreparationStore,
 } from "./prepared-contracts.ts";
 
+const active = live("'ready'");
+const enrolling = live("'registering','ready'");
+const matching = "f.source_id = $1 AND f.source = $2::jsonb";
 const families = "occ.prepared_github_families";
 const attempts = "occ.prepared_github_attempts";
 type Source = PreparedGitHubEgressSource;
@@ -30,19 +34,6 @@ type AttemptRow = {
   sealed: Buffer;
 };
 
-// Do not trust enrollment alone. A tombstone, an in-place change to the grant or a different
-// issuer reference fences use even if management crashed before reaching this repository.
-const live = (states: string) => `EXISTS (
- SELECT 1 FROM occ.credential_sources s JOIN occ.credential_source_secrets r
- ON r.namespace_id=s.namespace_id AND r.credential_source_id=s.id AND r.field='private_key'
- JOIN occ.secrets k ON k.namespace_id=r.namespace_id AND k.id=r.secret_id
- JOIN occ.installation i ON i.id=f.source #>> '{key,installationId}'
- WHERE s.id=f.source_id AND s.egress=f.source AND s.config->>'authority'='execution' AND s.state IN (${states})
- AND k.id=f.issuer->>'id' AND k.driver_id=f.issuer->>'driverId'
- AND k.backend_uid=f.issuer #>> '{backendRef,uid}' AND s.namespace_id=f.source #>> '{key,namespaceId}')`;
-const active = live("'ready'");
-const enrolling = live("'registering','ready'");
-const matching = "f.source_id = $1 AND f.source = $2::jsonb";
 const aad = (a: Admission, id: string) =>
   Buffer.from(JSON.stringify(["occ:prepared-github:v2", a.issuerAuthority, a.familyId, id]));
 
@@ -191,17 +182,8 @@ export class PreparedGitHubPostgres {
 
   async metadata(source: Source) {
     return this.transaction(async (c) => {
-      // Exclude sealed bytes even from the projection, including when called for readiness.
-      const { rows } = await c.query(
-        `SELECT f.admission,id,material_version,provider_expires_at,usable_until
-        FROM ${families} f JOIN ${attempts} a USING(source_id)
-        WHERE ${matching} AND enabled AND ${active} AND custody='current' AND a.admission=f.admission
-        AND a.admission->>'issuerAuthority'=$3
-        AND usable_until > clock_timestamp()
-        AND usable_until < clock_timestamp() + interval '61 minutes'`,
-        [source.key.source.id, source, this.issuerAuthority],
-      );
-      return rows[0] as Omit<AttemptRow, "sealed"> | undefined;
+      return (await readPreparedGitHubMetadata(c, source, this.issuerAuthority)) as
+        Omit<AttemptRow, "sealed"> | undefined;
     });
   }
 

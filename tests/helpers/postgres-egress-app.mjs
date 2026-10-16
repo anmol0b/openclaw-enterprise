@@ -5,6 +5,7 @@ export async function postgresApp(t, options, transportDatabaseUrl) {
   const p = await createPostgresAgentApp(t, {
     label: "static-egress",
     transportDatabaseUrl,
+    poolOptions: options.poolOptions,
     authSecret: "static-egress-fixture-session-secret-2026",
     appOptions: { secretDriver: options.secretDriver, computeDriver: options.computeDriver },
   });
