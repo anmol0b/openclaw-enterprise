@@ -1311,6 +1311,7 @@ test("OpenShell Harness endpoints expose only the Backend public CA", async (t) 
   assert.deepEqual(await endpoint(tls.rootCertificatePath), {
     url: "wss://harness.example.test:8080/",
     workspaceRoot: "/sandbox/enterprise",
+    codexPermissionProfile: ":danger-full-access",
     tls: { caBundle: tls.caBundle },
   });
   assert.equal((await endpoint()).tls, undefined, "unconfigured roots keep system trust");
