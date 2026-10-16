@@ -1,7 +1,7 @@
 ---
 created: 2026-09-08
-updated: 2026-10-15
-last_updated_session: authoring-run/97a67c3a-0aaa-4d59-bccf-19183079b169
+updated: 2026-10-16
+last_updated_session: 01a13683-3916-7880-b1a6-27175b853600
 ---
 
 # Agent Plugin Deployment Flow
@@ -58,7 +58,10 @@ graph TD
   F -->|invalid or unsafe| X["Keep runtime unready"]
   F -->|verified| G["Publish current startup status"]
   G --> H["Apply matching gateway configuration"]
-  H -->|ready| I["Compute returns readiness and warnings"]
+  H -->|dedicated| P["Apply OCE tool ceiling; validate supporting runtime"]
+  P -->|incompatible| X
+  P -->|valid| I
+  H -->|embedded and ready| I["Compute returns readiness and warnings"]
   I --> J["Worker completes deployment under live claim"]
   G -->|runtime restart| C
 ```
@@ -169,11 +172,19 @@ override precedes `toolDefaults.enabled`; disabled tools emit native denies.
 Master disable and operator denies prevail; `provider_default` and `none` add no
 Diffs review step. Revision-private configuration uses `--pin --force --no-enable`,
 preserving enablement and allow/deny lists. Preparation refreshes the registry
-and verifies admitted configuration; the pinned runtime release lacks this flag.
+and verifies admitted configuration; unsupported runtimes fail preparation.
 Native inspection verifies plugin ID, package name, runtime/install version,
 recorded integrity, and the runtime source's containment in the install path.
 Failure prevents gateway readiness. Confirmed install rejection disables the
 optional selection and removes its managed tool allowance before startup.
+
+Dedicated Gateways then call
+`apps/controller/src/drivers/compute/gateway-tool-policy.ts:managedGatewayConfiguration`.
+The revision's read-only [Gateway tool policy](../reference/configuration.md#gateway-tool-policy)
+bounds plugin grants and mutable native configuration. Both launchers verify source support and native configuration before startup
+and Kubernetes peer respawn. Refusal holds the Gateway unready with
+`gateway-tool-policy` diagnostics. Human administration keeps its existing
+authorization; embedded deployments retain their behavior.
 
 Dedicated Codex bootstraps isolated `CODEX_HOME` with
 `apps._default.enabled:false` and `plugins._default.enabled:false`.
@@ -348,6 +359,8 @@ deadline.
 
 ## Changelog
 
+- 2026-10-16 19:14: Apply the dedicated Gateway tool ceiling after plugin grants and recheck it before native startup or peer respawn. (01a13683-3916-7880-b1a6-27175b853600 - b768af1b24c6d9130e46eb0bb470fa761ade2bfb)
+
 - 2026-10-15 04:39: Grant read-only access to bundled Codex system skills. (authoring-run/97a67c3a-0aaa-4d59-bccf-19183079b169 - 00bbc7cd976ab7be317ce1e0a9d36ad72ce10567)
 
 - 2026-10-14 12:23: Document runtime-status streaming limits and oversized error responses. (authoring-run/a404e7a3-9acf-4b50-9307-31e50b1b3582 - 4727e9b109a2127150e03e39e859d45e0668f82f)
@@ -367,21 +380,5 @@ deadline.
 - 2026-10-09 15:02: Preserve the configured Codex session approval policy during startup. (authoring-run/72c276e8-6db5-44e5-aac1-f9e3fdc34ff2 - 504bf89a0707b66e1612d26e3d67ed6f6b16232f)
 
 - 2026-10-08 22:00: Integrate validated plugin default-off grants before native install, with final app-policy verification and skill-only selections. (authoring-run/74dc7eaf-a67b-47ef-91bd-2ecd0463fb10 - 65911984b3f6d9ee398aed913a0b8dd08e2ae094)
-
-- 2026-10-07 19:30: Pass the admitted model to native Codex before reviewer validation. (authoring-run/bc793557-585a-4c1a-9463-b2c55682ea02 - b1be0e0602b9db1035a689ca2a4ac4982f6d0b3b)
-
-- 2026-10-04 05:00: Recheck Create Agent discovery grants after the Secret read. (bughunt-11)
-
-- 2026-10-01 00:57: Reconcile peer recovery with current runtime. (codex/01a0b0e4-839a-71b3-9ec1-3b1000b5d06a - e57e777238104b1de0d3bee5c6c631722c4af575)
-
-- 2026-09-30 13:32: Clarify readiness and routing propagation. (codex/01a0b0e4-839a-71b3-9ec1-3b1000b5d06a - a0ca6376)
-
-- 2026-09-30 02:10: Recheck the peer before replacement readiness. (authoring-run/fc09b5f8-3fc8-4144-ac80-8bfd8ef24f52 - ed69e6eee87ca004d2970069e8e18cf4cce29a32)
-
-- 2026-09-30 00:33: Propagate Gateway exits while awaiting peer recovery. (authoring-run/bf3b8146-9d72-42a4-84e5-2293581c890c - 0d72f6a4e4e3003d457c4498e81e7de414f85649)
-
-- 2026-09-28 21:26: Batch Codex metadata reads; preserve ordered writes and verification. (authoring-run/7c8bff1b-a2d1-48f6-a996-1be6a06719fa - 8352c0932bcbde43e88b44c6975496ca5431ff55)
-
-- 2026-09-28 10:46: Materialize inherited app policy; native proof pending. (codex/01a0cf72-6985-7712-ba92-d8cc32470f24 - 44ed2405)
 
 [Agent plugin deployment documentation history](agent-plugins/history.md) preserves the older dated entries.

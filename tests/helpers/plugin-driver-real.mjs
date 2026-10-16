@@ -441,10 +441,12 @@ function sanitizedPluginProofWorkerEvents(events, revisionId) {
 
 const sessionEvidenceScript = String.raw`
   const { DatabaseSync } = require("node:sqlite");
+  const { zstdDecompressSync } = require("node:zlib");
   const sessionKey = process.argv[1];
   const marker = process.argv[2];
   const toolName = process.argv[3];
   const resultPattern = process.argv[4];
+  const expectedArguments = JSON.parse(process.argv[5] || "null");
   const databasePath = "/home/node/.openclaw/agents/main/agent/openclaw-agent.sqlite";
   const db = new DatabaseSync(databasePath, { readOnly: true });
   function contains(value, needle) {
@@ -498,16 +500,26 @@ const sessionEvidenceScript = String.raw`
       process.exit(0);
     }
     const entry = JSON.parse(session.entry_json);
+    const hasSnapshots = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_entry_snapshots'").get();
+    const snapshot = hasSnapshots ? db.prepare("SELECT value_json FROM session_entry_snapshots WHERE session_key = ? AND field = 'systemPromptReport'").get(sessionKey) : undefined;
+    const promptReport = snapshot ? JSON.parse(snapshot.value_json) : entry?.systemPromptReport;
     const promptTools =
-      entry?.systemPromptReport?.source === "run" &&
-      Array.isArray(entry.systemPromptReport.tools?.entries)
-        ? entry.systemPromptReport.tools.entries
+      promptReport?.source === "run" &&
+      Array.isArray(promptReport.tools?.entries)
+        ? promptReport.tools.entries
             .map((tool) => tool?.name)
             .filter((name) => typeof name === "string")
         : undefined;
     const allRows = db
-      .prepare("SELECT seq, event_json FROM transcript_events WHERE session_id = ? ORDER BY seq")
-      .all(session.current_session_id);
+      .prepare("SELECT seq, event_json, event_zstd, event_utf8_bytes FROM transcript_events WHERE session_id = ? ORDER BY seq")
+      .all(session.current_session_id)
+      .map((row) => {
+        const eventText = row.event_json ?? zstdDecompressSync(row.event_zstd).toString("utf8");
+        if (row.event_utf8_bytes !== null && Buffer.byteLength(eventText) !== row.event_utf8_bytes) {
+          throw new Error("transcript event length mismatch");
+        }
+        return { ...row, event_json: eventText };
+      });
     // Repeated calls share a session; an earlier allowed result cannot prove this turn.
     const start = allRows.findLastIndex((row) => {
       const event = JSON.parse(row.event_json);
@@ -582,7 +594,10 @@ const sessionEvidenceScript = String.raw`
           if (block?.type === "toolCall" && matchesToolName(block.name)) {
             const toolPrefix = prefixForToolMirrorIdentity(mirrorIdentity, ":call");
             if (toolPrefix !== undefined) turn(toolPrefix).toolCallMirrorSeen = true;
-            calls.push({ seq: row.seq, id: block.id, name: block.name, mirrorIdentity });
+            calls.push({ seq: row.seq, id: block.id, name: block.name, mirrorIdentity,
+              matchesArguments: expectedArguments === null || Object.entries(expectedArguments)
+                .every(([key, value]) => block.arguments?.[key] === value),
+            });
           }
         }
         if (hasMarker) {
@@ -622,7 +637,7 @@ const sessionEvidenceScript = String.raw`
       sessionKey,
       sessionId: session.current_session_id,
       exists: true,
-      promptReportSource: entry?.systemPromptReport?.source,
+      promptReportSource: promptReport?.source,
       promptToolNames: promptTools,
       messageCount: messages.length,
       userMarkerSeen: messages.some((message) => message.role === "user" && message.hasMarker),
@@ -1155,7 +1170,10 @@ export function createNativePluginAssertions({
     }
   }
 
-  async function sessionEvidence(agent, { sessionKey, turnMarker, toolName, resultPattern }) {
+  async function sessionEvidence(
+    agent,
+    { sessionKey, turnMarker, toolName, resultPattern, expectedArguments },
+  ) {
     const execution = await execGateway(agent, [
       "node",
       "-e",
@@ -1164,6 +1182,7 @@ export function createNativePluginAssertions({
       turnMarker,
       toolName ?? "",
       resultPattern ?? "",
+      JSON.stringify(expectedArguments ?? null),
     ]);
     return { runtime: execution.label, ...JSON.parse(execution.stdout) };
   }
@@ -1274,14 +1293,14 @@ export function createNativePluginAssertions({
     };
   }
 
-  async function assertSessionToolDeniedEvidence(agent, options) {
+  async function assertSessionToolFailureEvidence(agent, options) {
     const evidence = await sessionEvidence(agent, options);
     assert.equal(evidence.userMarkerSeen, true);
     assert.equal(evidence.assistantMarkerSeen, true);
     assert.equal(
       evidence.calls.length,
       1,
-      "the denied turn must attempt exactly the requested read",
+      "the denied turn must attempt exactly the requested tool",
     );
     assert.equal(evidence.results.length, 1, "the denied call must have a terminal result");
     assert.equal(evidence.results[0].toolCallId, evidence.calls[0].id);
@@ -1299,7 +1318,12 @@ export function createNativePluginAssertions({
           turn.toolResultMirrorSeen,
       );
     }
-    assert.equal(evidence.results[0].isError, true, "denial must prevent a successful native read");
+    assert.equal(evidence.results[0].isError, true, "denial must prevent a successful tool result");
+    return evidence;
+  }
+
+  async function assertSessionToolDeniedEvidence(agent, options) {
+    const evidence = await assertSessionToolFailureEvidence(agent, options);
     assert.equal(
       evidence.results[0].deniedByUser,
       true,
@@ -1310,6 +1334,27 @@ export function createNativePluginAssertions({
       false,
       "denial must not expose the provider result",
     );
+  }
+
+  async function assertSessionToolPolicyDeniedEvidence(agent, options) {
+    assert.ok(options.resultPattern, "policy proof requires the expected native refusal");
+    assert.ok(options.expectedArguments, "policy proof requires the intended invocation target");
+    const evidence = await assertSessionToolFailureEvidence(agent, options);
+    assert.equal(
+      evidence.calls[0].matchesArguments,
+      true,
+      "the model must attempt the exact requested action and target",
+    );
+    assert.equal(
+      evidence.results[0].matchesResult,
+      true,
+      "the attempted tool must return the policy refusal",
+    );
+    return {
+      sessionId: evidence.sessionId,
+      toolCallId: evidence.calls[0].id,
+      toolName: evidence.calls[0].name,
+    };
   }
 
   async function assertNoSessionToolCallEvidence(agent, options) {
@@ -1483,6 +1528,7 @@ export function createNativePluginAssertions({
     normalGatewayTurn,
     assertSessionToolCallEvidence,
     assertSessionToolDeniedEvidence,
+    assertSessionToolPolicyDeniedEvidence,
     assertNoSessionToolCallEvidence,
     readOpenClawPluginPolicy,
     listCodexNativeCatalog,

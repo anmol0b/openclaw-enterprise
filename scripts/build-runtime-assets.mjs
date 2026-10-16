@@ -29,11 +29,15 @@ const runtimePaths = [
   "node-runtime-update.mjs",
   "node-runtime-recovery.mjs",
   "node-runtime-env.mjs",
+  "cli-invocation.mjs",
+  "cli-parent-lifetime.mjs",
   "cli-root-options.mjs",
+  "gateway-prewarm.mjs",
   "gateway-run-argv.mjs",
   "gateway-shutdown-budget.mjs",
   "node-host-launcher.mjs",
   "node-compile-cache.mjs",
+  "worker-heap-flag.mjs",
   "openclaw.mjs",
   "extensions",
   "skills",
@@ -183,10 +187,13 @@ if (command === "inputs") {
   )
     .trim()
     .split("\n");
+  await writeFile(join(output, "openclaw-workspace-plugin-dirs"), `${selected.join("\n")}\n`);
+  // Upstream asset preparation builds external plugin assets before pruning.
+  // Keep their build dependencies here; the production install stays selected.
   for (const dir of [
     "ui",
     ...(await readdir(join(root, "packages"))).map((name) => `packages/${name}`),
-    ...selected.map((name) => `extensions/${name}`),
+    ...(await readdir(join(root, "extensions"))).map((name) => `extensions/${name}`),
   ]) {
     try {
       const manifest = await readFile(join(root, dir, "package.json"));
@@ -291,13 +298,13 @@ if (command === "inputs") {
       {
         source: "https://github.com/openclaw/openclaw",
         commit: process.env.GIT_COMMIT,
-        sourceArchiveSha256: "c56ea921a033efd95c2c9e43e4255c675939b0aa927c6aaf5bbdb51d5b693a8b",
+        sourceArchiveSha256: "10294d739f3feb773eb88aaf6a2e60556be9954252fd1521cd56d5510e171954",
         openclawBridgePatchSha256:
           "1d8b670e7029872262375a21da7222768c2fe2390ff7a159ed1616ee9c9de1ca",
         openclawConnectPatchSha256:
-          "c57722da9a88ec4295577ab9a9ba6e2ca37fceda11ce8b51b08ee1425e00851f",
+          "c3cdd724b4084cdbc1acdc2b62c7ad0ec36f400e56b21d1db9790bb1e4adb8b5",
         codexDependencyPinPatchSha256:
-          "7bb0ae29bf3259b245d7675b2c6a3abe521c8139095f75ce0c532188162de5e9",
+          "b125312f310d1dac3b3cf98c029dfaaadbf996229fd26660f73f1d51eb00dec3",
         artifactKind: "assembled-runtime-root",
         runtimeContentsSha256: hash(contents),
         lockfileSha256: hash(await readFile(join(root, "pnpm-lock.yaml"))),

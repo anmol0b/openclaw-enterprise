@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -1406,4 +1406,118 @@ test("failed native Gateway turns capture private bounded logs for the original 
       }
     });
   }
+});
+
+test("native tool evidence reads compressed transcript rows and separate prompt snapshots", async (t) => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { zstdCompressSync } = await import("node:zlib");
+  const { createNativePluginAssertions } = await import("../helpers/plugin-driver-real.mjs");
+  const directory = await mkdtemp(join(tmpdir(), "oce-tool-evidence-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const databasePath = join(directory, "transcript.sqlite");
+  const db = new DatabaseSync(databasePath);
+  db.exec(`CREATE TABLE session_nodes(session_key TEXT, current_session_id TEXT, entry_json TEXT);
+    CREATE TABLE session_entry_snapshots(session_key TEXT, field TEXT, value_json TEXT);
+    CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, event_zstd BLOB, event_utf8_bytes INTEGER);`);
+  const sessionKey = "agent:main:evidence-fixture";
+  db.prepare("INSERT INTO session_nodes VALUES (?, ?, ?)").run(sessionKey, "session-fixture", "{}");
+  db.prepare("INSERT INTO session_entry_snapshots VALUES (?, ?, ?)").run(
+    sessionKey,
+    "systemPromptReport",
+    JSON.stringify({
+      source: "run",
+      tools: { entries: [{ name: "exec" }, { name: "automations" }] },
+    }),
+  );
+  const rows = [
+    { role: "user", content: "allowed-fixture" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "allowed-call", name: "exec", arguments: {} }],
+    },
+    {
+      role: "toolResult",
+      toolCallId: "allowed-call",
+      toolName: "exec",
+      content: [{ type: "text", text: "TOOL-SUCCESS" }],
+    },
+    { role: "assistant", content: [{ type: "text", text: "allowed-fixture" }], stopReason: "stop" },
+    { role: "user", content: "denied-fixture" },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "denied-call",
+          name: "automations",
+          arguments: { action: "run", jobId: "fixture-job" },
+        },
+      ],
+    },
+    {
+      role: "toolResult",
+      toolCallId: "denied-call",
+      toolName: "automations",
+      isError: true,
+      content: [{ type: "text", text: "Automation not found: fixture-job" }],
+    },
+    { role: "assistant", content: [{ type: "text", text: "denied-fixture" }], stopReason: "stop" },
+  ];
+  for (const [seq, message] of rows.entries()) {
+    const text = JSON.stringify({ type: "message", message });
+    const compressed = [1, 2, 4, 5, 7].includes(seq);
+    db.prepare("INSERT INTO transcript_events VALUES (?, ?, ?, ?, ?)").run(
+      "session-fixture",
+      seq,
+      compressed ? null : text,
+      compressed ? zstdCompressSync(text) : null,
+      Buffer.byteLength(text),
+    );
+  }
+  db.close();
+  // Run the real evidence program against disposable SQLite storage. This tests
+  // evidence decoding/correlation, not a live model or deployment policy.
+  const native = createNativePluginAssertions({
+    gatewayUrl: async () => {
+      throw new Error("no Gateway connection in this fixture");
+    },
+    execGateway: async (_agent, [command, flag, script, ...args]) => {
+      assert.equal(command, "node");
+      assert.equal(flag, "-e");
+      const localScript = script.replace(
+        '"/home/node/.openclaw/agents/main/agent/openclaw-agent.sqlite"',
+        JSON.stringify(databasePath),
+      );
+      return {
+        label: "sqlite-fixture",
+        stdout: execFileSync(process.execPath, ["-e", localScript, ...args], { encoding: "utf8" }),
+      };
+    },
+    waitFor: async (_description, check) => check(),
+    proofMode: "openclaw",
+  });
+  const allowed = await native.assertSessionToolCallEvidence(
+    {},
+    { sessionKey, turnMarker: "allowed-fixture", toolName: "exec", resultPattern: "TOOL-SUCCESS" },
+  );
+  assert.equal(allowed.toolCallId, "allowed-call");
+  assert.equal(allowed.promptAdvertised, true);
+  const denial = {
+    sessionKey,
+    turnMarker: "denied-fixture",
+    toolName: "automations",
+    expectedArguments: { action: "run", jobId: "fixture-job" },
+    resultPattern: "Automation not found: fixture-job",
+  };
+  assert.equal(
+    (await native.assertSessionToolPolicyDeniedEvidence({}, denial)).toolCallId,
+    "denied-call",
+  );
+  await assert.rejects(
+    native.assertSessionToolPolicyDeniedEvidence(
+      {},
+      { ...denial, expectedArguments: { action: "run", jobId: "wrong-target" } },
+    ),
+    /exact requested action and target/,
+  );
 });

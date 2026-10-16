@@ -1196,27 +1196,27 @@ const config = {
 };
 const profile = ":danger-full-access";
 const providerEnv = { OPENCLAW_CODEX_PROVIDER_PERMISSION_PROFILE: profile };
-function permissionFields(appServer, sandboxPolicy) {
+async function permissionFields(appServer, sandboxPolicy) {
   const thread = threadPermissions(appServer);
-  const turn = buildTurnStartParams({ prompt: "policy check", hostCapabilities: {}, config }, {
+  const turn = await buildTurnStartParams({ prompt: "policy check", hostCapabilities: {}, config }, {
     appServer, sandboxPolicy, cwd: "/tmp", preserveNativeTurnSettings: true,
   });
   return [thread, turn.permissions ?? turn.sandboxPolicy?.type];
 }
-const results = JSON.parse(process.argv[1]).map(({ appServer, modelProvider }) => {
+const results = await Promise.all(JSON.parse(process.argv[1]).map(async ({ appServer, modelProvider }) => {
   const resolve = (env) => resolveCodexAppServerRuntimeOptions({
     pluginConfig: { appServer }, modelProvider, model: "gpt-6-astra", config, env, requirementsToml: null,
   });
   const runtime = resolve(providerEnv);
-  assert.deepEqual(permissionFields(runtime), [{ permissions: profile }, profile]);
+  assert.deepEqual(await permissionFields(runtime), [{ permissions: profile }, profile]);
   const local = resolve({});
-  assert.deepEqual(permissionFields(local), [{ sandbox: "danger-full-access" }, "dangerFullAccess"]);
+  assert.deepEqual(await permissionFields(local), [{ sandbox: "danger-full-access" }, "dangerFullAccess"]);
   const restricted = { ...runtime, sandbox: "workspace-write" };
-  assert.deepEqual(permissionFields(restricted), [{ sandbox: "workspace-write" }, "workspaceWrite"]);
-  assert.deepEqual(permissionFields({ ...runtime, networkProxy: {} }), [{}, undefined]);
-  assert.equal(permissionFields(runtime, { type: "readOnly" })[1], "readOnly");
+  assert.deepEqual(await permissionFields(restricted), [{ sandbox: "workspace-write" }, "workspaceWrite"]);
+  assert.deepEqual(await permissionFields({ ...runtime, networkProxy: {} }), [{}, undefined]);
+  assert.equal((await permissionFields(runtime, { type: "readOnly" }))[1], "readOnly");
   return { sandbox: runtime.sandbox, approvalsReviewer: runtime.approvalsReviewer };
-});
+}));
 
 // A real Codex can accept thread/start yet constrain its effective sandbox. The bundled
 // Gateway client must surface that refusal before the caller can use the thread for a turn.
@@ -2093,11 +2093,11 @@ assert.equal(execFileSync("codex", ["--version"], {encoding: "utf8"}).trim(), "c
 assert.equal(execFileSync(process.execPath, [bundledCommand, "--version"], {encoding: "utf8"}).trim(), "codex-cli 0.163.0-alpha.2");
 const provenance = JSON.parse(readFileSync("/opt/oce/runtime/provenance.json", "utf8"));
 assert.equal(provenance.source, "https://github.com/openclaw/openclaw");
-assert.equal(provenance.commit, "90d30a1178a79dddd92e6190b66b95d89dfb3ca8");
-assert.equal(provenance.sourceArchiveSha256, "c56ea921a033efd95c2c9e43e4255c675939b0aa927c6aaf5bbdb51d5b693a8b");
+assert.equal(provenance.commit, "22fab27390476de748c7a591e84840949fd7182a");
+assert.equal(provenance.sourceArchiveSha256, "10294d739f3feb773eb88aaf6a2e60556be9954252fd1521cd56d5510e171954");
 assert.equal(provenance.openclawBridgePatchSha256, "1d8b670e7029872262375a21da7222768c2fe2390ff7a159ed1616ee9c9de1ca");
-assert.equal(provenance.openclawConnectPatchSha256, "c57722da9a88ec4295577ab9a9ba6e2ca37fceda11ce8b51b08ee1425e00851f");
-assert.equal(provenance.codexDependencyPinPatchSha256, "7bb0ae29bf3259b245d7675b2c6a3abe521c8139095f75ce0c532188162de5e9");
+assert.equal(provenance.openclawConnectPatchSha256, "c3cdd724b4084cdbc1acdc2b62c7ad0ec36f400e56b21d1db9790bb1e4adb8b5");
+assert.equal(provenance.codexDependencyPinPatchSha256, "b125312f310d1dac3b3cf98c029dfaaadbf996229fd26660f73f1d51eb00dec3");
 assert.equal(provenance.codex.version, "0.163.0-alpha.2");
 assert.equal(Object.hasOwn(provenance, "codexPatchSha256"), false);
 assert.equal(Object.hasOwn(provenance, "codexVersion"), false);

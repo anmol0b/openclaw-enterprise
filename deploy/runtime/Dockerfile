@@ -1,4 +1,4 @@
-ARG OPENCLAW_COMMIT=90d30a1178a79dddd92e6190b66b95d89dfb3ca8
+ARG OPENCLAW_COMMIT=22fab27390476de748c7a591e84840949fd7182a
 ARG NODE_BASE_IMAGE=docker.io/library/node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
 ARG NODE_RUNTIME_BASE_IMAGE=docker.io/library/node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
@@ -87,7 +87,7 @@ FROM node-build-base AS openclaw-source
 # Keep the source identity separate from its unreleased package version.
 ARG OPENCLAW_COMMIT
 ENV GIT_COMMIT=${OPENCLAW_COMMIT}
-ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-07T22:05:23Z
+ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-16T19:33:30Z
 ENV OPENCLAW_PREFER_PNPM=1
 WORKDIR /source
 RUN --mount=type=secret,id=build-ca,required=false \
@@ -95,29 +95,25 @@ RUN --mount=type=secret,id=build-ca,required=false \
     if [ -f /run/secrets/build-ca ]; then export CURL_CA_BUNDLE=/run/secrets/build-ca; fi; \
     curl --fail --location --silent --show-error \
       "https://codeload.github.com/openclaw/openclaw/tar.gz/${GIT_COMMIT}" -o /tmp/openclaw-source.tar.gz; \
-    echo 'c56ea921a033efd95c2c9e43e4255c675939b0aa927c6aaf5bbdb51d5b693a8b  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
+    echo '10294d739f3feb773eb88aaf6a2e60556be9954252fd1521cd56d5510e171954  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
     tar -xzf /tmp/openclaw-source.tar.gz --strip-components=1; \
     rm /tmp/openclaw-source.tar.gz
 # TODO: Remove this bridge patch when OpenClaw supports networkProxy.readOnlyPaths.
 COPY deploy/runtime/openclaw-codex-read-only-paths.patch /tmp/openclaw-codex-read-only-paths.patch
 RUN echo '1d8b670e7029872262375a21da7222768c2fe2390ff7a159ed1616ee9c9de1ca  /tmp/openclaw-codex-read-only-paths.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-codex-read-only-paths.patch
-# TODO: Remove when OpenClaw preserves on-request for plugins that use MCP elicitation.
-COPY deploy/runtime/openclaw-codex-preserve-on-request.patch /tmp/openclaw-codex-preserve-on-request.patch
-RUN echo 'ef50d1e635be0a9afd970ee1ea95c3468c307759fedd3783180ac2a676fa015b  /tmp/openclaw-codex-preserve-on-request.patch' | sha256sum --check --strict \
-    && git apply /tmp/openclaw-codex-preserve-on-request.patch
 # TODO: Remove this bridge patch when OpenClaw `connect --ephemeral` accepts an expired
 # replayed setup code for a node whose saved device token can reconnect.
 COPY deploy/runtime/openclaw-connect-ephemeral-expired-setup.patch /tmp/openclaw-connect-ephemeral-expired-setup.patch
-RUN echo 'c57722da9a88ec4295577ab9a9ba6e2ca37fceda11ce8b51b08ee1425e00851f  /tmp/openclaw-connect-ephemeral-expired-setup.patch' | sha256sum --check --strict \
+RUN echo 'c3cdd724b4084cdbc1acdc2b62c7ad0ec36f400e56b21d1db9790bb1e4adb8b5  /tmp/openclaw-connect-ephemeral-expired-setup.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-connect-ephemeral-expired-setup.patch
 # TODO: Remove this bridge patch when OpenClaw selects the native full-access profile.
 COPY deploy/runtime/openclaw-codex-full-access-profile.patch /tmp/openclaw-codex-full-access-profile.patch
-RUN echo 'bf0e9cd6d1d2420f42a33af130d534e1de6d1fe17701517c676824f5e80ec931  /tmp/openclaw-codex-full-access-profile.patch' | sha256sum --check --strict \
+RUN echo 'ce301e59ba9266f7897c472cd54d51f487a4f9ed75034824f48c6839b35e922f  /tmp/openclaw-codex-full-access-profile.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-codex-full-access-profile.patch
 # TODO: Remove this dependency pin when the selected OpenClaw source supports plugin defaults.
 COPY deploy/runtime/stock-codex-0.163.0-alpha.2-dependency-pin.patch /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch
-RUN echo '7bb0ae29bf3259b245d7675b2c6a3abe521c8139095f75ce0c532188162de5e9  /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch' | sha256sum --check --strict \
+RUN echo 'b125312f310d1dac3b3cf98c029dfaaadbf996229fd26660f73f1d51eb00dec3  /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch' | sha256sum --check --strict \
     && git apply --unidiff-zero /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch
 COPY scripts/build-runtime-assets.mjs /tmp/build-runtime-assets.mjs
 RUN node /tmp/build-runtime-assets.mjs inputs /source /inputs
@@ -143,7 +139,7 @@ RUN --mount=type=secret,id=build-ca,required=false \
 FROM node-build-base AS openclaw-dependency-inputs
 ARG OPENCLAW_COMMIT
 ENV GIT_COMMIT=${OPENCLAW_COMMIT}
-ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-07T22:05:23Z
+ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-16T19:33:30Z
 ENV OPENCLAW_PREFER_PNPM=1
 WORKDIR /source
 COPY --from=openclaw-source /inputs/ ./
@@ -175,6 +171,8 @@ RUN OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_IDS=codex,slack \
     && pnpm_config_verify_deps_before_run=false pnpm ui:build
 
 FROM openclaw-dependency-inputs AS openclaw-production-deps
+# Build asset hooks need all plugin dependencies; the shipped runtime keeps only
+# the selected plugins and the upstream required bundled dependencies.
 RUN --mount=type=secret,id=build-ca,required=false \
     --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
     --mount=type=bind,from=matrix-sdk-crypto,source=/out,target=/tmp/matrix-sdk-crypto \
@@ -183,8 +181,12 @@ RUN --mount=type=secret,id=build-ca,required=false \
     set -eu; \
     if [ -f /run/secrets/build-ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/build-ca; fi; \
     corepack enable; \
+    set -- --filter . --filter ./ui --filter './packages/*'; \
+    while IFS= read -r plugin; do \
+      set -- "$@" --filter "./extensions/$plugin"; \
+    done < openclaw-workspace-plugin-dirs; \
     sh /tmp/install-attempts.sh node /tmp/with-pinned-matrix-sdk-crypto.mjs /tmp/matrix-sdk-crypto \
-    pnpm install --frozen-lockfile --prod --store-dir=/tmp/pnpm-store \
+    pnpm install --frozen-lockfile --prod "$@" --store-dir=/tmp/pnpm-store \
       --config.supportedArchitectures.os=linux \
       --config.supportedArchitectures.cpu="$(node -p 'process.arch')" \
       --config.supportedArchitectures.libc=glibc; \
@@ -209,6 +211,8 @@ RUN node scripts/postinstall-bundled-plugins.mjs \
       rmdir "$temporary"; \
     fi \
     && rm -rf node_modules/openclaw node_modules/.bin/openclaw node_modules/.pnpm/openclaw@*/node_modules/openclaw \
+    # The sealed recovery entries inline fs-safe's relative helper lookup.
+    && cp node_modules/@openclaw/fs-safe/dist/windows-security-helper.exe dist/windows-security-helper.exe \
     && node scripts/check-package-dist-imports.mjs /source \
     && node scripts/docker/verify-fs-safe-native.mjs --package-root /source --mode require
 # Bundled plugin chunks also live directly under dist and resolve dependencies

@@ -27,6 +27,7 @@ import { inflateRawSync } from "node:zlib";
 import { createAuthenticatedControllerRequest } from "../helpers/auth-session.mjs";
 import { ensureDevelopmentBootstrap } from "../helpers/bootstrap-installation.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
+import { createNativePluginAssertions } from "../helpers/plugin-driver-real.mjs";
 import {
   createOpenShellInstallationConfiguration,
   createOpenShellKubernetesFixture,
@@ -2015,7 +2016,7 @@ function withFirstPrepareRevisionFailureDiagnostic(computeDriver) {
 
 async function prepareProductionInstallation(
   context,
-  { harnessId = "codex", controllerPort } = {},
+  { harnessId = "codex", controllerPort, controlUiOrigin } = {},
 ) {
   const kubeconfig = await validateOpenShellPrerequisites();
   const identifier = randomUUID();
@@ -2465,17 +2466,21 @@ async function prepareProductionInstallation(
       ? undefined
       : await registerRefreshSources(request, namespaceId, tokenEcho, keycloak, placement);
 
+  const nativeConfiguration =
+    harnessId === "openclaw"
+      ? nativeOpenClawConfiguration(
+          workspaceGateway.nativeOptions.gatewayAuth,
+          controllerPort === undefined
+            ? []
+            : [`http://127.0.0.1:${demoControlUiPort}`, `http://localhost:${demoControlUiPort}`],
+        )
+      : nativeCodexConfiguration(workspaceGateway.nativeOptions.gatewayAuth);
+  if (controlUiOrigin !== undefined) {
+    nativeConfiguration.gateway.controlUi = { enabled: true, allowedOrigins: [controlUiOrigin] };
+  }
   const agentConfiguration = await request("POST", `/namespaces/${namespaceId}/configurations`, {
     kind: "agent",
-    values:
-      harnessId === "openclaw"
-        ? nativeOpenClawConfiguration(
-            workspaceGateway.nativeOptions.gatewayAuth,
-            controllerPort === undefined
-              ? []
-              : [`http://127.0.0.1:${demoControlUiPort}`, `http://localhost:${demoControlUiPort}`],
-          )
-        : nativeCodexConfiguration(workspaceGateway.nativeOptions.gatewayAuth),
+    values: nativeConfiguration,
   });
   assert.equal(agentConfiguration.status, 201, JSON.stringify(agentConfiguration.error));
   const agent = await request("POST", `/namespaces/${namespaceId}/agents`, {
@@ -2738,6 +2743,10 @@ async function prepareProductionInstallation(
     modelSecretId: modelSecret.data.id,
     sourceRoleId: sourceRole.data.id,
     controllerUrl,
+    // This is the existing authenticated Envoy route, including the host TLS relay.
+    gatewayAdminUrl: `wss://${workspaceGatewayHostname(workspaceGateway)}:${workspaceGateway.routing.endpointPort}/namespaces/${namespaceId}/agents/${agent.data.id}`,
+    gatewayApiKeySecretName: workspaceGateway.apiKeySecretName,
+    platformNamespace,
     credentials: adminCredentials,
     ...(toolSources === undefined ? {} : { toolSources, tokenEcho }),
     ...(untrustedTls === undefined ? {} : { untrustedTls, untrustedTlsSource }),
@@ -6042,6 +6051,379 @@ assert.match(
 if (demoStatePath !== undefined) {
   assert.equal(selectedHarness, "openclaw", "the OpenShell browser demo requires openclaw.");
 }
+
+// Exercise the regular dedicated Agent path with live inference and a real
+// administrator-origin chat. Direct tools.invoke probes are recorded separately:
+// an unavailable tool in a model response is not an invocation-denial proof.
+test(
+  "OpenShell dedicated Agents enforce Gateway tool policy during normal work",
+  { ...requiresOpenShellK3d, timeout: 2_400_000 },
+  async (context) => {
+    const controlUiOrigin = "http://127.0.0.1";
+    const topology = await prepareProductionInstallation(context, {
+      harnessId: selectedHarness,
+      controlUiOrigin,
+    });
+    const apiSecret = await resource(
+      "secret",
+      topology.gatewayApiKeySecretName,
+      topology.platformNamespace,
+    );
+    const apiKey = Buffer.from(apiSecret.data.occ, "base64").toString();
+    const { GatewayClient } = await import(controllerRequire.resolve("@openclaw/gateway-client"));
+    const connected = Promise.withResolvers();
+    // Envoy authenticates the fixture API key and supplies the configured identity.
+    // The Gateway derives controlUiAdmin after authentication; no internal flags
+    // or device-auth exceptions are supplied by this test.
+    const client = new GatewayClient({
+      url: topology.gatewayAdminUrl,
+      origin: controlUiOrigin,
+      edgeAuthHeaders: { "x-api-key": apiKey },
+      clientName: "openclaw-control-ui",
+      mode: "ui",
+      role: "operator",
+      scopes: [],
+      deviceIdentity: null,
+      onHelloOk: connected.resolve,
+      onConnectError: connected.reject,
+    });
+    context.after(() => client.stopAndWait());
+    const helloTimeout = setTimeout(
+      () => connected.reject(new Error("Gateway admin connection timed out")),
+      15_000,
+    );
+    client.start();
+    let hello;
+    try {
+      hello = await connected.promise;
+    } finally {
+      clearTimeout(helloTimeout);
+    }
+    assert.equal(hello.auth?.role, "operator");
+    assert.ok(hello.auth.scopes.includes("operator.admin"));
+    const sessionKey = `agent:main:gateway-policy-${randomUUID()}`;
+    const execPod = async (pod, namespace, args) => ({
+      label: `${namespace}/${pod.metadata.name}`,
+      stdout: await kubectl(
+        "exec",
+        pod.metadata.name,
+        "-n",
+        namespace,
+        "-c",
+        pod === topology.gatewayPod ? "gateway" : "agent",
+        "--",
+        ...args,
+      ),
+    });
+    const native = createNativePluginAssertions({
+      gatewayUrl: async () => {
+        throw new Error("this proof uses authenticated chat.send");
+      },
+      execGateway: (_agent, args) => execPod(topology.gatewayPod, topology.gatewayPlacement, args),
+      execCodex: (_agent, args) => execPod(topology.harnessPod, topology.placement, args),
+      waitFor,
+      proofMode: selectedHarness,
+    });
+    const turn = async (prompt, marker) => {
+      await client.request("chat.send", {
+        sessionKey,
+        idempotencyKey: randomUUID(),
+        message: `${prompt} End your reply with exactly ${marker}.`,
+      });
+      await waitFor(
+        `Gateway policy turn ${marker}`,
+        async () => {
+          const history = await client.request("chat.history", { sessionKey, limit: 30 });
+          return (
+            history.messages?.some((message) => {
+              if (message.role !== "assistant") {
+                return false;
+              }
+              assert.notEqual(message.stopReason, "error", "the live model turn must complete");
+              const parts = Array.isArray(message.content) ? message.content : [];
+              const text =
+                typeof message.content === "string"
+                  ? message.content
+                  : parts
+                      .filter((part) => part.type === "text")
+                      .map((part) => part.text)
+                      .join("\n");
+              return (
+                text.includes(marker) &&
+                message.stopReason !== "toolUse" &&
+                !parts.some((part) => part.type === "toolCall")
+              );
+            }) || undefined
+          );
+        },
+        600_000,
+      );
+    };
+    const exists = async (pod, namespace, path) =>
+      JSON.parse(
+        (
+          await execPod(pod, namespace, [
+            "node",
+            "-e",
+            "process.stdout.write(JSON.stringify(require('node:fs').existsSync(process.argv[1])))",
+            path,
+          ])
+        ).stdout,
+      );
+    const proof = {
+      harness: selectedHarness,
+      revisionId: topology.revision.id,
+      gateway: {
+        uid: topology.gatewayPod.metadata.uid,
+        containers: topology.gatewayPod.status.containerStatuses.map(({ name, imageID }) => ({
+          name,
+          imageID,
+        })),
+      },
+      harnessPod: {
+        uid: topology.harnessPod.metadata.uid,
+        containers: topology.harnessPod.status.containerStatuses.map(({ name, imageID }) => ({
+          name,
+          imageID,
+        })),
+      },
+      caller: "authenticated Control UI operator.admin through Envoy",
+      modelTurns: [],
+      directInvocationProbes: [],
+    };
+    // Keep config evidence bounded; never export the native snapshot or credentials.
+    const { config } = await client.request("config.get", {});
+    proof.effectivePolicy = {
+      gatewayPolicy: config.tools?.gatewayPolicy,
+      modelSelectionScope: config.agents?.defaults?.modelSelectionScope,
+      cronTriggersEnabled: config.cron?.triggers?.enabled,
+    };
+    assert.ok(proof.effectivePolicy.gatewayPolicy?.allow?.includes("automations"));
+    assert.equal(proof.effectivePolicy.gatewayPolicy.allow.includes("openclaw"), false);
+    assert.deepEqual(proof.effectivePolicy.gatewayPolicy.automations, {
+      scope: "caller",
+      allowCommandJobs: false,
+    });
+    assert.equal(proof.effectivePolicy.modelSelectionScope, "session");
+    assert.equal(proof.effectivePolicy.cronTriggersEnabled, false);
+    // Image IDs above join these launched binaries to the candidate's source receipt.
+    proof.gatewayVersion = (
+      await execPod(topology.gatewayPod, topology.gatewayPlacement, ["openclaw", "--version"])
+    ).stdout.trim();
+    proof.harnessVersion = (
+      await execPod(topology.harnessPod, topology.placement, [
+        selectedHarness === "codex" ? "codex" : "openclaw",
+        "--version",
+      ])
+    ).stdout.trim();
+    const taskMarker = `TASK-${randomUUID()}`;
+    const taskPath = `/tmp/${taskMarker}`;
+    await turn(
+      `Use your shell tool to run node -e ${JSON.stringify(`require('node:fs').writeFileSync('${taskPath}',process.env.HOSTNAME);console.log('${taskMarker}')`)}. Report the real tool output.`,
+      taskMarker,
+    );
+    const taskHost = (
+      await execPod(topology.harnessPod, topology.placement, [
+        "node",
+        "-e",
+        "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8'))",
+        taskPath,
+      ])
+    ).stdout;
+    assert.equal(taskHost, topology.harnessPod.metadata.name);
+    assert.equal(await exists(topology.gatewayPod, topology.gatewayPlacement, taskPath), false);
+    const taskEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: taskMarker,
+      toolName: selectedHarness === "codex" ? "bash" : "exec",
+      resultPattern: taskMarker,
+    });
+    proof.modelTurns.push({
+      ...taskEvidence,
+      kind: "workspace-task",
+      sessionKey,
+      marker: taskMarker,
+      executedOnHarnessPod: true,
+    });
+
+    const scheduledMarker = `SCHEDULED-${randomUUID()}`;
+    const name = `policy-schedule-${randomUUID()}`;
+    const jobDefinition = {
+      name,
+      enabled: false,
+      schedule: { kind: "every", everyMs: 86_400_000 },
+      sessionTarget: "isolated",
+      wakeMode: "now",
+      payload: {
+        kind: "agentTurn",
+        message: `Call agents_list once, then reply with ${scheduledMarker}.`,
+        toolsAllow: ["agents_list"],
+      },
+      delivery: { mode: "none" },
+    };
+    const createMarker = `CREATE-${randomUUID()}`;
+    await turn(
+      `Use automations once with action=add and job=${JSON.stringify(jobDefinition)}. Create this disabled ordinary Agent task without changing its requested fields.`,
+      createMarker,
+    );
+    await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: createMarker,
+      toolName: "automations",
+      resultPattern: name,
+    });
+    const listed = await client.request("cron.list", { includeDisabled: true });
+    const job = listed.jobs.find((candidate) => candidate.name === name);
+    assert.ok(job, "the model must create the scoped ordinary job");
+    assert.equal(job.enabled, false);
+    assert.deepEqual(job.payload.toolsAllow, ["agents_list"]);
+    const runMarker = `RUN-${randomUUID()}`;
+    await turn(
+      `Use automations once with action=run, runMode=force and jobId=${job.id}. Do not create another job.`,
+      runMarker,
+    );
+    await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: runMarker,
+      toolName: "automations",
+      resultPattern: "runId",
+    });
+    const run = await waitFor(
+      "scheduled Agent task completion",
+      async () => {
+        const result = await client.request("cron.runs", { id: job.id, limit: 10 });
+        return result.entries?.find(
+          (entry) => entry.status === "ok" && entry.summary?.includes(scheduledMarker),
+        );
+      },
+      600_000,
+    );
+    assert.ok(run.sessionKey, "scheduled execution must retain its actual session identity");
+    await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey: run.sessionKey,
+      turnMarker: scheduledMarker,
+      toolName: "agents_list",
+      resultPattern: "main",
+    });
+    proof.modelTurns.push({
+      kind: "scoped-schedule",
+      sessionKey,
+      jobId: job.id,
+      scheduledSessionKey: run.sessionKey,
+    });
+
+    const foreignJob = await client.request("cron.add", {
+      ...jobDefinition,
+      name: `foreign-${randomUUID()}`,
+      owner: {
+        agentId: "main",
+        sessionKey: `agent:main:foreign-${randomUUID()}`,
+        accountId: `foreign-${randomUUID()}`,
+      },
+    });
+    const foreignBefore = await client.request("cron.get", { id: foreignJob.id });
+    const foreignMarker = `FOREIGN-${randomUUID()}`;
+    await turn(
+      `Call automations exactly once with action=update, jobId=${foreignJob.id}, job={"name":"model-must-not-set-this"}. Report the returned error; do not retry, substitute a job, or use another interface.`,
+      foreignMarker,
+    );
+    const foreignEvidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: foreignMarker,
+      toolName: "automations",
+      expectedArguments: { action: "update", jobId: foreignJob.id },
+      resultPattern: `Automation not found: ${foreignJob.id}`,
+    });
+    assert.deepEqual(await client.request("cron.get", { id: foreignJob.id }), foreignBefore);
+    await client.request("cron.update", {
+      id: foreignJob.id,
+      patch: { name: "human-admin-update" },
+    });
+    const foreignAfter = await client.request("cron.get", { id: foreignJob.id });
+    assert.equal(foreignAfter.name, "human-admin-update");
+    proof.modelTurns.push({
+      kind: "foreign-job-denied",
+      ...foreignEvidence,
+      jobId: foreignJob.id,
+      rejectingOwner: "caller scope",
+      unchangedAfterModel: true,
+      humanUpdateSucceeded: true,
+    });
+
+    const commandPath = `/tmp/COMMAND-${randomUUID()}`;
+    await client.request("cron.update", {
+      id: job.id,
+      patch: {
+        payload: {
+          kind: "command",
+          argv: [
+            "node",
+            "-e",
+            `require('node:fs').writeFileSync('${commandPath}','human-command')`,
+          ],
+          toolsAllow: [],
+        },
+      },
+    });
+    const commandBefore = await client.request("cron.get", { id: job.id });
+    const commandMarker = `COMMAND-${randomUUID()}`;
+    await turn(
+      `Call automations exactly once with action=run and jobId=${job.id}. Report the returned error; do not retry or use another interface.`,
+      commandMarker,
+    );
+    const commandEvidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: commandMarker,
+      toolName: "automations",
+      expectedArguments: { action: "run", jobId: job.id },
+      resultPattern: `Automation not found: ${job.id}`,
+    });
+    assert.deepEqual(await client.request("cron.get", { id: job.id }), commandBefore);
+    assert.equal(await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath), false);
+    await client.request("cron.run", { id: job.id, mode: "force" });
+    await waitFor(
+      "human command positive control",
+      async () =>
+        (await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath)) || undefined,
+    );
+    proof.modelTurns.push({
+      kind: "command-run-denied",
+      ...commandEvidence,
+      jobId: job.id,
+      rejectingOwner: "caller scope",
+      unchangedAfterModel: true,
+      humanCommandSucceeded: true,
+    });
+
+    const password = await diagnosticGatewayPassword(topology);
+    const forwarding = await startGatewayPortForward(
+      topology.gatewayPlacement,
+      openShellGatewayName(topology.agent.id),
+    );
+    context.after(() => forwarding.stop());
+    for (const [tool, args, expectedStatus] of [
+      ["openclaw", {}, 404],
+      [
+        "message",
+        { action: "set-profile", channel: "matrix", displayName: "must-not-change" },
+        403,
+      ],
+    ]) {
+      const response = await fetch(`${forwarding.url}/tools/invoke`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${password}`, "content-type": "application/json" },
+        body: JSON.stringify({ tool, args, sessionKey }),
+      });
+      const result = await response.json();
+      assert.equal(response.status, expectedStatus);
+      if (expectedStatus === 403) {
+        assert.match(result.error?.message ?? "", /Gateway tool policy denies/);
+      }
+      proof.directInvocationProbes.push({ tool, action: args.action, status: response.status });
+    }
+    context.diagnostic(JSON.stringify(proof));
+  },
+);
 
 test(
   "OpenShell enforces provider delivery and authenticated Codex exposure",
