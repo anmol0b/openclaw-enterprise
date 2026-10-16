@@ -2117,7 +2117,7 @@ async function prepareProductionInstallation(
     // Automatic enrollment egress belongs to the Driver's Codex runtime provider. The native
     // verification bridge must admit only its Node executable and exact Gateway endpoint.
     configuration.drivers.sandbox.configuration.policy.networkPolicies.push({
-      name: "workspace-node-enrollment",
+      name: "native-bridge-node-enrollment",
       binaries: [{ path: "/usr/local/bin/node" }],
       endpoints: [
         {
