@@ -56,6 +56,7 @@ import {
   CredentialWithdrawalRefusedError,
   DependencyUnavailableError,
   SandboxRevisionUnsupportedError,
+  SandboxRepositoryRecipientUnverifiedError,
   ScopeViolationError,
   TransientDependencyError,
   WorkClaimLostError,
@@ -1536,8 +1537,12 @@ export class ControllerWorker {
     }
     try {
       this.compute.validateRepositoryCredentials(revision.harness, revision.sandboxDriverId);
-    } catch {
-      throw new RepositoryCredentialAuthorityError("REPOSITORY_RUNTIME_UNSUPPORTED");
+    } catch (error) {
+      throw new RepositoryCredentialAuthorityError(
+        error instanceof SandboxRepositoryRecipientUnverifiedError
+          ? error.code
+          : "REPOSITORY_RUNTIME_UNSUPPORTED",
+      );
     }
   }
 
@@ -1696,7 +1701,12 @@ export class ControllerWorker {
     let prepared = context;
     if (revision.repositoryCredentials !== undefined) {
       const repositoryCredentials = await this.repositoryCredentials.prepare(claim, revision);
-      prepared = { ...context, repositoryCredentials };
+      prepared = {
+        ...context,
+        repositoryCredentials,
+        verifyRepositorySessionRelease: (binding) =>
+          this.repositoryCredentials.verifyRelease(claim, revision, binding),
+      };
       await this.assertRepositoryAuthority(claim, revision);
       this.repositoryCredentials.validate(revision);
     }
@@ -1732,7 +1742,7 @@ export class ControllerWorker {
         prepared.repositoryCredentials,
         missing,
       );
-      prepared = { ...context, repositoryCredentials };
+      prepared = { ...prepared, repositoryCredentials };
       await this.assertRepositoryAuthority(claim, revision);
       this.repositoryCredentials.validate(revision);
       observation = await this.withClaimHeartbeat(claim, () =>

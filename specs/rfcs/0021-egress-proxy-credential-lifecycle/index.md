@@ -22,10 +22,10 @@ Replace `CredentialGatewayDriver` with the `credential_proxy` Installation capab
 
 The deployment selects an egress implementation; it does not separately select an authentication mechanism. Protection is an explicit admission decision, independent of how many credentials are configured.
 
-| Mode | What it means |
-|---|---|
-| **Unprotected** · minimal CI or simple local development | OCE knows the Agent exists but does not authenticate or govern its direct requests. No managed route, clone, or provider credential. Asking for one fails admission, rather than silently using ambient credentials. |
-| **Protected** · OpenShell, in production or locally | Authenticate the whole Agent execution, prevent direct egress, and authorize each operation at the admitted level of protection. A route may explicitly require no provider credential; zero allowed routes means deny all. Failure to establish protection never selects unprotected mode. |
+| Mode                                                     | What it means                                                                                                                                                                                                                                                                               |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Unprotected** · minimal CI or simple local development | OCE knows the Agent exists but does not authenticate or govern its direct requests. No managed route, clone, or provider credential. Asking for one fails admission, rather than silently using ambient credentials.                                                                        |
+| **Protected** · OpenShell, in production or locally      | Authenticate the whole Agent execution, prevent direct egress, and authorize each operation at the admitted level of protection. A route may explicitly require no provider credential; zero allowed routes means deny all. Failure to establish protection never selects unprotected mode. |
 
 ## Two levels of protection
 
@@ -48,3 +48,9 @@ protected level with an unprotected execution.
 3. **Send the read.** Credential Proxy binds the request and reply to their origin, checks current authority before material access and again before sending, and protects the response. Withdrawal racing the final check may not stop that send.
 
 [Request protocol and failure semantics](protocol.md#capture-and-authorize-a-request) · [Verification and migration](security.md)
+
+A metadata read is not a Git clone or push. For the developer workflow, the
+[repository broker](../../../docs/reference/repository-credentials/prepared-native-git.md)
+checks native Git requests and uses a separately granted, already prepared installation
+token. Git verifies TLS to that broker. This path requires its own admission and
+recipient guarantees; it is not evidence that an OpenShell release satisfies them.

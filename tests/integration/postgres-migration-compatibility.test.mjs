@@ -1678,6 +1678,7 @@ test(
       [59, "prePreparedGitHubEgress"],
       [60, "preCredentialFreeMetadata"],
       [61, "preRevisionHarnessAuthShape"],
+      [62, "prePreparedRepositoryGit"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -1965,6 +1966,7 @@ test(
       [59, "prePreparedGitHubEgress"],
       [60, "preCredentialFreeMetadata"],
       [61, "preRevisionHarnessAuthShape"],
+      [62, "prePreparedRepositoryGit"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -2055,6 +2057,7 @@ test(
       [59, "prePreparedGitHubEgress"],
       [60, "preCredentialFreeMetadata"],
       [61, "preRevisionHarnessAuthShape"],
+      [62, "prePreparedRepositoryGit"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });

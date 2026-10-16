@@ -391,6 +391,10 @@
                         "label": "Push Guardrail"
                       },
                       {
+                        "page": "reference/repository-credentials/prepared-native-git",
+                        "label": "Native Git with a Prepared Credential"
+                      },
+                      {
                         "page": "reference/public-github-reads",
                         "label": "Public GitHub Reads"
                       }

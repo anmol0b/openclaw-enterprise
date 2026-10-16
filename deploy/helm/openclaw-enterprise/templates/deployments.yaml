@@ -142,11 +142,13 @@ spec:
                   items:
                     - key: {{ $.Values.repositoryCredentials.serviceConfigKey | quote }}
                       path: config.json
+              {{- if eq $.Values.repositoryCredentials.authority "github-app" }}
               - secret:
                   name: {{ $.Values.repositoryCredentials.appKeySecretName | quote }}
                   items:
                     - key: {{ $.Values.repositoryCredentials.appKeyKey | quote }}
                       path: private-key.pem
+              {{- end }}
               - secret:
                   name: {{ $.Values.repositoryCredentials.tlsSecretName | quote }}
                   items:
@@ -154,6 +156,28 @@ spec:
                       path: tls.crt
                     - key: tls.key
                       path: tls.key
+        {{- if eq $.Values.repositoryCredentials.authority "prepared-git" }}
+        - name: prepared-repository-owner
+          projected:
+            defaultMode: 288
+            sources:
+              - secret:
+                  name: {{ $.Values.repositoryCredentials.appKeySecretName | quote }}
+                  items:
+                    - key: {{ $.Values.repositoryCredentials.appKeyKey | quote }}
+                      path: private-key.pem
+              - secret:
+                  name: {{ $.Values.repositoryCredentials.preparedCustodySecretName | quote }}
+                  items:
+                    - {key: custody.key, path: custody.key}
+        {{- if $.Values.repositoryCredentials.preparedProviderCaConfigMapName }}
+        - name: prepared-repository-ca
+          configMap:
+            name: {{ $.Values.repositoryCredentials.preparedProviderCaConfigMapName | quote }}
+            items:
+              - {key: ca.crt, path: ca.crt}
+        {{- end }}
+        {{- end }}
         - name: repository-private
           emptyDir:
             medium: Memory
@@ -468,6 +492,16 @@ spec:
             - name: worker-api-access
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
+            {{- if eq $.Values.repositoryCredentials.authority "prepared-git" }}
+            - name: prepared-repository-owner
+              mountPath: /etc/openclaw/prepared-repository
+              readOnly: true
+            {{- if $.Values.repositoryCredentials.preparedProviderCaConfigMapName }}
+            - name: prepared-repository-ca
+              mountPath: /etc/openclaw/prepared-repository-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
             - name: repository-control
               mountPath: /run/openclaw/repository-control
             {{- end }}
@@ -562,6 +596,10 @@ spec:
             - {{ include "openclaw.repositoryCredentials.origin" $ | quote }}
             - --backend-id
             - {{ $.Values.repositoryCredentials.backendId | quote }}
+            {{- if eq $.Values.repositoryCredentials.authority "prepared-git" }}
+            - --authority
+            - prepared-git
+            {{- end }}
           securityContext:
             {{- include "openclaw.containerSecurity" $ | nindent 12 }}
           resources:
@@ -577,6 +615,13 @@ spec:
             - name: repository-inputs
               mountPath: /etc/openclaw/repository-inputs
               readOnly: true
+            {{- if eq $.Values.repositoryCredentials.authority "prepared-git" }}
+            {{- if $.Values.repositoryCredentials.preparedProviderCaConfigMapName }}
+            - name: prepared-repository-ca
+              mountPath: /etc/openclaw/prepared-repository-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
             - name: repository-private
               mountPath: /run/openclaw/repository-private
             - name: repository-control

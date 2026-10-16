@@ -41,10 +41,18 @@ export class PreparedGitHubPostgres {
   private readonly pool: PostgresPool;
   private readonly custodyKey: Buffer;
   private readonly issuerAuthority: string;
-  constructor(pool: PostgresPool, custodyKey: Buffer, issuerAuthority: string) {
+  // The two admission paths share custody, fencing and retirement, never their permissions.
+  private readonly owner: Readonly<{ active: string; adoption: string }>;
+  constructor(
+    pool: PostgresPool,
+    custodyKey: Buffer,
+    issuerAuthority: string,
+    owner: Readonly<{ active: string; adoption: string }> = { active, adoption: "prepared" },
+  ) {
     this.pool = pool;
     this.custodyKey = custodyKey;
     this.issuerAuthority = issuerAuthority;
+    this.owner = owner;
   }
 
   private seal(bytes: Uint8Array, a: Admission, id: string) {
@@ -53,14 +61,14 @@ export class PreparedGitHubPostgres {
     cipher.setAAD(aad(a, id));
     return Buffer.concat([nonce, cipher.update(bytes), cipher.final(), cipher.getAuthTag()]);
   }
-  private open(b: Buffer, a: Admission, id: string) {
+  protected open(b: Buffer, a: Admission, id: string) {
     const cipher = createDecipheriv("aes-256-gcm", this.custodyKey, b.subarray(0, 12));
     cipher.setAAD(aad(a, id));
     cipher.setAuthTag(b.subarray(-16));
     return Buffer.concat([cipher.update(b.subarray(12, -16)), cipher.final()]);
   }
 
-  private async transaction<T>(work: (c: PostgresClient) => Promise<T>): Promise<T> {
+  protected async transaction<T>(work: (c: PostgresClient) => Promise<T>): Promise<T> {
     const c = await this.pool.connect();
     let discard = false;
     try {
@@ -190,7 +198,7 @@ export class PreparedGitHubPostgres {
   // Request access pins the selected material and the earlier material/request deadline.
   // Null is background preparation: it may open material no longer eligible for requests.
   store(
-    source: Source,
+    source: { readonly key: { readonly source: { readonly id: string } } },
     access: Readonly<{
       deadlineAt: string;
       attemptId: string;
@@ -209,7 +217,7 @@ export class PreparedGitHubPostgres {
           throw new Error("Family mismatch.");
         }
         const { rows } = await c.query(
-          `SELECT admission, enabled, ${active} AS live
+          `SELECT admission, enabled, ${this.owner.active} AS live
           FROM ${families} f WHERE ${matching}
           AND admission->>'issuerAuthority'=$3 FOR ${change ? "UPDATE" : "SHARE"} OF f`,
           [key, source, this.issuerAuthority],
@@ -341,15 +349,16 @@ export class PreparedGitHubPostgres {
       // Only a matching claim returns ciphertext; this also works after source withdrawal.
       const { rows } = await c.query(
         `WITH due AS (
-           SELECT id, (admission->>'issuerAuthority' = $2) IS TRUE AS authorized
-           FROM ${attempts} WHERE custody='retire' AND (source_id=$1 OR $1 IS NULL)
+           SELECT id, (a.admission->>'issuerAuthority' = $2) IS TRUE AS authorized
+           FROM ${attempts} a JOIN ${families} f USING (source_id)
+           WHERE custody='retire' AND (source_id=$1 OR $1 IS NULL) AND f.source->>'adoption'=$3
            ORDER BY authorized DESC LIMIT 1 FOR UPDATE SKIP LOCKED
          ), claimed AS (
            UPDATE ${attempts} a SET custody='revoking' FROM due d WHERE a.id=d.id AND d.authorized
            RETURNING a.id, a.admission, a.sealed
          )
          SELECT d.authorized, c.id, c.admission, c.sealed FROM due d LEFT JOIN claimed c USING (id)`,
-        [key, this.issuerAuthority],
+        [key, this.issuerAuthority, this.owner.adoption],
       );
       const a = rows[0] as (AttemptRow & { authorized: boolean }) | undefined;
       if (!a || !a.authorized) {

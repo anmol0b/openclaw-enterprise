@@ -33,6 +33,7 @@ import { NativeIAMDriver, type NativeIAMStateStore } from "@openclaw-enterprise/
 import {
   AuthorizationDeniedError,
   DependencyUnavailableError,
+  SandboxRepositoryRecipientUnverifiedError,
   validateBackendDefinitions,
   type BundledPresetVersion,
   type NativeWorkerSupport,
@@ -70,6 +71,7 @@ import { readWorkspaceFilesApiKey } from "./workspace-files.ts";
 import { PostgresPreparedGitHubLifecycle } from "../drivers/repo/github/credentials/prepared-lifecycle.ts";
 import { GitHubRepoDriver } from "../drivers/repo/github/driver.ts";
 import { composeRepoDriver } from "./repository-credentials/platform.ts";
+import type { PreparedRepositoryGitConfiguration } from "../backends/repository-credentials/prepared-git-owner.ts";
 import { createOpenShellBackend, type OpenShellGateway } from "../backends/openshell.ts";
 import {
   OpenShellCredentialGatewayDriver,
@@ -141,6 +143,8 @@ export interface InstallationRuntimeDrivers {
   readonly preparedGitHub?: PostgresPreparedGitHubLifecycle;
   readonly pluginDriver?: PluginDriver;
   readonly repoDriver?: RepoDriver;
+  readonly preparedRepositoryGit?: PreparedRepositoryGitConfiguration;
+  readonly repositoryRegistry?: Awaited<ReturnType<typeof composeRepoDriver>>["repositoryRegistry"];
   readonly repositoryReceipt?: Readonly<{
     controlSocket: string;
     driverId: string;
@@ -473,7 +477,7 @@ export async function readHarnessNodeCa(
   return readPublicCaBundle(path);
 }
 
-async function readPublicCaBundle(path: string): Promise<string> {
+export async function readPublicCaBundle(path: string): Promise<string> {
   const bundle = await readFile(path, "utf8");
   const certificates = bundle.match(
     /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g,
@@ -572,9 +576,30 @@ export async function loadInstallationConfiguration(options: {
     serviceAccount = Object.freeze({ id: nonempty(selection.id, "drivers.service_account.id") });
   }
   let repoSelection: SelectedDriverConfiguration | undefined;
+  let preparedRepositoryGit: PreparedRepositoryGitConfiguration | undefined;
   if (drivers.repo !== undefined) {
     const selection = object(drivers.repo, "drivers.repo");
-    closed(selection, ["id", "configuration"], "drivers.repo");
+    closed(selection, ["id", "configuration", "preparedGitHub"], "drivers.repo");
+    if (selection.preparedGitHub !== undefined) {
+      const label = "drivers.repo.preparedGitHub";
+      const owner = object(selection.preparedGitHub, label);
+      closed(owner, ["custodyKeyPath", "privateKeyPath", "apiOrigin", "issuerCaPath"], label);
+      const privatePath = (key: string): string => {
+        const path = nonempty(owner[key], label + "." + key);
+        if (!isAbsolute(path)) {
+          throw new Error(label + "." + key + " requires an absolute mounted-file path.");
+        }
+        return path;
+      };
+      preparedRepositoryGit = Object.freeze({
+        custodyKeyPath: privatePath("custodyKeyPath"),
+        privateKeyPath: privatePath("privateKeyPath"),
+        ...(owner.apiOrigin === undefined
+          ? {}
+          : { apiOrigin: nonempty(owner.apiOrigin, label + ".apiOrigin") }),
+        ...(owner.issuerCaPath === undefined ? {} : { issuerCaPath: privatePath("issuerCaPath") }),
+      });
+    }
     repoSelection = selected(selection, "repo", "github", GitHubRepoDriver);
   }
   let credentialGateway: SelectedDriverConfiguration | undefined;
@@ -723,6 +748,9 @@ export async function loadInstallationConfiguration(options: {
   const sshCompute = computePackage === undefined && computeSelection.id === "compute-ssh";
   const kubernetesCompute = computePackage === undefined && !sshCompute;
   if (repoSelection !== undefined && (!kubernetesCompute || sandboxSelection !== undefined)) {
+    if (openShellBackend && sandboxSelection && sandboxSelection.package === undefined) {
+      throw new SandboxRepositoryRecipientUnverifiedError();
+    }
     throw new Error(
       "drivers.repo requires the bundled Kubernetes Compute Driver without a Sandbox Driver.",
     );
@@ -959,6 +987,7 @@ export async function loadInstallationConfiguration(options: {
         ...(sandboxDriver === undefined ? {} : { sandboxDriver }),
         ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
         ...(proxyDriver === undefined ? {} : { proxyDriver }),
+        ...(preparedRepositoryGit === undefined ? {} : { preparedRepositoryIngress: true }),
         nodeEnrollment: createGatewayNodeEnrollment(() =>
           readWorkspaceFilesApiKey(
             nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
@@ -1008,6 +1037,7 @@ export async function loadInstallationConfiguration(options: {
     createIAMDriver,
     ...(pluginDriver === undefined ? {} : { pluginDriver }),
     ...(repositoryRuntime ?? {}),
+    ...(preparedRepositoryGit ? { preparedRepositoryGit } : {}),
   });
 }
 

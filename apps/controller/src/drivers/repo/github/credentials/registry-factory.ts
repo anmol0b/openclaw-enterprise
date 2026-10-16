@@ -15,6 +15,22 @@ type RegistryFactoryOptions = Omit<GitHubFactoryOptions, "configuration" | "bind
 const identityKey = (binding: RepositoryCredentialGrantIdentity) =>
   JSON.stringify([binding.providerInstanceId, binding.repositoryId, binding.grantId]);
 
+/** Request-time GitHub App issuance cannot serve prepared-only Git grants. */
+export function validateGitHubAppRepositoryRegistry(
+  value: unknown,
+  expectedBackendId?: string,
+): GitHubRepositoryRegistry {
+  const registry = validateGitHubRepositoryRegistry(value, expectedBackendId);
+  if (
+    registry.repositories.some(({ namespaces }) =>
+      namespaces.some(({ transport }) => transport !== undefined),
+    )
+  ) {
+    throw new Error("invalid-configuration");
+  }
+  return registry;
+}
+
 /** Registry admission and routing share the same immutable configured repository set. */
 export function createGitHubRegistryDriverFactory(
   options: RegistryFactoryOptions,
@@ -23,7 +39,7 @@ export function createGitHubRegistryDriverFactory(
   if (options.authority?.kind !== "github-app") {
     throw new Error("invalid-configuration");
   }
-  const registry = validateGitHubRepositoryRegistry(options.registry);
+  const registry = validateGitHubAppRepositoryRegistry(options.registry);
   const grants = new Map<
     string,
     Readonly<{
@@ -31,7 +47,6 @@ export function createGitHubRegistryDriverFactory(
       profile: GitHubProfile;
       identity: RepositoryCredentialGrantIdentity;
       pushRefAllowlist?: readonly string[];
-      transport?: "git-only";
     }>
   >();
   const factories = new Map<string, GitHubDriverFactory>();
@@ -50,7 +65,6 @@ export function createGitHubRegistryDriverFactory(
           ...(policy.pushRefAllowlist === undefined
             ? {}
             : { pushRefAllowlist: policy.pushRefAllowlist }),
-          ...(policy.transport === undefined ? {} : { transport: policy.transport }),
         });
       }
     }
@@ -77,7 +91,6 @@ export function createGitHubRegistryDriverFactory(
           ...(grant.pushRefAllowlist === undefined
             ? {}
             : { pushRefAllowlist: grant.pushRefAllowlist }),
-          ...(grant.transport === undefined ? {} : { transport: grant.transport }),
         },
         configuration: {
           kind: "github-app",

@@ -32,6 +32,8 @@
     "tests/integration/postgres-transaction-commit.test.mjs",
     "tests/integration/postgres-static-egress.test.mjs",
     "tests/integration/postgres-prepared-github-lifecycle.test.mjs",
+    "tests/integration/postgres-prepared-repository-git-broker.test.mjs",
+    "tests/integration/postgres-prepared-github-git-use.test.mjs",
     "tests/integration/postgres-egress-send-receipts.test.mjs",
     "tests/integration/postgres-protected-credential-free.test.mjs"
   ],
@@ -260,6 +262,12 @@
         "before-send refuses a rejected prepared selection",
         "before-send refuses a withdrawn prepared family"
       ]
+    },
+    {
+      "path": "tests/integration/postgres-prepared-repository-git-broker.test.mjs"
+    },
+    {
+      "path": "tests/integration/postgres-prepared-github-git-use.test.mjs"
     },
     {
       "path": "tests/integration/postgres-static-egress.test.mjs"

@@ -133,6 +133,9 @@ function classifyReceipts(receipts, manifest) {
       if (receipts.length === 61) {
         return "preRevisionHarnessAuthShape";
       }
+      if (receipts.length === 62) {
+        return "prePreparedRepositoryGit";
+      }
       if (receipts.length === manifest.entries.length) {
         return "completed";
       }
@@ -242,6 +245,9 @@ function classifyReceipts(receipts, manifest) {
   }
   if (receipts.length === 61) {
     return "preRevisionHarnessAuthShape";
+  }
+  if (receipts.length === 62) {
+    return "prePreparedRepositoryGit";
   }
   if (receipts.length === manifest.entries.length) {
     return "completed";

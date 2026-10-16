@@ -11,6 +11,7 @@
     "tests/browser/console-agent-logs.test.mjs",
     "tests/browser/console-agent-repositories.test.mjs",
     "tests/integration/repository-credentials-github-prepared.test.mjs",
+    "tests/integration/skipper-private-git-origin.test.mjs",
     "tests/integration/repository-credentials-github-token.test.mjs",
     "tests/integration/repository-credentials-client-config.test.mjs",
     "tests/browser/console-agent-overview.test.mjs",
@@ -44,6 +45,9 @@
     },
     {
       "path": "tests/integration/repository-credentials-github-prepared.test.mjs"
+    },
+    {
+      "path": "tests/integration/skipper-private-git-origin.test.mjs"
     },
     {
       "path": "tests/integration/repository-credentials-github-token.test.mjs"

@@ -1814,9 +1814,18 @@ export const preparedGitHubFamilies = occSchema.table(
   (t) => [
     check(
       "prepared_github_families_check",
-      sql`(source #>> '{key,source,id}' = source_id AND source->>'adoption' = 'prepared'
-    AND source #>> '{grant,profile}' = 'metadata-read' AND admission->>'familyId' = source_id
-    AND jsonb_typeof(issuer->'backendRef') = 'object') IS TRUE`,
+      sql`(source #>> '{key,source,id}' = source_id AND (
+  (source->>'adoption' = 'prepared' AND source #>> '{grant,profile}' = 'metadata-read'
+   AND admission->>'familyId' = source_id AND jsonb_typeof(issuer->'backendRef') = 'object')
+  OR
+  (source->>'adoption' = 'prepared_repository_git' AND source_id = 'repository-git:' || (source #>> '{session,admissionId}')
+   AND source #>> '{grant,profile}' = 'git-ref-write' AND source #>> '{grant,pushRef}' LIKE 'refs/heads/%'
+   AND admission->>'familyId' = source_id AND admission->'grant' = source->'grant'
+   AND source #>> '{grant,id}' = source #>> '{session,grant,grantId}'
+   AND source #>> '{grant,repositoryId}' = source #>> '{session,grant,repositoryId}'
+   AND source #>> '{grant,isolationId}' = source #>> '{session,revisionId}'
+   AND issuer = '{"kind":"worker-mounted-github-app-key"}'::jsonb)
+)) IS TRUE`,
     ),
     index("prepared_github_families_due")
       .on(t.nextCheckAt)
@@ -1862,5 +1871,32 @@ export const preparedGitHubAttempts = occSchema.table(
       .on(t.sourceId)
       .where(sql`custody='current'`),
     index("prepared_github_attempts_family").on(t.sourceId),
+  ],
+);
+
+export const preparedRepositoryGitUses = occSchema.table(
+  "prepared_repository_git_uses",
+  {
+    exchangeId: uuid("exchange_id").primaryKey(),
+    admissionId: text("admission_id")
+      .notNull()
+      .references(() => repositorySessionAttempts.admissionId),
+    attemptId: uuid("attempt_id")
+      .notNull()
+      .references(() => preparedGitHubAttempts.id),
+    materialVersion: uuid("material_version").notNull(),
+    operation: text("operation").notNull(),
+    requestDigestSha256: text("request_digest_sha256").notNull(),
+    sendStartBy: timestamp("send_start_by", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    check(
+      "prepared_repository_git_uses_operation_check",
+      sql`${t.operation} IN ('advertise-upload-pack','upload-pack','advertise-receive-pack','receive-pack')`,
+    ),
+    check(
+      "prepared_repository_git_uses_request_digest_sha256_check",
+      sql`${t.requestDigestSha256} ~ '^[a-f0-9]{64}$'`,
+    ),
   ],
 );

@@ -9,6 +9,7 @@ import {
   RuntimeLogsSandboxNotFoundError,
   SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
+  SandboxRepositoryRecipientUnverifiedError,
 } from "@openclaw-enterprise/occ";
 import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
@@ -651,14 +652,13 @@ function codexRuntimeFiles(
     );
   }
   const selections = configurationObject(manifest.selections, "Codex plugin-runtime selections");
-  if (
-    manifest.kind !== "codex" ||
-    Object.keys(selections).length !== 0 ||
-    manifest.repositoryBrokerNetworkPolicy !== undefined
-  ) {
+  if (manifest.repositoryBrokerNetworkPolicy !== undefined) {
+    throw new SandboxRepositoryRecipientUnverifiedError();
+  }
+  if (manifest.kind !== "codex" || Object.keys(selections).length !== 0) {
     throw new SandboxRevisionUnsupportedError(
       "SANDBOX_HARNESS_UNSUPPORTED",
-      "OpenShell dedicated Codex does not yet support selected plugins or repository credentials.",
+      "OpenShell dedicated Codex does not yet support selected plugins.",
     );
   }
   const nodeCaEntries = requirements.environment.filter(
@@ -1475,6 +1475,17 @@ function networkPolicyBinaries(policy: OpenShellNetworkPolicyRule) {
   }));
 }
 
+function assertNoRepositoryEnrollment(context: SandboxHarnessContext): void {
+  const { requirements, revision } = context;
+  if (
+    revision.repositoryCredentials !== undefined ||
+    "repositorySession" in requirements ||
+    requirements.environment.some(({ name }) => name === "OPENCLAW_REPOSITORY_ENROLLMENT")
+  ) {
+    throw new SandboxRepositoryRecipientUnverifiedError();
+  }
+}
+
 function sandboxSpec(
   options: OpenShellSandboxDriverOptions,
   revision: Readonly<AgentRevision>,
@@ -2147,6 +2158,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   }
 
   async provisionHarness(context: SandboxHarnessContext): Promise<SandboxResourceRef> {
+    assertNoRepositoryEnrollment(context);
     this.requireOperatorWorkspaceMode("provision a Harness");
     if (!isDeepStrictEqual(context.requirements.proxyWiring?.plan, context.revision.egressPlan)) {
       throw new OpenShellSandboxConfigurationFailure(
@@ -2350,6 +2362,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     installation: EgressInstallation,
     release: (startupId: string) => Promise<Readonly<Record<string, unknown>>>,
   ): Promise<void> {
+    assertNoRepositoryEnrollment(context);
     if (
       !context.revision.egressPlan ||
       !isDeepStrictEqual(installation.plan, context.revision.egressPlan)

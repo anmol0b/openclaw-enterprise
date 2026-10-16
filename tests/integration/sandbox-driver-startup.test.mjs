@@ -1800,7 +1800,7 @@ test("OpenShell rejects unsupported or foreign Codex runtime providers before Sa
           selections: { slack: { enabled: true } },
         }),
       },
-      expected: /does not yet support selected plugins or repository credentials/,
+      expected: /does not yet support selected plugins/,
     },
     {
       name: "foreign provider collision",
@@ -3178,5 +3178,55 @@ test("OpenShell startup admits bracketed IPv6 endpoints the native gRPC consumer
     "http://127.0.0.1:80",
   ]) {
     await loadInstallationFile(t, endpointInstallation(endpoint));
+  }
+});
+
+test("installation refuses OpenShell repository credentials before reading session or provider inputs", async (t) => {
+  const configuration = sandboxInstallation();
+  const id = "repository-credentials";
+  configuration.backend.push({
+    id: "github-primary",
+    type: "github",
+    configuration: { registryPath: "/absent/repositories.json" },
+    drivers: { repo: id },
+  });
+  configuration.drivers.repo = {
+    id,
+    configuration: {
+      controlSocket: "/absent/control.sock",
+      publicCaPath: "/absent/ca.pem",
+      sessionDurationSeconds: 600,
+    },
+    preparedGitHub: {
+      custodyKeyPath: "/absent/custody",
+      privateKeyPath: "/absent/app-key.pem",
+    },
+  };
+  await assert.rejects(loadInstallationFile(t, configuration), {
+    code: "SANDBOX_REPOSITORY_RECIPIENT_UNVERIFIED",
+  });
+});
+
+test("OpenShell refuses repository provision and enrollment before any gateway or release call", async () => {
+  const gateway = workspaceGatewayClient();
+  const driver = openShellDriver(gateway);
+  const refusal = { code: "SANDBOX_REPOSITORY_RECIPIENT_UNVERIFIED" };
+  let releases = 0;
+  for (const select of [
+    ({ revision }) => (revision.repositoryCredentials = {}),
+    ({ requirements }) => (requirements.repositorySession = {}),
+    ({ requirements: { environment } }) =>
+      environment.push({ name: "OPENCLAW_REPOSITORY_ENROLLMENT", value: "{}" }),
+  ]) {
+    const { context, revision, requirements } = codexSandboxFixture(driver);
+    const input = { ...context, revision, requirements };
+    select(input);
+    await assert.rejects(driver.provisionHarness(input), refusal);
+    await assert.rejects(
+      driver.enrollHarness(input, {}, () => releases++),
+      refusal,
+    );
+    assert.equal(releases, 0);
+    assert.deepEqual(gateway.calls, []);
   }
 });

@@ -2,7 +2,7 @@ import { immutableCopy, isNonEmptyString, isPositiveSafeInteger } from "@opencla
 import { isComputePreparationFailureEvidence } from "@openclaw-enterprise/contracts";
 import type { RuntimeFailureEvidence } from "@openclaw-enterprise/contracts";
 
-import { ScopeViolationError } from "../errors.ts";
+import { SandboxRepositoryRecipientUnverifiedError, ScopeViolationError } from "../errors.ts";
 import { runtimeFailureCause } from "../runtime-failure-cause.ts";
 
 export { runtimeFailureCause };
@@ -677,6 +677,8 @@ function deploymentErrorMessage(code: string): string {
       return "The Agent Gateway refused its own CLI as unauthorized. Check that the Agent's Configuration sets gateway.auth.password to OPENCLAW_GATEWAY_PASSWORD (Enable gateway password access), then deploy again.";
     case "KUBERNETES_API_UNAVAILABLE":
       return "The Kubernetes API was still unavailable at the deployment deadline.";
+    case "SANDBOX_REPOSITORY_RECIPIENT_UNVERIFIED":
+      return SandboxRepositoryRecipientUnverifiedError.description;
     case "SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED":
       return "The Sandbox Driver cannot deliver Secret-backed environment variables to the Harness.";
     case "SANDBOX_HARNESS_UNSUPPORTED":

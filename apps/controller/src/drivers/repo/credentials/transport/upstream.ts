@@ -106,10 +106,19 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
       if (context.signal.aborted) {
         throw new Error("cancelled");
       }
+      // Prepared materials have a short send-start window. Establish verified TLS
+      // without queuing HTTP bytes, then enter the gate at our first application write.
+      const afterTls = plan.bindRequestDigest === true;
+      let tlsReady!: () => void;
+      let tlsFailed!: (error: Error) => void;
+      const connected = new Promise<void>((resolve, reject) => {
+        tlsReady = resolve;
+        tlsFailed = reject;
+      });
+      void connected.catch(() => {});
       const responseReady = new Promise<IncomingMessage>((resolve, reject) => {
         try {
-          outbound = context.gate.dispatch(cancel, () => {
-            dispatched = true;
+          const connect = () => {
             const req = httpsRequest(
               {
                 protocol: "https:",
@@ -131,15 +140,35 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
                 resolve(response);
               },
             );
-            req.once("error", () => reject(new Error("upstream-failed")));
-            req.once("close", () => resolveSocket());
+            req.once("error", () => {
+              const error = new Error("upstream-failed");
+              reject(error);
+              if (afterTls) {
+                tlsFailed(error);
+              }
+            });
+            req.once("close", () => {
+              if (afterTls) {
+                tlsFailed(new Error("upstream-closed"));
+              }
+              resolveSocket();
+            });
             req.once("socket", (socket) => {
               socket.once("secureConnect", () => {
                 stopConnect?.();
+                if (afterTls) {
+                  tlsReady();
+                }
               });
             });
             return req;
-          });
+          };
+          outbound = afterTls
+            ? connect()
+            : context.gate.dispatch(cancel, () => {
+                dispatched = true;
+                return connect();
+              });
         } catch {
           reject(new Error("dispatch-denied"));
         }
@@ -154,6 +183,15 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
       stopInput = options.clock.schedule(plan.limits.inputMs, cancel);
       if (!outbound) {
         throw new Error("dispatch-denied");
+      }
+      if (afterTls) {
+        await connected;
+        const req = outbound;
+        context.gate.dispatch(cancel, () => {
+          // Once this write starts, an error is a possible dispatch; never replay it.
+          dispatched = true;
+          req.flushHeaders();
+        });
       }
       const wire = new ByteLimit(plan.limits.inputWireBytes, inputStall.reset);
       const decoded = new ByteLimit(plan.limits.inputDecodedBytes, inputStall.reset);
@@ -287,6 +325,10 @@ export function createUpstreamSender(options: UpstreamSenderOptions): ExchangeSe
       context.signal.removeEventListener("abort", cancel);
       if (!outbound) {
         resolveSocket();
+      } else if (!dispatched) {
+        // No HTTP data was queued. Close the TLS connection, preserving the caller's
+        // socket so the broker can report a definite pre-dispatch refusal.
+        stopUpstream();
       }
       // A completed response and agent:false close the socket. Failed work is destroyed.
       await Promise.allSettled(pending);

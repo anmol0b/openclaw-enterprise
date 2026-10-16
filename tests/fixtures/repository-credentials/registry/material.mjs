@@ -36,7 +36,6 @@ export async function createRegistryMaterial(
             ...(entry.pushRefAllowlist === undefined
               ? {}
               : { pushRefAllowlist: entry.pushRefAllowlist }),
-            ...(entry.transport === undefined ? {} : { transport: entry.transport }),
           },
         ],
       })),

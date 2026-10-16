@@ -1694,6 +1694,70 @@ test(
 );
 
 test(
+  "prepared Git broker Helm selection omits App credentials and preserves TLS/control",
+  tooling,
+  async () => {
+    const { stdout } = await render({
+      ...repositoryCredentialValues,
+      "repositoryCredentials.authority": "prepared-git",
+      "repositoryCredentials.preparedCustodySecretName": "test-git-custody",
+      "repositoryCredentials.preparedProviderCaConfigMapName": "test-git-provider-ca",
+    });
+    const objects = await resources(stdout);
+    assert.equal(
+      objects.some(
+        ({ kind, metadata }) =>
+          kind === "NetworkPolicy" &&
+          metadata.name === "openclaw-enterprise-repository-credentials-ingress",
+      ),
+      false,
+      "ordinary repository ingress would add its broad peer grant to the prepared broker",
+    );
+    const preparedIngress = objects.find(
+      ({ kind, metadata }) =>
+        kind === "NetworkPolicy" &&
+        metadata.name === "openclaw-enterprise-prepared-repository-ingress",
+    );
+    assert.deepEqual(preparedIngress.spec.ingress, []);
+    const pod = objects.find(
+      (object) =>
+        object.kind === "Deployment" && object.metadata.name === "openclaw-enterprise-worker",
+    ).spec.template.spec;
+    const broker = pod.containers.find(({ name }) => name === "repository-credentials");
+    assert.deepEqual(broker.args.slice(-2), ["--authority", "prepared-git"]);
+    const owner = "prepared-repository-owner";
+    assert.deepEqual(
+      [...pod.containers, ...(pod.initContainers ?? [])]
+        .filter(({ volumeMounts }) => volumeMounts?.some(({ name }) => name === owner))
+        .map(({ name }) => name),
+      ["worker"],
+    );
+    assert.deepEqual(
+      pod.volumes
+        .find(({ name }) => name === owner)
+        .projected.sources.map(({ secret }) => secret.name),
+      [repositoryCredentialValues["repositoryCredentials.appKeySecretName"], "test-git-custody"],
+    );
+    assert.ok(broker.volumeMounts.some(({ name }) => name === "prepared-repository-ca"));
+    const inputs = pod.volumes.find(({ name }) => name === "repository-inputs");
+    assert.deepEqual(
+      inputs.projected.sources.map(({ secret }) => secret.name),
+      ["repository-config", "repository-tls"],
+    );
+    assert.ok(broker.volumeMounts.some(({ name }) => name === "repository-control"));
+    assert.ok(broker.volumeMounts.some(({ name }) => name === "repository-registry"));
+    assert.equal(
+      broker.volumeMounts.some(({ name }) => /issuer|app-key|custody/.test(name)),
+      false,
+    );
+    await assert.rejects(
+      render({ ...repositoryCredentialValues, "repositoryCredentials.authority": "unknown" }),
+      /authority must be github-app or prepared-git/,
+    );
+  },
+);
+
+test(
   "repository credential Helm packaging derives the broker origin from Service settings",
   tooling,
   async () => {

@@ -497,6 +497,14 @@
       "tag": "0062_revision_harness_auth_shape",
       "breakpoints": true,
       "sha256": "38a647118a3ecc0f676ba7773e9a88da75a05780bd9b185fe09fe1ef2ed22cb5"
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1787000000063,
+      "tag": "0063_prepared_repository_git",
+      "breakpoints": true,
+      "sha256": "5fbb2769ec51c46a48c4e6dd9102baba46d71321b39c4176cdd864e1ad178575"
     }
   ],
   "initialSchemaStates": {
@@ -524,7 +532,7 @@
     "main": "bd490d16dd23ec1ea722bb370155e9454fb52187bd2b16cd8a0fe277e3e41bde",
     "repositoryCredentials": "5f9359057412199ea7a5659bdedbef664fb6da7bcd99d7a552f01a5782b904ea",
     "workspaceSetup": "3d7801c345eea875fb79adba4e04a4e2b24bad49ffe6ada62cc58117c5cce134",
-    "completed": "11fd573a43b9e6df5e05e94e2db0f5d9658b5d4ca1f68d72e56a416d148de841",
+    "completed": "0d8f7efdf96e48a45fe345107ef88b7678169d685d5b8403b784e304f8040d48",
     "repositoryRetention": "a66448129d9ae2adf076f1d7887d3c7151cdc68f635c6fac7984d4254604d074",
     "agentProvisioning": "baac9e369ace8610f96948c1a930e6387431b1d0a33cefa3893765e52f8f7a52",
     "backendCompleted": "a2ba6fc82fbf0047cea491efad4a9e58eacaed7c29ce8528accff331569c51dd",
@@ -558,7 +566,8 @@
     "prePreparedGitHubEgress": "7a30c3cc5d4b9d3b092eb06f98b30a99383cd81c88a15190f7207440ffbd26ee",
     "preCredentialFreeMetadata": "c72b49d9dc3af4c1f73b237cc1aff4578cdee0411cb3491201829983439901ca",
     "preRevisionHarnessAuthShape": "3d978f4cdc59d4d95af5f5b2e95ead0c345c74b8f1cd94fa8da7f4b0d00f1d10",
-    "preHeldAuthenticationSession": "153f6ef879f86781ce3355594b5dca10364fb6d118c079280655242459e041b8"
+    "preHeldAuthenticationSession": "153f6ef879f86781ce3355594b5dca10364fb6d118c079280655242459e041b8",
+    "prePreparedRepositoryGit": "11fd573a43b9e6df5e05e94e2db0f5d9658b5d4ca1f68d72e56a416d148de841"
   },
   "ledgerCatalogs": {
     "initialized": "62946da6b1fc2b06df09e97dda4cf1831f170a2f3d5ff35a9f107af206c425dc",

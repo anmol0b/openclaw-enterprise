@@ -59,8 +59,6 @@ export interface GitHubFactoryOptions {
     profile: GitHubTokenProfile;
     identity: RepositoryCredentialGrantIdentity;
     pushRefAllowlist?: readonly string[];
-    /** Registry-owned; only Git, with receive-pack checked against the admitted refs. */
-    transport?: "git-only";
   }>;
   readonly authority: GitHubAuthority;
   readonly gatewayOrigin: string;

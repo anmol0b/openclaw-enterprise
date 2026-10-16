@@ -163,14 +163,31 @@ test("GitHub factory snapshots a registry-selected write grant through session a
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const key = createGitHubKeyOwner({ privateKey, appId: configuration.appId, clock });
   resources.after(() => key.close());
-  const factory = createGitHubDriverFactory({
+  const factoryOptions = {
     configuration,
     binding: selection,
     authority: key,
     clock,
     gatewayOrigin: config.gateway.publicOrigin,
     limits: config.limits,
-  });
+  };
+  assert.throws(
+    () =>
+      createGitHubDriverFactory({
+        ...factoryOptions,
+        binding: { ...selection, transport: "git-only" },
+      }),
+    /invalid-binding/,
+  );
+  assert.throws(
+    () =>
+      createGitHubDriverFactory({
+        ...factoryOptions,
+        binding: { ...selection, profile: "git-ref-write" },
+      }),
+    /invalid-binding/,
+  );
+  const factory = createGitHubDriverFactory(factoryOptions);
 
   // Caller mutation cannot replace the selected profile or its opaque registry grant.
   selection.profile = "git-full";

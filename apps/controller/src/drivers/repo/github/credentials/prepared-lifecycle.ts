@@ -243,45 +243,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
 
   private async retire(familyId: string | null, outer: AbortSignal) {
     outer.throwIfAborted();
-    const candidate = await this.db.takeRetirement(familyId);
-    if (!candidate || candidate === "issuer-mismatch") {
-      return candidate ?? "idle";
-    }
-    let revoked = false;
-    const { bytes, admission: a, id } = candidate;
-    try {
-      const signal = AbortSignal.any([outer, AbortSignal.timeout(25_000)]);
-      const assertAdmitted = () => signal.throwIfAborted();
-      const attempt: AttemptContext = {
-        id,
-        signal,
-        action: "retire",
-        deadlineMonoMs: this.clock.monotonicNow() + 25_000,
-        assertAdmitted,
-        observeDispatch: assertAdmitted,
-        authority: {
-          sessionId: a.familyId,
-          providerInstanceId: a.grant.appId,
-          repositoryId: a.grant.repositoryId,
-          grantId: a.grant.id,
-        },
-      };
-      const response = await createProviderTransport(
-        this.apiOrigin,
-        this.ca,
-        this.clock,
-        a.grant,
-      ).revoke(bytes.toString(), attempt, () => {});
-      revoked = response.status === 204;
-      response.body.fill(0);
-    } finally {
-      bytes.fill(0);
-      await this.db.finishRetirement(id, revoked);
-    }
-    if (!revoked) {
-      throw new Error("Prepared GitHub token revocation is unconfirmed.");
-    }
-    return "retired" as const;
+    return retirePreparedGitHubToken(this.db, familyId, outer, this.apiOrigin, this.ca, this.clock);
   }
 
   startWorker(
@@ -369,4 +331,53 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
     this.custodyKey?.fill(0);
     this.repository = undefined;
   }
+}
+
+/** Retirement is shared by both background owners. An ambiguous attempt is never replayed. */
+export async function retirePreparedGitHubToken(
+  repository: PreparedGitHubPostgres,
+  familyId: string | null,
+  outer: AbortSignal,
+  apiOrigin: string,
+  ca: Uint8Array | undefined,
+  clock: ReturnType<typeof createSystemClock>,
+) {
+  const candidate = await repository.takeRetirement(familyId);
+  if (!candidate || candidate === "issuer-mismatch") {
+    return candidate ?? "idle";
+  }
+  let revoked = false;
+  const { bytes, admission: a, id } = candidate;
+  try {
+    const signal = AbortSignal.any([outer, AbortSignal.timeout(25_000)]);
+    const assertAdmitted = () => signal.throwIfAborted();
+    const attempt: AttemptContext = {
+      id,
+      signal,
+      action: "retire",
+      deadlineMonoMs: clock.monotonicNow() + 25_000,
+      assertAdmitted,
+      observeDispatch: assertAdmitted,
+      authority: {
+        sessionId: a.familyId,
+        providerInstanceId: a.grant.appId,
+        repositoryId: a.grant.repositoryId,
+        grantId: a.grant.id,
+      },
+    };
+    const response = await createProviderTransport(apiOrigin, ca, clock, a.grant).revoke(
+      bytes.toString(),
+      attempt,
+      () => {},
+    );
+    revoked = response.status === 204;
+    response.body.fill(0);
+  } finally {
+    bytes.fill(0);
+    await repository.finishRetirement(id, revoked);
+  }
+  if (!revoked) {
+    throw new Error("Prepared GitHub token revocation is unconfirmed.");
+  }
+  return "retired" as const;
 }

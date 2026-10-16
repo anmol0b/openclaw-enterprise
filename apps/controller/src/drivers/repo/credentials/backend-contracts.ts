@@ -120,6 +120,8 @@ export interface RequestPlan {
   readonly responsePolicy: ResponsePolicy;
   /** When set, the complete request body is buffered and must pass before dispatch. */
   readonly inputPolicy?: (body: Uint8Array) => InputVerdict;
+  /** Bind the validated complete request to a one-use prepared material selection. */
+  readonly bindRequestDigest?: true;
 }
 /**
  * `true` admits the body; `false` refuses it as 400 `unsupported-request`; a refusal
@@ -165,3 +167,26 @@ export interface RepositoryBackendFactory {
   ): RepositoryBackend;
   unauthenticated(head: RequestHead): Readonly<{ kind: "challenge"; realm: string }> | Denied;
 }
+
+/** An exchange capability, with no provider acquisition, retention or retirement methods. */
+export interface PreparedRepositoryBackend {
+  readonly binding: RepositoryCredentialGrantIdentity;
+  plan(request: SessionAuthenticatedRequest): RequestPlan | Denied;
+  authorize(
+    request: RequestPlan,
+    requestDigestSha256: string,
+    bounds: Bounds,
+  ): Promise<
+    Readonly<{
+      headers: HeaderFields;
+      /** Checked synchronously at the actual upstream request start. */
+      assertSendStart(): void;
+    }>
+  >;
+}
+
+export interface PreparedRepositoryBackendFactory extends Omit<RepositoryBackendFactory, "create"> {
+  createPrepared(authority: AuthorityIdentity): PreparedRepositoryBackend;
+}
+
+export type RepositoryServiceFactory = RepositoryBackendFactory | PreparedRepositoryBackendFactory;

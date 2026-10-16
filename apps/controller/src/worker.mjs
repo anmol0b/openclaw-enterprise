@@ -1,10 +1,12 @@
 import { unlink, writeFile } from "node:fs/promises";
 import { createPostgresPool, PostgresPlatformState } from "@openclaw-enterprise/occ";
+import { startPreparedGitHubGitOwner } from "./backends/repository-credentials/prepared-git-owner.ts";
 import { startRepositoryReceiptServer } from "./backends/repository-credentials/receipt-server.ts";
 import {
   loadInstallationConfiguration,
   loadOperationalLoggingConfiguration,
   loadStartupConfigurationSnapshot,
+  readPublicCaBundle,
 } from "./composition/installation-config.ts";
 import { PresetFileError } from "./composition/installation-presets.ts";
 import { createOccLogger, createWorkerLogEmitter, emitOccLogEvent } from "./logging.ts";
@@ -96,6 +98,7 @@ let metricsPool;
 let metricsListener;
 let metricsClosing;
 let receiptServer;
+let preparedRepositoryGit;
 let preparedGitHub;
 async function closeMetrics() {
   metricsClosing ??= (async () => {
@@ -154,6 +157,17 @@ try {
       ...drivers.repositoryReceipt,
       state: new PostgresPlatformState(pool),
     });
+    if (drivers.preparedRepositoryGit) {
+      const { issuerCaPath, ...owner } = drivers.preparedRepositoryGit;
+      preparedRepositoryGit = await startPreparedGitHubGitOwner({
+        ...drivers.repositoryReceipt,
+        ...owner,
+        ...(issuerCaPath ? { ca: Buffer.from(await readPublicCaBundle(issuerCaPath)) } : {}),
+        pool,
+        registry: drivers.repositoryRegistry,
+        report: (code) => emitOccLogEvent(logger, { event: "worker.error", code }),
+      });
+    }
   }
   let metrics;
   if (metricsSettings !== undefined) {
@@ -208,6 +222,7 @@ try {
       }
       try {
         try {
+          await preparedRepositoryGit?.close();
           await receiptServer?.close();
         } finally {
           await closeMetrics();
@@ -226,6 +241,7 @@ try {
   process.once("SIGINT", shutdown);
 } catch (error) {
   await preparedGitHub?.close().catch(() => {});
+  await preparedRepositoryGit?.close().catch(() => {});
   await receiptServer?.close().catch(() => {});
   await closeMetrics().catch(() => {});
   if (readinessPath !== undefined) {

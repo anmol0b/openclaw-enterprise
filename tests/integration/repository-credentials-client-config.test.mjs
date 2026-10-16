@@ -34,7 +34,6 @@ import {
 } from "../../apps/controller/src/drivers/repo/github/credentials/client/native-git.ts";
 import { readRuntimeRepositoryManifest } from "../../apps/controller/src/drivers/repo/github/credentials/client/manifest.ts";
 import { createNativeClientMaterial } from "../fixtures/repository-credentials/clients.mjs";
-import { gatewayRequest } from "../fixtures/repository-credentials/service.mjs";
 import { startRegistryCredentialServiceFixture } from "../fixtures/repository-credentials/registry.mjs";
 import { socketDirectory } from "../helpers/socket-directory.mjs";
 import {
@@ -888,121 +887,6 @@ test(
     );
   },
 );
-
-test("Git-only App session clones, pulls and pushes while the broker denies other refs and APIs", async (t) => {
-  const allowedRef = "refs/heads/review/skipper-qualification";
-  const fixture = await startRegistryCredentialServiceFixture(t, {
-    gateway: { listen: "127.0.0.1:0", publicOrigin: "https://localhost" },
-    autoOpen: false,
-    repositories: [
-      {
-        repositoryRef: "review-repository",
-        repositoryId: "73",
-        repository: "fixture/repository",
-        profiles: ["git-write"],
-        profile: "git-write",
-        transport: "git-only",
-        pushRefAllowlist: [allowedRef],
-      },
-      {
-        repositoryRef: "other-repository",
-        repository: "fixture/other",
-        repositoryId: "74",
-      },
-    ],
-  });
-  const [{ repositoryRef, git: origin, github }, other] = fixture.repositories;
-  const { opened } = await fixture.open(repositoryRef);
-  const material = await createNativeClientMaterial(t, [
-    {
-      opened,
-      repositoryRef,
-      publicCa: fixture.tls.ca,
-    },
-  ]);
-  const proxy = await loopbackBrokerTunnel(t, fixture);
-  const env = gitEnvironment(material.root, { https_proxy: proxy });
-  const cwd = await temporaryDirectory(t);
-  const invoke = (args) => run("/usr/bin/git", args, { cwd, env });
-  const remote = opened.client.gitRemote;
-  const main = await origin.ref("refs/heads/main");
-  await invoke(["clone", remote, "."]);
-  await writeFile(join(cwd, "review.txt"), "A change for review\n");
-  await invoke(["add", "review.txt"]);
-  await invoke([
-    "-c",
-    "user.name=Review Fixture",
-    "-c",
-    "user.email=review@example.test",
-    "commit",
-    "-m",
-    "Prepare review",
-  ]);
-  const head = (await invoke(["rev-parse", "HEAD"])).stdout.trim();
-  assert.notEqual(head, main);
-  await invoke(["push", "origin", "HEAD:" + allowedRef]);
-  assert.equal(await origin.ref(allowedRef), head);
-  // A new checkout reads the pushed content through the broker, independent of local objects.
-  await invoke(["clone", remote, "reader"]);
-  await invoke(["-C", "reader", "pull", "--ff-only", "origin", allowedRef]);
-  assert.equal((await invoke(["-C", "reader", "rev-parse", "HEAD"])).stdout.trim(), head);
-  assert.equal(await readFile(join(cwd, "reader/review.txt"), "utf8"), "A change for review\n");
-
-  // Send a complete command section but no objects. The broker must reject even this
-  // request before it reaches the origin; neither an origin refusal nor a client hook suffices.
-  const gitAuth = "Basic " + Buffer.from("gateway-session:" + opened.bearer).toString("base64");
-  const apiAuth = "Bearer " + opened.bearer;
-  const gitPath = "/fixture/repository.git/";
-  const command = main + " " + "1".repeat(40) + " refs/heads/main";
-  const pkt = (command.length + 4).toString(16).padStart(4, "0") + command + "0000";
-  const receives = () => origin.trace.filter((e) => e.path.endsWith("/git-receive-pack")).length;
-  assert.equal(receives(), 1);
-  const send = (target, options) => gatewayRequest({ ...fixture, opened }, target, options);
-  const denied = await send(gitPath + "git-receive-pack", {
-    method: "POST",
-    headers: {
-      authorization: gitAuth,
-      "content-type": "application/x-git-receive-pack-request",
-    },
-    rawBody: pkt,
-  });
-  assert.equal(receives(), 1, "forbidden receive-pack reached the origin");
-  assert.equal(denied.status, 400, "refused by the broker");
-  const [issued] = github.issuesOfTokens;
-  assert.deepEqual(issued.repositoryIds, [73]);
-  assert.deepEqual(issued.permissions, { metadata: "read", contents: "write" });
-
-  const info = "info/refs?service=git-upload-pack";
-  const requests = origin.trace.length;
-  const attempts = github.authenticationAttempts.length;
-  const wrongRepo = await send("/fixture/other.git/" + info, {
-    headers: { authorization: gitAuth },
-  });
-  assert.equal(wrongRepo.status, 400);
-  assert.equal(other.git.trace.length, 0);
-  assert.equal(other.github.authenticationAttempts.length, 0);
-  for (const [target, body] of [
-    ["/graphql", { query: "mutation { __typename }" }],
-    ["/repos/fixture/repository/git/refs", { ref: allowedRef, sha: head }],
-    ["/repos/fixture/repository/pulls", { title: "not allowed" }],
-  ]) {
-    const reply = await send(target, {
-      method: "POST",
-      headers: { authorization: apiAuth, "content-type": "application/json" },
-      body,
-    });
-    assert.equal(reply.status, 400, target);
-  }
-  fixture.service.close(opened.session.sessionId);
-  const closed = await send(gitPath + info, { headers: { authorization: gitAuth } });
-  assert.equal(closed.status, 401);
-  assert.equal(origin.trace.length, requests);
-  assert.equal(github.authenticationAttempts.length, attempts);
-  assert.equal(await origin.ref("refs/heads/main"), main);
-  t.diagnostic(
-    "Independent Git readback " + head + ", unchanged main " + main + ", one origin receive-pack",
-  );
-});
 
 describe("repository credential client configuration", { concurrency: 2 }, () => {
   for (const registration of cases) {

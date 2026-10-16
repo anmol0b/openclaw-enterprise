@@ -139,6 +139,7 @@ import {
   configurationSettingMessage,
   CredentialWithdrawalRefusedError,
   DependencyUnavailableError,
+  SandboxRepositoryRecipientUnverifiedError,
   imageReferenceProblem,
   keyedSettingPath,
   requireOpenClawRoster,
@@ -247,6 +248,10 @@ import {
   type RepositoryMaterialSpec,
   type ResolvedRepositoryMaterialSpec,
 } from "./repository-material.ts";
+import {
+  reconcilePreparedRepositoryIngress,
+  type PreparedRepositoryIngressOwner,
+} from "./repository-compute-ingress.ts";
 import {
   RepositoryMaterialStore,
   completeKubernetesList,
@@ -3134,6 +3139,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   });
   private readonly options: KubernetesComputeDriverOptions;
   private readonly sandboxDriver: SandboxDriver | undefined;
+  private readonly preparedRepositoryIngress: boolean;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
   private readonly proxyDriver: CredentialProxyDriver | undefined;
   private readonly nodeEnrollment: GatewayNodeEnrollment | undefined;
@@ -3508,6 +3514,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       readonly implementation?: string;
       readonly lifecycleDrivers?: readonly Driver[];
       readonly sandboxDriver?: SandboxDriver;
+      readonly preparedRepositoryIngress?: true;
       readonly credentialGatewayDriver?: CredentialGatewayDriver;
       readonly proxyDriver?: CredentialProxyDriver;
       readonly nodeEnrollment?: GatewayNodeEnrollment;
@@ -3525,6 +3532,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       this.requiresAgentRuntimeCredentials = true;
     }
     this.sandboxDriver = selection.sandboxDriver;
+    this.preparedRepositoryIngress = selection.preparedRepositoryIngress === true;
     if (selection.credentialGatewayDriver !== undefined && selection.sandboxDriver === undefined) {
       throw new ConfigurationFailure(
         "The Credential Gateway Driver requires a paired Sandbox Driver.",
@@ -3779,6 +3787,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
         "Repository credential delivery is not supported by the experimental two-cluster profile.",
       );
     }
+    // Repository authority is admitted before a session can be prepared or delivered.
+    if (this.sandboxDriver?.implementation === "openshell") {
+      throw new SandboxRepositoryRecipientUnverifiedError();
+    }
     if (
       this.options.runtime === undefined ||
       this.options.network.repositoryCredentials === undefined ||
@@ -3797,11 +3809,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
   ): void {
     this.validateRepositoryCredentialSupport(sandboxDriverId);
     if (!(
-      (harness.id === "openclaw" && harness.mode === "embedded") ||
+      (!this.preparedRepositoryIngress &&
+        harness.id === "openclaw" &&
+        harness.mode === "embedded") ||
       (harness.id === "codex" && harness.mode === "dedicated")
     )) {
       throw new ConfigurationFailure(
-        "Repository credentials require an embedded OpenClaw or dedicated Codex Kubernetes runtime.",
+        this.preparedRepositoryIngress
+          ? "Prepared repository credentials require a dedicated Compute-owned Codex Harness."
+          : "Repository credentials require an embedded OpenClaw or dedicated Codex Kubernetes runtime.",
       );
     }
   }
@@ -5173,6 +5189,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         }
       }
       await this.lifecycle.beforeNamespaceDelete(namespace);
+      await this.reconcileRepositoryIngress({ namespace: name.name, namespaceId: namespace.id });
       if (this.sandboxDriver !== undefined) {
         await this.sandboxDriver.cleanup(await this.sandboxNamespaceContext(namespace, name));
       }
@@ -5765,6 +5782,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
       ),
       harnessAuth.credentialSource?.config.base_url,
     );
+    if (repositoryMaterial !== undefined) {
+      await this.prepareRevisionStage("repository_material", () =>
+        this.reconcileRepositoryIngress(
+          { namespace: namespace.name, namespaceId: revision.namespaceId, revision },
+          repositoryMaterial,
+        ),
+      );
+    }
     const hasEnabledPluginSelections =
       pluginRuntime !== undefined &&
       Object.values(pluginRuntime.runtime.selections).some((selection) => selection.enabled);
@@ -6176,7 +6201,9 @@ export class KubernetesComputeDriver implements ComputeDriver {
         pluginRuntime,
         [],
         workspaceSetup,
-        repositoryConsumer?.role === "agent" ? repositoryMaterial : undefined,
+        repositoryConsumer?.role === "agent" && sandboxDriver === undefined
+          ? repositoryMaterial
+          : undefined,
         nativeRuntime,
       );
       if (node !== undefined) {
@@ -6799,6 +6826,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
       ),
       harnessAuth.credentialSource?.config.base_url,
     );
+    if (repositoryMaterial !== undefined) {
+      await this.reconcileRepositoryIngress(
+        { namespace: namespace.name, namespaceId: revision.namespaceId, revision },
+        repositoryMaterial,
+      );
+    }
     const revisionName = `${agentName}-rev-${sha256Hex(revision.id, 12)}`;
     const configuration = this.gatewayConfiguration(
       admittedRevision,
@@ -6852,7 +6885,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         pluginRuntime,
         [],
         workspaceSetup,
-        repositoryMaterial,
+        sandboxDriver === undefined ? repositoryMaterial : undefined,
         nativeRuntime,
       );
     let providerEndpoint: SandboxHarnessEndpoint | undefined;
@@ -8118,6 +8151,29 @@ export class KubernetesComputeDriver implements ComputeDriver {
     };
   }
 
+  private async reconcileRepositoryIngress(
+    owner: PreparedRepositoryIngressOwner,
+    material?: ResolvedRepositoryMaterialSpec,
+  ): Promise<void> {
+    if (!this.preparedRepositoryIngress) {
+      return;
+    }
+    const clients = await this.clients("execution");
+    const broker = this.options.network.repositoryCredentials!;
+    const origin = material && repositoryCredentialBrokerOriginFromMaterial(material);
+    // Reads and the optimistic write use the normal deadline, with no automatic mutation retries.
+    await this.request(
+      () =>
+        reconcilePreparedRepositoryIngress({
+          clients,
+          broker,
+          owner,
+          ...(origin && { brokerHostname: origin.hostname }),
+        }),
+      { mutating: true },
+    );
+  }
+
   private async repositoryMaterialStore(
     namespace: KubernetesNamespaceAddress,
   ): Promise<RepositoryMaterialStore> {
@@ -8293,6 +8349,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
     revision: AgentRevision,
     namespace: KubernetesNamespaceAddress,
   ): Promise<void> {
+    await this.reconcileRepositoryIngress({
+      namespace: namespace.name,
+      namespaceId: revision.namespaceId,
+      revision,
+    });
     const owner = {
       namespaceId: revision.namespaceId,
       agentId: revision.agentId,

@@ -218,6 +218,7 @@ import {
   PluginPolicyValidationError,
   ProvisioningSecretDriverError,
   RepositoryOptionsUnavailableError,
+  SandboxRepositoryRecipientUnverifiedError,
   ResourceConflictError,
   ResourceStateConflictError,
   RuntimeCredentialsForbiddenByClusterError,
@@ -371,6 +372,7 @@ export {
   RuntimeLogsSandboxNotFoundError,
   SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
+  SandboxRepositoryRecipientUnverifiedError,
   ScopeViolationError,
   SecretBindingDriverError,
   ServiceAccountCredentialSecretExistsError,
@@ -1306,9 +1308,11 @@ function validateRepositoryTopology(
   }
   try {
     compute.validateRepositoryCredentials(harness, sandboxDriverId);
-  } catch {
+  } catch (error) {
     throw new ResourceStateConflictError(
-      "The selected Compute Driver cannot deliver repository credentials to this Harness topology.",
+      error instanceof SandboxRepositoryRecipientUnverifiedError
+        ? error.message
+        : "The selected Compute Driver cannot deliver repository credentials to this Harness topology.",
     );
   }
 }
@@ -2207,9 +2211,11 @@ export class OpenClawController {
     const sandboxDriverId = this.sandboxDriver()?.id;
     try {
       compute.validateRepositoryCredentialSupport(sandboxDriverId);
-    } catch {
+    } catch (error) {
       throw new RepositoryOptionsUnavailableError(
-        "The selected Compute Driver cannot support repository options with this composition.",
+        error instanceof SandboxRepositoryRecipientUnverifiedError
+          ? error.message
+          : "The selected Compute Driver cannot support repository options with this composition.",
       );
     }
     let driver: RepoDriver;

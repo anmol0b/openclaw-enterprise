@@ -116,7 +116,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
           : {}),
         repositoryCredentials: {
           namespace: options.repositoryNamespace ?? "credentials",
-          podLabels: { app: "credentials" },
+          podLabels: options.repositoryPodLabels ?? { app: "credentials" },
           port: 8443,
         },
         ...(options.publicGithubRead === undefined
@@ -140,7 +140,7 @@ async function fixture(mode = "embedded", nodeEnrollment, options = {}) {
         gatewayNodeSelector: { "oce-role": "control-plane" },
       },
     },
-    { nodeEnrollment },
+    { nodeEnrollment, preparedRepositoryIngress: options.preparedRepositoryIngress },
   );
   // Fixture failures are final; skip the driver's API retry waits.
   driver.waitBeforeRetry = async () => {};
@@ -696,6 +696,101 @@ test("Dedicated repository custody and networking belong only to Codex", async (
   assertGatewayIsolated(
     f.deployments().find((deployment) => deployment.metadata.name === gateway.metadata.name),
   );
+});
+
+test("prepared Git admits only the dedicated Harness peer and retires it without evicting another Agent", async () => {
+  const worker = {
+    "app.kubernetes.io/name": "openclaw-enterprise",
+    "app.kubernetes.io/instance": "oce",
+    "app.kubernetes.io/component": "worker",
+  };
+  const f = await fixture("dedicated", undefined, {
+    preparedRepositoryIngress: true,
+    repositoryPodLabels: worker,
+  });
+  const revision = f.revision;
+  assert.throws(
+    () => f.driver.validateRepositoryCredentials({ id: "openclaw", mode: "embedded" }),
+    /dedicated Compute-owned Codex Harness/,
+  );
+  const name = "openclaw-enterprise-prepared-repository-ingress";
+  const metadata = { name, namespace: "credentials", uid: "policy-uid", resourceVersion: "1" };
+  const start = { podSelector: { matchLabels: worker }, policyTypes: ["Ingress"], ingress: [] };
+  const savePolicy = (spec) => f.save({ kind: "NetworkPolicy", metadata, spec });
+  savePolicy(start);
+  f.save({
+    kind: "Service",
+    metadata: { namespace: "credentials", name: "git" },
+    spec: {
+      type: "ClusterIP",
+      selector: worker,
+      ports: [{ port: 443, targetPort: 8443, protocol: "TCP" }],
+    },
+  });
+
+  const networking = f.clients.networking;
+  const read = async () => (await networking.readNamespacedNetworkPolicy(metadata)).spec;
+  const prepare = () => f.driver.prepareRevision(revision, f.context([runtimeBinding()]));
+  const replace = networking.replaceNamespacedNetworkPolicy;
+  let writes = 0;
+  let other;
+  networking.replaceNamespacedNetworkPolicy = async (request) => {
+    if (request.name !== name) {
+      return replace(request);
+    }
+    const spec = structuredClone(request.body.spec);
+    if (++writes === 1) {
+      // Another Agent wins the update. Compute must preserve its exact peer on the conflict.
+      other = spec.ingress[0]._from[0];
+      other.podSelector.matchLabels["openclaw.dev/agent"] = "another-agent";
+      other.podSelector.matchLabels["openclaw.dev/revision"] = "another-revision";
+      metadata.resourceVersion = "2";
+      savePolicy(spec);
+      throw Object.assign(new Error("conflict"), { statusCode: 409 });
+    }
+    assert.equal(request.body.metadata.resourceVersion, metadata.resourceVersion);
+    metadata.resourceVersion = String(writes + 1);
+    savePolicy(spec);
+    if (writes === 2) {
+      throw new Error("lost policy response");
+    }
+    return networking.readNamespacedNetworkPolicy(metadata);
+  };
+  await assert.rejects(prepare(), /lost policy response/);
+  await prepare();
+  assert.equal(writes, 2, "a lost response must be resolved by observation, with no second grant");
+  f.markReady();
+  await f.driver.activateRevision(revision, f.context([runtimeBinding()]));
+  assert.equal(writes, 2);
+  const { ingress, ...destination } = await read();
+  assert.deepEqual(destination, { podSelector: { matchLabels: worker }, policyTypes: ["Ingress"] });
+  const expected = {
+    "openclaw.dev/agent": revision.agentId,
+    "openclaw.dev/namespace": revision.namespaceId,
+    "openclaw.dev/revision": revision.id,
+    "openclaw.dev/service-principal": revision.servicePrincipalId,
+    "openclaw.dev/workload-role": "agent",
+    "openclaw.dev/network-profile": "broad-egress-v1",
+  };
+  // Match both halves of Kubernetes' AND peer selector to the actual dedicated Pod template.
+  // This excludes gateways, sibling Agents, stale revisions and another Kubernetes namespace.
+  for (const [key, value] of Object.entries(expected)) {
+    assert.equal(f.consumer().spec.template.metadata.labels[key], value, key);
+  }
+  const peer = {
+    namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": f.namespace } },
+    podSelector: { matchLabels: expected },
+  };
+  const ports = [{ port: 8443, protocol: "TCP" }];
+  assert.deepEqual(ingress, [{ _from: [other, peer], ports }]);
+
+  f.observePods(() => f.setPods([]));
+  await f.driver.retireRevision(revision);
+  assert.deepEqual((await read()).ingress, [{ _from: [other], ports }]);
+
+  // Namespace retirement prunes the last peer. No peers must mean no rule, not an empty 'from'.
+  await f.driver.deleteNamespace({ id: revision.namespaceId, name: "Repository material tenant" });
+  assert.deepEqual((await read()).ingress, []);
 });
 
 test("Dedicated credential refresh preserves its enrolled workspace node", async () => {

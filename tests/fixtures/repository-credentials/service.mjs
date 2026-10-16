@@ -101,13 +101,9 @@ export async function startCredentialServiceFixture(t, options = {}) {
   }
 }
 
-export function gatewayRequest(
-  fixture,
-  target,
-  { method = "GET", body, rawBody, headers = {} } = {},
-) {
+export function gatewayRequest(fixture, target, { method = "GET", body, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const encoded = rawBody ?? (body === undefined ? undefined : Buffer.from(JSON.stringify(body)));
+    const encoded = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     const outgoing = request(
       {
         hostname: "127.0.0.1",

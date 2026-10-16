@@ -65,14 +65,18 @@ set this policy on the repository in its Namespace's credential registry:
 }
 ```
 
-The Agent uses the ordinary `git-write` binding and a scoped gateway session.
-The gateway requests a GitHub App installation token for this repository with
-`metadata: read` and `contents: write`. It keeps the token, admits only Git
-discovery, fetch and push for this repository, and checks every proposed ref
-before sending any part of a push to GitHub. REST and GraphQL are unavailable
-through this session. Omitting the allowlist is an error; an empty list denies all
-ref updates. Changing this transport or its refs changes the grant identity;
-close old sessions when narrowing access.
+Select the `github-prepared-git-registry` backend for this policy. The Agent uses
+the ordinary `git-write` binding and a scoped gateway session. The prepared
+credential owner mints the repository-scoped GitHub App installation token in
+the background with `metadata: read` and `contents: write`. The gateway admits
+only Git discovery, fetch and push for this repository, and checks every proposed
+ref before sending any part of a push to GitHub. REST and GraphQL are unavailable
+through this session. The request-time `github-app-registry` backend rejects this
+policy. The prepared backend requires exactly one branch ref; an omitted, empty,
+wildcard, or multi-ref allowlist is an error. Changing this transport or its ref
+changes the grant identity; close old sessions when narrowing access. See
+[Prepared native Git](prepared-native-git.md) for the credential lifecycle and
+deployment requirements.
 
 The branch restriction is enforced by this gateway, not encoded in the provider
 token. The allowlist admits creation, updates, force pushes and deletion of the
@@ -88,7 +92,8 @@ byte goes upstream and refuses the whole push with HTTP 400 when one ref fails,
 so `--no-verify` or a replaced `core.hooksPath` changes nothing. The client hook
 still gives the first, friendlier refusal. No admitted REST route writes refs,
 and GraphQL mutations are refused for this authority, so the allowlist bounds
-every ref write. Ordinary GitHub App grants without `transport: "git-only"` keep the hook-only behavior described below.
+every ref write. Ordinary GitHub App grants keep the hook-only behavior described
+below.
 
 The gateway also limits one push to 256 refs and refuses a larger push with
 HTTP 413 `push-ref-limit-exceeded`, even when every ref is allowed. The client
@@ -97,7 +102,8 @@ in batches of 256 or fewer.
 
 ## Limits
 
-For GitHub App grants without `transport: "git-only"`, this is a convenience guardrail, **not a security boundary**. Native hook/config
+For ordinary GitHub App grants, this is a convenience guardrail, **not a security
+boundary**. Native hook/config
 overrides, bypassing hooks, alternate clients, direct REST/GraphQL writes and
 merges are outside it. A custom `core.hooksPath` replaces the managed directory;
 custom hooks must explicitly chain the image dispatcher to retain the check.

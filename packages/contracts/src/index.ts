@@ -541,6 +541,10 @@ export interface ComputeRevisionContext {
   readonly recordEgressInstallation?: (installation: EgressInstallation) => Promise<void>;
   /** A fresh read of the still-authorized revision and its exact committed installation. */
   readonly currentEgressInstallation?: () => Promise<EgressInstallation | undefined>;
+  /** Verify the live Worker-owned grant and exact broker session immediately before releasing it. */
+  readonly verifyRepositorySessionRelease?: (
+    binding: RepositoryCredentialMaterialRef & { readonly deadlineWallMs: number },
+  ) => Promise<void>;
   readonly workspaceSetup?: Readonly<WorkspaceSetup>;
   readonly harnessAuth: ResolvedHarnessAuth;
   /** Non-model sources resolved again at dispatch, in admission order. */

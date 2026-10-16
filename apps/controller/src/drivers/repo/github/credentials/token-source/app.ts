@@ -15,7 +15,6 @@ export function createAppTokenSource(
     cleanup: "revocable",
     capabilityPolicy: () => githubCapabilityPolicy,
     graphql: () => "token-bounded",
-    // The bound registry policy, not the App token source, selects Git-only ref enforcement.
     pushRefAllowlist: undefined,
     bind({ state, custody, clock, profile, permissions }) {
       const exchange = createProviderTransport(apiOrigin, ca, clock, {

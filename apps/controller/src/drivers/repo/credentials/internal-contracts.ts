@@ -34,7 +34,11 @@ export interface RunningListeners {
 export interface ExchangeService {
   reserve(bearer: string, head: RequestHead, signal: AbortSignal): ExchangeRef | Denied;
   plan(exchange: ExchangeRef): RequestPlan;
-  execute(exchange: ExchangeRef, send: ExchangeSender): Promise<ExchangeOutcome>;
+  execute(
+    exchange: ExchangeRef,
+    send: ExchangeSender,
+    requestDigestSha256?: string,
+  ): Promise<ExchangeOutcome>;
   cancel(exchange: ExchangeRef): void;
 }
 /** One runtime owner supplies both views; no separate lifecycle is introduced. */

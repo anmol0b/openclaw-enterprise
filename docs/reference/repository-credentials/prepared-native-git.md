@@ -1,0 +1,47 @@
+# Native Git with a prepared GitHub App credential
+
+Use this profile when a dedicated Codex Agent needs to clone a private repository
+and push one review branch. It is an explicit Installation choice, not an upgrade
+of an existing metadata-read grant. Qualify the exact deployment before using a
+real provider credential.
+
+The first supported topology is the dedicated Codex Harness owned by Kubernetes
+Compute, with no Sandbox Driver selected. The Agent receives a short-lived OCE
+repository session, not a GitHub credential. Native Git verifies HTTPS to the OCE
+repository service. This topology does not provide OpenShell network isolation.
+An Installation that requires OpenShell must not fall back to it automatically.
+
+## What a request authorizes
+
+1. Grant one repository and one exact writable ref, such as
+   `refs/heads/review/skipper-123`, using the
+   [Git-only registry policy](push-ref-guardrail.md#enforce-the-ref-policy-at-the-gateway-for-a-github-app).
+2. An OCE worker prepares a repository-scoped installation token in the background.
+   Only that worker needs the App signing key and custody key. A Git request can use
+   eligible, committed material or fail; it cannot ask the worker to mint a token.
+3. The broker authenticates the Agent's session and checks the actual repository,
+   Git operation and proposed refs. It sends only after the worker authorizes that
+   use of the prepared credential. An authorization record is not a delivery receipt.
+
+Reads cover the repository, not just the review branch. GitHub's `contents: write`
+permission is not branch-scoped: protect important refs at GitHub independently,
+without an App bypass. This profile exposes Git fetch and push, not GitHub REST,
+GraphQL or pull-request creation.
+
+## Install and check
+
+Select `repositoryCredentials.authority: prepared-git` in the chart and
+`drivers.repo.preparedGitHub` in the Installation. Mount the signing and custody
+keys in the worker; do not copy them to the Agent or broker. OCE must be able to
+bind this repository session to the admitted revision and restrict broker ingress.
+If it cannot, do not fall back to an ambient token or grant broader broker access.
+
+Before team use, chat with the Agent, then use that same Agent to clone, fetch an
+independently known commit, and push a new commit to the allowed review ref. Read
+the exact commit back independently. In a disposable test repository, also show
+that the broker refuses another writable ref, rather than relying on a client hook.
+
+To withdraw access, remove the repository binding on the running Agent. Confirm a
+new authenticated fetch is denied and chat still works. Withdrawal cannot erase
+an existing clone or recall a push already sent. If the outcome of a push is
+unknown, inspect the remote ref before deciding what to do; do not replay it.

@@ -139,3 +139,27 @@ export function githubMetadataGrant(config: Readonly<Record<string, string>>): G
     profile: "metadata-read",
   };
 }
+
+/** Trusted broker to worker, once per validated Git exchange. Never sent to the Agent. */
+export interface PreparedGitHubUseRequest {
+  readonly providerInstanceId: string;
+  readonly repositoryId: string;
+  readonly grantId: string;
+  readonly sessionId: string;
+  readonly exchangeId: string;
+  readonly operation:
+    "advertise-upload-pack" | "upload-pack" | "advertise-receive-pack" | "receive-pack";
+  readonly requestDigestSha256: string;
+  /** The admitted full review ref, also required on reads to bind the policy. */
+  readonly pushRef: string;
+  readonly deadlineAt: string;
+}
+
+/** A possible disclosure, not evidence that GitHub received or performed the operation. */
+export interface PreparedGitHubUseResponse {
+  readonly value: string;
+  readonly sendStartBy: string;
+  readonly exchangeId: string;
+  readonly preparationAttemptId: string;
+  readonly materialVersion: string;
+}
