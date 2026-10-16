@@ -125,6 +125,7 @@ interface TrackedItem {
   argumentDeltas: string[];
   argumentBytes: number;
   completedArguments?: string;
+  textTails: string[];
 }
 
 class ResponsesStream {
@@ -157,9 +158,14 @@ class ResponsesStream {
       if (this.responseId !== undefined && id !== this.responseId) {
         return false;
       }
-      this.responseId = id;
       // The closed event schema binds the event name to this exact response status.
       this.terminal = status === "completed" || status === "failed" || status === "incomplete";
+      // The SDK initializes its output from this envelope and then appends items.
+      // A seeded initial output would make event indexes ambiguous.
+      if (this.responseId === undefined && !this.terminal && event.response.output.length !== 0) {
+        return false;
+      }
+      this.responseId = id;
       return protectedResponseOutput(event.response, this.policy.scan);
     }
     return "item" in event ? this.outputItem(event) : this.itemContent(event);
@@ -168,7 +174,12 @@ class ResponsesStream {
   private outputItem({ type, output_index, item }: ItemEvent): boolean {
     const tracked = this.items.get(output_index);
     if (type === "response.output_item.added") {
-      if (tracked || this.itemIds.has(item.id) || this.items.size >= 4096) {
+      if (
+        tracked ||
+        this.itemIds.has(item.id) ||
+        output_index !== this.items.size ||
+        this.items.size >= 4096
+      ) {
         return false;
       }
       this.itemIds.add(item.id);
@@ -178,6 +189,10 @@ class ResponsesStream {
         done: false,
         argumentDeltas: [],
         argumentBytes: 0,
+        textTails:
+          item.type === "message"
+            ? item.content.map((part) => part.text.slice(-this.policy.fragmentOverlap))
+            : [],
       });
       return (
         item.type !== "function_call" ||
@@ -217,7 +232,31 @@ class ResponsesStream {
     if (event.type.startsWith("response.custom_tool_call_input.")) {
       return item.type === "custom_tool_call";
     }
-    return item.type === "message";
+    if (item.type !== "message" || event.content_index === undefined) {
+      return false;
+    }
+    if (event.type === "response.content_part.added") {
+      // Added parts append in the SDK; accepting a duplicate or a gap would
+      // make the indexed delta target a different part than the one tracked.
+      if (event.content_index !== item.textTails.length || !event.part) {
+        return false;
+      }
+      item.textTails.push(event.part.text.slice(-this.policy.fragmentOverlap));
+      return true;
+    }
+    const previous = item.textTails[event.content_index];
+    if (previous === undefined) {
+      return false;
+    }
+    if (event.type === "response.output_text.delta" && event.delta !== undefined) {
+      const snapshot = previous + event.delta;
+      if (this.policy.leaked(snapshot)) {
+        return false;
+      }
+      item.textTails[event.content_index] = snapshot.slice(-this.policy.fragmentOverlap);
+    }
+    // Completion events do not replace the SDK's accumulated snapshot.
+    return true;
   }
 }
 

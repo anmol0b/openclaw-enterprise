@@ -777,6 +777,93 @@ test("Responses output text assembled across parts and messages cannot reveal se
   }
 });
 
+test("Responses incremental text snapshots cannot reveal selected material", async (t) => {
+  const f = await staticEgressFixture(t);
+  const wire = JSON.parse(
+    readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
+  );
+  const encode = (events) =>
+    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const events = (candidate, kind) => {
+    const [created, item, part, delta, ...rest] = structuredClone(wire.responseEvents);
+    const middle = Math.floor(candidate.length / 2);
+    const prefix = candidate.slice(0, middle);
+    const suffix = candidate.slice(middle);
+    if (kind === "item") {
+      item.item.content = [{ ...part.part, text: prefix }];
+      return [created, item, { ...delta, delta: suffix }, ...rest];
+    }
+    if (kind === "parts") {
+      return [
+        created,
+        item,
+        part,
+        { ...delta, delta: prefix },
+        { ...part, content_index: 1 },
+        { ...delta, content_index: 1, delta: "distraction" },
+        { ...delta, delta: suffix },
+        ...rest,
+      ];
+    }
+    if (kind === "duplicate") {
+      part.part.text = prefix;
+      return [
+        created,
+        item,
+        part,
+        { ...part, part: { ...part.part, text: "distraction" } },
+        { ...delta, delta: suffix },
+        ...rest,
+      ];
+    }
+    if (kind === "initial") {
+      created.response.output = [{ ...item.item, content: [{ ...part.part, text: prefix }] }];
+      return [created, item, part, { ...delta, delta: suffix }, ...rest];
+    }
+    part.part.text = prefix;
+    return [created, item, part, { ...delta, delta: suffix }, ...rest];
+  };
+  async function exchange(responseEvents) {
+    const captured = f.capture(wire.request);
+    const ready = (await f.resolve(captured)).ready;
+    assert.ok(ready);
+    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
+    f.setResponse({
+      status: 200,
+      contentType: "text/event-stream",
+      rawBody: encode(responseEvents),
+    });
+    return f.protect(captured, await f.send(captured, ready));
+  }
+  // The harmless final response cannot erase a credential exposed in an earlier
+  // SDK snapshot assembled from an added part and later indexed deltas.
+  for (const candidate of [
+    "synthetic-key-initial",
+    Buffer.from("synthetic-key-initial").toString("base64"),
+  ]) {
+    for (const kind of ["part", "item", "parts", "duplicate", "initial"]) {
+      assert.ok(
+        (await exchange(events(candidate, kind))).blocked,
+        `${kind} snapshot must be withheld`,
+      );
+    }
+  }
+  for (const kind of ["part", "item", "parts"]) {
+    const safe = events("ordinary response", kind);
+    assert.equal(
+      (await exchange(safe)).body.toString(),
+      encode(safe),
+      `benign ${kind} remains available`,
+    );
+  }
+  const laterProgress = events("ordinary response", "part");
+  const progress = structuredClone(laterProgress[0]);
+  progress.type = "response.in_progress";
+  progress.response.output = [structuredClone(laterProgress.at(-2).item)];
+  laterProgress.splice(2, 0, progress);
+  assert.equal((await exchange(laterProgress)).body.toString(), encode(laterProgress));
+});
+
 test("selected Codex Responses wire admits local tools and finite SSE while rejecting remote tools and unprotected events", async (t) => {
   const f = await staticEgressFixture(t);
   // Sanitized packaged 0.163.0-alpha.2 request and synthetic response consumed by that

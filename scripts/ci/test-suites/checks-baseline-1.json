@@ -382,7 +382,8 @@
     {
       "path": "tests/integration/static-egress.test.mjs",
       "expectedTests": [
-        "Responses output text assembled across parts and messages cannot reveal selected material"
+        "Responses output text assembled across parts and messages cannot reveal selected material",
+        "Responses incremental text snapshots cannot reveal selected material"
       ]
     },
     {

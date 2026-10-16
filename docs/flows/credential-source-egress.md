@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-16"
-last_updated_session: authoring-run/3c418cc2-68fe-4c9a-a34e-9ecb83372b88
+last_updated_session: authoring-run/92d1c2e7-e68d-4684-b8d1-8bfa0ed99a09
 ---
 
 # Protected credential request flow
@@ -251,8 +251,10 @@ The registry matches the original peer, request ID and exchange identity, and
 removes visible headers outside its allowlist. The provider
 policy parses bounded JSON or complete finite SSE using closed provider event
 schemas and rejects unsupported responses or selected-material reflection, including
-text deltas joined across item IDs as exposed by the Codex consumer. Indexed
-events must belong to an unfinished item. Supported function-call arguments are
+text deltas joined across item IDs as exposed by the Codex consumer, and the
+incremental text snapshots assembled for each output part by the Responses SDK.
+Added items and parts must have unambiguous indexes; indexed events must belong
+to an unfinished item. Supported function-call arguments are
 parsed once as bounded JSON, including their completed delta accumulation, before
 release. This does not recursively decode arbitrary string encodings. No SSE event
 is released early. The original deadline and 4 MiB limit still apply.
@@ -317,6 +319,8 @@ image compatibility.
 None.
 
 ## Changelog
+
+- 2026-10-16 01:00: Protect incremental Responses SDK text snapshots and reject ambiguous appended indexes. (authoring-run/92d1c2e7-e68d-4684-b8d1-8bfa0ed99a09 - ed532ec5496e87da37c086cf71949f12a17250c9)
 
 - 2026-10-16 00:27: Bound openings before proof and keep canceled operations charged until pending work settles. (authoring-run/3c418cc2-68fe-4c9a-a34e-9ecb83372b88 - 8df404d0635fa00e8d452cd0b846be3c68d3c4b0)
 

@@ -380,7 +380,8 @@ const response = object(
 
 // The stream needs only this projection of the closed wire shapes checked below.
 type ResponseOutputItem =
-  | { type: "message" | "reasoning" | "custom_tool_call" }
+  | { type: "message"; content: { type: "output_text"; text: string }[] }
+  | { type: "reasoning" | "custom_tool_call" }
   | { type: "function_call"; arguments: string };
 export type ItemEvent = {
   type: "response.output_item.added" | "response.output_item.done";
@@ -393,6 +394,8 @@ export type ItemContentEvent = {
   item_id: string;
   delta?: string;
   arguments?: string;
+  content_index?: number;
+  part?: { type: "output_text"; text: string };
 };
 export type ResponsesEvent = { type: string; sequence_number?: number } & (
   | { response: { id: string; status: string; output: ResponseOutputItem[] } }
