@@ -25,8 +25,22 @@ An Installation that requires OpenShell must not fall back to it automatically.
 
 Reads cover the repository, not just the review branch. GitHub's `contents: write`
 permission is not branch-scoped: protect important refs at GitHub independently,
-without an App bypass. This profile exposes Git fetch and push, not GitHub REST,
-GraphQL or pull-request creation.
+without an App bypass. The Git-only profile exposes fetch and push, not GitHub REST or GraphQL.
+
+## Let the Agent open a draft pull request
+
+If the task includes handing work to a reviewer, explicitly select
+`transport: git-and-draft-pr`, keep one exact writable review ref, and set
+`pullRequestBase: main` in the registry policy. The worker then requests
+`pull_requests: write` as well. GitHub does not limit that permission to drafts;
+the broker limits it to creating one draft from the review branch to the selected
+base. Later feedback and commits use ordinary Git on the same branch.
+
+The Agent uses `oce-github pr-create --draft` with the head, base, title, body
+file and a fresh operation ID. If the reply is lost, look for the draft at GitHub;
+do not submit another create. The receipt identifies the admitted Agent session,
+not the person who assigned the task. Use a trusted team for the initial trial;
+do not treat that receipt as per-person task authorization.
 
 ## Install and check
 
