@@ -373,9 +373,11 @@ try {
   failed = true;
   // File and line are useful on a failed guard. Never print values, runner or subprocess output.
   const location = String(error.stack).match(/skipper-prepared-git-installed\.mjs:\d+:\d+/)?.[0];
-  const detail = String(error.result?.stderr ?? error.message);
+  // The installer can report a failed stage on either stream. Publish only fixed categories.
+  const { stdout = "", stderr = error.message } = error.result ?? {};
+  const detail = stdout + "\n" + stderr;
   const category = detail.match(
-    /RTM_NEWADDR|bwrap|ImagePullBackOff|ErrImagePull|CrashLoopBackOff|timed out|deadline exceeded|connection refused|permission denied|not ready/i,
+    /RTM_NEWADDR|bwrap|ImagePullBackOff|ErrImagePull|CrashLoopBackOff|timed out|deadline exceeded|connection refused|permission denied|not ready|BackoffLimitExceeded|pre-install hooks failed|pre-upgrade hooks failed|catalog objects or effective grants differ/i,
   )?.[0];
   console.error(
     "Private Git acceptance failed: %s (%s, %s)",

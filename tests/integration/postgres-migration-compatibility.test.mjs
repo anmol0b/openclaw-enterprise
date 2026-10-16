@@ -1679,6 +1679,7 @@ test(
       [60, "preCredentialFreeMetadata"],
       [61, "preRevisionHarnessAuthShape"],
       [62, "prePreparedRepositoryGit"],
+      [63, "prePreparedRepositoryDraftPulls"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -1967,6 +1968,7 @@ test(
       [60, "preCredentialFreeMetadata"],
       [61, "preRevisionHarnessAuthShape"],
       [62, "prePreparedRepositoryGit"],
+      [63, "prePreparedRepositoryDraftPulls"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -2058,6 +2060,7 @@ test(
       [60, "preCredentialFreeMetadata"],
       [61, "preRevisionHarnessAuthShape"],
       [62, "prePreparedRepositoryGit"],
+      [63, "prePreparedRepositoryDraftPulls"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
@@ -2075,6 +2078,7 @@ test(
         // 0051's final GRANT runs after it dropped both withdrawal triggers.
         // Abort 0056 after its function was created, before the deferred trigger exists.
         const rollbackTag = [
+          [63, "GRANT"],
           [61, "ALTER TABLE"],
           [60, "CREATE FUNCTION"],
           [56, "GRANT"],
@@ -2155,6 +2159,11 @@ test(
         "INSERT INTO drizzle.__drizzle_migrations(hash,created_at) VALUES(repeat('f',64),9999999999999)",
       ],
       ["catalog-object", 25, "CREATE TABLE occ.unexplained(id integer)"],
+      [
+        "draft-pull-privilege",
+        64,
+        "GRANT DELETE ON occ.prepared_repository_draft_pulls TO occ_app",
+      ],
       ["ledger-grant", 25, "GRANT SELECT ON drizzle.__drizzle_migrations TO occ_app"],
     ];
     for (const [label, prefix, sql] of cases) {

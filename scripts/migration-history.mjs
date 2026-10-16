@@ -136,6 +136,9 @@ function classifyReceipts(receipts, manifest) {
       if (receipts.length === 62) {
         return "prePreparedRepositoryGit";
       }
+      if (receipts.length === 63) {
+        return "prePreparedRepositoryDraftPulls";
+      }
       if (receipts.length === manifest.entries.length) {
         return "completed";
       }
@@ -248,6 +251,9 @@ function classifyReceipts(receipts, manifest) {
   }
   if (receipts.length === 62) {
     return "prePreparedRepositoryGit";
+  }
+  if (receipts.length === 63) {
+    return "prePreparedRepositoryDraftPulls";
   }
   if (receipts.length === manifest.entries.length) {
     return "completed";
