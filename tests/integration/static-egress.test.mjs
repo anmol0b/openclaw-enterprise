@@ -716,6 +716,67 @@ test("V1 permits only the exact inert runtime rule and fences both policies befo
   assert.equal(f.providerRequests.length, 0, "send-side widening must not permit a provider send");
 });
 
+test("Responses output text assembled across parts and messages cannot reveal selected material", async (t) => {
+  const f = await staticEgressFixture(t);
+  const wire = JSON.parse(
+    readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
+  );
+  const template = wire.responseEvents.at(-1).response;
+  const message = (id, parts) => ({
+    type: "message",
+    id,
+    status: "completed",
+    role: "assistant",
+    content: parts.map((text) => ({ type: "output_text", text, annotations: [] })),
+  });
+  const output = (parts, acrossMessages) =>
+    acrossMessages
+      ? parts.map((text, index) => message(`msg_${index}`, [text]))
+      : [message("msg_0", parts)];
+  const encode = (events) =>
+    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  async function exchange(result, streaming) {
+    const request = streaming
+      ? wire.request
+      : { model: "fixture-model", input: "hello", store: false };
+    const captured = f.capture(request);
+    const ready = (await f.resolve(captured)).ready;
+    assert.ok(ready);
+    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
+    if (streaming) {
+      const events = structuredClone(wire.responseEvents);
+      // The deltas and completed item remain harmless. Only the response
+      // envelope contains the candidate, so delta protection cannot mask this test.
+      events.at(-1).response.output = result.output;
+      f.setResponse({ status: 200, contentType: "text/event-stream", rawBody: encode(events) });
+    } else {
+      f.setResponse({ status: 200, body: result });
+    }
+    return f.protect(captured, await f.send(captured, ready));
+  }
+  for (const streaming of [false, true]) {
+    for (const acrossMessages of [false, true]) {
+      for (const candidate of [
+        "synthetic-key-initial",
+        Buffer.from("synthetic-key-initial").toString("base64"),
+      ]) {
+        const midpoint = Math.floor(candidate.length / 2);
+        const parts = [candidate.slice(0, midpoint), candidate.slice(midpoint)];
+        assert.ok(
+          (await exchange({ ...template, output: output(parts, acrossMessages) }, streaming))
+            .blocked,
+          `split selected material must not be released (streaming=${streaming}, acrossMessages=${acrossMessages})`,
+        );
+      }
+      const safe = { ...template, output: output(["ordinary ", "response"], acrossMessages) };
+      assert.ok(
+        (await exchange(safe, streaming)).body,
+        `benign multipart output remains available (streaming=${streaming}, acrossMessages=${acrossMessages})`,
+      );
+    }
+  }
+});
+
 test("selected Codex Responses wire admits local tools and finite SSE while rejecting remote tools and unprotected events", async (t) => {
   const f = await staticEgressFixture(t);
   // Sanitized packaged 0.163.0-alpha.2 request and synthetic response consumed by that
@@ -787,7 +848,7 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
     output_index: 1,
   }));
   switched.splice(1, switched.length - 2, ...firstMessage, ...secondMessage);
-  switched.at(-1).response.output = [firstMessage.at(-1).item, secondMessage.at(-1).item];
+  // Keep the terminal snapshot harmless so only cross-item deltas trigger refusal.
   assert.ok(
     (await exchange(encode(switched))).blocked,
     "OutputTextDelta drops item IDs, so the consumer-observable concatenation must be scanned",

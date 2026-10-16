@@ -28,16 +28,30 @@ function protectedArguments(text: string, scan: Scan): boolean {
 
 export function protectedResponseOutput(value: unknown, scan: Scan): boolean {
   const output = asRecord(value)?.output;
-  return (
-    !Array.isArray(output) ||
-    output.every((entry: unknown) => {
-      const item = asRecord(entry);
-      return (
-        item?.type !== "function_call" ||
-        (typeof item.arguments === "string" && protectedArguments(item.arguments, scan))
-      );
-    })
-  );
+  if (!Array.isArray(output)) {
+    return true;
+  }
+  const text: string[] = [];
+  for (const entry of output) {
+    const item = asRecord(entry);
+    if (
+      item?.type === "function_call" &&
+      (typeof item.arguments !== "string" || !protectedArguments(item.arguments, scan))
+    ) {
+      return false;
+    }
+    if (item?.type === "message" && Array.isArray(item.content)) {
+      for (const entry of item.content) {
+        const part = asRecord(entry);
+        if (part?.type === "output_text" && typeof part.text === "string") {
+          text.push(part.text);
+        }
+      }
+    }
+  }
+  // Responses clients concatenate output_text across all message items without
+  // delimiters. Scan that bounded projection once, including split encodings.
+  return scan(text.join(""));
 }
 
 /** Inspect the entire bounded response before the provider releases its original bytes. */

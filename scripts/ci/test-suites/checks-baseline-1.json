@@ -380,7 +380,10 @@
       "path": "tests/conformance/url-authority.test.mjs"
     },
     {
-      "path": "tests/integration/static-egress.test.mjs"
+      "path": "tests/integration/static-egress.test.mjs",
+      "expectedTests": [
+        "Responses output text assembled across parts and messages cannot reveal selected material"
+      ]
     },
     {
       "path": "tests/integration/egress-enrollment.test.mjs"
