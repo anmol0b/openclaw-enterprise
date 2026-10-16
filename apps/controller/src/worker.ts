@@ -1587,6 +1587,8 @@ export class ControllerWorker {
           computeDriverId: this.compute.id,
           code: diagnostic.code,
           step: diagnostic.stage,
+          // Includes renewing the claim before calling Compute. This does not say the Driver ran.
+          candidatePreparationReached: this.preparedThisPass === revision.id,
           ...(diagnostic.errorClass === undefined ? {} : { errorClass: diagnostic.errorClass }),
           ...(diagnostic.message === undefined ? {} : { message: diagnostic.message }),
           ...(diagnostic.status === undefined ? {} : { status: diagnostic.status }),

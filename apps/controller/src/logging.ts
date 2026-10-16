@@ -45,6 +45,7 @@ const ALLOWED_FIELDS = new Set([
   "activationMs",
   "agentId",
   "attempt",
+  "candidatePreparationReached",
   "cause",
   "code",
   "computeDriverId",
@@ -314,6 +315,12 @@ function sanitizedEvent(
       key === "message" &&
       eventName !== "compute.preflight-warning" &&
       eventName !== "worker.compute-prepare-failed"
+    ) {
+      continue;
+    }
+    if (
+      key === "candidatePreparationReached" &&
+      (eventName !== "worker.compute-prepare-failed" || typeof value !== "boolean")
     ) {
       continue;
     }

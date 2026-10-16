@@ -323,6 +323,7 @@ test("Compute preparation diagnostics keep reviewed context and reject secret-be
     computeDriverId: "compute-kubernetes",
     code: "KUBERNETES_API_REJECTED",
     step: "gateway_deployment",
+    candidatePreparationReached: false,
     errorClass: "KubernetesApiError",
     status: 422,
     message: "The Kubernetes API rejected revision preparation.",
@@ -331,6 +332,7 @@ test("Compute preparation diagnostics keep reviewed context and reject secret-be
     event: "worker.compute-prepare-failed",
     code: "KUBERNETES_PREPARATION_FAILED",
     step: "sandbox_provision",
+    candidatePreparationReached: "token-that-must-not-log",
     message: "Bearer token-that-must-not-log",
   });
 
@@ -350,11 +352,13 @@ test("Compute preparation diagnostics keep reviewed context and reject secret-be
     computeDriverId: "compute-kubernetes",
     code: "KUBERNETES_API_REJECTED",
     step: "gateway_deployment",
+    candidatePreparationReached: false,
     errorClass: "KubernetesApiError",
     status: 422,
     message: "The Kubernetes API rejected revision preparation.",
   });
   assert.equal(Object.hasOwn(output.lines[1], "message"), false);
+  assert.equal(Object.hasOwn(output.lines[1], "candidatePreparationReached"), false);
   assert.equal(JSON.stringify(output.lines).includes("token-that-must-not-log"), false);
 });
 

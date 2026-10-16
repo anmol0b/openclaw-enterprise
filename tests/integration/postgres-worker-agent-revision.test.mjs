@@ -1648,6 +1648,7 @@ test(
       computeDriverId: fixture.compute.id,
       code: "KUBERNETES_API_REJECTED",
       step: "gateway_deployment",
+      candidatePreparationReached: true,
       errorClass: "KubernetesApiError",
       message: "The Kubernetes API rejected revision preparation.",
       status: 422,
