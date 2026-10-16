@@ -25,6 +25,7 @@ export const InvalidConfiguration = {
   ...story("invalidConfiguration"),
   name: "Invalid Configuration JSON",
 };
+export const ConfigurationChangedElsewhereMerged = story("configurationChangedElsewhereMerged");
 export const Admitted = story("admitted");
 export const RepositoryDraft = {
   ...story("repositoryDraft"),
@@ -38,10 +39,12 @@ export const DeploymentPending = story("deploymentPending");
 export const DeploymentDeferred = story("deploymentDeferred");
 export const DeploymentRetrying = story("deploymentRetrying");
 export const DeploymentRunning = story("deploymentRunning");
+export const DeploymentActivityLoading = story("deploymentActivityLoading");
 export const CurrentVersionDuringDeployment = story("currentVersionDuringDeployment");
 export const DeploymentFailed = story("deploymentFailed");
 export const DeploymentFailedLogsFromDraft = story("deploymentFailedLogsFromDraft");
 export const DeploymentModelProbeFailed = story("deploymentModelProbeFailed");
+export const DeploymentModelProbeFailedReadOnly = story("deploymentModelProbeFailedReadOnly");
 export const DeploymentFailedAfterSelection = story("deploymentFailedAfterSelection");
 export const DeploymentStopped = story("deploymentStopped");
 export const DeploymentSuperseded = story("deploymentSuperseded");
@@ -51,6 +54,8 @@ export const DiagnosticsSuccess = story("diagnosticsSuccess");
 export const DiagnosticsUnknown = story("diagnosticsUnknown");
 export const DiagnosticsUnavailable = story("diagnosticsUnavailable");
 export const RuntimeLogs = story("runtimeLogs");
+export const RuntimeLogsSlowFirstStatus = story("runtimeLogsSlowFirstStatus");
+export const RuntimeLogsSlowTabClick = story("runtimeLogsSlowTabClick");
 export const RuntimeLogsStatusTransition = story("runtimeLogsStatusTransition");
 export const RuntimeLogsStartupWarnings = story("runtimeLogsStartupWarnings");
 export const RuntimeLogsFilteredDownload = story("runtimeLogsFilteredDownload");

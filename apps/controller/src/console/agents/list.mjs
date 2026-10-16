@@ -110,6 +110,17 @@ export function message(error, mutation = false) {
       : "Service unavailable. The read could not be completed. Try again.";
 }
 
+// The API refused a Configuration update because another save moved its generation, which a
+// reread recovers from. Other Configuration conflicts, such as a provisioning reservation, carry
+// no such detail and a reread meets them again (finding 1511).
+export function isStaleGeneration(error) {
+  return (
+    error?.status === 409 &&
+    error.code === "RESOURCE_CONFLICT" &&
+    (error.detailPaths ?? []).includes("/expectedGeneration")
+  );
+}
+
 // A rejected write shows the API's own sentence, which names the field to fix (for example
 // an inline model credential); other failures keep the generic status text.
 export function rejectionMessage(error, mutation = false) {
@@ -141,7 +152,26 @@ export function renderAgentList(context) {
   const create = button("Create Agent", () => context.navigate("agents/new"), {
     className: "primary",
   });
-  view.replaceChildren(element("div", { className: "agent-toolbar" }, search, create), rows);
+  const createNote = element(
+    "p",
+    { className: "muted", role: "status", hidden: true },
+    "Your access does not include creating Agents in this Namespace.",
+  );
+  view.replaceChildren(
+    element("div", { className: "agent-toolbar" }, search, create),
+    createNote,
+    rows,
+  );
+  // Gating only: the API still authorizes creation, so an unknown answer keeps the control.
+  void context.request(`${namespacePath(context.namespaceId)}/permissions`).then(
+    (permissions) => {
+      if (context.isCurrent() && permissions?.agents?.create === false) {
+        create.disabled = true;
+        createNote.hidden = false;
+      }
+    },
+    () => {},
+  );
   function render() {
     const query = search.value.trim().toLowerCase();
     const matches = items
@@ -180,7 +210,9 @@ export function renderAgentList(context) {
     );
     const body = element("tbody");
     for (const item of matches) {
-      const deployment = element("td", {}, "Reading deployment…");
+      // The cell keeps its column's width once its read lands, and its outcome link and one
+      // note line fit the two lines the Agent cell already gives the row (finding 1488).
+      const deployment = element("td", { className: "agent-deployment" }, "Reading deployment…");
       if (!deployments.has(item.id)) {
         deployments.set(
           item.id,
@@ -216,25 +248,21 @@ export function renderAgentList(context) {
             ),
           );
           const neutral = neutralDeploymentOutcome(result.status);
-          if (neutral) {
-            deployment.append(
-              element(
-                "span",
-                { className: "resource-id" },
-                `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.`,
-              ),
-            );
-          } else if (result.status.status === "failed") {
-            deployment.append(
-              element(
-                "span",
-                { className: "resource-id" },
-                result.status.error?.message ?? "Deployment failed.",
-              ),
-            );
-          }
+          const failure =
+            !neutral && result.status.status === "failed"
+              ? (result.status.error?.message ?? "Deployment failed.")
+              : null;
+          // A long failure fits one line; its title and the Agent page give the whole text.
           deployment.append(
-            element("span", { className: "resource-id" }, "Serving health unverified"),
+            element(
+              "span",
+              {
+                className: "resource-id agent-deployment-note",
+                ...(failure ? { title: failure } : {}),
+              },
+              failure ??
+                (neutral ? `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.` : "Serving health unverified"),
+            ),
           );
         })
         .catch((error) => {
