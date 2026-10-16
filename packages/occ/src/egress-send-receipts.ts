@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   EgressExecution,
   EgressRef,
+  EgressSourceKey,
   EgressMaterialEvidence,
   EgressSelectionEvidence,
 } from "@openclaw-enterprise/contracts";
@@ -136,6 +137,18 @@ function ref(value: unknown): EgressRef {
   return { id: text(item.id), generation: item.generation };
 }
 
+const sourceFields = ["installationId", "namespaceId", "source", "backend", "provider"] as const;
+
+function projectSource(source: Record<string, unknown>): EgressSourceKey {
+  return {
+    installationId: text(source.installationId),
+    namespaceId: text(source.namespaceId),
+    source: ref(source.source),
+    backend: ref(source.backend),
+    provider: ref(source.provider),
+  };
+}
+
 function material(value: unknown): EgressMaterialEvidence {
   const item = object(value);
   const common = [
@@ -148,13 +161,7 @@ function material(value: unknown): EgressMaterialEvidence {
     "materialVersion",
     "usableUntil",
   ];
-  const source = exact(item.source, [
-    "installationId",
-    "namespaceId",
-    "source",
-    "backend",
-    "provider",
-  ]);
+  const source = exact(item.source, sourceFields);
   if (item.kind === "prepared_github") {
     exact(item, [
       ...common,
@@ -177,13 +184,7 @@ function material(value: unknown): EgressMaterialEvidence {
     }
     return {
       kind: "prepared_github",
-      source: {
-        installationId: text(source.installationId),
-        namespaceId: text(source.namespaceId),
-        source: ref(source.source),
-        backend: ref(source.backend),
-        provider: ref(source.provider),
-      },
+      source: projectSource(source),
       binding: ref(item.binding),
       grantHash: text(item.grantHash),
       isolationId: text(item.isolationId),
@@ -218,13 +219,7 @@ function material(value: unknown): EgressMaterialEvidence {
   }
   return {
     kind: "static",
-    source: {
-      installationId: text(source.installationId),
-      namespaceId: text(source.namespaceId),
-      source: ref(source.source),
-      backend: ref(source.backend),
-      provider: ref(source.provider),
-    },
+    source: projectSource(source),
     binding: ref(item.binding),
     grantHash: text(item.grantHash),
     isolationId: text(item.isolationId),
@@ -246,20 +241,7 @@ function selection(value: unknown): EgressSelectionEvidence {
     return material(value);
   }
   const item = exact(selected, ["kind", "source", "binding", "grantHash", "isolationId"]);
-  const src = exact(item.source, [
-    "installationId",
-    "namespaceId",
-    "source",
-    "backend",
-    "provider",
-  ]);
-  const source = {
-    installationId: text(src.installationId),
-    namespaceId: text(src.namespaceId),
-    source: ref(src.source),
-    backend: ref(src.backend),
-    provider: ref(src.provider),
-  };
+  const source = projectSource(exact(item.source, sourceFields));
   if (
     source.provider.id !== "credential-free-repository-metadata" ||
     source.provider.generation !== 1
