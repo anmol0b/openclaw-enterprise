@@ -70,11 +70,30 @@ func (app *application) agentRevision(
 	probe := newerRevisionWithRuntime(client, namespace, agentID, active)
 	switch {
 	case probe.hasRuntime:
-		noticef(
-			notices,
-			"notice: reading revision %s, newer than the active revision %s and not yet active; pass --revision %s for the active revision",
-			probe.latest, active, active,
-		)
+		// Revision lists are permission-filtered, so a candidate with Pods can be
+		// older than the active one: name its order only when exact active
+		// metadata proves it (finding 1513). Harness status alone redirects only
+		// when that metadata proves the candidate newer.
+		switch order, _ := revisionOrder(client, namespace, agentID, active, probe.number); order {
+		case "newer":
+			noticef(
+				notices,
+				"notice: reading revision %s, newer than the active revision %s and not yet active; pass --revision %s for the active revision",
+				probe.latest, active, active,
+			)
+		case "older":
+			noticef(
+				notices,
+				"notice: reading revision %s, older than the active revision %s, because it still has Pods; pass --revision %s for the active revision",
+				probe.latest, active, active,
+			)
+		default:
+			noticef(
+				notices,
+				"notice: reading revision %s, another readable revision that still has Pods, not the active revision %s; pass --revision %s for the active revision",
+				probe.latest, active, active,
+			)
+		}
 		return probe.latest, probe.description, nil
 	case probe.err != nil:
 		// The runtime probe needs more permission than reading logs, so a log
@@ -143,7 +162,7 @@ func newerRevisionWithRuntime(client *occclient.Client, namespace, agentID, acti
 			number <= 1<<53-1 && number > activeNumber
 	}
 	return newerRevision{
-		latest: latest, hasRuntime: hasRuntime,
+		latest: latest, number: number, hasRuntime: hasRuntime,
 		description: description,
 	}
 }

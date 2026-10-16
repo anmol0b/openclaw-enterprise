@@ -143,7 +143,7 @@ revision number than the exact active revision; unreadable or invalid active
 metadata retains the active revision. Otherwise they read the active revision, else
 the latest revision. They print the revision they
 read to stderr; a reader without Agent `operate` cannot probe runtime status, so the
-notice names the other readable revision to pass. It calls that revision newer or
+notice names the other readable revision to pass. Notices call any other revision newer or
 older only when the active revision's readable number proves it. `runtime` accepts `-o table|json|yaml`
 and needs Agent `operate` and `read` plus `read` on the revision. Its table output
 ends with each Pod's Events (`POD`, `CONTAINER`, `TYPE`, `REASON`, `COUNT`,
