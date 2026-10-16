@@ -6562,7 +6562,7 @@ test("dedicated Codex admission rejects settings its Gateway entrypoint cannot r
     );
   }
   assert.throws(
-    () => driver.validateHarnessAuth(codex, oauth, { ...base, cron: "off" }),
+    () => driver.validateHarnessAuth(codex, auth, { ...base, cron: "off" }),
     /Configuration setting cron must be an object/,
     "the dedicated baseline now disables triggers even without a Codex plugin entry",
   );
