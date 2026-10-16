@@ -31,6 +31,10 @@ export async function waitFor(description, observe, timeout = 120_000) {
 
 /** Operate only the supplied fresh, local Compute installation and its synthetic model. */
 export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
+  // Keep the controller key in this client, never in the environment inherited by Git or kubectl.
+  const serviceKey = process.env.OCC_TEST_SKIPPER_COMPUTE_SERVICE_KEY;
+  delete process.env.OCC_TEST_SKIPPER_COMPUTE_SERVICE_KEY;
+  assert.ok(serviceKey && !/\s/.test(serviceKey));
   const input = JSON.parse(await readFile(inputPath));
   const {
     apiOrigin,
@@ -50,9 +54,6 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
   assert.equal(modelContainer, "oce-first-agent-smoke-model");
   assert.match(clusterUID, /^[a-f0-9-]{36}$/);
   assert.equal(input.sourceCommit, (await exec("git", ["rev-parse", "HEAD"])).stdout.trim());
-  const serviceKey = process.env.OCC_TEST_SKIPPER_COMPUTE_SERVICE_KEY;
-  delete process.env.OCC_TEST_SKIPPER_COMPUTE_SERVICE_KEY;
-  assert.ok(serviceKey && !/\s/.test(serviceKey));
   const kc = async (...args) =>
     (
       await exec("kubectl", ["--kubeconfig", kubeconfig, "--context", context, ...args], {
