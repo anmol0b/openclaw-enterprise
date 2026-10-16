@@ -82,8 +82,11 @@ a standalone `<proposed_plan>` line starts a nonnested hidden block ending at a
 standalone `</proposed_plan>` line or end of text. Tag lines use Unicode White_Space
 trimming and are removed with their newlines. Inline tags and unmatched closing
 tags remain text.
-Both modes must be safe, including raw data inside hidden markup. These
-projections do not reinterpret function-call argument data.
+Check the Plan itself, too. Codex extracts a completed Plan before removing
+citations, but can build a streamed Plan from deltas across several assistant
+items. If pending parser tails could change their order, withhold the response.
+These checks cover the named views of one finite response, not arbitrary future
+client transformations; they do not reinterpret function-call argument data.
 
 ## Installation configuration
 

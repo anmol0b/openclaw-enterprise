@@ -256,26 +256,19 @@ to repeat the business request.
 `apps/controller/src/drivers/egress-proxy/openai-provider.ts:protectedResponse`,
 `apps/controller/src/drivers/egress-proxy/openai-responses-stream.ts:protectedResponsesStream`
 
-The response frame carries the complete bounded response on the accepted exchange.
-The registry matches the original peer, request ID and exchange identity, and
-removes visible headers outside its allowlist. The provider
-policy parses bounded JSON or complete finite SSE using closed provider event
-schemas and rejects unsupported responses or selected-material reflection, including
-text deltas joined across item IDs as exposed by the Codex consumer, and the
-incremental text snapshots assembled for each output part by the Responses SDK.
-`openai-responses-stream.ts:assistantText` joins message parts without delimiters
-for both response envelopes and independent added/done items. The stream also
-collects the active assistant message's joined seed and subsequent ID-free deltas
-in chunks. It scans the joined run once before a new message, reasoning item,
-item completion, or terminal/end boundary discards it. The whole response remains
-buffered within the 4 MiB and 16,384-event limits before release. Raw text,
-citation-stripped text, and its plan-mode projection are checked independently;
-benign disagreement preserves the original bytes under the [supported profile](../reference/credential-sources/protected-inference.md#static-source-and-response-policy).
-Added items and parts must have unambiguous indexes; indexed events must belong
-to an unfinished item. Supported function-call arguments are
-parsed once as bounded JSON, including their completed delta accumulation, before
-release. This does not recursively decode arbitrary string encodings. No SSE event
-is released early. The original deadline and 4 MiB limit still apply.
+The registry binds the complete response to the accepted peer, request and
+exchange, then removes headers outside its allowlist. Nothing is streamed to the
+caller before the decision. The original deadline, 4 MiB and 16,384-event limits
+bound this check; an unsupported response is refused, not approximated.
+
+For Responses, inspect the text clients actually assemble: SDK output-part
+snapshots; assistant text joined across parts, items or deltas; and Codex's
+completed and streamed Plan views. Ambiguous indexes or parser order fail
+closed. Check supported function arguments as bounded JSON, without recursively
+decoding arbitrary strings. Safe responses keep their original bytes. This
+[supported profile](../reference/credential-sources/protected-inference.md#static-source-and-response-policy)
+protects named client views of one finite response, not secrecy from an origin
+that already received the credential.
 
 Only the accepted exchange can claim its response. The provider classifier
 requires a structured 401 `invalid_api_key` / `invalid_request_error` error;
@@ -309,21 +302,15 @@ credential access.
 
 ## Debugging and Verification
 
-The [static egress testing guide](../testing/static-egress.md) gives commands,
-fixture boundaries and end-to-end prerequisites. The authority integration covers
-real API, IAM, controller and TLS wire paths with storage and runtime-observation
-fixtures. The PostgreSQL integration covers persisted plans, installation and
-rejection state with a disposable database. The enrollment integration runs the
-actual generated entrypoint and selected Sandbox Driver against local fixtures,
-with a substituted CLI. The provider preparation case in
-`tests/conformance/kubernetes-compute.test.mjs` also runs the enrollment helper
-with the environment and manifest produced by `prepareRevision`. It exercises a
-real local HTTP challenge, revision refusals and private-field suppression;
-Kubernetes and provider dependencies remain fixtures.
+See the [static egress testing guide](../testing/static-egress.md) for commands
+and prerequisites. Authority tests exercise API, IAM, controller and TLS paths;
+PostgreSQL tests exercise persisted plans, currentness, installation and rejection.
+Enrollment tests run the generated entrypoint and Sandbox Driver with a fixture
+CLI, including the manifest and environment from `prepareRevision`.
 
-Those checks do not establish a packaged model turn, installed supervisor
-response protection, Kubernetes NetworkPolicies, chart installation or published
-image compatibility.
+These tests do not establish an installed model turn, response custody,
+NetworkPolicy, chart or published-image compatibility. Verify those on the
+selected installation, with independent observations at the origin and caller.
 
 ## Related docs
 

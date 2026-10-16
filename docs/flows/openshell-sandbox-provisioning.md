@@ -265,11 +265,9 @@ logs them without changing retries. Categories are `POLICY_SAFETY`,
 policy prefixes qualify. Request values never enter these fields or the exception
 message.
 
-The Backend shares clients by endpoint and retries setup failures. Unary calls
-check cancellation after setup and credential preparation, before dispatch.
-Cancellation cannot bound stalled initialization or file reads. After dispatch,
-it rejects the caller and cancels local gRPC; remote effects may still need
-reconciliation.
+The Backend shares clients by endpoint and retries setup. It checks cancellation
+after preparing credentials, before dispatch; stalled initialization or file reads
+remain unbounded. After dispatch, cancellation stops local gRPC, not remote effects.
 
 `GetService` distinguishes the local client URL from its advertised origin.
 `harnessEndpoint` validates the exposure and returns that WebSocket origin,
@@ -312,12 +310,10 @@ Compute admits configured provider egress, keeps the Agent Service inactive and
 omits its Harness route. Drivers without `harnessEndpoint`
 retain Kubernetes routing and `/home/node/workspace`.
 
-Compute waits for the provider Pod and exact workspace node; missing enrollment
-keeps the revision inactive. The dedicated Harness wrapper
-rereads the provider setup before every node retry and retains the latest valid
-value while the projection is unavailable. It relaunches the workspace-node
-process one second after every exit without capping attempts, so Gateway rollout
-does not strand the Sandbox. Shutdown stops the retry loop.
+Compute keeps the revision inactive until the provider Pod and enrolled workspace
+node are ready. On each retry, the Harness wrapper refreshes provider setup or keeps
+the last valid value if unavailable. It restarts workspace-node one second after
+every exit, without an attempt limit; shutdown ends retries.
 
 For bound sources
 Compute calls `attachmentStatus`, which reads
