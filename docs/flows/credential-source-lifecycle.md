@@ -274,7 +274,7 @@ Driver detaches the provider again only if `SandboxSpec.providers` lists it.
   endpoint lifecycle. Gateway storage and Compute placement are test doubles;
   this does not prove OpenShell runtime execution.
 - `node --test tests/conformance/openshell-gateway-wire.test.mjs` checks the
-  provider, profile, update, detach, and recheck RPCs against the pinned `v0.1.4`
+  provider, profile, update, detach, and recheck RPCs against the pinned `v0.1.5-pre.4`
   wire fixture.
 - The credential withdrawal cases in
   `tests/integration/postgres-worker-agent-revision.test.mjs` run the real queue
