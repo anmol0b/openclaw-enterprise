@@ -688,6 +688,30 @@ test("repository startup rejects unmatched ownership, registry identity, duratio
   }
 });
 
+test("public CA loading rejects repeated malformed certificates without stalling", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "occ-public-ca-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "ca.pem");
+  await writeFile(
+    path,
+    "-----BEGIN CERTIFICATE-----\nA-----END CERTIFICATE-----\n".repeat(32) + "!",
+    { mode: 0o644 },
+  );
+  // A separate process keeps a pathological parser from blocking the test runner indefinitely.
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      'import { loadPublicCa } from "./apps/controller/src/composition/repository-credentials/public-ca.ts"; await loadPublicCa(process.argv[1]).catch((error) => console.log(error.message));',
+      path,
+    ],
+    { encoding: "utf8", timeout: 3000 },
+  );
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  assert.equal(result.stdout.trim(), "invalid-public-ca");
+});
+
 test("startup loads singleton Installation YAML and validates Drivers before construction", async (t) => {
   const path = await fixture(t);
   const drivers = await loadInstallationConfiguration({

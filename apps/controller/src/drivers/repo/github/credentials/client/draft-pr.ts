@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { Agent, request } from "node:https";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,12 +19,12 @@ export async function createDraftPull(args: string[], manifestRoot?: string) {
       head: { type: "string" },
       base: { type: "string" },
       title: { type: "string" },
-      "body-file": { type: "string" },
+      body: { type: "string" },
       "operation-id": { type: "string" },
       draft: { type: "boolean" },
     },
   });
-  const { head, base, title, draft } = q;
+  const { head, base, title, body = "", draft } = q;
   if (
     positionals.length !== 1 ||
     positionals[0] !== "pr-create" ||
@@ -48,8 +47,6 @@ export async function createDraftPull(args: string[], manifestRoot?: string) {
     throw new Error("no-single-selected-repository");
   }
   requireCurrentBinding(b);
-  const text = q["body-file"] && (await readFile(q["body-file"]));
-  const body = text ? new TextDecoder("utf-8", { fatal: true }).decode(text) : "";
   const bytes = Buffer.from(JSON.stringify({ title, head, base, body, draft }));
   if (bytes.length > 65536) {
     throw new Error("draft-pull-request-too-large");

@@ -1,7 +1,7 @@
 ---
 created: "2026-09-18"
 updated: "2026-10-16"
-last_updated_session: authoring-run/c21f74f4-95aa-4ba6-878d-84586bd6ecb7
+last_updated_session: authoring-run/97826393-386f-4988-ace7-afc669f1922f
 ---
 
 # Agent repository credential flow
@@ -268,6 +268,12 @@ routes supported `gh` commands using explicit targets or effective Git remotes.
 It pins generation, reference and session, selects private `gh` configuration
 and preserves HOME without mutating shared selection.
 
+For a prepared Git session with draft access,
+`apps/controller/src/drivers/repo/github/credentials/client/draft-pr.ts:createDraftPull`
+accepts explicit body text, bounds the serialized JSON body and sends it once to the
+selected broker. It cannot load a caller-selected body file. The helper records
+the operation ID before sending and returns only a matching draft receipt.
+
 `apps/controller/src/drivers/repo/github/credentials/profiles.ts` owns the exact
 Reader, Contributor and Collaborator permission maps. The GitHub route classifier
 admits profile-selected REST operations and token-bounded GraphQL for
@@ -362,6 +368,7 @@ Ready Pods and commands do not prove live writes.
 
 ## Changelog
 
+- 2026-10-16 21:13: Restrict prepared Git draft body input to explicit text. (authoring-run/97826393-386f-4988-ace7-afc669f1922f - dac53babe2d0da06b39c5d6ec664fa0989191b11)
 - 2026-10-16 20:48: Bind prepared Git session origins to the Helm-owned broker Service before ingress admission. (authoring-run/c21f74f4-95aa-4ba6-878d-84586bd6ecb7 - d2200df9a89deb9500c94030d80b37e229483764)
 - 2026-10-12 07:39: Recovery fences a reserved receipt whose fence did not commit. (authoring-run/aee1dd2c-5ac0-4499-aaf6-a4c36928423e - b195e54e9b0ce98ead2b2306015a5209325e837b)
 

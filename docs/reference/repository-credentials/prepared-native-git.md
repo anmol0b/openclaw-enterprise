@@ -36,8 +36,9 @@ If the task includes handing work to a reviewer, explicitly select
 the broker limits it to creating one draft from the review branch to the selected
 base. Later feedback and commits use ordinary Git on the same branch.
 
-The Agent uses `oce-github pr-create --draft` with the head, base, title, body
-file and a fresh operation ID. If the reply is lost, look for the draft at GitHub;
+The Agent uses `oce-github pr-create --draft` with the head, base, title, optional
+explicit `--body` text and a fresh operation ID. The helper refuses `--body-file`;
+the JSON request body must fit within 64 KiB. If the reply is lost, look for the draft at GitHub;
 do not submit another create. The receipt identifies the admitted Agent session,
 not the person who assigned the task. Use a trusted team for the initial trial;
 do not treat that receipt as per-person task authorization.

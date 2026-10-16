@@ -94,12 +94,11 @@ export async function runTeamReview({
     const submit =
       stage === 0
         ? [
-            "printf '%s\\n' 'Check: node --test review-title.test.mjs' >.git/team-pr-body",
             "/opt/oce/repository-credentials/bin/oce-github pr-create --head " +
               branch +
               " --base main --title '" +
               title +
-              '\' --body-file "$PWD/.git/team-pr-body"' +
+              "' --body 'Check: node --test review-title.test.mjs'" +
               " --operation-id " +
               operationId +
               " --draft >.git/team-pull.json",

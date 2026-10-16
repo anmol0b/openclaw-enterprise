@@ -2,6 +2,18 @@ import { constants } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { createSecureContext } from "node:tls";
 
+function isCertificateBundle(pem: string): boolean {
+  // Match one certificate at the current offset so malformed bundles cannot
+  // backtrack through previously accepted certificates.
+  const certificate =
+    /\s*-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----/y;
+  let end = 0;
+  while (certificate.exec(pem)) {
+    end = certificate.lastIndex;
+  }
+  return end > 0 && pem.slice(end).trim().length === 0;
+}
+
 export async function loadPublicCa(path: string): Promise<Buffer> {
   // Public projected files may be symlinks. Private service material has a
   // separate protected loader and is never part of platform composition.
@@ -38,11 +50,7 @@ export async function loadPublicCa(path: string): Promise<Buffer> {
       throw new Error("invalid-public-ca");
     }
     const pem = data.subarray(0, size).toString("utf8");
-    if (
-      !/^(?:\s*-----BEGIN CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----\s*)+$/.test(
-        pem,
-      )
-    ) {
+    if (!isCertificateBundle(pem)) {
       throw new Error("invalid-public-ca");
     }
     createSecureContext({ ca: pem, minVersion: "TLSv1.2" });

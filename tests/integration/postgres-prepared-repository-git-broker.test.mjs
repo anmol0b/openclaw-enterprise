@@ -344,7 +344,7 @@ for (const mode of ["Git only", "created", "lost provider reply", "mismatched pr
     const head = b.pushRef.slice("refs/heads/".length);
     const base = "main";
     const title = "Scoped review";
-    const body = "";
+    const body = mode === "created" ? "Check: tests passed" : "";
     const operationId = randomUUID();
     const packet = { title, head, base, body, draft: true };
     const headers = {
@@ -419,14 +419,18 @@ for (const mode of ["Git only", "created", "lost provider reply", "mismatched pr
         "import {createDraftPull} from " +
         JSON.stringify(client) +
         "; await createDraftPull(process.argv.slice(2),process.argv[1]);";
-      const output = await run(
-        process.execPath,
-        ["--input-type=module", "-e", command, root, ...args],
-        {
+      const invoke = (extra) =>
+        run(process.execPath, ["--input-type=module", "-e", command, root, ...args, ...extra], {
           env: { ...cleanEnvironment(), HTTPS_PROXY: proxyAddress },
           allowFailure: true,
-        },
-      );
+        });
+      const bodyFile = join(await temporaryDirectory(t), "body.txt");
+      await writeFile(bodyFile, "file contents must stay local");
+      const refused = await invoke(["--body-file", bodyFile]);
+      assert.notEqual(refused.code, 0);
+      assert.match(refused.stderr, /Unknown option '--body-file'/);
+      assert.deepEqual(tunnels, [], "file input must be refused before contacting the broker");
+      const output = await invoke(["--body", body]);
       assert.equal(output.code, 0, output.stderr);
       assert.deepEqual(tunnels, ["127.0.0.1:443"]);
       const receipt = JSON.parse(output.stdout);
@@ -488,6 +492,7 @@ for (const mode of ["Git only", "created", "lost provider reply", "mismatched pr
     });
     assert.equal(visible.length, 1);
     const [created] = visible;
+    assert.equal(created.body, body);
     assert.equal(created.head.ref, head);
     assert.equal(created.base.ref, base);
     assert.equal(created.maintainer_can_modify, false);
