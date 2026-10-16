@@ -303,6 +303,8 @@ RUN mkdir -p node_modules/openclaw/dist/extensions ./plugin-skills /etc/openclaw
   && test "$(stat -c '%U:%G:%a' /home/node/.codex/generated_images)" = "node:node:700" \
   && node /app/openclaw.mjs --version \
   && node -e 'if (typeof require("ws") !== "function") throw new Error("Runtime WebSocket dependency unavailable")' \
+  && (cd /app/node_modules/openclaw && node --input-type=module -e \
+    'import { isSupported } from "@openclaw/proc-safe/reaper"; if (!isSupported()) throw new Error("Runtime native child reaping unavailable; install the locked proc-safe platform package");') \
   && codex_home="$(mktemp -d)" \
   && test "$(CODEX_HOME="$codex_home" codex --version)" = "codex-cli ${OPENAI_CODEX_VERSION}" \
   && rm -rf "$codex_home" \

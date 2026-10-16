@@ -1,7 +1,7 @@
 ---
 created: 2026-09-21
-updated: 2026-10-08
-last_updated_session: authoring-run/74dc7eaf-a67b-47ef-91bd-2ecd0463fb10
+updated: 2026-10-16
+last_updated_session: authoring-run/481f5151-a4aa-4448-a73c-1ce1b7251607
 ---
 
 # Container publication flow
@@ -88,9 +88,9 @@ source commit. BuildKit rewrites image and filesystem timestamps to that epoch,
 so wall-clock time does not change the image manifests on a cold-cache rebuild.
 
 `deploy/runtime/Dockerfile:openclaw-source` verifies the pinned OpenClaw main source archive
-and applies three patches whose hashes it verifies and records in runtime provenance:
+and applies four checksum-verified patches:
 the stock Codex 0.163.0-alpha.2 dependency pin, before extracting frozen installation
-inputs, and the temporary read-only-paths and `connect --ephemeral` expired-setup
+inputs, and the temporary read-only-paths, full-access-profile and `connect --ephemeral` expired-setup
 bridge patches. The bridge forwards the bound
 Agent's stock network settings without modifying Codex. Both installs use
 frozen lockfiles and upstream's selected-plugin manifests, retaining required
@@ -117,6 +117,9 @@ helper rewrites `contents.json` from `/app/node_modules/openclaw` and updates
 therefore describes the final runtime tree. Upstream
 import-closure and native-addon checks remain. See the
 [runtime recipe](../../deploy/runtime/README.md).
+
+The final-image smoke check imports `@openclaw/proc-safe/reaper` from the installed
+OpenClaw package and fails the build unless `isSupported()` returns true.
 
 ### 2. Verify and assemble both platform variants
 
@@ -235,6 +238,8 @@ owns package-write access and coordination.
 ## Manual Notes
 
 ## Changelog
+
+- 2026-10-16 22:23: Require the native child-reaping addon in the final image. (authoring-run/481f5151-a4aa-4448-a73c-1ce1b7251607 - 1f30657ebcddd1dd5254b18a51972d4e2fa9b1b6)
 
 - 2026-10-10 03:00: Pin stock Codex 0.163.0-alpha.2; alpha.1 sent metadata the backend rejects. (fix-992-pin)
 
