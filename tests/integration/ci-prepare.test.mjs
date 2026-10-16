@@ -2217,47 +2217,84 @@ if (args[0] === "pull") {
     const owner = "tests/integration/sandbox-driver-openshell-k3d-real.test.mjs";
     const other = "tests/integration/local-first-agent-openshell-real.test.mjs";
     const cases = [
-      { harness: "codex", credential: "CODEX_ACCESS_TOKEN" },
-      { harness: "codex", credential: "OPENAI_API_KEY", missing: "CODEX_ACCESS_TOKEN" },
-      { harness: "openclaw", credential: "OPENAI_API_KEY" },
-      { harness: "openclaw", credential: "CODEX_ACCESS_TOKEN", missing: "OPENAI_API_KEY" },
-      { harness: "codex", endpoint: true, credential: "OPENAI_API_KEY", file: owner },
+      { harness: "codex", credentials: ["CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"] },
+      { harness: "codex", credentials: ["CODEX_ACCESS_TOKEN"], missing: "OPENAI_API_KEY" },
+      { harness: "codex", credentials: ["OPENAI_API_KEY"], missing: "CODEX_ACCESS_TOKEN" },
+      { harness: "openclaw", credentials: ["OPENAI_API_KEY"], missing: "CODEX_ACCESS_TOKEN" },
+      { harness: "openclaw", credentials: ["OPENAI_API_KEY"], file: owner },
+      { harness: "openclaw", credentials: ["CODEX_ACCESS_TOKEN"], missing: "OPENAI_API_KEY" },
+      { harness: "codex", endpoint: true, credentials: ["OPENAI_API_KEY"], file: owner },
       {
         harness: "codex",
         endpoint: true,
-        credential: "CODEX_ACCESS_TOKEN",
+        credentials: ["CODEX_ACCESS_TOKEN"],
         missing: "OPENAI_API_KEY",
         file: owner,
       },
       {
         harness: "openclaw",
-        credential: "OPENAI_API_KEY",
+        credentials: ["OPENAI_API_KEY"],
         missing: "CODEX_ACCESS_TOKEN",
         file: other,
       },
-      { harness: "openclaw", credential: "CODEX_ACCESS_TOKEN", file: other },
+      {
+        harness: "openclaw",
+        credentials: ["CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"],
+        file: other,
+      },
+      {
+        harness: "codex",
+        endpoint: true,
+        credentials: ["OPENAI_API_KEY"],
+        missing: "CODEX_ACCESS_TOKEN",
+        prepareLane: true,
+      },
+      {
+        harness: "openclaw",
+        credentials: ["OPENAI_API_KEY"],
+        file: owner,
+        prepareLane: true,
+      },
+      {
+        harness: "codex",
+        endpoint: true,
+        credentials: ["OPENAI_API_KEY"],
+        file: owner,
+        prepareLane: true,
+      },
     ];
     for (const [index, value] of cases.entries()) {
       const statePath = join(root, `credential-${index}.json`);
-      const result = await runPrepare(
-        [
-          "--lane",
-          "openshell",
-          "--state",
-          statePath,
-          ...(value.file ? ["--file", value.file] : []),
-        ],
-        {
-          OPENAI_API_KEY: "",
-          CODEX_ACCESS_TOKEN: "",
-          [value.credential]: "synthetic-fixture-credential",
-          OCC_TEST_OPENAI_MODEL: "fixture-model",
-          OCC_TEST_OPENSHELL_HARNESS: value.harness,
-          OCC_TEST_OPENSHELL_MODEL_BASE_URL: value.endpoint ? "https://api.openai.com/v1" : "",
-          // Stop after input validation even when the selected credential exists.
-          OCC_TEST_KUBERNETES_GATEWAY_IMAGE: mutableImage,
-        },
-      );
+      const env = {
+        OPENAI_API_KEY: "",
+        CODEX_ACCESS_TOKEN: "",
+        ...Object.fromEntries(
+          value.credentials.map((name) => [name, "synthetic-fixture-credential"]),
+        ),
+        OCC_TEST_OPENAI_MODEL: "fixture-model",
+        OCC_TEST_OPENSHELL_HARNESS: value.harness,
+        OCC_TEST_OPENSHELL_MODEL_BASE_URL: value.endpoint ? "https://api.openai.com/v1" : "",
+        // Stop after input validation even when the selected credential exists.
+        OCC_TEST_KUBERNETES_GATEWAY_IMAGE: mutableImage,
+      };
+      const result = value.prepareLane
+        ? await runProgram(
+            `const { prepareLane } = await import(process.argv[1]);
+             await prepareLane({ lane: "openshell", statePath: process.argv[2], file: ${JSON.stringify(value.file)} });`,
+            statePath,
+            { ...process.env, GITHUB_ENV: "", GITHUB_OUTPUT: "", ...env },
+            10_000,
+          )
+        : await runPrepare(
+            [
+              "--lane",
+              "openshell",
+              "--state",
+              statePath,
+              ...(value.file ? ["--file", value.file] : []),
+            ],
+            env,
+          );
       assert.equal(result.status, 1);
       assert.match(
         result.stderr,
@@ -2286,8 +2323,8 @@ if (args[0] === "pull") {
       OCC_TEST_OPENAI_MODEL: "gpt-test",
     };
     const openShellModelEnv = {
+      ...baseModelEnv,
       CODEX_ACCESS_TOKEN: "synthetic-codex-pat",
-      OCC_TEST_OPENAI_MODEL: "gpt-test",
     };
     const k3dImages = {
       OCC_TEST_KUBERNETES_GATEWAY_IMAGE: immutableImage,

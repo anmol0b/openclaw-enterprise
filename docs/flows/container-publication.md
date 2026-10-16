@@ -1,7 +1,7 @@
 ---
 created: 2026-09-21
 updated: 2026-10-16
-last_updated_session: authoring-run/481f5151-a4aa-4448-a73c-1ce1b7251607
+last_updated_session: codex/01a13683-3916-7880-b1a6-27175b853600
 ---
 
 # Container publication flow
@@ -100,6 +100,9 @@ use a separately pinned Node 24 Bookworm slim base. Both bases apply available
 Debian package updates when their recipe layers build. The Node digest identifies
 the upstream image; it does not freeze Debian package repositories.
 
+The build stage runs checksum-verified caller-authority tests offline. Runtime
+provenance records their patch checksum; tests stay in the build stage.
+
 `deploy/runtime/Dockerfile:runtime` disables npm's background update notifier in
 the final image environment. Harness child processes inherit that default, so
 local npm scripts do not trigger a separate version-check network request.
@@ -118,8 +121,8 @@ therefore describes the final runtime tree. Upstream
 import-closure and native-addon checks remain. See the
 [runtime recipe](../../deploy/runtime/README.md).
 
-The final-image smoke check imports `@openclaw/proc-safe/reaper` from the installed
-OpenClaw package and fails the build unless `isSupported()` returns true.
+Final image checks require `@openclaw/proc-safe/reaper` to return true from
+`isSupported()`.
 
 ### 2. Verify and assemble both platform variants
 
@@ -239,7 +242,7 @@ owns package-write access and coordination.
 
 ## Changelog
 
-- 2026-10-16 22:23: Require the native child-reaping addon in the final image. (authoring-run/481f5151-a4aa-4448-a73c-1ce1b7251607 - 1f30657ebcddd1dd5254b18a51972d4e2fa9b1b6)
+- 2026-10-16 22:41: Require the native reaper and caller-authority regression checks. (codex/01a13683-3916-7880-b1a6-27175b853600 - fd21b43ce92dbd44f98fce5fef29489b97d6352c)
 
 - 2026-10-10 03:00: Pin stock Codex 0.163.0-alpha.2; alpha.1 sent metadata the backend rejects. (fix-992-pin)
 

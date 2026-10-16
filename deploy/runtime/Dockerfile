@@ -163,6 +163,13 @@ RUN --mount=type=secret,id=build-ca,required=false \
       --config.supportedArchitectures.libc=glibc; \
     rm -rf /tmp/pnpm-store
 COPY --from=openclaw-source /source/ ./
+# Exercise the original caller through the public RPC before and after the
+# placement acknowledgment, including revocation, against this exact source.
+COPY deploy/runtime/openclaw-required-worker-authority-regression.patch /tmp/openclaw-required-worker-authority-regression.patch
+RUN echo '3b8d8866f2ee18d7569b1fab7990ef0406e7913b292e880ef735a5133e861960  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
+    && git apply /tmp/openclaw-required-worker-authority-regression.patch
+RUN --network=none OPENCLAW_VITEST_RUNTIME=node OPENCLAW_VITEST_MAX_WORKERS=1 pnpm_config_verify_deps_before_run=false \
+    node --import ./scripts/tsx.mjs scripts/test-projects.mts src/gateway/server.required-placement-scopes.test.ts
 # Follow the pinned upstream Docker assembly; plugin-local dependencies remain
 # separate when a plugin and core require different versions.
 RUN OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_IDS=codex,slack \

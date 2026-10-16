@@ -1272,6 +1272,9 @@ const GATEWAY_PRIVATE_STATE_CATEGORIES = Object.freeze([
   ["state", "/home/node/.openclaw/state"],
   ["agent", "/home/node/.openclaw/agents/main/agent"],
   ["media", "/home/node/.openclaw/media"],
+  // Session records retain linked worktree paths and their shared Git metadata.
+  ["worktrees", "/home/node/.openclaw/worktrees"],
+  ["worktree-sources", "/home/node/.openclaw/worktree-sources"],
 ] as const);
 const HARNESS_WORKSPACE_VOLUME = "openclaw-workspace";
 const HARNESS_WORKSPACE_SIZE = "40Gi";
@@ -1284,7 +1287,7 @@ const HARNESS_WORKSPACE_CATEGORIES = Object.freeze([
   ["codex-sessions", "/home/node/.codex/sessions"],
 ] as const);
 /**
- * Init script that makes each Harness claim subdirectory a uid-1000 0700
+ * Init script that makes each Harness claim subdirectory a process-owned 0700
  * directory. The 2026-09-28 release had no Harness init, so the kubelet created
  * `workspace` and `generated-images` for their subPath mounts: root-owned and
  * group- and world-writable, which uid 1000 cannot chmod (EPERM, finding 752).
@@ -5808,7 +5811,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           !initialDedicatedCodexGateway) ||
         this.options.runtime === undefined ||
         (existingGateway?.metadata.annotations?.[AGENT_REVISION_ID_ANNOTATION] === revision.id &&
-          !providerOwnsHarnessEndpoint)
+          (!providerOwnsHarnessEndpoint || revision.harness.id === "openclaw"))
       ) {
         await reconcileGatewayDeployment(gatewayEnvironment);
       }
@@ -5920,7 +5923,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
         }
         await this.reconcilePublicGithubReadNetworkPolicy(revision, namespace, pluginRuntime);
       }
-      if (!providerOwnsHarnessEndpoint) {
+      if (nativeRuntime === undefined && !providerOwnsHarnessEndpoint) {
         await this.reconcileHarnessRoute(revision, namespace);
       }
       if (initialDedicatedCodexGateway) {
@@ -5973,7 +5976,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
             workspaceSetup,
           );
         } else {
-          this.addNativeWorker(agentDeployment, node.name, node.ca);
+          this.addNativeWorker(agentDeployment, node.name, node.ca, workspaceSetup);
         }
       }
       if (
@@ -6058,7 +6061,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           );
         }
         const providerEndpoint =
-          sandboxDriver.harnessEndpoint === undefined
+          nativeRuntime !== undefined || sandboxDriver.harnessEndpoint === undefined
             ? undefined
             : await this.prepareRevisionStage("sandbox_provision", () =>
                 sandboxDriver.harnessEndpoint!({
@@ -6203,7 +6206,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
             revision,
             sandboxDriver?.provisionHarness === undefined
               ? revisionName
-              : providerOwnsHarnessEndpoint
+              : providerOwnsHarnessEndpoint || nativeRuntime !== undefined
                 ? `${agentName}-inactive`
                 : undefined,
           ),
@@ -6592,7 +6595,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
                 workspaceSetup,
               );
             } else {
-              this.addNativeWorker(replacement, node.name, node.ca);
+              this.addNativeWorker(replacement, node.name, node.ca, workspaceSetup);
             }
           }
           if (nodeSetupFile) {
@@ -6631,7 +6634,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       if (!(await this.providerHarnessReady(revision, namespace, requirements.labels))) {
         throw new Error("The exact AgentRevision workload is not ready.");
       }
-      if (sandboxDriver.harnessEndpoint !== undefined) {
+      if (nativeRuntime === undefined && sandboxDriver.harnessEndpoint !== undefined) {
         const sandboxContext = await this.sandboxNamespaceContext(
           this.sandboxNamespaceForRevision(revision, namespace),
           namespace,
@@ -6728,7 +6731,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           revision,
           sandboxDriver?.provisionHarness === undefined
             ? revisionName
-            : providerOwnsHarnessEndpoint
+            : providerOwnsHarnessEndpoint || nativeRuntime !== undefined
               ? `${agentName}-inactive`
               : undefined,
         ),
@@ -6736,7 +6739,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       ownership,
       namespace,
     );
-    if (!providerOwnsHarnessEndpoint) {
+    if (nativeRuntime === undefined && !providerOwnsHarnessEndpoint) {
       await this.reconcileHarnessRoute(revision, namespace);
     }
     const policies = await this.agentNetworkPoliciesWithPeers(revision, namespace);
@@ -10280,6 +10283,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     deployment: ManagedKubernetesObject,
     name: string,
     ca: string | undefined,
+    workspaceSetup: WorkspaceSetup | undefined,
   ): void {
     const { container, variables } = this.addNodeEnrollmentState(deployment, name, ca, false);
     variables.push(
@@ -10296,7 +10300,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
       },
     );
     container.command = [...RUNTIME_WRAPPER_COMMAND];
-    container.args = nodeProgramArguments(NATIVE_WORKER_ENTRYPOINT);
+    container.args = nodeProgramArguments(
+      (workspaceSetup === undefined
+        ? ""
+        : workspaceSetupVerifier(workspaceSetup, { environment: "OPENCLAW_WORKSPACE_DIR" })) +
+        NATIVE_WORKER_ENTRYPOINT,
+    );
   }
 
   private addNodeEnrollmentState(
@@ -12951,9 +12960,12 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
   private workspaceNodeRelay(revision: AgentRevision): SandboxDriver | undefined {
     const sandboxDriver =
       revision.harness.mode === "dedicated" ? this.sandboxDriverForRevision(revision) : undefined;
+    const opensWorkspaceNode =
+      sandboxDriver?.harnessEndpoint !== undefined ||
+      (revision.harness.id === "openclaw" && sandboxDriver?.provisionHarness !== undefined);
     if (
-      sandboxDriver?.harnessEndpoint !== undefined &&
-      sandboxDriver.implementation === "openshell" &&
+      opensWorkspaceNode &&
+      sandboxDriver?.implementation === "openshell" &&
       sandboxDriver.workspaceNodePeerLabels === undefined
     ) {
       // Its supervisor opens the node connection; without exact peer labels the
@@ -12962,8 +12974,8 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         "An OpenShell SandboxDriver must implement workspaceNodePeerLabels.",
       );
     }
-    return sandboxDriver?.harnessEndpoint !== undefined &&
-      sandboxDriver.workspaceNodePeerLabels !== undefined &&
+    return opensWorkspaceNode &&
+      sandboxDriver?.workspaceNodePeerLabels !== undefined &&
       this.options.executionCluster === undefined
       ? sandboxDriver
       : undefined;
@@ -13125,16 +13137,12 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
               ports: [{ protocol: "TCP", port: this.options.network.repositoryCredentials!.port }],
             },
           ];
+    const nativeWorker =
+      revision.harness.id === "openclaw" && revision.harness.mode === "dedicated";
     const providerOwnsHarnessEndpoint =
       revision.harness.mode === "dedicated" &&
       this.sandboxDriverForRevision(revision)?.harnessEndpoint !== undefined;
-    if (providerOwnsHarnessEndpoint) {
-      const provider = this.options.network.providerHarness;
-      if (provider === undefined) {
-        throw new ConfigurationFailure(
-          "SandboxDriver Harness endpoint requires an exact provider network route.",
-        );
-      }
+    if (nativeWorker || providerOwnsHarnessEndpoint) {
       // Only this revision's relay Pods (and, during preparation, the serving
       // predecessor's) reach the Gateway, never another Agent's Sandbox in the
       // namespace (finding 1127). No peer yet means no rule: an empty `from` would
@@ -13160,6 +13168,17 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
                       ],
               }),
             ];
+      // Native OpenClaw connects outward; it has no inbound Harness transport.
+      // Retain the same exact revision/predecessor relay grants as Codex.
+      if (nativeWorker) {
+        return [...workspaceNodePolicies, ...statusPolicies];
+      }
+      const provider = this.options.network.providerHarness;
+      if (provider === undefined) {
+        throw new ConfigurationFailure(
+          "SandboxDriver Harness endpoint requires an exact provider network route.",
+        );
+      }
       return [
         policy("allow-gateway-agent", {
           podSelector: gateway,
@@ -14069,6 +14088,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       if (
         !embedded &&
         nativeRuntime === undefined &&
+        configuration?.nativeWorkerProfile === undefined &&
         !harnessAuth?.environment.some(({ name }) => name === APP_TOKEN_SHA)
       ) {
         variables.push(
@@ -14081,7 +14101,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
             name: "HOME",
             value: "/home/node",
           });
-        } else if (nativeRuntime === undefined) {
+        } else if (configuration?.nativeWorkerProfile === undefined) {
           // TODO(workload-transport-mtls): Replace per-Agent capability-token ws:// with mTLS.
           variables.push({
             name: "APP_SERVER_URL",

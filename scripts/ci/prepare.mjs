@@ -778,13 +778,12 @@ async function validateLaneInputsBeforeSideEffects(lane, env = {}, file) {
   if (prepare.k3d && name !== "openshell" && effectiveEnv.OPENCLAW_CI_K3S_IMAGE) {
     assertImmutableImageReference(effectiveEnv.OPENCLAW_CI_K3S_IMAGE, "OPENCLAW_CI_K3S_IMAGE");
   }
-  // This real owner supports native OC and explicit-endpoint Codex with an API
-  // key. Other OpenShell files still require PAT authentication. Infrastructure
-  // preparation has no file yet, so follow the selected owner's credential.
+  // This selected owner supports native OC and explicit-endpoint Codex with an
+  // API key. Full-lane preparation and other files keep the manifest's complete
+  // credential requirements.
   const openShellApiKey =
     name === "openshell" &&
-    (file === undefined ||
-      file === "tests/integration/sandbox-driver-openshell-k3d-real.test.mjs") &&
+    file === "tests/integration/sandbox-driver-openshell-k3d-real.test.mjs" &&
     (effectiveEnv.OCC_TEST_OPENSHELL_HARNESS === "openclaw" ||
       effectiveEnv.OCC_TEST_OPENSHELL_MODEL_BASE_URL?.trim());
   requireEnv(
@@ -2516,9 +2515,10 @@ async function prepareLaneLogging(statePath, state, env, cluster) {
   await markResourceReady(statePath, state, logging.resource);
 }
 
-async function prepareLane({ lane, statePath }) {
+async function prepareLane({ lane, statePath, file }) {
   const name = assertLane(lane);
-  await validateLaneInputsBeforeSideEffects(name);
+  const relativeFile = file === undefined ? undefined : toRepositoryRelative(filePath(file));
+  await validateLaneInputsBeforeSideEffects(name, {}, relativeFile);
   const resolvedStatePath = normalizeStatePath(statePath);
   const existingState = await readState(resolvedStatePath);
   if (existingState) {

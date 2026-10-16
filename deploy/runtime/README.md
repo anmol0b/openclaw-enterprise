@@ -1,10 +1,10 @@
 # Runtime image recipe
 
 Build a public local runtime image for the OpenClaw Enterprise quickstart and
-real-runtime integration tests. The image contains both supported runtime
-entrypoints:
+real-runtime integration tests. The image contains these runtime entrypoints:
 
 - OpenClaw gateway: `node /app/openclaw.mjs`.
+- Dedicated OpenClaw node: `node /app/openclaw.mjs connect --target-file <private-file> --ephemeral`.
 - Dedicated Codex app-server: `codex app-server`.
 
 The image sets `NPM_CONFIG_UPDATE_NOTIFIER=false` so local npm commands do not
@@ -40,6 +40,13 @@ after enrollment cannot reconnect. The patch lets that path decode an expired
 code and hands the expiry to the node host. The node host then reconnects with
 the saved device token for the same Gateway, or still refuses the code, as
 upstream `node run --pair-if-needed` already does.
+The pinned source retains the original caller's authority while required-worker
+placement continues after session creation is acknowledged. Scope, role and
+profile revocation still stop dispatch. The OpenClaw build stage applies
+`openclaw-required-worker-authority-regression.patch`, verifies its checksum,
+and runs the real Gateway public-RPC cases without network access. The cases
+cover placement before and after acknowledgement, disconnect, and committed
+role, scope, and profile revocation. Test changes stay in the build stage.
 The source archive and patch hashes identify the resulting custom build.
 
 Dedicated Gateways require the supporting source recorded in this recipe and
@@ -60,13 +67,17 @@ Dedicated native OpenClaw requires both required worker placement
 projects each worker's managed workspace from its authorized launch descriptor;
 OCE does not write the retired `nodeHost.workerRuns.nativeInferenceConfig` field.
 
-The selected image remains unqualified for the complete dedicated native flow.
-`PINNED_OPENCLAW_RUNTIME_SUPPORTS_NATIVE_WORKERS` in
-`packages/occ/src/native-worker-support.ts` stays false, so admission refuses
-that topology unless the operator declares an explicitly selected custom image.
-The images-runtime-startup lane validates both generated configurations with the
-image's CLI. Schema acceptance alone does not qualify enrollment, workspace
-access, or native model execution.
+The selected source includes required placement activation, node-local
+model/workspace projection, and the Codex native-child relay. OCE advertises
+`pinned-runtime` native-worker support, so the Console offers Dedicated OpenClaw
+without a custom-image declaration. Deployment still requires a provisioning
+SandboxDriver with networking, filesystem, and process containment.
+
+The images-runtime-startup lane runs the production Gateway and Harness
+entrypoints and validates their generated configurations with the image's CLI.
+Native AMD64 and ARM64 image checks and real deployment verification remain
+separate requirements. Schema acceptance alone does not prove placement,
+enrollment, containment, workspace access, or model execution.
 
 | Input                                        | Selection                                                                                                    |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
