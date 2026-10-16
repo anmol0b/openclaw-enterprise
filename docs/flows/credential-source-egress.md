@@ -1,7 +1,7 @@
 ---
 created: "2026-10-14"
 updated: "2026-10-16"
-last_updated_session: authoring-run/92d1c2e7-e68d-4684-b8d1-8bfa0ed99a09
+last_updated_session: authoring-run/68ecede6-d2bc-4d49-ae2c-c04150ccb307
 ---
 
 # Protected credential request flow
@@ -243,8 +243,8 @@ to repeat the business request.
 ### 4. Protect response and finish
 
 `packages/occ/src/credential-proxy.ts:protectResponse`,
-`apps/controller/src/drivers/egress-proxy/openai-provider.ts:protectedEvents`,
-`apps/controller/src/drivers/egress-proxy/openai-responses.ts:validResponsesEvent`
+`apps/controller/src/drivers/egress-proxy/openai-provider.ts:protectedResponse`,
+`apps/controller/src/drivers/egress-proxy/openai-responses-stream.ts:protectedResponsesStream`
 
 The response frame carries the complete bounded response on the accepted exchange.
 The registry matches the original peer, request ID and exchange identity, and
@@ -253,6 +253,14 @@ policy parses bounded JSON or complete finite SSE using closed provider event
 schemas and rejects unsupported responses or selected-material reflection, including
 text deltas joined across item IDs as exposed by the Codex consumer, and the
 incremental text snapshots assembled for each output part by the Responses SDK.
+`openai-responses-stream.ts:assistantText` joins message parts without delimiters
+for both response envelopes and independent added/done items. The stream also
+collects the active assistant message's joined seed and subsequent ID-free deltas
+in chunks. It scans the joined run once before a new message, reasoning item,
+item completion, or terminal/end boundary discards it. The whole response remains
+buffered within the 4 MiB and 16,384-event limits before release. Raw text,
+citation-stripped text, and its plan-mode projection are checked independently;
+benign disagreement preserves the original bytes under the [supported profile](../reference/credential-sources/protected-inference.md#static-source-and-response-policy).
 Added items and parts must have unambiguous indexes; indexed events must belong
 to an unfinished item. Supported function-call arguments are
 parsed once as bounded JSON, including their completed delta accumulation, before
@@ -319,6 +327,8 @@ image compatibility.
 None.
 
 ## Changelog
+
+- 2026-10-16 02:06: Protect independent assistant items and bounded seeded runs, including citation and plan-mode projections. (authoring-run/68ecede6-d2bc-4d49-ae2c-c04150ccb307 - 3ed0e1cbd553b753e3f7d97b720cb7a43b6b5109)
 
 - 2026-10-16 01:00: Protect incremental Responses SDK text snapshots and reject ambiguous appended indexes. (authoring-run/92d1c2e7-e68d-4684-b8d1-8bfa0ed99a09 - ed532ec5496e87da37c086cf71949f12a17250c9)
 

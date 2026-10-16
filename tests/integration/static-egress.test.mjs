@@ -777,6 +777,163 @@ test("Responses output text assembled across parts and messages cannot reveal se
   }
 });
 
+test("Responses assistant projections protect independent items and seeded deltas", async (t) => {
+  const f = await staticEgressFixture(t);
+  const wire = JSON.parse(
+    readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
+  );
+  const encode = (events) =>
+    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const parts = (text) => {
+    const middle = Math.floor(text.length / 2);
+    return [text.slice(0, middle), text.slice(middle)].map((text) => ({
+      type: "output_text",
+      text,
+      annotations: [],
+    }));
+  };
+  function eventsFor(text, kind) {
+    const events = structuredClone(wire.responseEvents);
+    if (kind === "done") {
+      // Change only this independent item. Deltas and terminal output stay READY.
+      events[6].item.content = parts(text);
+    } else if (kind === "envelope") {
+      events[7].response.output[0].content = parts(text);
+    } else if (kind === "added") {
+      events[1].item.content = parts(text);
+      // Seeded parts already occupy indexes 0 and 1; no duplicate append.
+      events.splice(2, 1);
+    } else if (kind === "deltas") {
+      const [left, right] = parts(text);
+      events.splice(3, 1, { ...events[3], delta: left.text }, { ...events[3], delta: right.text });
+    } else {
+      // Split the seed across two parts, then finish via an ID-free delta.
+      // No single indexed SDK snapshot contains the full candidate.
+      // Split inside the citation opener when present, so neither event has it.
+      const citation = text.indexOf("citation");
+      const boundary = citation === -1 ? Math.floor(text.length / 2) : citation + 3;
+      const seed = parts(text.slice(0, boundary));
+      events[3].delta = text.slice(boundary);
+      if (kind === "seed") {
+        events[1].item.content = seed;
+        events.splice(2, 1);
+      } else {
+        // The delta names the first item, but the assistant consumer sends it
+        // to the most recently added message. Both wire items remain valid.
+        const active = structuredClone(events[1]);
+        active.output_index = 1;
+        active.item.id = "msg_active";
+        active.item.content = seed;
+        events.splice(3, 0, active);
+        const done = structuredClone(events.at(-2));
+        done.output_index = 1;
+        done.item.id = "msg_active";
+        events.splice(events.length - 1, 0, done);
+      }
+    }
+    return events;
+  }
+  async function exchange(events, streaming = true) {
+    const captured = f.capture({ ...wire.request, stream: streaming });
+    const ready = (await f.resolve(captured)).ready;
+    assert.ok(ready);
+    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
+    const rawBody = streaming ? encode(events) : JSON.stringify(events.at(-1).response);
+    f.setResponse({
+      status: 200,
+      contentType: streaming ? "text/event-stream" : "application/json",
+      rawBody,
+    });
+    return { result: await f.protect(captured, await f.send(captured, ready)), rawBody };
+  }
+  // Retain both encodings on the two independent item surfaces. Other cases
+  // each exercise a distinct consumer boundary rather than a Cartesian matrix.
+  for (const kind of ["done", "added", "seed"]) {
+    for (const candidate of [
+      "synthetic-key-initial",
+      Buffer.from("synthetic-key-initial").toString("base64"),
+    ]) {
+      assert.ok((await exchange(eventsFor(candidate, kind))).result.blocked, kind);
+    }
+  }
+  const collapsed = "synthetic-key-<oai-mem-citation>note</oai-mem-citation>initial";
+  for (const kind of ["done", "added", "envelope", "deltas", "seed", "active"]) {
+    // protect() also asserts zero response messages, including the head.
+    assert.ok((await exchange(eventsFor(collapsed, kind))).result.blocked, kind);
+  }
+  assert.ok((await exchange(eventsFor(collapsed, "envelope"), false)).result.blocked);
+  for (const [kind, candidate] of [
+    ["done", "Answer.<oai-mem-citation>source</oai-mem-citation>"],
+    ["added", "Hello <oai-mem-citation>source</oai-mem-citation> world"],
+    ["envelope", "Intro\n<proposed_plan>\n- step\n</proposed_plan>\nDone"],
+    ["seed", "Hello <oai-mem-citation>source</oai-mem-citation> world"],
+    ["active", "Hello <oai-mem-citation>source</oai-mem-citation> world"],
+    ["deltas", "Intro\n\u0085<proposed_plan>\u0085\n- step\n</proposed_plan>\nDone"],
+    ["seed", "Intro\n<proposed_plan>\n- step\n</proposed_plan>\nDone"],
+    ["done", "ordinary <oai-mem-citation>unclosed"],
+    ["done", "ordinary <proposed_plan>inline</proposed_plan>"],
+    ["done", "synthetic-key-&lt;oai-mem-citation&gt;note&lt;/oai-mem-citation&gt;initial"],
+  ]) {
+    const { result, rawBody } = await exchange(eventsFor(candidate, kind));
+    assert.equal(result.body?.toString(), rawBody, `benign ${kind}`);
+  }
+  // Switching consumers must inspect the previous run before discarding it.
+  for (const item of [
+    { type: "message", role: "assistant", id: "msg_next", content: [] },
+    { type: "reasoning", id: "rs_next", summary: [] },
+  ]) {
+    for (const malicious of [false, true]) {
+      const events = eventsFor(
+        malicious ? collapsed : "Hello <oai-mem-citation>source</oai-mem-citation> world",
+        "seed",
+      );
+      const delta = events.findIndex((event) => event.type === "response.output_text.delta");
+      events.splice(delta + 1, 0, { type: "response.output_item.added", output_index: 1, item });
+      events.splice(events.length - 1, 0, {
+        type: "response.output_item.done",
+        output_index: 1,
+        item,
+      });
+      const { result, rawBody } = await exchange(events);
+      if (malicious) {
+        assert.ok(result.blocked, `switch to ${item.type}`);
+      } else {
+        assert.equal(result.body?.toString(), rawBody, `switch to ${item.type}`);
+      }
+    }
+  }
+  const safeEnvelope = eventsFor("Answer.<oai-mem-citation>source</oai-mem-citation>", "envelope");
+  const json = await exchange(safeEnvelope, false);
+  assert.equal(json.result.body?.toString(), json.rawBody);
+  // Hidden data still receives raw and citation-only protection in either mode.
+  for (const candidate of [
+    "<oai-mem-citation>synthetic-key-initial</oai-mem-citation>",
+    "<proposed_plan>\nsynthetic-key-initial\n</proposed_plan>",
+    "<proposed_plan>\n" + collapsed + "\n</proposed_plan>",
+  ]) {
+    assert.ok((await exchange(eventsFor(candidate, "seed"))).result.blocked);
+  }
+  // Assistant projections must not reinterpret local tool data.
+  const tool = {
+    type: "function_call",
+    id: "fc_markup",
+    call_id: "call_markup",
+    name: "fixture_function_0",
+    arguments: JSON.stringify({ text: "<oai-mem-citation>note" }),
+  };
+  const nonMessage = [
+    structuredClone(wire.responseEvents[0]),
+    { type: "response.output_item.added", output_index: 0, item: tool },
+    { type: "response.output_item.done", output_index: 0, item: tool },
+    {
+      type: "response.completed",
+      response: { ...wire.responseEvents.at(-1).response, output: [tool] },
+    },
+  ];
+  const { result, rawBody } = await exchange(nonMessage);
+  assert.equal(result.body?.toString(), rawBody);
+});
+
 test("Responses incremental text snapshots cannot reveal selected material", async (t) => {
   const f = await staticEgressFixture(t);
   const wire = JSON.parse(

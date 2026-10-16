@@ -72,6 +72,19 @@ after the origin acted. A positive credential rejection fences only that materia
 version. An observed response or a decision to release bytes does not prove delivery
 to the Agent and cannot authorize a replay.
 
+Response protection checks joined assistant text in envelopes, independent items,
+and added-item seeds extended by streamed deltas. Safe projections may disagree;
+accepted response bodies retain their original bytes. In addition to raw text,
+protection checks the selected assistant consumer's literal, nonnested citation
+projection: `<oai-mem-citation>` through `</oai-mem-citation>` is hidden, with an
+unclosed citation hidden to the end. It also checks that projection in plan mode:
+a standalone `<proposed_plan>` line starts a nonnested hidden block ending at a
+standalone `</proposed_plan>` line or end of text. Tag lines use Unicode White_Space
+trimming and are removed with their newlines. Inline tags and unmatched closing
+tags remain text.
+Both modes must be safe, including raw data inside hidden markup. These
+projections do not reinterpret function-call argument data.
+
 ## Installation configuration
 
 Use the [protected local launch profile](../../guides/deploy/local-openshell-images.md#select-the-protected-profile)

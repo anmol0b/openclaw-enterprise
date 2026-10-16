@@ -15,6 +15,82 @@ interface ResponseProtection {
   fragmentOverlap: number;
 }
 
+// The supported assistant consumer joins message parts without a delimiter.
+function assistantText(parts: readonly { text: string }[]): string {
+  return parts.map((part) => part.text).join("");
+}
+
+// Compare consumer projections only; the accepted wire response is never rewritten.
+// Each walk advances through the bounded input and joins its retained slices once.
+function withoutCitations(text: string): string {
+  const open = "<oai-mem-citation>";
+  const close = "</oai-mem-citation>";
+  if (text.indexOf(open) === -1) {
+    return text;
+  }
+  const visible: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    const next = text.indexOf(open, start);
+    if (next === -1) {
+      visible.push(text.slice(start));
+      break;
+    }
+    visible.push(text.slice(start, next));
+    const end = text.indexOf(close, next + open.length);
+    if (end === -1) {
+      break;
+    }
+    start = end + close.length;
+  }
+  return visible.join("");
+}
+
+function withoutPlan(text: string): string {
+  if (!text.includes("<proposed_plan>")) {
+    return text;
+  }
+  const visible: string[] = [];
+  let active = false;
+  let start = 0;
+  while (start < text.length) {
+    const newline = text.indexOf("\n", start);
+    const end = newline === -1 ? text.length : newline + 1;
+    const line = text.slice(start, end);
+    // Rust str::trim uses Unicode White_Space (unlike JavaScript trim).
+    let left = 0;
+    let right = line.length;
+    while (left < right && /\p{White_Space}/u.test(line[left]!)) {
+      left++;
+    }
+    while (right > left && /\p{White_Space}/u.test(line[right - 1]!)) {
+      right--;
+    }
+    const slug = line.slice(left, right);
+    if (!active && slug === "<proposed_plan>") {
+      active = true;
+    } else if (active && slug === "</proposed_plan>") {
+      active = false;
+    } else if (!active) {
+      visible.push(line);
+    }
+    start = end;
+  }
+  return visible.join("");
+}
+
+function protectedAssistantText(text: string, scan: Scan): boolean {
+  if (!scan(text)) {
+    return false;
+  }
+  const cited = withoutCitations(text);
+  if (cited !== text && !scan(cited)) {
+    return false;
+  }
+  const visible = withoutPlan(cited);
+  return visible === cited || scan(visible);
+}
+
 // Decode exactly the JSON layer defined for function arguments. Strings inside
 // that object remain strings; this is not a general-purpose encoding decoder.
 const maximumArgumentBytes = 1024 * 1024;
@@ -31,7 +107,7 @@ export function protectedResponseOutput(value: unknown, scan: Scan): boolean {
   if (!Array.isArray(output)) {
     return true;
   }
-  const text: string[] = [];
+  const parts: { text: string }[] = [];
   for (const entry of output) {
     const item = asRecord(entry);
     if (
@@ -44,14 +120,14 @@ export function protectedResponseOutput(value: unknown, scan: Scan): boolean {
       for (const entry of item.content) {
         const part = asRecord(entry);
         if (part?.type === "output_text" && typeof part.text === "string") {
-          text.push(part.text);
+          parts.push({ text: part.text });
         }
       }
     }
   }
   // Responses clients concatenate output_text across all message items without
   // delimiters. Scan that bounded projection once, including split encodings.
-  return scan(text.join(""));
+  return protectedAssistantText(assistantText(parts), scan);
 }
 
 /** Inspect the entire bounded response before the provider releases its original bytes. */
@@ -133,6 +209,7 @@ class ResponsesStream {
   private readonly items = new Map<number, TrackedItem>();
   private readonly itemIds = new Set<string>();
   private readonly fragments = new Map<string, string>();
+  private assistantChunks: string[] | undefined;
   private responseId?: string;
   private sequence = -1;
   private terminal = false;
@@ -142,7 +219,9 @@ class ResponsesStream {
   }
 
   get complete(): boolean {
-    return this.terminal && [...this.items.values()].every((item) => item.done);
+    return (
+      this.terminal && this.finishAssistant() && [...this.items.values()].every((item) => item.done)
+    );
   }
 
   accept(event: ResponsesEvent): boolean {
@@ -166,12 +245,25 @@ class ResponsesStream {
         return false;
       }
       this.responseId = id;
-      return protectedResponseOutput(event.response, this.policy.scan);
+      return (
+        (!this.terminal || this.finishAssistant()) &&
+        protectedResponseOutput(event.response, this.policy.scan)
+      );
     }
     return "item" in event ? this.outputItem(event) : this.itemContent(event);
   }
 
+  private finishAssistant(): boolean {
+    const chunks = this.assistantChunks;
+    this.assistantChunks = undefined;
+    return chunks === undefined || protectedAssistantText(chunks.join(""), this.policy.scan);
+  }
+
   private outputItem({ type, output_index, item }: ItemEvent): boolean {
+    const text = item.type === "message" ? assistantText(item.content) : undefined;
+    if (text !== undefined && !protectedAssistantText(text, this.policy.scan)) {
+      return false;
+    }
     const tracked = this.items.get(output_index);
     if (type === "response.output_item.added") {
       if (
@@ -181,6 +273,14 @@ class ResponsesStream {
         this.items.size >= 4096
       ) {
         return false;
+      }
+      // Assistant deltas have no item/content IDs in the supported consumer.
+      // They extend the active message's joined seed, not an indexed part.
+      if (text !== undefined || item.type === "reasoning") {
+        if (!this.finishAssistant()) {
+          return false;
+        }
+        this.assistantChunks = text === undefined ? undefined : [text];
       }
       this.itemIds.add(item.id);
       this.items.set(output_index, {
@@ -203,6 +303,9 @@ class ResponsesStream {
     if (!tracked || tracked.done || tracked.id !== item.id || tracked.type !== item.type) {
       return false;
     }
+    if (!this.finishAssistant()) {
+      return false;
+    }
     tracked.done = true;
     return (
       item.type !== "function_call" || argumentsMatch(tracked, item.arguments, this.policy.scan)
@@ -213,6 +316,9 @@ class ResponsesStream {
     const item = this.items.get(event.output_index);
     if (!item || item.done || item.id !== event.item_id) {
       return false;
+    }
+    if (event.type === "response.output_text.delta" && event.delta !== undefined) {
+      this.assistantChunks?.push(event.delta);
     }
     if (event.delta !== undefined) {
       // Codex exposes output deltas without item IDs. Protect the concatenation the
