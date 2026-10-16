@@ -49,6 +49,7 @@ import {
   retryKubectlRead,
   withinDiagnosticDeadline,
 } from "../helpers/kubernetes-real.mjs";
+import { observeSandboxProbe } from "../helpers/k3d-failure-diagnostics.mjs";
 import {
   createEnvoyWorkspaceGatewayPlan,
   ensureEnvoyGatewayControllers,
@@ -79,7 +80,7 @@ const openShellSupervisorImage = process.env.OCC_TEST_OPENSHELL_SUPERVISOR_IMAGE
 const openShellHelmPath = process.env.OCC_TEST_OPENSHELL_HELM;
 const openShellHelmChart = process.env.OCC_TEST_OPENSHELL_HELM_CHART;
 const openShellWorkspaceHelmChart = process.env.OCC_TEST_OPENSHELL_WORKSPACE_HELM_CHART;
-const openShellChartVersion = process.env.OCC_TEST_OPENSHELL_CHART_VERSION ?? "0.1.3-pre.2";
+const openShellChartVersion = process.env.OCC_TEST_OPENSHELL_CHART_VERSION ?? "0.1.4";
 const openShellRuntimeClass = process.env.OCC_TEST_OPENSHELL_RUNTIME_CLASS ?? "openshell-sandbox";
 const providerModel = (process.env.OCC_TEST_OPENAI_MODEL ?? defaultAgentModel).replace(
   /^(?:openai|codex)\//,
@@ -1763,6 +1764,9 @@ function createIntegrationSandboxDriverFactory(
       configureAgent(configuration, harness) {
         return configurationDriver.configureAgent(configuration, harness);
       },
+      validateWorkspaceSetup(harness, configuration) {
+        return configurationDriver.validateWorkspaceSetup(harness, configuration);
+      },
       harnessResource(context) {
         return configurationDriver.harnessResource(context);
       },
@@ -2494,6 +2498,11 @@ async function prepareProductionInstallation(
     configurationId: agentConfiguration.data.id,
     executionMode: "dedicated",
     harnessAuth: { method: "credential_source", sourceId: modelSource.data.id },
+    // Console creation includes initial files. Keep this normal setup path in the
+    // real Sandbox proof so credential-only fixtures cannot hide delivery gaps.
+    ...(harnessId === "codex"
+      ? { initialWorkspaceFiles: { "AGENTS.md": "# Initialized OpenShell workspace\n" } }
+      : {}),
     // The list holds every bound source; harnessAuth names the model source within it.
     credentialSources: [
       { sourceId: modelSource.data.id },
@@ -2645,6 +2654,14 @@ async function prepareProductionInstallation(
   });
 
   const sandbox = await waitForSandbox(placement, deployed.data);
+  if (harnessId === "codex") {
+    const initialFile = await request(
+      "GET",
+      `/namespaces/${namespaceId}/agents/${agent.data.id}/workspace/files/AGENTS.md`,
+    );
+    assert.equal(initialFile.status, 200, JSON.stringify(initialFile.error));
+    assert.equal(initialFile.data.content, "# Initialized OpenShell workspace\n");
+  }
   const harnessPod = await waitForProviderHarnessPod(placement, deployed.data);
   process.stderr.write(
     "OpenShell integration: provider Harness ready; checking ownership and mounts.\n",
@@ -4608,6 +4625,34 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
     providerWorkspace,
     "the OpenShell Harness and Agent Gateway must use the same workspace root.",
   );
+  const harnessHome = topology.harnessPod.spec.containers
+    .flatMap(({ env = [] }) => env)
+    .find(({ name }) => name === "HOME")?.value;
+  // Read only the path from the configuration the real Gateway consumes, never credentials.
+  const hookDirectory = JSON.parse(
+    await kubectl(
+      "exec",
+      topology.gatewayPod.metadata.name,
+      "--namespace",
+      topology.gatewayPlacement,
+      "--container",
+      "gateway",
+      "--",
+      "node",
+      "-e",
+      [
+        'const fs = require("node:fs");',
+        'const config = JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH, "utf8"));',
+        "process.stdout.write(JSON.stringify(config.plugins?.entries?.codex?.config?.appServer?.nativeHookRelay?.credentialDirectory ?? null));",
+      ].join("\n"),
+    ),
+  );
+  assert.equal(
+    hookDirectory,
+    `${harnessHome}/.oce-native-hooks`,
+    "the Gateway must deliver native hook credentials into the Harness launcher's private directory.",
+  );
+  assert.equal(hookDirectory.startsWith(`${providerWorkspace}/`), false);
   const writablePath = `${providerWorkspace}/${nonce}.txt`;
   // OpenShell serves provider-profile files only when they are opened; access(2) reports them
   // missing. Reading proves the projected config is readable, and a write open is refused.
@@ -4778,39 +4823,38 @@ async function runSandboxProbe(topology, nonce, script, harnessPod = topology.ha
     ...(topology.toolSources ?? []).map(({ token }) => token),
     topology.untrustedTlsSource?.token,
   ].filter(Boolean);
-  // The model occasionally answers without calling the exec tool, most often on the first turn
-  // after cluster DNS for the model host was restored. That says nothing about OpenShell, so the
-  // turn is asked again after a pause; the probe's own results are never retried.
-  let result;
-  let run;
-  let completed = [];
-  for (let attempt = 1; attempt <= 3 && run === undefined; attempt += 1) {
-    if (attempt > 1) {
-      await delay(20_000);
-    }
-    result = await requestCodexTurnFromGatewayPod({
-      namespace: topology.gatewayPlacement,
-      gatewayPod: await currentGatewayPod(topology),
-      providerModel,
-      prompt:
-        `Use the shell exec tool to run exactly this one command: bash ${scriptPath}. ` +
-        `Then reply with exactly ${nonce}.`,
-    });
-    const serialized = JSON.stringify(result);
-    assert.equal(
-      secrets.some((value) => serialized.includes(value)),
-      false,
-      "a probe turn must not expose a credential.",
-    );
-    completed = result.items
-      .filter(({ method }) => method === "item/completed")
-      .map(({ params }) => params?.item);
-    // Codex may change into the workspace first, so the script is recognized by its unique name.
-    run = completed.find(
-      (item) => item?.type === "commandExecution" && String(item.command).includes(nonce),
-    );
-  }
+  const traceSecrets = failureSecrets([
+    process.env,
+    Object.fromEntries(secrets.map((value, index) => [`PROBE_CREDENTIAL_${index}`, value])),
+  ]);
+  const { result, run, traces } = await observeSandboxProbe({
+    nonce,
+    traceSecrets,
+    async requestTurn(attempt) {
+      if (attempt > 1) {
+        await delay(20_000);
+      }
+      const turn = await requestCodexTurnFromGatewayPod({
+        namespace: topology.gatewayPlacement,
+        gatewayPod: await currentGatewayPod(topology),
+        providerModel,
+        prompt:
+          `Use the shell exec tool to run exactly this one command: bash ${scriptPath}. ` +
+          `Then reply with exactly ${nonce}.`,
+      });
+      const serialized = JSON.stringify(turn);
+      assert.equal(
+        secrets.some((value) => serialized.includes(value)),
+        false,
+        "a probe turn must not expose a credential.",
+      );
+      return turn;
+    },
+  });
   if (run === undefined) {
+    process.stderr.write(
+      `OpenShell integration: turns that skipped the probe:\n${traces.join("\n")}\n`,
+    );
     // Codex logs why a tool call did not run, such as a dropped model stream. Lines that could
     // carry a credential or placeholder are dropped.
     const logs = await kubectl(
@@ -4832,16 +4876,12 @@ async function runSandboxProbe(topology, nonce, script, harnessPod = topology.ha
       `OpenShell integration: Harness log after a skipped probe:\n${relevant.join("\n")}\n`,
     );
   }
-  assert.ok(
-    run,
-    `the Harness must run the probe script; completed items: ${JSON.stringify(
-      completed.map((item) => item?.type ?? null),
-    )}; messages: ${JSON.stringify(
-      completed
-        .filter((item) => item?.type === "agentMessage")
-        .map((item) => String(item.text ?? "").slice(0, 400)),
-    )}`,
-  );
+  assert.ok(run, `No probe command was observed in three turns.\n${traces.join("\n")}`);
+  if (traces.length > 0) {
+    process.stderr.write(
+      `OpenShell integration: the probe ran after these turns without a probe command:\n${traces.join("\n")}\n`,
+    );
+  }
   assert.match(result.assistant, new RegExp(nonce));
   const output = String(run.aggregatedOutput ?? "");
   const value = (name) => new RegExp(`^${name}=(.*)$`, "m").exec(output)?.[1]?.trim() ?? null;
@@ -5889,14 +5929,32 @@ async function assertDuplicateReconciliationDoesNotDuplicateOpenShell(topology) 
   );
   assert.equal(redeployed.status, 202, JSON.stringify(redeployed.error));
   assert.notEqual(redeployed.data.id, topology.revision.id);
+  const agentPath = `/namespaces/${topology.namespaceId}/agents/${topology.agent.id}`;
+  const deploymentPath = `${agentPath}/deployments/${redeployed.data.id}`;
   try {
     await waitFor(`replacement OpenShell revision ${redeployed.data.id} activation`, async () => {
-      const observed = await topology.request(
-        "GET",
-        `/namespaces/${topology.namespaceId}/agents/${topology.agent.id}`,
-      );
+      const observed = await topology.request("GET", agentPath);
       assert.equal(observed.status, 200, JSON.stringify(observed.error));
-      return observed.data.activeRevisionId === redeployed.data.id ? observed.data : undefined;
+      if (observed.data.activeRevisionId === redeployed.data.id) {
+        return observed.data;
+      }
+      // Finding 1532: a Harness holding a failed startup model probe fails the deployment for
+      // good on its first attempt. Stop then: the error names the probe's classified cause, and
+      // the diagnostic is captured near the failure, not after 240 s of Gateway reconnect noise.
+      const deployment = await topology.request("GET", deploymentPath);
+      // A temporary failure to read that diagnostic is not a failed replacement. Keep the
+      // original activation deadline; only the Agent naming this revision can satisfy the wait.
+      const { status } = deployment;
+      if (status === 408 || status === 429 || (status >= 500 && status < 600)) {
+        return undefined;
+      }
+      assert.equal(status, 200, JSON.stringify(deployment.error));
+      assert.notEqual(
+        deployment.data.status,
+        "failed",
+        `Replacement OpenShell revision ${redeployed.data.id} failed: ${JSON.stringify(deployment.data)}`,
+      );
+      return undefined;
     });
   } catch (error) {
     const worker = await topology.diagnoseRevision(redeployed.data.id);
