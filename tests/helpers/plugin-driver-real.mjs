@@ -616,6 +616,7 @@ const sessionEvidenceScript = String.raw`
           toolCallId: message.toolCallId,
           toolName: message.toolName,
           isError: message.isError === true,
+          errorText: message.isError === true ? textOf(message.content) : undefined,
           // Native Codex emits this terminal reason when MCP approval is denied.
           deniedByUser: textOf(message.content).includes("user rejected MCP tool call"),
           matchesResult: resultPattern
@@ -1342,7 +1343,17 @@ export function createNativePluginAssertions({
       resultPattern ?? "",
       JSON.stringify(expectedArguments ?? null),
     ]);
-    return { runtime: execution.label, ...JSON.parse(execution.stdout) };
+    const evidence = JSON.parse(execution.stdout);
+    for (const result of evidence.results ?? []) {
+      if (typeof result.errorText === "string") {
+        result.errorLines = redactedQaTail(result.errorText, process.env, {
+          lines: 3,
+          lineChars: 900,
+        });
+        delete result.errorText;
+      }
+    }
+    return { runtime: execution.label, ...evidence };
   }
 
   async function readCodexSessionBinding(agent, { sessionKey }) {

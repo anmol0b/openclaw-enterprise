@@ -7,7 +7,7 @@ import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { protectedText } from "../helpers/qa-secrets.mjs";
+import { protectedText, registerQaSecret } from "../helpers/qa-secrets.mjs";
 
 test("QA Agent reads the selected Preset in its Namespace", async (t) => {
   const { createQaAgent } = await import("../helpers/qa-installation.mjs");
@@ -1484,6 +1484,8 @@ test("native tool evidence reads compressed transcript rows and separate prompt 
       tools: { entries: [{ name: "exec" }, { name: "automations" }] },
     }),
   );
+  const toolErrorSecret = "fixture-tool-error-secret";
+  registerQaSecret(toolErrorSecret);
   const rows = [
     { role: "user", content: "allowed-fixture" },
     {
@@ -1514,7 +1516,17 @@ test("native tool evidence reads compressed transcript rows and separate prompt 
       toolCallId: "denied-call",
       toolName: "automations",
       isError: true,
-      content: [{ type: "text", text: "Automation not found: fixture-job" }],
+      content: [
+        {
+          type: "text",
+          text: [
+            "earlier error context omitted from bounded diagnostic",
+            "Automation not found: fixture-job",
+            `private fixture value: ${toolErrorSecret}`,
+            "x".repeat(3_000),
+          ].join("\n"),
+        },
+      ],
     },
     { role: "assistant", content: [{ type: "text", text: "denied-fixture" }], stopReason: "stop" },
   ];
@@ -1575,6 +1587,19 @@ test("native tool evidence reads compressed transcript rows and separate prompt 
     ),
     /exact requested action and target/,
   );
+  await assert.rejects(native.assertSessionToolCallEvidence({}, denial), (error) => {
+    const diagnostic = JSON.parse(error.message.split("matching successful result: ")[1]);
+    const [result] = diagnostic.results;
+    assert.equal(result.toolCallId, "denied-call");
+    assert.equal(result.errorText, undefined);
+    assert.equal(result.errorLines.length, 3);
+    assert.equal(result.errorLines[0], "Automation not found: fixture-job");
+    assert.equal(result.errorLines[1], "private fixture value: [env:qa-secret]");
+    assert.equal(error.message.includes(toolErrorSecret), false);
+    assert.ok(result.errorLines.every((line) => line.length <= 900 + "... [truncated]".length));
+    assert.match(result.errorLines[2], /\[truncated\]$/);
+    return true;
+  });
 });
 
 test("Gateway policy evidence identifies a fresh native Codex child and its own completed work", async (t) => {
