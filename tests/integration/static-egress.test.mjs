@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
-import { outputWithIndependentCitation } from "../fixtures/synthetic-egress-provider.mjs";
+import {
+  encodeSyntheticEvents,
+  outputWithIndependentCitation,
+} from "../fixtures/synthetic-egress-provider.mjs";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { readFileSync } from "node:fs";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
@@ -717,11 +720,28 @@ test("V1 permits only the exact inert runtime rule and fences both policies befo
   assert.equal(f.providerRequests.length, 0, "send-side widening must not permit a provider send");
 });
 
-test("Responses output text assembled across parts and messages cannot reveal selected material", async (t) => {
-  const f = await staticEgressFixture(t);
-  const wire = JSON.parse(
+function readResponsesWire() {
+  return JSON.parse(
     readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
   );
+}
+
+function encode(events) {
+  return encodeSyntheticEvents(events).toString("utf8");
+}
+
+async function exchangeProtectedResponse(f, request, response) {
+  const captured = f.capture(request);
+  const ready = (await f.resolve(captured)).ready;
+  assert.ok(ready);
+  assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
+  f.setResponse(response);
+  return f.protect(captured, await f.send(captured, ready));
+}
+
+test("Responses output text assembled across parts and messages cannot reveal selected material", async (t) => {
+  const f = await staticEgressFixture(t);
+  const wire = readResponsesWire();
   const template = wire.responseEvents.at(-1).response;
   const message = (id, parts) => ({
     type: "message",
@@ -734,26 +754,22 @@ test("Responses output text assembled across parts and messages cannot reveal se
     acrossMessages
       ? parts.map((text, index) => message(`msg_${index}`, [text]))
       : [message("msg_0", parts)];
-  const encode = (events) =>
-    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
   async function exchange(result, streaming) {
     const request = streaming
       ? wire.request
       : { model: "fixture-model", input: "hello", store: false };
-    const captured = f.capture(request);
-    const ready = (await f.resolve(captured)).ready;
-    assert.ok(ready);
-    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
-    if (streaming) {
-      const events = structuredClone(wire.responseEvents);
-      // The deltas and completed item remain harmless. Only the response
-      // envelope contains the candidate, so delta protection cannot mask this test.
-      events.at(-1).response.output = result.output;
-      f.setResponse({ status: 200, contentType: "text/event-stream", rawBody: encode(events) });
-    } else {
-      f.setResponse({ status: 200, body: result });
+    if (!streaming) {
+      return exchangeProtectedResponse(f, request, { status: 200, body: result });
     }
-    return f.protect(captured, await f.send(captured, ready));
+    const events = structuredClone(wire.responseEvents);
+    // The deltas and completed item remain harmless. Only the response
+    // envelope contains the candidate, so delta protection cannot mask this test.
+    events.at(-1).response.output = result.output;
+    return exchangeProtectedResponse(f, request, {
+      status: 200,
+      contentType: "text/event-stream",
+      rawBody: encode(events),
+    });
   }
   for (const streaming of [false, true]) {
     for (const acrossMessages of [false, true]) {
@@ -780,11 +796,7 @@ test("Responses output text assembled across parts and messages cannot reveal se
 
 test("Responses assistant projections protect independent items and seeded deltas", async (t) => {
   const f = await staticEgressFixture(t);
-  const wire = JSON.parse(
-    readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
-  );
-  const encode = (events) =>
-    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const wire = readResponsesWire();
   const parts = (text) => {
     const middle = Math.floor(text.length / 2);
     return [text.slice(0, middle), text.slice(middle)].map((text) => ({
@@ -835,17 +847,17 @@ test("Responses assistant projections protect independent items and seeded delta
     return events;
   }
   async function exchange(events, streaming = true) {
-    const captured = f.capture({ ...wire.request, stream: streaming });
-    const ready = (await f.resolve(captured)).ready;
-    assert.ok(ready);
-    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
     const rawBody = streaming ? encode(events) : JSON.stringify(events.at(-1).response);
-    f.setResponse({
-      status: 200,
-      contentType: streaming ? "text/event-stream" : "application/json",
-      rawBody,
-    });
-    return { result: await f.protect(captured, await f.send(captured, ready)), rawBody };
+    const result = await exchangeProtectedResponse(
+      f,
+      { ...wire.request, stream: streaming },
+      {
+        status: 200,
+        contentType: streaming ? "text/event-stream" : "application/json",
+        rawBody,
+      },
+    );
+    return { result, rawBody };
   }
   // Retain both encodings on the two independent item surfaces. Other cases
   // each exercise a distinct consumer boundary rather than a Cartesian matrix.
@@ -957,11 +969,7 @@ test("Responses assistant projections protect independent items and seeded delta
 
 test("signed Responses Plan projections protect completed and response-wide streamed text", async (t) => {
   const f = await staticEgressFixture(t);
-  const wire = JSON.parse(
-    readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
-  );
-  const encode = (events) =>
-    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const wire = readResponsesWire();
   const parts = (text) => [{ type: "output_text", text, annotations: [] }];
   const added = (index, text) => ({
     type: "response.output_item.added",
@@ -1115,11 +1123,7 @@ test("signed Responses Plan projections protect completed and response-wide stre
 
 test("Responses incremental text snapshots cannot reveal selected material", async (t) => {
   const f = await staticEgressFixture(t);
-  const wire = JSON.parse(
-    readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
-  );
-  const encode = (events) =>
-    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const wire = readResponsesWire();
   const events = (candidate, kind) => {
     const [created, item, part, delta, ...rest] = structuredClone(wire.responseEvents);
     const middle = Math.floor(candidate.length / 2);
@@ -1160,16 +1164,11 @@ test("Responses incremental text snapshots cannot reveal selected material", asy
     return [created, item, part, { ...delta, delta: suffix }, ...rest];
   };
   async function exchange(responseEvents) {
-    const captured = f.capture(wire.request);
-    const ready = (await f.resolve(captured)).ready;
-    assert.ok(ready);
-    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
-    f.setResponse({
+    return exchangeProtectedResponse(f, wire.request, {
       status: 200,
       contentType: "text/event-stream",
       rawBody: encode(responseEvents),
     });
-    return f.protect(captured, await f.send(captured, ready));
   }
   // The harmless final response cannot erase a credential exposed in an earlier
   // SDK snapshot assembled from an added part and later indexed deltas.
@@ -1204,18 +1203,13 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
   const f = await staticEgressFixture(t);
   // Sanitized packaged 0.163.0-alpha.2 request and synthetic response consumed by that
   // binary. This exercises OCE's real transport, not a model provider or installed Harness.
-  const wire = JSON.parse(
-    readFileSync(new URL("../fixtures/static-egress/codex-responses.json", import.meta.url)),
-  );
-  const encode = (events) =>
-    events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+  const wire = readResponsesWire();
   async function exchange(rawBody) {
-    const captured = f.capture(wire.request);
-    const ready = (await f.resolve(captured)).ready;
-    assert.ok(ready);
-    assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
-    f.setResponse({ status: 200, contentType: "text/event-stream", rawBody });
-    return f.protect(captured, await f.send(captured, ready));
+    return exchangeProtectedResponse(f, wire.request, {
+      status: 200,
+      contentType: "text/event-stream",
+      rawBody,
+    });
   }
   const body = encode(wire.responseEvents);
   const delivered = await exchange(body);
