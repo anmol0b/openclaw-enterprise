@@ -4,7 +4,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { imageSmokeTimeoutMultiplier } from "../helpers/image-smoke-timeout.mjs";
-import { imageTestOptions, runDocker, failureTail } from "../helpers/runtime-image-startup.mjs";
+import {
+  imageTestOptions,
+  runDocker,
+  failureTail,
+  failureOutputLimit,
+} from "../helpers/runtime-image-startup.mjs";
 import {
   runStartupProbeScenario,
   observedValue,
@@ -53,8 +58,13 @@ async function assertPromptTermination(t, { containerName, collect }, descriptio
     })}`,
   );
   if (state.running) {
+    // Keep both streams: stderr warnings must not crowd stdout shutdown spans out.
+    // Reserve space for stream labels and omission markers in the existing budget.
+    const streamTailLimit = failureOutputLimit / 2 - 128;
     assert.fail(
-      `${description}: SIGTERM did not stop the wrapper in ${elapsedMs} ms.\n${failureTail(state.output)}`,
+      `${description}: SIGTERM did not stop the wrapper in ${elapsedMs} ms.\n` +
+        `stdout:\n${failureTail(state.stdout, streamTailLimit)}\n` +
+        `stderr:\n${failureTail(state.stderr, streamTailLimit)}`,
     );
   }
   // A terminated wrapper exits cleanly in every phase, as it does once running.

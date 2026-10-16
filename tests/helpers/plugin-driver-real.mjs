@@ -901,6 +901,142 @@ function assertDiagnosticText(value, secrets) {
   return text;
 }
 
+// The native catalog is SessionMeta, not the legacy thread_dynamic_tools table.
+export function parseCodexPolicyMetadata(line, expectedThreadId) {
+  const entry = JSON.parse(line);
+  assert.equal(entry.type, "session_meta", "the rollout head must be native SessionMeta");
+  const metadata = entry.payload;
+  assert.equal(metadata?.id, expectedThreadId, "SessionMeta must identify the requested thread");
+  const specs = metadata.dynamic_tools ?? [];
+  assert.ok(Array.isArray(specs), "SessionMeta dynamic_tools must be an array");
+  const tools = specs.flatMap((spec) => {
+    assert.ok(spec.type === "namespace" || spec.type === "function", "unknown native tool spec");
+    const entries = spec.type === "namespace" ? spec.tools : [spec];
+    assert.ok(Array.isArray(entries), "native namespace must contain tools");
+    return entries.map((tool) => {
+      assert.equal(tool.type, "function");
+      assert.ok(typeof tool.name === "string" && tool.name.length > 0);
+      return { namespace: spec.type === "namespace" ? spec.name : null, name: tool.name };
+    });
+  });
+  return {
+    threadId: metadata.id,
+    parentThreadId: metadata.parent_thread_id ?? null,
+    forkedFromId: metadata.forked_from_id ?? null,
+    tools,
+  };
+}
+
+export async function readCodexPolicyRolloutHead(path) {
+  const { access } = await import("node:fs/promises");
+  const { createReadStream } = await import("node:fs");
+  const { createZstdDecompress } = await import("node:zlib");
+  assert.ok(typeof path === "string" && /\.jsonl(?:\.zst)?$/.test(path));
+  // Codex's reader prefers the plain counterpart if compression left both present.
+  const plain = path.replace(/\.zst$/, "");
+  let selected = plain;
+  try {
+    await access(plain);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+    selected = `${plain}.zst`;
+  }
+  const input = createReadStream(selected);
+  const stream = selected.endsWith(".zst") ? input.pipe(createZstdDecompress()) : input;
+  if (stream !== input) {
+    input.on("error", (error) => stream.destroy(error));
+  }
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  try {
+    for await (const chunk of stream) {
+      bytes += chunk.length;
+      assert.ok(bytes <= 4 * 1024 * 1024, "native rollout metadata exceeds the fixture read limit");
+      text += decoder.decode(chunk, { stream: true });
+      const end = text.indexOf("\n");
+      if (end !== -1) {
+        return text.slice(0, end);
+      }
+    }
+    throw new Error("native rollout has no complete SessionMeta record");
+  } finally {
+    stream.destroy();
+    input.destroy();
+  }
+}
+
+export function findCodexPolicyChild(parent, childMarker) {
+  const spawns = parent.turns
+    .filter((turn) => turn.status === "completed" && turn.error === null)
+    .flatMap((turn) => turn.items)
+    .filter(
+      (item) =>
+        item.type === "collabAgentToolCall" &&
+        item.tool === "spawnAgent" &&
+        item.status === "completed" &&
+        item.senderThreadId === parent.id &&
+        item.prompt?.includes(childMarker),
+    );
+  assert.equal(spawns.length, 1, "one completed native spawn must match the child task");
+  assert.equal(spawns[0].receiverThreadIds.length, 1, "the spawn must identify exactly one child");
+  return spawns[0].receiverThreadIds[0];
+}
+
+export function assertCodexPolicyChild({
+  parent,
+  child,
+  parentMetadata,
+  childMetadata,
+  childMarker,
+  childResult,
+}) {
+  assert.equal(child.id, findCodexPolicyChild(parent, childMarker));
+  assert.notEqual(child.id, parent.id);
+  assert.equal(child.parentThreadId, parent.id);
+  assert.equal(child.forkedFromId, null, "this proof requires a fresh child, not forked history");
+  assert.equal(parentMetadata.threadId, parent.id);
+  assert.equal(childMetadata.threadId, child.id);
+  assert.equal(childMetadata.parentThreadId, parent.id);
+  assert.equal(childMetadata.forkedFromId, null);
+  assert.ok(
+    parentMetadata.tools.some((tool) => tool.name === "agents_list"),
+    "the parent Gateway catalog is the positive control",
+  );
+  assert.deepEqual(
+    childMetadata.tools,
+    [],
+    "the fresh child must not inherit Gateway dynamic tools",
+  );
+  const completed = child.turns.find(
+    (turn) =>
+      turn.status === "completed" &&
+      turn.error === null &&
+      turn.items.some((item) => item.type === "agentMessage" && item.text.includes(childMarker)) &&
+      turn.items.some(
+        (item) =>
+          item.type === "commandExecution" &&
+          item.status === "completed" &&
+          item.exitCode === 0 &&
+          item.aggregatedOutput?.includes(`42 ${childResult}`),
+      ),
+  );
+  assert.ok(
+    completed,
+    "the child's own completed turn must contain the successful native command and reply",
+  );
+  return {
+    parentThreadId: parent.id,
+    childThreadId: child.id,
+    childTurnId: completed.id,
+    nativeCommandSucceeded: true,
+    parentGatewayTools: parentMetadata.tools,
+    childGatewayTools: [],
+  };
+}
+
 export async function assertNativeCronRunSucceeded({ request, waitFor, jobId }) {
   const accepted = await request("cron.run", { id: jobId, mode: "force", waitTimeoutMs: 5_000 });
   assert.equal(accepted.ok, true, "human command request must succeed");
@@ -1207,6 +1343,59 @@ export function createNativePluginAssertions({
       JSON.stringify(expectedArguments ?? null),
     ]);
     return { runtime: execution.label, ...JSON.parse(execution.stdout) };
+  }
+
+  async function readCodexSessionBinding(agent, { sessionKey }) {
+    assert.equal(proofMode, "codex");
+    const execution = await execGateway(agent, [
+      "node",
+      "-e",
+      String.raw`
+      const assert = require("node:assert/strict");
+      const { createHash } = require("node:crypto");
+      const { DatabaseSync } = require("node:sqlite");
+      const sessionKey = process.argv[1];
+      const sessions = new DatabaseSync("/home/node/.openclaw/agents/main/agent/openclaw-agent.sqlite", { readOnly: true });
+      const state = new DatabaseSync("/home/node/.openclaw/state/openclaw.sqlite", { readOnly: true });
+      try {
+        const session = sessions.prepare("SELECT current_session_id FROM session_nodes WHERE session_key = ?").get(sessionKey);
+        assert.ok(session, "the original OC session must exist");
+        const key = "session-key:main:" + createHash("sha256").update(sessionKey.trim()).digest("base64url");
+        const row = state.prepare("SELECT value_json FROM plugin_state_entries WHERE plugin_id = 'codex' AND namespace = 'app-server-thread-bindings' AND entry_key = ? AND (expires_at IS NULL OR expires_at > ?)").get(key, Date.now());
+        assert.ok(row, "the OC session must have an active Codex binding");
+        const stored = JSON.parse(row.value_json);
+        assert.equal(stored.version, 1);
+        assert.equal(stored.state, "active");
+        assert.equal(stored.sessionId, session.current_session_id);
+        assert.ok(typeof stored.binding.threadId === "string" && stored.binding.threadId.length > 0);
+        process.stdout.write(JSON.stringify({ sessionId: session.current_session_id, threadId: stored.binding.threadId }));
+      } finally { sessions.close(); state.close(); }
+    `,
+      sessionKey,
+    ]);
+    return JSON.parse(execution.stdout);
+  }
+
+  async function readCodexThreadMetadata(agent, thread) {
+    assert.equal(proofMode, "codex");
+    assert.ok(typeof thread.id === "string" && thread.id.length > 0);
+    assert.ok(typeof thread.path === "string", "native thread/read must return its rollout path");
+    const execution = await execCodex(agent, [
+      "node",
+      "-e",
+      `
+      const assert = require("node:assert/strict");
+      ${parseCodexPolicyMetadata.toString()}
+      ${readCodexPolicyRolloutHead.toString()}
+      (async () => {
+        const line = await readCodexPolicyRolloutHead(process.argv[1]);
+        process.stdout.write(JSON.stringify(parseCodexPolicyMetadata(line, process.argv[2])));
+      })().catch(() => { process.stderr.write("Native SessionMeta evidence read failed."); process.exitCode = 1; });
+    `,
+      thread.path,
+      thread.id,
+    ]);
+    return JSON.parse(execution.stdout);
   }
 
   async function assertSessionToolCallEvidence(agent, options) {
@@ -1548,6 +1737,8 @@ export function createNativePluginAssertions({
 
   return {
     normalGatewayTurn,
+    readCodexSessionBinding,
+    readCodexThreadMetadata,
     assertSessionToolCallEvidence,
     assertSessionToolDeniedEvidence,
     assertSessionToolPolicyDeniedEvidence,

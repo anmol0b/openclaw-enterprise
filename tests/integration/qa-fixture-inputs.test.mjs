@@ -1576,3 +1576,162 @@ test("native tool evidence reads compressed transcript rows and separate prompt 
     /exact requested action and target/,
   );
 });
+
+test("Gateway policy evidence identifies a fresh native Codex child and its own completed work", async (t) => {
+  const { assertCodexPolicyChild, parseCodexPolicyMetadata, readCodexPolicyRolloutHead } =
+    await import("../helpers/plugin-driver-real.mjs");
+  const metadata = (id, dynamic_tools = [], parent_thread_id) =>
+    JSON.stringify({
+      type: "session_meta",
+      payload: { id, dynamic_tools, parent_thread_id },
+    });
+  const parentLine = metadata("parent", [
+    {
+      type: "namespace",
+      name: "openclaw",
+      tools: [
+        {
+          type: "function",
+          name: "agents_list",
+          description: "private description",
+          inputSchema: {},
+        },
+      ],
+    },
+  ]);
+  const childLine = metadata("child", [], "parent");
+  const fixture = () => ({
+    childMarker: "child-done",
+    childResult: "command-result",
+    parent: {
+      id: "parent",
+      turns: [
+        {
+          id: "parent-turn",
+          status: "completed",
+          error: null,
+          items: [
+            {
+              type: "collabAgentToolCall",
+              tool: "spawnAgent",
+              status: "completed",
+              senderThreadId: "parent",
+              receiverThreadIds: ["child"],
+              prompt: "run native work and reply child-done",
+            },
+          ],
+        },
+      ],
+    },
+    child: {
+      id: "child",
+      parentThreadId: "parent",
+      forkedFromId: null,
+      turns: [
+        {
+          id: "child-turn",
+          status: "completed",
+          error: null,
+          items: [
+            {
+              type: "commandExecution",
+              status: "completed",
+              exitCode: 0,
+              aggregatedOutput: "42 command-result\n",
+            },
+            { type: "agentMessage", text: "child-done" },
+          ],
+        },
+      ],
+    },
+    parentMetadata: parseCodexPolicyMetadata(parentLine, "parent"),
+    childMetadata: parseCodexPolicyMetadata(childLine, "child"),
+  });
+  const result = assertCodexPolicyChild(fixture());
+  assert.equal(result.childTurnId, "child-turn");
+  assert.equal(result.nativeCommandSucceeded, true);
+  assert.deepEqual(result.childGatewayTools, []);
+  assert.deepEqual(result.parentGatewayTools, [{ namespace: "openclaw", name: "agents_list" }]);
+  assert.equal(JSON.stringify(result).includes("private description"), false);
+
+  for (const [label, mutate] of [
+    [
+      "unrelated child",
+      (value) => {
+        value.child.id = "other";
+      },
+    ],
+    [
+      "wrong lineage",
+      (value) => {
+        value.child.parentThreadId = "other";
+      },
+    ],
+    [
+      "forked history",
+      (value) => {
+        value.child.forkedFromId = "parent";
+      },
+    ],
+    [
+      "wrong metadata identity",
+      (value) => {
+        value.childMetadata.threadId = "other";
+      },
+    ],
+    [
+      "missing parent catalog control",
+      (value) => {
+        value.parentMetadata.tools = [];
+      },
+    ],
+    [
+      "inherited Gateway tools",
+      (value) => {
+        value.childMetadata.tools = value.parentMetadata.tools;
+      },
+    ],
+    [
+      "unfinished child",
+      (value) => {
+        value.child.turns[0].status = "inProgress";
+      },
+    ],
+    [
+      "failed command",
+      (value) => {
+        value.child.turns[0].items[0].exitCode = 1;
+      },
+    ],
+    [
+      "reply without native work",
+      (value) => {
+        value.child.turns[0].items.shift();
+      },
+    ],
+  ]) {
+    await t.test(`rejects ${label}`, () => {
+      const value = fixture();
+      mutate(value);
+      assert.throws(() => assertCodexPolicyChild(value));
+    });
+  }
+  await t.test("reads only the exact plain or compressed SessionMeta head", async () => {
+    const { zstdCompressSync } = await import("node:zlib");
+    const directory = await mkdtemp(join(tmpdir(), "codex-policy-metadata-"));
+    try {
+      const path = join(directory, "rollout.jsonl");
+      await writeFile(path, `${parentLine}\nnot-a-json-record\n`);
+      await writeFile(`${path}.zst`, zstdCompressSync(`${childLine}\n`));
+      assert.equal(await readCodexPolicyRolloutHead(`${path}.zst`), parentLine);
+      await rm(path);
+      assert.equal(await readCodexPolicyRolloutHead(path), childLine);
+      assert.throws(() => parseCodexPolicyMetadata(childLine, "unrelated-thread"));
+      assert.throws(() => parseCodexPolicyMetadata('{"type":"response_item"}', "child"));
+      await writeFile(path, "x".repeat(4 * 1024 * 1024 + 1));
+      await assert.rejects(readCodexPolicyRolloutHead(path), /fixture read limit/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});

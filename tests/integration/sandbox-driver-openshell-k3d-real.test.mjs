@@ -29,6 +29,8 @@ import { ensureDevelopmentBootstrap } from "../helpers/bootstrap-installation.mj
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 import {
   assertNativeCronRunSucceeded,
+  assertCodexPolicyChild,
+  findCodexPolicyChild,
   createNativePluginAssertions,
 } from "../helpers/plugin-driver-real.mjs";
 import {
@@ -192,6 +194,7 @@ const {
   assertGatewayBootstrapPolicies,
   assertNoSecretBytes,
   requestCodexTurnFromGatewayPod,
+  readCodexThreadFromGatewayPod,
   startGatewayPortForward,
 } = fixture;
 
@@ -6075,36 +6078,40 @@ test(
     );
     const apiKey = Buffer.from(apiSecret.data.occ, "base64").toString();
     const { GatewayClient } = await import(controllerRequire.resolve("@openclaw/gateway-client"));
-    const connected = Promise.withResolvers();
-    // Envoy authenticates the fixture API key and supplies the configured identity.
-    // The Gateway derives controlUiAdmin after authentication; no internal flags
-    // or device-auth exceptions are supplied by this test.
-    const client = new GatewayClient({
-      url: topology.gatewayAdminUrl,
-      origin: controlUiOrigin,
-      edgeAuthHeaders: { "x-api-key": apiKey },
-      clientName: "openclaw-control-ui",
-      mode: "ui",
-      role: "operator",
-      scopes: [],
-      deviceIdentity: null,
-      onHelloOk: connected.resolve,
-      onConnectError: connected.reject,
-    });
-    context.after(() => client.stopAndWait());
-    const helloTimeout = setTimeout(
-      () => connected.reject(new Error("Gateway admin connection timed out")),
-      15_000,
-    );
-    client.start();
-    let hello;
-    try {
-      hello = await connected.promise;
-    } finally {
-      clearTimeout(helloTimeout);
-    }
-    assert.equal(hello.auth?.role, "operator");
-    assert.ok(hello.auth.scopes.includes("operator.admin"));
+    const connectGateway = async () => {
+      const connected = Promise.withResolvers();
+      // Envoy authenticates the fixture API key and supplies the configured identity.
+      // The Gateway derives controlUiAdmin after authentication; no internal flags
+      // or device-auth exceptions are supplied by this test.
+      const connectedClient = new GatewayClient({
+        url: topology.gatewayAdminUrl,
+        origin: controlUiOrigin,
+        edgeAuthHeaders: { "x-api-key": apiKey },
+        clientName: "openclaw-control-ui",
+        mode: "ui",
+        role: "operator",
+        scopes: [],
+        deviceIdentity: null,
+        onHelloOk: connected.resolve,
+        onConnectError: connected.reject,
+      });
+      context.after(() => connectedClient.stopAndWait());
+      const helloTimeout = setTimeout(
+        () => connected.reject(new Error("Gateway admin connection timed out")),
+        15_000,
+      );
+      connectedClient.start();
+      let hello;
+      try {
+        hello = await connected.promise;
+      } finally {
+        clearTimeout(helloTimeout);
+      }
+      assert.equal(hello.auth?.role, "operator");
+      assert.ok(hello.auth.scopes.includes("operator.admin"));
+      return connectedClient;
+    };
+    let client = await connectGateway();
     const sessionKey = `agent:main:gateway-policy-${randomUUID()}`;
     const execPod = async (pod, namespace, args) => ({
       label: `${namespace}/${pod.metadata.name}`,
@@ -6128,40 +6135,46 @@ test(
       waitFor,
       proofMode: selectedHarness,
     });
+    const waitForTurn = async (targetSessionKey, marker) => {
+      return await waitFor(
+        `Gateway policy turn ${marker}`,
+        async () => {
+          const history = await client.request("chat.history", {
+            sessionKey: targetSessionKey,
+            limit: 30,
+          });
+          return history.messages?.some((message) => {
+            if (message.role !== "assistant") {
+              return false;
+            }
+            assert.notEqual(message.stopReason, "error", "the live model turn must complete");
+            const parts = Array.isArray(message.content) ? message.content : [];
+            const text =
+              typeof message.content === "string"
+                ? message.content
+                : parts
+                    .filter((part) => part.type === "text")
+                    .map((part) => part.text)
+                    .join("\n");
+            return (
+              text.includes(marker) &&
+              message.stopReason !== "toolUse" &&
+              !parts.some((part) => part.type === "toolCall")
+            );
+          })
+            ? history
+            : undefined;
+        },
+        600_000,
+      );
+    };
     const turn = async (prompt, marker) => {
       await client.request("chat.send", {
         sessionKey,
         idempotencyKey: randomUUID(),
         message: `${prompt} End your reply with exactly ${marker}.`,
       });
-      await waitFor(
-        `Gateway policy turn ${marker}`,
-        async () => {
-          const history = await client.request("chat.history", { sessionKey, limit: 30 });
-          return (
-            history.messages?.some((message) => {
-              if (message.role !== "assistant") {
-                return false;
-              }
-              assert.notEqual(message.stopReason, "error", "the live model turn must complete");
-              const parts = Array.isArray(message.content) ? message.content : [];
-              const text =
-                typeof message.content === "string"
-                  ? message.content
-                  : parts
-                      .filter((part) => part.type === "text")
-                      .map((part) => part.text)
-                      .join("\n");
-              return (
-                text.includes(marker) &&
-                message.stopReason !== "toolUse" &&
-                !parts.some((part) => part.type === "toolCall")
-              );
-            }) || undefined
-          );
-        },
-        600_000,
-      );
+      return waitForTurn(sessionKey, marker);
     };
     const exists = async (pod, namespace, path) =>
       JSON.parse(
@@ -6354,6 +6367,118 @@ test(
       humanUpdateSucceeded: true,
     });
 
+    const childMarker = `CHILD-${randomUUID()}`;
+    const spawnMarker = `SPAWN-${randomUUID()}`;
+    if (selectedHarness === "openclaw") {
+      const childLabel = `policy-child-${randomUUID()}`;
+      const childResult = `OC-CHILD-${randomUUID()}`;
+      const childTask = `Use exec to run node -e 'console.log(6*7, "${childResult}")'. If agents_list is available, call it once. If automations is available, try action=update, jobId=${foreignJob.id}, job={"name":"child-must-not-set-this"} once. Otherwise report those tools are unavailable. Do not use another interface. End your reply with exactly ${childMarker}.`;
+      await turn(
+        `Use sessions_spawn exactly once with runtime=subagent, mode=run, cleanup=keep, label=${childLabel}, and task=${JSON.stringify(childTask)}. Wait for its completion. Do not perform its task yourself.`,
+        spawnMarker,
+      );
+      await native.assertSessionToolCallEvidence(topology.agent, {
+        sessionKey,
+        turnMarker: spawnMarker,
+        toolName: "sessions_spawn",
+        resultPattern: "accepted",
+      });
+      const child = await waitFor("the labeled child of the tested parent", async () => {
+        const listed = await client.request("sessions.list", {
+          spawnedBy: sessionKey,
+          label: childLabel,
+        });
+        const matches = listed.sessions?.filter((entry) => entry.label === childLabel) ?? [];
+        assert.ok(matches.length <= 1, "the parent must create exactly one labeled child");
+        return matches[0];
+      });
+      assert.notEqual(child.key, sessionKey);
+      await waitForTurn(child.key, childMarker);
+      const allowed = await native.assertSessionToolCallEvidence(topology.agent, {
+        sessionKey: child.key,
+        turnMarker: childMarker,
+        toolName: "exec",
+        resultPattern: `42 ${childResult}`,
+      });
+      // OC intrinsically denies these task tools to children. Also verify the baseline's
+      // administrative catalog, including tools without an intrinsic child exclusion.
+      // These are withholding checks; the parent above proves an actual foreign-job refusal.
+      const intrinsicChildExclusions = ["agents_list", "automations"];
+      const administrativeCatalogWithholding = [
+        "gateway",
+        "plugins",
+        "openclaw",
+        "nodes",
+        "terminal",
+        "secrets",
+        "gateway_exec",
+        "gateway_process",
+      ];
+      for (const toolName of [...intrinsicChildExclusions, ...administrativeCatalogWithholding]) {
+        await native.assertNoSessionToolCallEvidence(topology.agent, {
+          sessionKey: child.key,
+          turnMarker: childMarker,
+          toolName,
+        });
+      }
+      assert.deepEqual(await client.request("cron.get", { id: foreignJob.id }), foreignAfter);
+      proof.modelTurns.push({
+        kind: "child-capability-withholding",
+        parentSessionKey: sessionKey,
+        childSessionKey: child.key,
+        allowed,
+        intrinsicChildExclusions,
+        administrativeCatalogWithholding,
+        foreignJobUnchanged: true,
+      });
+    } else {
+      const childResult = `NATIVE-CHILD-${randomUUID()}`;
+      await turn(
+        `Use spawn_agent exactly once with fork_context=false. Give the child this task: use a native shell tool to execute node -e 'console.log(6*7, "${childResult}")', verify the output is 42 followed by that marker, then reply with exactly ${childMarker}. Wait for completion before replying. Do not run the command in the parent or ask the child to use Gateway tools.`,
+        spawnMarker,
+      );
+      const binding = await native.readCodexSessionBinding(topology.agent, { sessionKey });
+      const parent = await readCodexThreadFromGatewayPod({
+        namespace: topology.gatewayPlacement,
+        gatewayPod: topology.gatewayPod.metadata.name,
+        threadId: binding.threadId,
+      });
+      const childId = findCodexPolicyChild(parent, childMarker);
+      const child = await waitFor(
+        "completed fresh native Codex child",
+        async () => {
+          const observed = await readCodexThreadFromGatewayPod({
+            namespace: topology.gatewayPlacement,
+            gatewayPod: topology.gatewayPod.metadata.name,
+            threadId: childId,
+          });
+          return observed.turns?.some(
+            (turn) =>
+              turn.status === "completed" &&
+              turn.items.some(
+                (item) => item.type === "agentMessage" && item.text.includes(childMarker),
+              ),
+          )
+            ? observed
+            : undefined;
+        },
+        600_000,
+      );
+      const parentMetadata = await native.readCodexThreadMetadata(topology.agent, parent);
+      const childMetadata = await native.readCodexThreadMetadata(topology.agent, child);
+      proof.modelTurns.push({
+        kind: "fresh-native-child",
+        ...assertCodexPolicyChild({
+          parent,
+          child,
+          parentMetadata,
+          childMetadata,
+          childMarker,
+          childResult,
+        }),
+      });
+    }
+
     const commandPath = `/tmp/DENIED-COMMAND-${randomUUID()}`;
     await client.request("cron.update", {
       id: job.id,
@@ -6454,6 +6579,167 @@ test(
       }
       proof.directInvocationProbes.push({ tool, action: args.action, status: response.status });
     }
+    const beforeMarker = `BEFORE-REDEPLOY-${randomUUID()}`;
+    const beforeHistory = await turn("Call agents_list once.", beforeMarker);
+    await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: beforeMarker,
+      toolName: "agents_list",
+      resultPattern: "main",
+    });
+    assert.ok(typeof beforeHistory.sessionId === "string" && beforeHistory.sessionId.length > 0);
+    const beforeBinding =
+      selectedHarness === "codex"
+        ? await native.readCodexSessionBinding(topology.agent, { sessionKey })
+        : undefined;
+    const oldRevisionId = topology.revision.id;
+    const oldHarnessUid = topology.harnessPod.metadata.uid;
+    const oldGatewayUid = topology.gatewayPod.metadata.uid;
+    const configPath = `/namespaces/${topology.namespaceId}/configurations/${topology.agent.configurationId}`;
+    const source = await topology.request("GET", configPath);
+    assert.equal(source.status, 200, JSON.stringify(source.error));
+    const values = structuredClone(source.data.values);
+    values.tools ??= {};
+    values.tools.gatewayPolicy = {
+      ...structuredClone(proof.effectivePolicy.gatewayPolicy),
+      allow: proof.effectivePolicy.gatewayPolicy.allow.filter((name) => name !== "agents_list"),
+    };
+    const updated = await topology.request("PATCH", configPath, { values });
+    assert.equal(updated.status, 200, JSON.stringify(updated.error));
+    await client.stopAndWait();
+    await forwarding.stop();
+    const agentPath = `/namespaces/${topology.namespaceId}/agents/${topology.agent.id}`;
+    const redeployed = await topology.request("POST", `${agentPath}/deploy`);
+    assert.equal(redeployed.status, 202, JSON.stringify(redeployed.error));
+    assert.notEqual(redeployed.data.id, oldRevisionId);
+    assert.equal(redeployed.data.configurationGeneration, updated.data.generation);
+    await waitFor("narrower Gateway policy revision activation", async () => {
+      const observed = await topology.request("GET", agentPath);
+      assert.equal(observed.status, 200, JSON.stringify(observed.error));
+      const status = await topology.request(
+        "GET",
+        `${agentPath}/deployments/${redeployed.data.id}`,
+      );
+      assert.equal(status.status, 200, JSON.stringify(status.error));
+      assert.notEqual(status.data.status, "failed", "the policy replacement must activate");
+      return observed.data.activeRevisionId === redeployed.data.id || undefined;
+    });
+    topology.harnessPod = await waitForProviderHarnessPod(topology.placement, redeployed.data);
+    topology.gatewayPod = await waitFor("the replacement Agent Gateway Pod", async () => {
+      const pod = await resource(
+        "pod",
+        await currentGatewayPod(topology),
+        topology.gatewayPlacement,
+      );
+      return pod.metadata.uid !== oldGatewayUid &&
+        pod.status?.conditions?.some(
+          (condition) => condition.type === "Ready" && condition.status === "True",
+        )
+        ? pod
+        : undefined;
+    });
+    topology.revision = redeployed.data;
+    assert.notEqual(topology.harnessPod.metadata.uid, oldHarnessUid);
+    assert.notEqual(topology.gatewayPod.metadata.uid, oldGatewayUid);
+    await waitFor("the old policy Sandbox retirement", async () => {
+      const sandboxes = await fixture.customResources(
+        "sandboxes.agents.x-k8s.io",
+        topology.placement,
+      );
+      return (
+        !sandboxes.some(
+          (sandbox) =>
+            sandbox.metadata.labels?.["openshell.ai/sandbox-name"] ===
+            `os-${hash(oldRevisionId, 16)}`,
+        ) || undefined
+      );
+    });
+    client = await connectGateway();
+    const currentConfig = await client.request("config.get", {});
+    assert.deepEqual(currentConfig.config.tools.gatewayPolicy, values.tools.gatewayPolicy);
+    const restored = await client.request("chat.history", { sessionKey, limit: 30 });
+    assert.equal(restored.sessionId, beforeHistory.sessionId);
+    assert.ok(
+      JSON.stringify(restored.messages).includes(beforeMarker),
+      "the original conversation history must survive redeployment",
+    );
+    const afterMarker = `AFTER-REDEPLOY-${randomUUID()}`;
+    const afterHistory = await turn(
+      "If your tool interface still exposes agents_list, invoke it exactly once and report its refusal. Do not use another interface or substitute tool. Then call automations with action=list exactly once.",
+      afterMarker,
+    );
+    assert.equal(afterHistory.sessionId, beforeHistory.sessionId);
+    await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: afterMarker,
+      toolName: "automations",
+      resultPattern: "jobs",
+    });
+    let afterBinding;
+    let retainedDeclaration = false;
+    if (selectedHarness === "codex") {
+      afterBinding = await native.readCodexSessionBinding(topology.agent, { sessionKey });
+      const thread = await readCodexThreadFromGatewayPod({
+        namespace: topology.gatewayPlacement,
+        gatewayPod: topology.gatewayPod.metadata.name,
+        threadId: afterBinding.threadId,
+      });
+      const metadata = await native.readCodexThreadMetadata(topology.agent, thread);
+      retainedDeclaration = metadata.tools.some((tool) => tool.name === "agents_list");
+    }
+    if (retainedDeclaration) {
+      await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
+        sessionKey,
+        turnMarker: afterMarker,
+        toolName: "agents_list",
+        expectedArguments: {},
+        resultPattern: "OpenClaw tool is not available for this turn: agents_list",
+      });
+    } else {
+      await native.assertNoSessionToolCallEvidence(topology.agent, {
+        sessionKey,
+        turnMarker: afterMarker,
+        toolName: "agents_list",
+      });
+    }
+    const afterForwarding = await startGatewayPortForward(
+      topology.gatewayPlacement,
+      openShellGatewayName(topology.agent.id),
+    );
+    context.after(() => afterForwarding.stop());
+    const removed = await fetch(`${afterForwarding.url}/tools/invoke`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await diagnosticGatewayPassword(topology)}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ tool: "agents_list", args: {}, sessionKey }),
+    });
+    assert.equal(removed.status, 404);
+    proof.directInvocationProbes.push({
+      tool: "agents_list",
+      status: removed.status,
+      afterRedeploy: true,
+    });
+    proof.redeployment = {
+      previousRevisionId: oldRevisionId,
+      revisionId: topology.revision.id,
+      sessionKey,
+      sessionId: afterHistory.sessionId,
+      historyPreserved: true,
+      ...(beforeBinding === undefined
+        ? {}
+        : {
+            previousNativeThreadId: beforeBinding.threadId,
+            nativeThreadId: afterBinding.threadId,
+            nativeThreadOutcome:
+              beforeBinding.threadId === afterBinding.threadId ? "retained" : "reconstructed",
+          }),
+      removedToolEvidence: retainedDeclaration
+        ? "actual callback denied"
+        : "catalog omitted; no model call",
+      allowedGatewayOperationSucceeded: true,
+    };
     context.diagnostic(JSON.stringify(proof));
   },
 );

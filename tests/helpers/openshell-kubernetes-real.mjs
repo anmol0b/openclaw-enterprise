@@ -1036,7 +1036,7 @@ export function createOpenShellKubernetesFixture({
     }
   }
 
-  async function requestCodexTurnFromPod({
+  async function requestCodexFromPod({
     namespace,
     pod,
     container,
@@ -1044,6 +1044,7 @@ export function createOpenShellKubernetesFixture({
     prompt,
     appServerUrl,
     appServerTokenPath,
+    readThreadId,
   }) {
     const script = String.raw`
       const appServerUrl = ${JSON.stringify(appServerUrl)} ?? process.env.APP_SERVER_URL;
@@ -1118,6 +1119,15 @@ export function createOpenShellKubernetesFixture({
             capabilities: { experimentalApi: true },
           });
           socket.send(JSON.stringify({ jsonrpc: "2.0", method: "initialized", params: {} }));
+          if (${JSON.stringify(readThreadId)} !== undefined) {
+            const result = await request("thread/read", {
+              threadId: ${JSON.stringify(readThreadId)}, includeTurns: true,
+            });
+            finished = true;
+            clearTimeout(timeout);
+            process.stdout.write(JSON.stringify(result.thread), () => process.exit(0));
+            return;
+          }
           // A Gateway serving an OpenShell Harness names the Sandbox workspace root; Codex
           // cannot start exec tools in a working directory that does not exist there.
           const workspace = process.env.OPENCLAW_REMOTE_WORKSPACE_ROOT ?? "/home/node/workspace";
@@ -1145,6 +1155,7 @@ export function createOpenShellKubernetesFixture({
 
       socket.addEventListener("message", ({ data }) => {
         const message = JSON.parse(String(data));
+        if (${JSON.stringify(readThreadId)} !== undefined && message.id === undefined) return;
         rememberFailureSignals(message);
         items.push(message);
         if (message.id !== undefined && (
@@ -1204,8 +1215,13 @@ export function createOpenShellKubernetesFixture({
     );
   }
 
+  async function readCodexThreadFromGatewayPod({ namespace, gatewayPod, threadId }) {
+    assert.ok(typeof threadId === "string" && threadId.length > 0);
+    return requestCodexFromPod({ namespace, pod: gatewayPod, readThreadId: threadId });
+  }
+
   async function requestCodexTurnFromGatewayPod({ namespace, gatewayPod, providerModel, prompt }) {
-    return requestCodexTurnFromPod({
+    return requestCodexFromPod({
       namespace,
       pod: gatewayPod,
       providerModel,
@@ -1220,7 +1236,7 @@ export function createOpenShellKubernetesFixture({
     prompt,
     appServerTokenPath,
   }) {
-    return requestCodexTurnFromPod({
+    return requestCodexFromPod({
       namespace,
       pod: harnessPod,
       container: "agent",
@@ -1253,6 +1269,7 @@ export function createOpenShellKubernetesFixture({
     assertGatewayBootstrapPolicies,
     assertNoSecretBytes,
     requestCodexTurnFromGatewayPod,
+    readCodexThreadFromGatewayPod,
     requestCodexTurnFromOpenShellHarnessPod,
     startGatewayPortForward,
   };
