@@ -74,6 +74,10 @@ async function observePreparedRetirement({ databaseUrl, namespaceId, sourceId },
           GROUP BY a.custody`,
         [namespaceId, sourceId],
       );
+      if (rows.length === 0) {
+        await record({ observation: "no-matching-prepared-custody-observed" });
+        return false;
+      }
       const custody = Object.fromEntries(rows.map(({ custody, attempts }) => [custody, attempts]));
       await record({ observation: "deleting-source-disabled-family", custody });
       if (rows.length === 1 && custody.revoked > 0) {
