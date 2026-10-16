@@ -25,6 +25,7 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
   const releases = new Set();
   let nextResponse;
   let issues = 0;
+  let retirement204 = 0;
   const server = custodyOriginWire(
     {
       cert: await readFile(configuration.certificatePath),
@@ -74,6 +75,7 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
         req.url === "/installation/token" &&
         req.headers.authorization === "Bearer " + token
       ) {
+        retirement204++;
         res.writeHead(204).end();
         return;
       }
@@ -189,6 +191,11 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
       releases.add(release);
       gates.push({ response, arrived, send, released });
       return { arrived: arrived.promise, release };
+    },
+    // Aggregate fixture observations only. This origin reuses a token, and writing a 204
+    // does not prove delivery to the caller or which prepared source initiated retirement.
+    retirementEvidence() {
+      return { issues, retirement204 };
     },
     get issues() {
       return issues;

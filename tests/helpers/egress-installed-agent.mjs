@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { deleteInstalledResource } from "./egress-installed-resource-cleanup.mjs";
 import { createCustodyTransitions } from "./egress-supplier-custody-transitions.mjs";
 import { createOpenShellKubernetesFixture } from "./openshell-kubernetes-real.mjs";
 import { connectedReceiptRevision, assertConnectedResponse } from "./egress-connected-inputs.mjs";
@@ -127,18 +128,29 @@ export async function registerCleanupAndStartProvider(
       "configurations",
     ]) {
       for (const owned of ledger.resources.filter((entry) => entry.kind === kind)) {
-        await clean(`${kind}/${owned.id}`, async () => {
-          const observed = await request(
-            "DELETE",
-            `${namespacePath}/${kind}/${owned.id}`,
-            undefined,
-            true,
-          );
-          assert.ok(
-            [204, 404].includes(observed.status),
-            `cleanup ${kind} returned HTTP ${observed.status}`,
-          );
-          assertConnectedResponse(observed, observed.status);
+        const ordinal = ledger.resources.indexOf(owned) + 1;
+        const label = `${kind} resource #${ordinal}; see cleanup-resource observations`;
+        await clean(label, async () => {
+          const repository = kind === "credential-sources" && provider?.retirementEvidence;
+          const removed = await deleteInstalledResource({
+            remove: () =>
+              request("DELETE", `${namespacePath}/${kind}/${owned.id}`, undefined, true),
+            record: (details) =>
+              checkpoint("cleanup-resource", {
+                kind,
+                ordinal,
+                ...details,
+                ...(repository && { issuer: provider.retirementEvidence() }),
+              }),
+            prepared: repository && {
+              databaseUrl: setup.databaseUrl,
+              namespaceId: stack.namespace.id,
+              sourceId: owned.id,
+            },
+          });
+          if (!removed) {
+            failures.push(label);
+          }
         });
       }
     }
