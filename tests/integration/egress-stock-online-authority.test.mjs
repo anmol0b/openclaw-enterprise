@@ -21,21 +21,17 @@ test(
         if (request.requestId === "error") {
           throw new Error("authorization unavailable");
         }
-        if (request.requestId === "cancel") {
-          cancellationStarted.resolve();
-          await new Promise((resolve) =>
-            signal.addEventListener(
-              "abort",
-              () => {
-                cancellationObserved.resolve();
-                resolve();
-              },
-              { once: true },
-            ),
+        if (["cancel", "budget"].includes(request.requestId)) {
+          const aborted = new Promise((resolve) =>
+            signal.addEventListener("abort", resolve, { once: true }),
           );
-        }
-        if (request.requestId === "budget") {
-          await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+          if (request.requestId === "cancel") {
+            cancellationStarted.resolve();
+          }
+          await aborted;
+          if (request.requestId === "cancel") {
+            cancellationObserved.resolve();
+          }
         }
         if (request.requestId === "late-allow") {
           // A synchronous authorizer can outlast the budget before its timer callback runs.
@@ -73,28 +69,13 @@ test(
       invoke(client, "Describe", describe, token(keys, "gateway", undefined, "wrong-audience")),
       { code: grpc.status.PERMISSION_DENIED },
     );
-    assert.equal(
-      (
-        await invoke(
-          client,
-          "ValidateConfig",
-          { middleware_name: registrationName, config: binding },
-          gateway,
-        )
-      ).valid,
-      true,
-    );
-    assert.equal(
-      (
-        await invoke(
-          client,
-          "ValidateConfig",
-          { middleware_name: registrationName, config: { fields: {} } },
-          gateway,
-        )
-      ).valid,
-      false,
-    );
+    for (const [config, valid] of [
+      [binding, true],
+      [{ fields: {} }, false],
+    ]) {
+      const input = { middleware_name: registrationName, config };
+      assert.equal((await invoke(client, "ValidateConfig", input, gateway)).valid, valid);
+    }
     const request = {
       phase: 1,
       middleware_name: registrationName,
@@ -112,6 +93,8 @@ test(
         path: "/v1/status",
       },
     };
+    const evaluate = async (changes = {}, bearer = supervisor) =>
+      (await invoke(client, "EvaluateHttpRequest", { ...request, ...changes }, bearer)).decision;
     assert.deepEqual(await invoke(client, "EvaluateHttpRequest", request, supervisor), {
       decision: 1,
     });
@@ -130,48 +113,31 @@ test(
     });
     // The same unexpired bearer cannot retain an allowance after the grant is withdrawn.
     grant = false;
-    assert.equal((await invoke(client, "EvaluateHttpRequest", request, supervisor)).decision, 2);
+    assert.equal(await evaluate(), 2);
     assert.equal(seen.length, 2);
     grant = true;
-    const spoofed = { ...request, context: { ...request.context, sandbox_id: "different-id" } };
-    assert.equal((await invoke(client, "EvaluateHttpRequest", spoofed, supervisor)).decision, 2);
-    assert.equal((await invoke(client, "EvaluateHttpRequest", request, gateway)).decision, 2);
+    const spoofed = { context: { ...request.context, sandbox_id: "different-id" } };
+    assert.equal(await evaluate(spoofed), 2, "token and sandbox disagree");
+    assert.equal(await evaluate({}, gateway), 2, "gateway cannot act as a supervisor");
     for (const changed of [
-      { ...request, body: Buffer.from("payload") },
-      { ...request, target: { ...request.target, query: "scope=other" } },
-      { ...request, target: { ...request.target, method: "POST" } },
-      { ...request, target: { ...request.target, scheme: "http" } },
+      { body: Buffer.from("payload") },
+      { target: { ...request.target, query: "scope=other" } },
+      { target: { ...request.target, method: "POST" } },
+      { target: { ...request.target, scheme: "http" } },
     ]) {
-      assert.equal((await invoke(client, "EvaluateHttpRequest", changed, supervisor)).decision, 2);
+      assert.equal(await evaluate(changed), 2);
     }
-    assert.equal(
-      seen.length,
-      2,
-      "unsupported and unauthenticated requests never reach current authority",
-    );
-    const differentSandbox = token(keys, "supervisor", "different-id");
-    assert.equal(
-      (await invoke(client, "EvaluateHttpRequest", spoofed, differentSandbox)).decision,
-      2,
-    );
+    assert.equal(seen.length, 2, "unadmitted requests never reach current authority");
+    assert.equal(await evaluate(spoofed, token(keys, "supervisor", "different-id")), 2);
     // Independently issued tokens for the same sandbox cannot distinguish supervisor instances.
     const sameSandbox = token(keys, "supervisor", "immutable-sandbox-id");
     assert.notEqual(sameSandbox, supervisor);
-    assert.equal((await invoke(client, "EvaluateHttpRequest", request, sameSandbox)).decision, 1);
-    const unknownBinding = {
-      ...request,
-      config: { fields: { binding_id: { stringValue: "unknown_0123456789abcdefghijklmn" } } },
-    };
-    assert.equal(
-      (await invoke(client, "EvaluateHttpRequest", unknownBinding, supervisor)).decision,
-      2,
-    );
-    const error = { ...request, context: { ...request.context, request_id: "error" } };
-    assert.equal((await invoke(client, "EvaluateHttpRequest", error, supervisor)).decision, 2);
-    const budget = { ...request, context: { ...request.context, request_id: "budget" } };
-    assert.equal((await invoke(client, "EvaluateHttpRequest", budget, supervisor)).decision, 2);
-    const lateAllow = { ...request, context: { ...request.context, request_id: "late-allow" } };
-    assert.equal((await invoke(client, "EvaluateHttpRequest", lateAllow, supervisor)).decision, 2);
+    assert.equal(await evaluate({}, sameSandbox), 1);
+    const fields = { binding_id: { stringValue: "unknown_0123456789abcdefghijklmn" } };
+    assert.equal(await evaluate({ config: { fields } }), 2);
+    for (const request_id of ["error", "budget", "late-allow"]) {
+      assert.equal(await evaluate({ context: { ...request.context, request_id } }), 2, request_id);
+    }
     const metadata = new grpc.Metadata();
     metadata.set("authorization", supervisor);
     let pendingCall;

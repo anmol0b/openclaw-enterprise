@@ -121,35 +121,33 @@ test("installation exchange rejects stolen bearer, changed request and swapped s
   const foreign = generateKeyPairSync("ed25519");
   const baselineReads = f.secretReads;
   const captured = f.capture();
-  const b = await f.beginExchange();
-  b.stream.write(b.opening(captured, foreign.privateKey));
-  await assert.rejects(b.next(), /Installation exchange refused/);
-  assert.equal(f.secretReads, baselineReads);
-  assert.equal(f.providerRequests.length, 0);
-  assert.deepEqual(
-    b.received.map((message) => message.event),
-    ["challenge"],
-  );
-
-  // Even A's valid proof cannot authorize the same request on a different sink.
-  const a = await f.beginExchange();
-  const swapped = await f.beginExchange();
-  swapped.stream.write(a.opening(captured));
-  await assert.rejects(swapped.next(), /Installation exchange refused/);
-  assert.equal(f.secretReads, baselineReads);
-
-  const changed = await f.beginExchange();
-  const opening = changed.opening(captured);
-  opening.open.resolve_request = changed.opening(f.capture()).open.resolve_request;
-  changed.stream.write(opening);
-  await assert.rejects(changed.next(), /Installation exchange refused/);
-  assert.equal(f.secretReads, baselineReads);
-  assert.equal(f.providerRequests.length, 0);
-
+  const rejectOpening = async (name, makeOpening, peer) => {
+    const exchange = await f.beginExchange(peer);
+    exchange.stream.write(makeOpening(exchange));
+    await assert.rejects(exchange.next(), /Installation exchange refused/, name);
+    assert.deepEqual(
+      exchange.received.map((message) => message.event),
+      ["challenge"],
+      name,
+    );
+    assert.equal(f.secretReads, baselineReads, name);
+    assert.equal(f.providerRequests.length, 0, name);
+  };
+  await rejectOpening("stolen bearer", (x) => x.opening(captured, foreign.privateKey));
+  const original = await f.beginExchange();
+  await rejectOpening("swapped stream", () => original.opening(captured));
+  original.stream.cancel();
+  await rejectOpening("changed request", (x) => {
+    const signed = x.opening(captured);
+    signed.open.resolve_request = x.opening(f.capture()).open.resolve_request;
+    return signed;
+  });
   // A key in an exchange is never enrollment; a legacy issuer token is insufficient.
-  const old = await f.beginExchange(f.metadata({ exchange_key: undefined }));
-  old.stream.write(old.opening(f.capture()));
-  await assert.rejects(old.next(), /Installation exchange refused/);
+  await rejectOpening(
+    "no issuer-bound key",
+    (x) => x.opening(captured),
+    f.metadata({ exchange_key: undefined }),
+  );
   const legacy = await unary(f.clients.HttpCredentialAccess, "Resolve", f.capture(), f.metadata());
   assert.ok(legacy.refused);
   await assert.rejects(
@@ -243,32 +241,20 @@ test("signed custody must be present, unique to this live exchange and unchanged
 test("the last forbidden trailer reaches the complete response policy; no head or body is released", async (t) => {
   const f = await staticEgressFixture(t);
   const captured = f.capture();
-  const a = await f.beginExchange();
-  a.stream.write(a.opening(captured));
-  const { ready } = (await a.next()).resolved;
-  a.stream.write({ authorize: f.permitRequest(captured, ready) });
-  assert.deepEqual((await a.next()).authorized.allowed.response_custody, captured.response_custody);
+  const { ready } = await f.resolve(captured);
+  assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
+  const trailer = { name: "x-forbidden-last", value: "synthetic-private" };
   f.setResponse({
     status: 200,
     body: { output: "otherwise safe body" },
-    trailers: { "x-forbidden-last": "synthetic-private" },
+    trailers: { [trailer.name]: trailer.value },
   });
   const response = await f.send(captured, ready);
   assert.equal(response.response_complete, true);
-  assert.deepEqual(response.trailers, [
-    {
-      name: "x-forbidden-last",
-      value: "synthetic-private",
-    },
-  ]);
-  a.stream.write({ response });
-  await assert.rejects(a.next(), { code: 7 });
+  assert.deepEqual(response.trailers, [trailer]);
+  // protect observes the entire gRPC stream and rejects even a response head before refusal.
+  assert.deepEqual(await f.protect(captured, response), { blocked: true });
   assert.equal(f.providerRequests.length, 1, "the origin had already executed once");
-  assert.equal(
-    a.received.filter((event) => event.response).length,
-    0,
-    "not even an early response head",
-  );
 });
 
 test("current installation replacement revokes captured A without reassigning its request", async (t) => {
@@ -300,15 +286,12 @@ test("a second gateway-issued key for the same admitted instance cannot inherit 
   assert.equal(f.providerRequests.length, 0);
 
   const c = f.capture();
-  const a = await f.beginExchange();
-  a.stream.write(a.opening(c));
-  const { resolved } = await a.next();
-  assert.ok(resolved.ready);
+  const { ready } = await f.resolve(c);
+  assert.ok(ready);
   const afterA = f.secretReads;
   // A reconnect may keep the instance UUID but must not replace the pinned key.
   f.observed.observation.registered_exchange_public_key = Buffer.from(exchange_key.x, "base64url");
-  a.stream.write({ authorize: f.permitRequest(c, resolved.ready) });
-  assert.ok((await a.next()).authorized.refused);
+  assert.ok((await f.authorize(f.permitRequest(c, ready))).refused);
   assert.equal(f.secretReads, afterA);
   assert.equal(f.providerRequests.length, 0);
 });

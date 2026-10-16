@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { json } from "node:stream/consumers";
 import test from "node:test";
 import { AGENT_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import {
@@ -23,30 +22,12 @@ import {
 import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
 import { staticEgressFixture } from "../helpers/static-egress.mjs";
 
+import { unusedPort, waitFor } from "../helpers/qa-utils.mjs";
+import { listen } from "../fixtures/repository-credentials/process.mjs";
+
 const token = "synthetic-harness-transport";
 const serviceUrl = "http://fixture-harness.example.test/";
 const path = HARNESS_EGRESS_ENROLLMENT_PATH;
-const listen = async (server) => {
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  return server.address().port;
-};
-const close = async (server) => {
-  server.closeAllConnections?.();
-  await new Promise((resolve) => server.close(resolve));
-};
-async function waitFor(description, check) {
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    const result = await check();
-    if (result) {
-      return result;
-    }
-    await delay(20);
-  }
-  assert.fail(`Timed out waiting for ${description}`);
-}
-
 // The native CLI is the only substituted process. Its exec command sends one
 // local HTTP request through the real authority fixture, and its app-server
 // implements only the authenticated transport handshake. This proves generated
@@ -92,9 +73,7 @@ test(
   async (t) => {
     const directory = await mkdtemp(join(tmpdir(), "egress-enrollment-"));
     t.after(() => rm(directory, { recursive: true, force: true }));
-    const reservation = createServer();
-    const port = await listen(reservation);
-    await close(reservation);
+    const port = await unusedPort();
     const transport = new GrpcOpenShellGatewayClient({ endpoint: `http://127.0.0.1:${port}` });
     t.after(() => transport.close());
     const f = await staticEgressFixture(t, {
@@ -116,11 +95,7 @@ test(
     const model = createServer(async (request, response) => {
       businessRequests++;
       try {
-        const chunks = [];
-        for await (const chunk of request) {
-          chunks.push(chunk);
-        }
-        const captured = f.capture(JSON.parse(Buffer.concat(chunks)));
+        const captured = f.capture(await json(request));
         const resolved = await f.resolve(captured);
         assert.ok(
           resolved.ready,
@@ -136,8 +111,8 @@ test(
         response.writeHead(503).end();
       }
     });
-    const modelPort = await listen(model);
-    t.after(() => close(model));
+    await listen(t, model);
+    const modelPort = model.address().port;
     const callsPath = join(directory, "calls.jsonl");
     const script = join(directory, "entrypoint.cjs");
     await writeFile(script, AGENT_RUNTIME_ENTRYPOINT);
@@ -168,53 +143,49 @@ test(
       APP_TOKEN_SHA: createHash("sha256").update(token).digest("hex"),
       ...pluginRuntimeEnvironment(runtime),
     };
-    const children = [];
     const start = () => {
       const child = spawn(process.execPath, [script], {
         env: environment,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "ignore", "pipe"],
       });
       const exited = once(child, "exit");
       let diagnostics = "";
       child.stderr.on("data", (chunk) => {
         diagnostics += chunk;
       });
-      child.stdout.resume();
-      const started = { child, exited, diagnostics: () => diagnostics };
-      children.push(started);
-      return started;
-    };
-    const stop = async ({ child, exited }) => {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        return;
-      }
-      child.kill("SIGTERM");
-      await exited;
-    };
-    t.after(async () => {
-      for (const child of children) {
-        await stop(child);
-      }
-    });
-    const getChallenge = async () =>
-      waitFor("authenticated enrollment challenge", async () => {
-        assert.equal(
-          businessRequests,
-          0,
-          "startup must not send a business request before enrollment",
-        );
-        try {
-          const document = await transport.getServiceDocument(
-            serviceUrl,
-            path,
-            token,
-            AbortSignal.timeout(1000),
-          );
-          return document.status === 200 && document.json;
-        } catch {
-          return undefined;
+      const stop = async () => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGTERM");
+          await exited;
         }
-      });
+      };
+      t.after(stop);
+      return { stop, diagnostics: () => diagnostics };
+    };
+    const getChallenge = async () =>
+      waitFor(
+        "authenticated enrollment challenge",
+        async () => {
+          assert.equal(
+            businessRequests,
+            0,
+            "startup must not send a business request before enrollment",
+          );
+          try {
+            const document = await transport.getServiceDocument(
+              serviceUrl,
+              path,
+              token,
+              AbortSignal.timeout(1000),
+            );
+            return document.status === 200 && document.json;
+          } catch {
+            return undefined;
+          }
+        },
+        10000,
+        { interval: 20 },
+      );
     const calls = async () =>
       (await readFile(callsPath, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse);
     const first = start();
@@ -236,29 +207,18 @@ test(
     const post = (body, bearer = token) =>
       transport.postServiceDocument(serviceUrl, path, bearer, body, AbortSignal.timeout(2000));
     assert.equal((await post(oldChallenge, "wrong-token")).status, 401);
-    assert.equal(
-      (await post(oldChallenge)).status,
-      409,
-      "an Agent bearer cannot echo a challenge to release",
-    );
-    assert.equal(
-      (
-        await post({
-          ...oldChallenge,
-          execution: { ...oldChallenge.execution, executionId: "wrong-execution" },
-        })
-      ).status,
-      409,
-    );
-    assert.equal(
-      (await post({ ...oldChallenge, plan: { ...oldChallenge.plan, generation: 2 } })).status,
-      409,
-    );
+    for (const change of [
+      {}, // An Agent bearer cannot echo a challenge to release the Harness.
+      { execution: { ...oldChallenge.execution, executionId: "wrong-execution" } },
+      { plan: { ...oldChallenge.plan, generation: 2 } },
+    ]) {
+      assert.equal((await post({ ...oldChallenge, ...change })).status, 409);
+    }
     assert.equal(businessRequests, 0);
 
     // Restart creates a new challenge even for the same admitted plan. A response
     // held by an earlier controller request cannot release the replacement process.
-    await stop(first);
+    await first.stop();
     const second = start();
     const currentChallenge = await getChallenge();
     assert.notEqual(currentChallenge.startupId, oldChallenge.startupId);
@@ -337,18 +297,17 @@ test(
       "signed old startup cannot release its replacement",
     );
     await f.sandboxDriver.enrollHarness(enrollmentContext, installed, release);
-    await waitFor("authenticated app-server", async () => {
-      try {
-        return await transport.serviceWebSocketHandshake(
-          serviceUrl,
-          token,
-          AbortSignal.timeout(1000),
-        );
-      } catch {
-        return false;
-      }
-    }).catch((error) =>
-      assert.fail([error.message, businessError, second.diagnostics()].filter(Boolean).join("\n")),
+    await waitFor(
+      "authenticated app-server",
+      () =>
+        transport
+          .serviceWebSocketHandshake(serviceUrl, token, AbortSignal.timeout(1000))
+          .catch(() => false),
+      10000,
+      {
+        interval: 20,
+        describe: () => [businessError, second.diagnostics()].filter(Boolean).join("\n"),
+      },
     );
     assert.equal(businessRequests, 1, second.diagnostics());
     assert.equal(f.providerRequests.length, 1);
@@ -363,7 +322,6 @@ test(
     );
     assert.equal(businessRequests, 1);
     assert.equal((await calls()).filter((args) => args.includes("exec")).length, 1);
-    await stop(second);
   },
 );
 

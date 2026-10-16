@@ -3,19 +3,10 @@ import { randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import test from "node:test";
-import { createFastifyApp } from "../../apps/controller/src/index.ts";
-import { InMemoryAuditSink } from "../../packages/audit/src/index.ts";
 import { createOccLogger, createWorkerLogEmitter } from "../../apps/controller/src/logging.ts";
-import { NativeIAMDriver } from "../../packages/iam/src/index.ts";
-import { InMemoryPlatformState, OpenClawController } from "../../packages/occ/src/index.ts";
-import {
-  createTestAuthPrincipal,
-  authenticatedHeaders,
-  signInToControllerApp,
-} from "../helpers/auth-session.mjs";
+import { authenticatedHeaders } from "../helpers/auth-session.mjs";
+import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { createReadyComputeDriver } from "../helpers/development.mjs";
-import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
-import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
 import {
   activateRepositoryAgent,
   admitRepositoryAgent,
@@ -110,80 +101,55 @@ test("connected workload binding accepts only the maintained launcher identity a
   assertOpenShellHarnessBinding("workspace", revision, sandbox, perAgent);
   assert.throws(() => check(valid, "unknown"), { code: "ERR_ASSERTION" });
 
-  const mutations = {
-    "wrong account": (pod) => {
-      pod.spec.serviceAccountName = "default";
-    },
-    "per-Agent account in launcher profile": (pod) => {
-      pod.spec.serviceAccountName = perAgent.spec.serviceAccountName;
-    },
-    "automount enabled": (pod) => {
-      pod.spec.automountServiceAccountToken = true;
-    },
-    "automount unspecified": (pod) => {
-      delete pod.spec.automountServiceAccountToken;
-    },
-    "token projection even without a workload mount": (pod) => {
-      pod.spec.volumes.push({
-        name: "bootstrap-token",
-        projected: {
-          sources: [
-            {
-              serviceAccountToken: {
-                audience: "openshell-gateway",
-                path: "token",
-                expirationSeconds: 600,
-              },
-            },
-          ],
-        },
-      });
-    },
-    "recreated Sandbox UID": (pod) => {
-      pod.metadata.ownerReferences[0].uid = "stale-uid";
-    },
-    "wrong Sandbox name": (pod) => {
-      pod.metadata.ownerReferences[0].name = "other";
-    },
-    "wrong owner API": (pod) => {
-      pod.metadata.ownerReferences[0].apiVersion = "other/v1";
-    },
-    "noncontrolling owner": (pod) => {
-      pod.metadata.ownerReferences[0].controller = false;
-    },
-    "wrong annotation": (pod) => {
-      pod.metadata.annotations["openshell.ai/sandbox-id"] = "other";
-    },
-    "wrong pair": (pod) => {
-      pod.metadata.labels["openshell.ai/boundary-pair"] = "other";
-    },
-    "supervisor instead of workload": (pod) => {
-      pod.metadata.labels["openshell.ai/boundary-role"] = "supervisor";
-    },
-  };
-  for (const label of [
-    "openclaw.dev/namespace",
-    "openclaw.dev/agent",
-    "openclaw.dev/revision",
-    "openclaw.dev/workload-role",
-    "openclaw.dev/network-profile",
-    "app.kubernetes.io/name",
-  ]) {
-    mutations[`wrong ${label}`] = (pod) => {
-      pod.metadata.labels[label] = "other";
-    };
-  }
-  for (const [name, mutate] of Object.entries(mutations)) {
-    await t.test(name, () => {
-      const pod = structuredClone(valid);
-      mutate(pod);
+  const rejects = (name, overrides) =>
+    t.test(name, () => {
+      const pod = { ...valid, ...overrides };
       assert.throws(() => check(pod), { code: "ERR_ASSERTION" });
+    });
+  const { metadata, spec } = valid;
+  const token = { audience: "openshell-gateway", path: "token", expirationSeconds: 600 };
+  for (const [name, change] of Object.entries({
+    "wrong account": { serviceAccountName: "default" },
+    "per-Agent account in launcher profile": {
+      serviceAccountName: perAgent.spec.serviceAccountName,
+    },
+    "automount enabled": { automountServiceAccountToken: true },
+    "token projection even without a workload mount": {
+      volumes: [
+        ...spec.volumes,
+        { name: "bootstrap-token", projected: { sources: [{ serviceAccountToken: token }] } },
+      ],
+    },
+  })) {
+    await rejects(name, { spec: { ...spec, ...change } });
+  }
+  const missingAutomount = { ...spec };
+  delete missingAutomount.automountServiceAccountToken;
+  await rejects("automount unspecified", { spec: missingAutomount });
+  for (const [name, change] of Object.entries({
+    "recreated Sandbox UID": { uid: "stale-uid" },
+    "wrong Sandbox name": { name: "other" },
+    "wrong owner API": { apiVersion: "other/v1" },
+    "noncontrolling owner": { controller: false },
+  })) {
+    const ownerReferences = [{ ...metadata.ownerReferences[0], ...change }];
+    await rejects(name, { metadata: { ...metadata, ownerReferences } });
+  }
+  await rejects("wrong annotation", {
+    metadata: { ...metadata, annotations: { "openshell.ai/sandbox-id": "other" } },
+  });
+  for (const label of Object.keys(metadata.labels)) {
+    const role = label === "openshell.ai/boundary-role";
+    const labels = { ...metadata.labels, [label]: role ? "supervisor" : "other" };
+    const name = label === "openshell.ai/boundary-pair" ? "pair" : label;
+    await rejects(role ? "supervisor instead of workload" : `wrong ${name}`, {
+      metadata: { ...metadata, labels },
     });
   }
 });
 
 test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS fixtures", () => {
-  const inputs = () => ({
+  const input = {
     version: 2,
     namespaceId: "ns_fixture",
     model: "fixture-model",
@@ -220,14 +186,13 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
       certificatePath: "/fixture/provider.pem",
       privateKeyPath: "/fixture/provider.key",
     },
-  });
+  };
   const selection = (input) => ({
     apiOrigin: input.apiOrigin,
     namespaceId: input.namespaceId,
     model: input.model,
     providerOrigin: input.provider.origin,
   });
-  const input = inputs();
   const controller = selection(input);
   for (const field of Object.keys(controller)) {
     assert.throws(() => validateConnectedInputs(input, { ...controller, [field]: "different" }));
@@ -238,28 +203,31 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
     certificatePath: "/fixture/client.pem",
     privateKeyPath: "/fixture/client.key",
   };
-  for (const auth of [inputs().openShellBackend.auth, mtls]) {
+  for (const auth of [input.openShellBackend.auth, mtls]) {
     for (const host of ["provider.test", "host.openshell.internal"]) {
-      const input = inputs();
-      input.openShellBackend.auth = auth;
-      input.provider.origin = `https://${host}:9443/v1`;
-      assert.equal(validate(input), input);
+      const origin = `https://${host}:9443/v1`;
+      const candidate = {
+        ...input,
+        openShellBackend: { ...input.openShellBackend, auth },
+        provider: { ...input.provider, origin },
+      };
+      assert.equal(validate(candidate), candidate);
     }
   }
   for (const pin of [
     undefined,
     {},
-    { ...inputs().credentialConnector, sha256: "" },
-    { ...inputs().credentialConnector, image: inputs().images.sandbox },
-    { ...inputs().credentialConnector, path: "model-client" },
-    { ...inputs().credentialConnector, verification: "discovered" },
+    { ...input.credentialConnector, sha256: "" },
+    { ...input.credentialConnector, image: input.images.sandbox },
+    { ...input.credentialConnector, path: "model-client" },
+    { ...input.credentialConnector, verification: "discovered" },
   ]) {
     assert.throws(() =>
-      validateConnectedInputs({ ...inputs(), credentialConnector: pin }, controller),
+      validateConnectedInputs({ ...input, credentialConnector: pin }, controller),
     );
   }
   const fresh = {
-    ...inputs(),
+    ...input,
     credentialConnector: undefined,
     authorityProfile: "fresh-whole-execution",
   };
@@ -267,13 +235,8 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
     validateConnectedInputs(input, controller, { wholeExecution: true });
   assert.equal(wholeExecution(fresh), fresh);
   assert.throws(() => validate(fresh), "legacy lane cannot silently broaden a connector grant");
-  assert.throws(
-    () => wholeExecution(inputs()),
-    "fresh profile must not inherit connector authority",
-  );
-  assert.throws(() =>
-    wholeExecution({ ...fresh, credentialConnector: inputs().credentialConnector }),
-  );
+  assert.throws(() => wholeExecution(input), "fresh profile must not inherit connector authority");
+  assert.throws(() => wholeExecution({ ...fresh, credentialConnector: input.credentialConnector }));
   assert.throws(() => wholeExecution({ ...fresh, authorityProfile: undefined }));
   const rejectedAuth = [
     undefined,
@@ -287,50 +250,33 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
     { ...mtls, rejectUnauthorized: false },
   ];
   for (const auth of rejectedAuth) {
-    const input = inputs();
-    input.openShellBackend.auth = auth;
-    assert.throws(() => validate(input));
+    const openShellBackend = { ...input.openShellBackend, auth };
+    assert.throws(() => validate({ ...input, openShellBackend }));
   }
   // These guards precede credential reads and provider binding. Alias acceptance
   // must not admit ordinary providers, suffix lookalikes or implicit routing.
-  for (const mutate of [
-    (input) => {
-      input.serviceKeyPath = "/fixture/not-the-controller-key";
-    },
-    (input) => {
-      input.openShellBackend.endpoint = "http://gateway.test:8443";
-    },
-    (input) => {
-      input.openShellBackend.rootCertificatePath = "relative.pem";
-    },
-    (input) => {
-      input.openShellBackend.insecureTransport = true;
-    },
-    ...[
-      "http://provider.test:9443/v1",
-      "https://api.openai.com:9443/v1",
-      "https://other.openshell.internal:9443/v1",
-      "https://host.openshell.internal.example.com:9443/v1",
-      "https://host.openshell.internal:9443/v1?override=1",
-    ].map((origin) => (input) => {
-      input.provider.origin = origin;
-    }),
-    (input) => {
-      input.provider.bindHost = "host.openshell.internal";
-    },
-    (input) => {
-      input.provider.bindPort = 9444;
-    },
-    (input) => {
-      input.provider.certificatePath = "relative.pem";
-    },
-    (input) => {
-      input.provider.privateKeyPath = "relative.key";
-    },
+  assert.throws(() => validate({ ...input, serviceKeyPath: "/fixture/not-the-controller-key" }));
+  for (const change of [
+    { endpoint: "http://gateway.test:8443" },
+    { rootCertificatePath: "relative.pem" },
+    { insecureTransport: true },
   ]) {
-    const input = inputs();
-    mutate(input);
-    assert.throws(() => validate(input));
+    const openShellBackend = { ...input.openShellBackend, ...change };
+    assert.throws(() => validate({ ...input, openShellBackend }));
+  }
+  for (const change of [
+    { origin: "http://provider.test:9443/v1" },
+    { origin: "https://api.openai.com:9443/v1" },
+    { origin: "https://other.openshell.internal:9443/v1" },
+    { origin: "https://host.openshell.internal.example.com:9443/v1" },
+    { origin: "https://host.openshell.internal:9443/v1?override=1" },
+    { bindHost: "host.openshell.internal" },
+    { bindPort: 9444 },
+    { certificatePath: "relative.pem" },
+    { privateKeyPath: "relative.key" },
+  ]) {
+    const provider = { ...input.provider, ...change };
+    assert.throws(() => validate({ ...input, provider }), JSON.stringify(change));
   }
 });
 
@@ -470,111 +416,55 @@ test("connected adversarial wire carries split and nested-JSON material without 
 test("connected request bytes pass the real Fastify parser and preserve missing-capability refusals", async (t) => {
   // This is offline HTTP admission proof only. In-memory storage/Compute keep
   // the parser test source-only; no installed receipt or provider is substituted.
-  const auth = await createTestAuthPrincipal();
-  const policy = {
-    identities: [auth.seed.principal],
-    groups: [],
-    memberships: [],
-    roles: auth.seed.roles,
-    bindings: auth.seed.bindings,
-    restrictions: [],
-  };
-  const auditSink = new InMemoryAuditSink();
-  let controller;
-  const app = createFastifyApp({
-    createController(installation) {
-      controller = new OpenClawController(installation, {
-        state: new InMemoryPlatformState({ auditSink }),
-        recordOperations: false,
-      });
-      return controller;
-    },
-    iamDriver: new NativeIAMDriver({ loadNativeIAMState: async () => policy }),
-    configurationDriver: createTestConfigurationDriver(),
-    secretDriver: createTestSecretDriver(),
+  const f = await createConsoleAppFixture(t, {
+    backends: [],
     computeDriver: createReadyComputeDriver("egress-preflight-compute"),
-    auditSink,
-    auth: auth.auth,
-    development: { enabled: true, installationId: auth.installationId },
   });
-  t.after(() => app.close());
-  const session = await signInToControllerApp(app, auth);
-  const request = async (method, path, body) => {
-    const wire = serializeConnectedRequest(method, path, body);
-    const response = await app.inject({
+  await f.bootstrap("Connected wire preflight");
+  const namespace = await f.createNamespace("egress-preflight", { ready: true });
+  const secret = await f.createSecret(namespace.id, "synthetic", "SYNTHETIC-preflight-only");
+  const session = await f.signIn();
+  const prefix = "/namespaces/" + namespace.id;
+  const post = async (route, body, expectedStatus = 201) => {
+    const wire = serializeConnectedRequest("POST", prefix + route, body);
+    const response = await f.app.inject({
       method: wire.method,
       url: wire.path,
       headers: authenticatedHeaders(session, wire.headers),
-      ...(wire.body === undefined ? {} : { payload: wire.body }),
+      payload: wire.body,
     });
-    return {
-      status: response.statusCode,
-      body: response.body === "" ? undefined : response.json(),
-    };
+    return assertConnectedResponse(
+      { status: response.statusCode, body: response.json() },
+      expectedStatus,
+    );
   };
-  const api = async (method, path, body, status = 200) =>
-    assertConnectedResponse(await request(method, path, body), status);
-  await api("POST", "/installation/bootstrap", { name: "Connected wire preflight" }, 201);
-  const namespace = await api("POST", "/namespaces", { name: "egress-preflight" }, 201);
-  await controller.handleNamespaceLifecycle(auth.seed.principal.id, namespace.id, "ready");
-  const prefix = `/namespaces/${namespace.id}`;
-  const secret = await api(
-    "POST",
-    `${prefix}/secrets`,
-    { name: "synthetic", value: "SYNTHETIC-preflight-only" },
-    201,
-  );
   const sourceBody = protectedSourceBody("synthetic", secret.ref, "https://provider.test:9443/v1");
-  const unknownField = await api(
-    "POST",
-    `${prefix}/credential-sources`,
-    { ...sourceBody, invented: true },
-    400,
-  );
+  const unknownField = await post("/credential-sources", { ...sourceBody, invented: true }, 400);
   assert.equal(unknownField.code, "INVALID_REQUEST");
-  // A schema-valid request must reach the missing real counterpart guard. An
-  // undefined captured body or generic 400 cannot masquerade as that refusal.
+  // A valid body must reach the missing real counterpart guard, rather than a generic 400.
   for (const origin of [
     "https://provider.test:9443/v1",
     "https://host.openshell.internal:9443/v1",
   ]) {
-    const unsupported = await request(
-      "POST",
-      `${prefix}/credential-sources`,
-      protectedSourceBody("synthetic", secret.ref, origin),
-    );
-    assertConnectedResponse(unsupported, 409);
-    assert.equal(unsupported.body.error.code, "CREDENTIAL_GATEWAY_NOT_CONFIGURED");
+    const source = protectedSourceBody("synthetic", secret.ref, origin);
+    const error = await post("/credential-sources", source, 409);
+    assert.equal(error.code, "CREDENTIAL_GATEWAY_NOT_CONFIGURED");
   }
-  const configuration = await api(
-    "POST",
-    `${prefix}/configurations`,
-    protectedConfigurationBody("gpt-6"),
-    201,
-  );
+  const configuration = await post("/configurations", protectedConfigurationBody("gpt-6"));
   const agentBody = protectedAgentBody("synthetic", configuration.id, `cs_${randomUUID()}`);
-  const unsupportedAgent = await request("POST", `${prefix}/agents`, agentBody);
-  assertConnectedResponse(unsupportedAgent, 409);
-  assert.equal(unsupportedAgent.body.error.code, "CREDENTIAL_GATEWAY_NOT_CONFIGURED");
-  const role = await api(
-    "POST",
-    `${prefix}/iam/roles`,
-    {
-      name: "exact source only",
-      permissions: [{ action: "operate", resourceKind: "credential_source" }],
-    },
-    201,
-  );
-  const principal = await api("POST", `${prefix}/iam/service-principals`, {}, 201);
-  const bindingBody = sourceAccessBindingBody({ servicePrincipalId: principal.id }, role, {
+  const agentError = await post("/agents", agentBody, 409);
+  assert.equal(agentError.code, "CREDENTIAL_GATEWAY_NOT_CONFIGURED");
+  const role = await post("/iam/roles", {
+    name: "exact source only",
+    permissions: [{ action: "operate", resourceKind: "credential_source" }],
+  });
+  const principal = await post("/iam/service-principals", {});
+  const binding = sourceAccessBindingBody({ servicePrincipalId: principal.id }, role, {
     id: agentBody.harnessAuth.sourceId,
   });
-  const missingBindingTarget = await request("POST", `${prefix}/iam/access-bindings`, bindingBody);
-  assertConnectedResponse(missingBindingTarget, 400);
-  assert.equal(missingBindingTarget.body.error.code, "INVALID_REQUEST");
-  assert.deepEqual(missingBindingTarget.body.error.details, [
-    { path: "/resourceId", code: "INVALID_VALUE" },
-  ]);
+  const bindingError = await post("/iam/access-bindings", binding, 400);
+  assert.equal(bindingError.code, "INVALID_REQUEST");
+  assert.deepEqual(bindingError.details, [{ path: "/resourceId", code: "INVALID_VALUE" }]);
 });
 
 function custodyControllerPods() {

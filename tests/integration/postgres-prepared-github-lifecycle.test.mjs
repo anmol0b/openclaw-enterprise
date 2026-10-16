@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, get } from "node:https";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -8,6 +8,8 @@ import test from "node:test";
 import pg from "pg";
 import { setTimeout as delay } from "node:timers/promises";
 import { captureMetadata, dispatchMetadata } from "../helpers/github-metadata-exchange.mjs";
+import { postgresEgressSendReceipts } from "../../packages/occ/src/state/egress-send-receipts.ts";
+import { bindRuntimeSource } from "../helpers/postgres-protected-scenarios.mjs";
 import { postgresApp } from "../helpers/postgres-egress-app.mjs";
 import { requiresPostgres } from "../helpers/postgres-database.mjs";
 import { staticEgressFixture, wireTime } from "../helpers/static-egress.mjs";
@@ -81,25 +83,17 @@ test(
         });
         assert.equal(created.status, 201);
         source = created.data;
-        const bound = await app.request("PATCH", `/namespaces/${namespace.id}/agents/${agent.id}`, {
-          body: {
-            configurationId: agent.configurationId,
-            harnessAuth: { method: "runtime" },
-            credentialSources: [{ sourceId: source.id }],
-          },
-        });
-        assert.equal(bound.status, 200);
-        return { agent: bound.data, source };
+        return bindRuntimeSource(app, namespace, agent, source);
       },
     });
     source = (
       await f.state.read((v) => v.credentialSources.findCredentialSource(f.namespace.id, source.id))
     ).egress;
     const signal = new AbortController().signal;
-    const deadlineAt = () => new Date(Date.now() + 20_000).toISOString();
+    const readWindow = () => ({ signal, deadlineAt: new Date(Date.now() + 20_000).toISOString() });
     const firstReads = f.secretReads;
     assert.equal(await lifecycle.ready(source, signal), false);
-    assert.equal(await lifecycle.readWarm(source, { signal, deadlineAt: deadlineAt() }), undefined);
+    assert.equal(await lifecycle.readWarm(source, readWindow()), undefined);
     assert.equal(f.secretReads, firstReads, "cold request read the issuer Secret");
     assert.equal(
       gh.issuesOfTokens.length,
@@ -110,7 +104,7 @@ test(
     // Two workers race over a real family. Only the durable claim holder reaches the issuer.
     const results = await Promise.all([lifecycle.maintain(signal), lifecycle.maintain(signal)]);
     assert.deepEqual(results.sort(), ["committed", "idle"]);
-    const old = await lifecycle.readWarm(source, { signal, deadlineAt: deadlineAt() });
+    const old = await lifecycle.readWarm(source, readWindow());
     assert.equal(old.ownerEpoch, 1);
     assert.deepEqual(gh.issuesOfTokens[0].permissions, { metadata: "read" });
     // Use OCE's actual signed exchange owner, not a second fixture acceptance or a unary sender.
@@ -118,17 +112,11 @@ test(
     const { ready } = await f.resolve(captured);
     assert.ok(ready, "signed resolve must select the prepared family");
     const evidence = JSON.parse(ready.evidence.authority_evidence);
-    assert.equal(
-      await f.state.transact((unit) =>
-        lifecycle.current(
-          source,
-          evidence,
-          { signal, deadlineAt: deadlineAt() },
-          unit.preparedGitHubProof,
-        ),
-      ),
-      true,
-    );
+    const proveCurrent = (selected) =>
+      f.state.transact((unit) =>
+        lifecycle.current(source, selected, readWindow(), unit.preparedGitHubProof),
+      );
+    assert.equal(await proveCurrent(evidence), true);
     await t.test(
       "current proof preserves caller SQL limits and restores them in its unit",
       async (t) => {
@@ -219,17 +207,7 @@ test(
           { usableUntil: new Date(Date.parse(old.usableUntil) + 1).toISOString() },
         ]) {
           expireAfterLookup = false;
-          assert.equal(
-            await f.state.transact((unit) =>
-              lifecycle.current(
-                source,
-                { ...evidence, ...changed },
-                { signal, deadlineAt: deadlineAt() },
-                unit.preparedGitHubProof,
-              ),
-            ),
-            false,
-          );
+          assert.equal(await proveCurrent({ ...evidence, ...changed }), false);
         }
       },
     );
@@ -244,6 +222,14 @@ test(
         );
       },
     );
+    await t.test("PostgreSQL enforces the prepared material and reply association", async () => {
+      await assertPreparedDispatchConstraints(f.pool, captured.request.context.request_id);
+    });
+    const assertPoolIdle = async () => {
+      assert.equal((await f.pool.query("SELECT 1 AS ok")).rows[0].ok, 1);
+      assert.equal(f.pool.waitingCount, 0);
+      assert.equal(f.pool.idleCount, 1);
+    };
     await t.test("concurrent signed checks drain the shared single-connection pool", async () => {
       const requests = [captureMetadata(f), captureMetadata(f), captureMetadata(f)];
       const selections = await Promise.all(requests.map((request) => f.resolve(request)));
@@ -251,9 +237,7 @@ test(
         requests.map((request, i) => f.authorize(f.permitRequest(request, selections[i].ready))),
       );
       assert.ok(decisions.every((decision) => decision.allowed));
-      assert.equal((await f.pool.query("SELECT 1 AS ok")).rows[0].ok, 1);
-      assert.equal(f.pool.waitingCount, 0);
-      assert.equal(f.pool.idleCount, 1);
+      await assertPoolIdle();
     });
     await t.test(
       "signed access and material expiry bound ciphertext selection, projection and decryption",
@@ -358,13 +342,18 @@ test(
         }
       },
     );
+    async function selectSend(captured = captureMetadata(f)) {
+      const { ready } = await f.resolve(captured);
+      assert.ok(ready, "select prepared material before changing its authority");
+      const permit = f.permitRequest(captured, ready);
+      return { evidence: ready.evidence, authorize: () => f.authorize(permit) };
+    }
     await t.test(
       "before-send bounds a real PostgreSQL lock wait and refuses late permission",
       async () => {
         const request = captureMetadata(f);
         request.deadline = wireTime(Date.now() + 3000);
-        const selection = (await f.resolve(request)).ready;
-        assert.ok(selection);
+        const selected = await selectSend(request);
         // A separate contention actor holds only the table lock. Authority and custody still
         // use the exact same max=1 pool; this connection never serves an application read.
         const blocker = new pg.Client({ connectionString: f.pool.options.connectionString });
@@ -372,7 +361,7 @@ test(
         try {
           await blocker.query("BEGIN");
           await blocker.query("LOCK TABLE occ.prepared_github_attempts IN ACCESS EXCLUSIVE MODE");
-          const pending = f.authorize(f.permitRequest(request, selection));
+          const pending = selected.authorize();
           let waited = false;
           for (let i = 0; i < 50; i += 1) {
             const { rows } = await blocker.query(
@@ -391,26 +380,20 @@ test(
           await blocker.query("ROLLBACK");
           await blocker.end();
         }
-        assert.equal((await f.pool.query("SELECT 1 AS ok")).rows[0].ok, 1);
-        assert.equal(f.pool.waitingCount, 0);
-        assert.equal(f.pool.idleCount, 1);
+        await assertPoolIdle();
       },
     );
     await t.test(
       "before-send refuses expired material and an elapsed signed deadline",
       async (t) => {
         const request = captureMetadata(f);
-        const selection = (await f.resolve(request)).ready;
-        assert.ok(selection);
+        const selected = await selectSend(request);
         await f.pool.query(
           "UPDATE occ.prepared_github_attempts SET usable_until=clock_timestamp() - interval '1 second' WHERE material_version=$1",
           [old.materialVersion],
         );
         try {
-          assert.equal(
-            (await f.authorize(f.permitRequest(request, selection))).refused?.code,
-            f.refusalCode("DENIED"),
-          );
+          assert.equal((await selected.authorize()).refused?.code, f.refusalCode("DENIED"));
         } finally {
           await f.pool.query(
             "UPDATE occ.prepared_github_attempts SET usable_until=$1 WHERE material_version=$2",
@@ -420,15 +403,11 @@ test(
         const late = captureMetadata(f);
         const lateDeadline = Date.now() + 20_000;
         late.deadline = wireTime(lateDeadline);
-        const selected = (await f.resolve(late)).ready;
-        assert.ok(selected);
+        const expiring = await selectSend(late);
         // Preparation completes with real time; advance only Date after that checkpoint.
         t.mock.timers.enable({ apis: ["Date"], now: lateDeadline + 1 });
         try {
-          assert.equal(
-            (await f.authorize(f.permitRequest(late, selected))).refused?.code,
-            f.refusalCode("DENIED"),
-          );
+          assert.equal((await expiring.authorize()).refused?.code, f.refusalCode("DENIED"));
         } finally {
           t.mock.timers.reset();
         }
@@ -469,20 +448,15 @@ test(
     t.after(() => fresh.close());
     const beforeRestartRead = f.secretReads;
     assert.equal(await fresh.ready(source, signal), true);
-    assert.equal(
-      (await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() })).materialVersion,
-      old.materialVersion,
-    );
+    assert.equal((await fresh.readWarm(source, readWindow())).materialVersion, old.materialVersion);
     assert.equal(f.secretReads, beforeRestartRead);
     assert.equal(gh.issuesOfTokens.length, 1);
-    const due = () =>
+    const due = (sourceId = source.key.source.id) =>
       f.pool.query(
         "UPDATE occ.prepared_github_families SET next_check_at=now() WHERE source_id=$1",
-        [source.key.source.id],
+        [sourceId],
       );
-    const staleRequest = captureMetadata(f);
-    const staleSelection = (await f.resolve(staleRequest)).ready;
-    assert.ok(staleSelection);
+    const displaced = await selectSend();
     let renewed;
     await t.test(
       "renewal after committed metadata cannot open replacement for the old request",
@@ -548,7 +522,7 @@ test(
           await fresh.close();
           await fresh.connect(f.pool);
           assert.deepEqual(reports, []);
-          renewed = await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() });
+          renewed = await fresh.readWarm(source, readWindow());
           assert.notEqual(renewed.materialVersion, old.materialVersion);
           const issues = gh.issuesOfTokens.length;
           const reads = f.secretReads;
@@ -624,24 +598,16 @@ test(
           "custody or outcome changed under B",
         );
         assert.equal(await restartedAtB.ready(source, signal), false);
-        assert.equal(
-          Boolean(await restartedAtB.readWarm(source, { signal, deadlineAt: deadlineAt() })),
-          false,
-        );
+        assert.equal(Boolean(await restartedAtB.readWarm(source, readWindow())), false);
         assert.equal(await status(old.value), 200, "A still accepts the displaced token");
       },
     );
     await t.test(
       "before-send refuses displaced material and accepts renewed material",
       async () => {
-        assert.equal(
-          (await f.authorize(f.permitRequest(staleRequest, staleSelection))).refused?.code,
-          f.refusalCode("DENIED"),
-        );
-        const request = captureMetadata(f);
-        const selected = (await f.resolve(request)).ready;
-        assert.ok(selected);
-        assert.ok((await f.authorize(f.permitRequest(request, selected))).allowed);
+        assert.equal((await displaced.authorize()).refused?.code, f.refusalCode("DENIED"));
+        const selected = await selectSend();
+        assert.ok((await selected.authorize()).allowed);
       },
     );
     await fresh.maintain(signal); // Drains the displaced token. GitHub confirms DELETE independently.
@@ -649,18 +615,13 @@ test(
     assert.equal(await status(renewed.value), 200);
 
     await t.test("before-send refuses a rejected prepared selection", async () => {
-      const request = captureMetadata(f);
-      const selected = (await f.resolve(request)).ready;
-      assert.ok(selected);
+      const selected = await selectSend();
       await f.state.transact((unit) =>
         unit.credentialSources.rejectEgressMaterial(
           JSON.parse(selected.evidence.authority_evidence),
         ),
       );
-      assert.equal(
-        (await f.authorize(f.permitRequest(request, selected))).refused?.code,
-        f.refusalCode("DENIED"),
-      );
+      assert.equal((await selected.authorize()).refused?.code, f.refusalCode("DENIED"));
     });
     // A genuine update advances the authoritative issuer resourceVersion even with identical PEM.
     const changed = await f.request("PATCH", `/namespaces/${f.namespace.id}/secrets/${issuer.id}`, {
@@ -669,15 +630,13 @@ test(
     assert.equal(changed.status, 200);
     await due();
     assert.equal(await fresh.maintain(signal), "committed");
-    const rotated = await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() });
+    const rotated = await fresh.readWarm(source, readWindow());
     assert.equal(rotated.ownerEpoch, 2);
     assert.notEqual(rotated.inputVersion, old.inputVersion);
     assert.equal(await status(rotated.value), 200);
     // A issued a real token, but its response cannot qualify the token for use. Withdrawal
     // under B must preserve that exceptional cleanup candidate and A's now-displaced current token.
-    const withdrawnRequest = captureMetadata(f);
-    const withdrawnSelection = (await f.resolve(withdrawnRequest)).ready;
-    assert.ok(withdrawnSelection);
+    const withdrawn = await selectSend();
     invalidScope = true;
     await due();
     assert.equal(await fresh.maintain(signal), "quarantined");
@@ -708,13 +667,8 @@ test(
       },
     );
     await t.test("before-send refuses a withdrawn prepared family", async () => {
-      assert.equal(
-        (await f.authorize(f.permitRequest(withdrawnRequest, withdrawnSelection))).refused?.code,
-        f.refusalCode("DENIED"),
-      );
-      assert.equal((await f.pool.query("SELECT 1 AS ok")).rows[0].ok, 1);
-      assert.equal(f.pool.waitingCount, 0);
-      assert.equal(f.pool.idleCount, 1);
+      assert.equal((await withdrawn.authorize()).refused?.code, f.refusalCode("DENIED"));
+      await assertPoolIdle();
     });
     await fresh.withdraw(source, signal);
     assert.equal(
@@ -724,7 +678,7 @@ test(
     );
     assert.deepEqual(await pendingRetirements(), []);
     assert.equal(await fresh.ready(source, signal), false);
-    assert.equal(await fresh.readWarm(source, { signal, deadlineAt: deadlineAt() }), undefined);
+    assert.equal(await fresh.readWarm(source, readWindow()), undefined);
     assert.equal(
       await status(rotated.value),
       401,
@@ -733,13 +687,15 @@ test(
     // Lose the response *after* the synthetic provider owns the token. A different worker must
     // observe the durable quarantine, never issue again, and never claim remote revocation.
     const path = `/namespaces/${f.namespace.id}/credential-sources`;
-    const second = await f.request("POST", path, {
-      body: { ...registration, name: "prepared-lost-response" },
-    });
-    assert.equal(second.status, 201);
+    const registerSource = async (name) => {
+      const { status, data } = await f.request("POST", path, { body: { ...registration, name } });
+      assert.equal(status, 201);
+      return data.id;
+    };
+    const lostSource = await registerSource("prepared-lost-response");
     const lost = (
       await f.state.read((v) =>
-        v.credentialSources.findCredentialSource(f.namespace.id, second.data.id),
+        v.credentialSources.findCredentialSource(f.namespace.id, lostSource),
       )
     ).egress;
     const issuedBefore = gh.issuesOfTokens.length;
@@ -758,14 +714,11 @@ test(
       "must not replay the uncertain issuance",
     );
     assert.equal(gh.issuesOfTokens.length, issuedBefore + 1);
-    assert.equal(await lifecycle.readWarm(lost, { signal, deadlineAt: deadlineAt() }), undefined);
+    assert.equal(await lifecycle.readWarm(lost, readWindow()), undefined);
     await assert.rejects(lifecycle.withdraw(lost, signal), /unsettled provider attempt/);
     await t.test("a lost retirement commit receipt clears the unreceived candidate", async (t) => {
       // An out-of-scope issuance leaves a real cleanup candidate for the next worker pass.
-      const retiring = await f.request("POST", path, {
-        body: { ...registration, name: "prepared-lost-retirement-commit" },
-      });
-      assert.equal(retiring.status, 201);
+      await registerSource("prepared-lost-retirement-commit");
       invalidScope = true;
       assert.equal(await fresh.maintain(signal), "quarantined");
 
@@ -801,10 +754,7 @@ test(
     });
     for (const custody of ["current", "retire"]) {
       await t.test(`publication rollback clears ${custody} bytes`, async (t) => {
-        const created = await f.request("POST", path, {
-          body: { ...registration, name: `prepared-rollback-${custody}` },
-        });
-        assert.equal(created.status, 201);
+        const sourceId = await registerSource(`prepared-rollback-${custody}`);
         invalidScope = custody === "retire";
         t.after(() => {
           invalidScope = false;
@@ -847,15 +797,12 @@ test(
         assert.equal(gh.issuesOfTokens.length, issues + 1);
         const { rows } = await f.pool.query(
           "SELECT state,custody,sealed IS NOT NULL AS sealed FROM occ.prepared_github_attempts WHERE source_id=$1",
-          [created.data.id],
+          [sourceId],
         );
         assert.deepEqual(rows, [{ state: "issuing", custody: "intent", sealed: false }]);
 
         // The durable intent blocks another issuance even after the family becomes due.
-        await f.pool.query(
-          "UPDATE occ.prepared_github_families SET next_check_at=now() WHERE source_id=$1",
-          [created.data.id],
-        );
+        await due(sourceId);
         assert.equal(await fresh.maintain(signal), "blocked");
         assert.equal(gh.issuesOfTokens.length, issues + 1);
         assert.equal(
@@ -868,3 +815,51 @@ test(
     assert.deepEqual(gh.errors, []);
   },
 );
+
+// Start with the signed dispatch above, whose material, peer, custody and policy all agreed.
+// The repository issues SQL directly; no caller-side parser can satisfy these negative cases.
+async function assertPreparedDispatchConstraints(pool, useId) {
+  const { rows } = await pool.query(
+    "SELECT binding, authorized_dispatch FROM occ.egress_send_receipts WHERE use_id=$1",
+    [useId],
+  );
+  assert.equal(rows.length, 1, "the signed dispatch produced one receipt");
+  const { binding, authorized_dispatch: auth } = rows[0];
+  assert.ok(auth, "the signed dispatch was durably authorized");
+  const { material } = binding;
+  assert.equal(material.kind, "prepared_github");
+  const {
+    association: { execution, installation },
+  } = auth;
+  const repo = postgresEgressSendReceipts(pool);
+  const reserve = async (material) => {
+    const attempt = { ...binding, material, attemptId: randomUUID() };
+    assert.equal(await repo.insert(attempt), true);
+    return attempt;
+  };
+  const control = await reserve(material);
+  assert.equal(await repo.authorize(control, auth), true);
+  assert.equal(await repo.authorize(control, auth), false, "no replay of acknowledged dispatch");
+  assert.deepEqual((await repo.find(control)).authorization, auth);
+
+  const afterExpiry = new Date(Date.parse(material.providerExpiresAt) + 1).toISOString();
+  for (const [evidence, association] of [
+    [material, { execution: { ...execution, agentId: "agt_" + randomUUID() } }],
+    [material, { custodyId: randomUUID() }],
+    ...[
+      { peerKeyId: "not an enrolled key" },
+      { authorityScope: undefined },
+      { authorityScope: "connector" },
+      { policyHash: "loaded" },
+    ].map((changed) => [material, { installation: { ...installation, ...changed } }]),
+    [{ ...material, extra: "forbidden evidence" }, {}],
+    [{ ...material, usableUntil: afterExpiry }, {}],
+  ]) {
+    const attempt = await reserve(evidence);
+    const changed = { ...auth, association: { ...auth.association, ...association } };
+    await assert.rejects(repo.authorize(attempt, changed), {
+      code: "23514",
+      constraint: "egress_send_receipts_check_17",
+    });
+  }
+}

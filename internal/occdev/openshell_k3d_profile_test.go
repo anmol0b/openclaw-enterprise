@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,7 @@ import (
 // controller downloads and network-policy probes, which only a real cluster proves
 // (see dev-up-openshell-k3d-real and local-first-agent-openshell-k3d-real).
 
-const profileTestDigest = "sha256:17b2f65d1e33f32a419ecc98dd42389b0227280be54139c14834933ec29420ea"
+const profileTestDigest = "sha256:bdb4fe248070032c88be78f029dad9325cb698480e90486e1413a674a5d8edc8"
 
 // fakeProfileCommands puts fake binaries on PATH. Each records its arguments and
 // answers only the listed cases, so a step that issues a new command fails.
@@ -161,6 +162,7 @@ func TestKubernetesOnlyOpenShellInstallationUsesInClusterServices(t *testing.T) 
 		"mode: inCluster",
 		"workspaceMode: operator",
 		"operatorWorkspaceResources:",
+		"userNamespaces: false",
 		`openshell.ai/openclaw-workspace: "true"`,
 	} {
 		if !strings.Contains(text, required) {
@@ -214,6 +216,7 @@ func TestKubernetesOnlyOpenShellInstallationUsesInClusterServices(t *testing.T) 
 	if !reflect.DeepEqual(installation.Drivers.CredentialGateway.Configuration.Binaries, []string{
 		"/app/node_modules/openclaw/node_modules/.pnpm/@openai+codex@0.163.0-alpha.2-linux-x64/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/bin/codex",
 		"/app/node_modules/openclaw/node_modules/.pnpm/@openai+codex@0.163.0-alpha.2-linux-arm64/node_modules/@openai/codex/vendor/aarch64-unknown-linux-musl/bin/codex",
+		"/usr/local/bin/node",
 	}) {
 		t.Fatalf("unexpected OpenShell credential binary allowlist: %#v", installation.Drivers.CredentialGateway.Configuration.Binaries)
 	}
@@ -311,9 +314,9 @@ func TestKubernetesOnlyOpenShellGatewayInstallsImportedImagesBehindAClusterIP(t 
 			// Fixed source pins guard the released default; candidate digests deliberately
 			// differ from the containerd manifests returned by the import fixture.
 			sources := []string{
-				"ghcr.io/nvidia/openshell/gateway:021400be8af471f8669369e679de3e18cf0bd672@sha256:17b2f65d1e33f32a419ecc98dd42389b0227280be54139c14834933ec29420ea",
-				"ghcr.io/nvidia/openshell/sandbox:021400be8af471f8669369e679de3e18cf0bd672@sha256:b46ed57b080946d0fe80490dbe1441ebf4a83c6eec79369ddbcfc49ec19dc0cf",
-				"ghcr.io/nvidia/openshell/supervisor:021400be8af471f8669369e679de3e18cf0bd672@sha256:971d71f45f677a7b1084385322bae4ac6fd09e9450e680684ab79a04d07c5c9f",
+				"ghcr.io/nvidia/openshell/gateway:5a7728c304b5528e954e9ae900cf21f84e1a12b1@sha256:bdb4fe248070032c88be78f029dad9325cb698480e90486e1413a674a5d8edc8",
+				"ghcr.io/nvidia/openshell/sandbox:5a7728c304b5528e954e9ae900cf21f84e1a12b1@sha256:ca00c094aeaa60681b8196cda18ab3c5dd5f7d782d4c36798256427b67599070",
+				"ghcr.io/nvidia/openshell/supervisor:5a7728c304b5528e954e9ae900cf21f84e1a12b1@sha256:aa681d8264af6ee860e38349ed3c76609a51778eb6d0f02743df03787b80a290",
 			}
 			selection := candidateOpenShellEnvironment()
 			if candidate {
@@ -406,26 +409,19 @@ func TestKubernetesOnlyOpenShellGatewayInstallsImportedImagesBehindAClusterIP(t 
 			}
 			// Check every image value: the chart must receive the
 			// exact imported digest for each component, never a source digest or fallback.
-			imageValues := map[string]string{}
-			for _, arg := range strings.Fields(install) {
-				key, value, found := strings.Cut(strings.TrimPrefix(arg, "--set-string="), "=")
-				if found && strings.Contains(key, ".image.") && strings.HasPrefix(arg, "--set-string=") {
-					if _, exists := imageValues[key]; exists {
-						t.Fatalf("duplicate image value %s", key)
-					}
-					imageValues[key] = value
-				}
-			}
-			wantValues := map[string]string{}
+			args := strings.Fields(install)
+			imageArgs := slices.DeleteFunc(args, func(s string) bool {
+				return !strings.HasPrefix(s, "--set-string=") || !strings.Contains(s, ".image.")
+			})
+			var wantArgs []string
 			for i, component := range []string{"gateway", "sandbox", "supervisor"} {
 				prefix := component
 				if component == "sandbox" {
 					prefix = "sandboxRuntime"
 				}
 				digest := "sha256:" + strings.Repeat(string(rune('a'+i)), 64)
-				wantValues[prefix+".image.registry"] = "docker.io"
-				wantValues[prefix+".image.repository"] = "openclaw-development/openshell-" + component
-				wantValues[prefix+".image.digest"] = digest
+				arg := "--set-string=" + prefix + ".image."
+				wantArgs = append(wantArgs, arg+"registry=docker.io", arg+"repository=openclaw-development/openshell-"+component, arg+"digest="+digest)
 				wantRecord := "OpenShell " + component + " image: source=" + sources[i] + " containerd=docker.io/openclaw-development/openshell-" + component + "@" + digest
 				if !strings.Contains(stdout.String(), wantRecord) {
 					t.Fatalf("missing import identity: %s", stdout.String())
@@ -437,8 +433,10 @@ func TestKubernetesOnlyOpenShellGatewayInstallsImportedImagesBehindAClusterIP(t 
 					t.Fatalf("staging tag not removed: %v", commands())
 				}
 			}
-			if !reflect.DeepEqual(imageValues, wantValues) {
-				t.Fatalf("image values = %#v, want %#v", imageValues, wantValues)
+			slices.Sort(imageArgs)
+			slices.Sort(wantArgs)
+			if !slices.Equal(imageArgs, wantArgs) {
+				t.Fatalf("image arguments = %v, want %v", imageArgs, wantArgs)
 			}
 		})
 	}
@@ -480,6 +478,15 @@ func TestOpenShellImageImportRegistersThePodmanRecordedName(t *testing.T) {
 	assertRetriedImport(t, commands(), filepath.Join(root, "gateway-image.tar"), state.Cluster, stdout.String())
 }
 
+const controlPlaneKubectlCases = `"-n oce-system get pod bootstrap-password-prepare -o jsonpath={.status.phase}") echo Succeeded ;;
+"-n oce-system rollout status statefulset/postgres "*) ;;
+"-n oce-system get pod postgres-0 -o jsonpath={.status.podIP}") echo 10.42.0.20 ;;
+"-n default get endpoints kubernetes -o jsonpath={.subsets[0].addresses[0].ip}") echo 172.30.42.3 ;;
+"-n default get endpoints kubernetes -o jsonpath={.subsets[0].ports[0].port}") echo 6443 ;;
+"-n oce-system rollout status deployment/occ-development-api-proxy "*) ;;`
+
+const controlPlaneNetworkCase = `"network inspect k3d-occ-dev-owned") echo '[{"IPAM":{"Config":[{"Subnet":"172.30.42.0/24"}]}}]' ;;`
+
 func TestKubernetesOnlyControlPlaneKeepsPostgreSQLAcrossClusterRestart(t *testing.T) {
 	realHelm, helmErr := exec.LookPath("helm")
 	state := kubernetesOnlyOpenShellState(t)
@@ -488,13 +495,8 @@ func TestKubernetesOnlyControlPlaneKeepsPostgreSQLAcrossClusterRestart(t *testin
 	}
 	commands := fakeProfileCommands(t, map[string]string{
 		"kubectl": `"apply -f "*) ;;
-"-n oce-system get pod bootstrap-password-prepare -o jsonpath={.status.phase}") echo Succeeded ;;
-"-n oce-system rollout status statefulset/postgres "*) ;;
-"-n oce-system get pod postgres-0 -o jsonpath={.status.podIP}") echo 10.42.0.20 ;;
-"-n default get endpoints kubernetes -o jsonpath={.subsets[0].addresses[0].ip}") echo 172.30.42.3 ;;
-"-n default get endpoints kubernetes -o jsonpath={.subsets[0].ports[0].port}") echo 6443 ;;
-"-n oce-system rollout status deployment/occ-development-api-proxy "*) ;;`,
-		"docker": `"network inspect k3d-occ-dev-owned") echo '[{"IPAM":{"Config":[{"Subnet":"172.30.42.0/24"}]}}]' ;;`,
+` + controlPlaneKubectlCases,
+		"docker": controlPlaneNetworkCase,
 		"helm":   `"upgrade --install openclaw-enterprise deploy/helm/openclaw-enterprise "*) ;;`,
 	})
 	r := newRunner(Options{Repository: state.Repository})
@@ -561,14 +563,8 @@ func TestKubernetesOnlyControlPlaneKeepsPostgreSQLAcrossClusterRestart(t *testin
 		t.Log("helm is not installed; skipping chart rendering of the generated values")
 		return
 	}
-	render := exec.Command(realHelm, "template", "openclaw-enterprise", "deploy/helm/openclaw-enterprise",
-		"--namespace", "oce-system", "-f", filepath.Join(state.directory, "helm-values.json"))
-	render.Dir = state.Repository
-	output, err := render.CombinedOutput()
-	if err != nil {
-		t.Fatalf("the chart rejected the generated values: %v\n%s", err, output)
-	}
-	assertDevelopmentReplicas(t, output, 1)
+	assertDevelopmentReplicas(t, renderDevelopmentChart(t, realHelm, state, "openclaw-enterprise",
+		"deploy/helm/openclaw-enterprise", "helm-values.json"), 1)
 }
 
 func candidateOpenShellEnvironment() map[string]string {
@@ -586,8 +582,7 @@ func TestOpenShellCandidateSelectionRejectsIncompleteOrInvalidInputs(t *testing.
 	// omitted component may silently fall back to a released image.
 	for mask := 1; mask < 15; mask++ {
 		t.Run(fmt.Sprintf("subset-%d", mask), func(t *testing.T) {
-			r := newRunner(Options{})
-			r.env = candidateOpenShellEnvironment()
+			r := &runner{env: candidateOpenShellEnvironment()}
 			for i, key := range keys {
 				if mask&(1<<i) == 0 {
 					delete(r.env, key)
@@ -617,16 +612,14 @@ func TestOpenShellCandidateSelectionRejectsIncompleteOrInvalidInputs(t *testing.
 		{"whitespace", keys[0], "registry.example/gateway@" + profileTestDigest + "\n", "immutable sha256"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			r := newRunner(Options{})
-			r.env = candidateOpenShellEnvironment()
+			r := &runner{env: candidateOpenShellEnvironment()}
 			r.env[test.key] = test.value
 			if _, err := r.selectOpenShellImages("openshell"); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}
-	r := newRunner(Options{})
-	r.env = candidateOpenShellEnvironment()
+	r := &runner{env: candidateOpenShellEnvironment()}
 	if _, err := r.selectOpenShellImages("none"); err == nil {
 		t.Fatal("candidate images ignored without OpenShell")
 	}
@@ -708,77 +701,62 @@ func TestOpenShellCandidateStartupRejectsBeforeResourceEffects(t *testing.T) {
 }
 
 func TestOpenShellImageImportPreservesFailureBoundaries(t *testing.T) {
-	for _, failure := range []string{"missing candidate", "staging collision", "non-Linux", "save", "import", "missing digest", "ambiguous digest", "registration", "cleanup"} {
-		t.Run(failure, func(t *testing.T) {
-			state := kubernetesOnlyOpenShellState(t)
+	state := kubernetesOnlyOpenShellState(t)
+	stage := "openclaw-development/openshell-gateway:" + state.Cluster
+	list := "echo '" + stage + " application/vnd.oci.image.manifest.v1+json " + profileTestDigest + "'"
+	for _, tc := range []struct{ step, reply, want string }{
+		{"source", "exit 1", "must still exist locally"},
+		{"collision", ":", "staging image already exists"},
+		{"platform", "echo windows/amd64", "must contain a Linux platform"},
+		{"save", `printf archive > "$6"; exit 42`, "exit status 42"},
+		{"import", "exit 42", "k3d failed"},
+		{"list", "echo '" + stage + " manifest sha256:invalid'", "could not resolve imported"},
+		{"list", list + "; echo 'docker.io/" + stage + " manifest sha256:" + strings.Repeat("b", 64) + "'", "ambiguous imported"},
+		{"register", "exit 42", "register imported"},
+		{"cleanup", "exit 42", "remove OpenShell gateway staging image"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
 			root := t.TempDir()
 			source := "registry.example/gateway@" + profileTestDigest
-			staging := "openclaw-development/openshell-gateway:" + state.Cluster
-			inspect, collision, platform, save, imported, register, cleanup := ":", "exit 1", "echo linux/amd64", `printf archive > "$6"`, ":", ":", ":"
-			inventory := "echo '" + staging + " application/vnd.oci.image.manifest.v1+json " + profileTestDigest + "'"
-			want := ""
-			switch failure {
-			case "missing candidate":
-				inspect = "exit 1"
-				want = "must still exist locally"
-			case "staging collision":
-				collision = ":"
-				want = "staging image already exists"
-			case "non-Linux":
-				platform = "echo windows/amd64"
-				want = "must contain a Linux platform"
-			case "save":
-				save += "; exit 42"
-				want = "exit status 42"
-			case "import":
-				imported = "exit 42"
-				want = "k3d failed"
-			case "missing digest":
-				inventory = "echo '" + staging + " manifest sha256:invalid'"
-				want = "could not resolve imported"
-			case "ambiguous digest":
-				inventory += "; echo 'docker.io/" + staging + " manifest sha256:" + strings.Repeat("b", 64) + "'"
-				want = "ambiguous imported"
-			case "registration":
-				register = "exit 42"
-				want = "register imported"
-			case "cleanup":
-				cleanup = "exit 42"
-				want = "remove OpenShell gateway staging image"
+			reply := func(step, normal string) string {
+				if step == tc.step {
+					return tc.reply
+				}
+				return normal
 			}
 			t.Setenv("PATH", t.TempDir())
 			commands := fakeProfileCommands(t, map[string]string{
-				"docker": `"image inspect ` + source + `") ` + inspect + ` ;;
-"image inspect ` + staging + `") ` + collision + ` ;;
-"tag ` + source + ` ` + staging + `") ;;
-"image inspect --format {{json .RepoTags}} ` + staging + `") echo '["` + staging + `"]' ;;
-"image inspect --format {{.Os}}/{{.Architecture}} ` + source + `") ` + platform + ` ;;
-"image save --platform linux/amd64 --output "*" ` + staging + `") ` + save + ` ;;
-"exec k3d-occ-dev-owned-server-0 ctr -n k8s.io images list") ` + inventory + ` ;;
-"exec k3d-occ-dev-owned-server-0 ctr -n k8s.io images tag ` + staging + ` openclaw-development/openshell-gateway@` + profileTestDigest + `") ` + register + ` ;;
-"image rm ` + staging + `") ` + cleanup + ` ;;`,
-				"k3d": `"image import --mode direct "*" -c occ-dev-owned") ` + imported + ` ;;`,
+				"docker": `"image inspect ` + source + `") ` + reply("source", ":") + ` ;;
+"image inspect ` + stage + `") ` + reply("collision", "exit 1") + ` ;;
+"tag ` + source + ` ` + stage + `") ;;
+"image inspect --format {{json .RepoTags}} ` + stage + `") echo '["` + stage + `"]' ;;
+"image inspect --format {{.Os}}/{{.Architecture}} ` + source + `") ` + reply("platform", "echo linux/amd64") + ` ;;
+"image save --platform linux/amd64 --output "*" ` + stage + `") ` + reply("save", `printf archive > "$6"`) + ` ;;
+"exec k3d-occ-dev-owned-server-0 ctr -n k8s.io images list") ` + reply("list", list) + ` ;;
+"exec k3d-occ-dev-owned-server-0 ctr -n k8s.io images tag ` + stage + ` openclaw-development/openshell-gateway@` + profileTestDigest + `") ` + reply("register", ":") + ` ;;
+"image rm ` + stage + `") ` + reply("cleanup", ":") + ` ;;`,
+				"k3d": `"image import --mode direct "*" -c occ-dev-owned") ` + reply("import", ":") + ` ;;`,
 			})
 			r := newRunner(Options{Repository: state.Repository})
 			r.engine = "docker"
 			_, err := r.importOpenShellImage(context.Background(), state, root, "gateway", source, true)
-			if err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("expected %q, got %v\n%v", want, err, commands())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got %v\n%v", tc.want, err, commands())
 			}
 			calls := commands()
-			if failure == "missing candidate" {
+			if tc.step == "source" {
 				if !reflect.DeepEqual(calls, []string{"docker image inspect " + source}) {
 					t.Fatalf("missing candidate triggered effects: %v", calls)
 				}
-			} else if failure == "staging collision" {
-				if !reflect.DeepEqual(calls, []string{"docker image inspect " + source, "docker image inspect " + staging}) {
+			} else if tc.step == "collision" {
+				if !reflect.DeepEqual(calls, []string{"docker image inspect " + source, "docker image inspect " + stage}) {
 					t.Fatalf("collision mutated an existing tag: %v", calls)
 				}
 			} else {
-				if calls[len(calls)-1] != "docker image rm "+staging {
+				if calls[len(calls)-1] != "docker image rm "+stage {
 					t.Fatalf("owned staging tag not cleaned: %v", calls)
 				}
-				if failure == "non-Linux" && slices.ContainsFunc(calls, func(call string) bool {
+				if tc.step == "platform" && slices.ContainsFunc(calls, func(call string) bool {
 					return strings.HasPrefix(call, "k3d ") || strings.HasPrefix(call, "docker image save ")
 				}) {
 					t.Fatalf("non-Linux image imported: %v", calls)
@@ -786,6 +764,115 @@ func TestOpenShellImageImportPreservesFailureBoundaries(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(root, "gateway-image.tar")); !os.IsNotExist(err) {
 				t.Fatalf("owned archive not cleaned: %v", err)
+			}
+		})
+	}
+}
+
+func TestKubernetesOnlyControlPlaneUsesItsPublishedConsoleOrigin(t *testing.T) {
+	realHelm, helmErr := exec.LookPath("helm")
+	for _, test := range []struct {
+		name          string
+		sandboxDriver string
+		browserPort   int
+		origin        string
+	}{
+		{"OpenShell loopback HTTP", "openshell", 0, "http://127.0.0.1:3100"},
+		{"HTTPS without Sandbox", "none", 8444, "https://console.occ-dev-owned.oce.localhost:8444"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := kubernetesOnlyOpenShellState(t)
+			state.SandboxDriver = test.sandboxDriver
+			state.APIPort = 3100
+			state.BrowserPort = test.browserPort
+			if err := os.WriteFile(filepath.Join(state.directory, "installation.yaml"), []byte("occ: {}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			commands := fakeProfileCommands(t, map[string]string{
+				"kubectl": `"apply -f "*) ;;
+"-n oce-system get pod bootstrap-password-prepare -o jsonpath={.status.phase}") echo Succeeded ;;
+"-n oce-system rollout status statefulset/postgres "*) ;;
+"-n oce-system get pod postgres-0 -o jsonpath={.status.podIP}") echo 10.42.0.20 ;;
+"-n default get endpoints kubernetes -o jsonpath={.subsets[0].addresses[0].ip}") echo 172.30.42.3 ;;
+"-n default get endpoints kubernetes -o jsonpath={.subsets[0].ports[0].port}") echo 6443 ;;
+"-n oce-system rollout status deployment/occ-development-api-proxy "*) ;;`,
+				"docker": `"network inspect k3d-occ-dev-owned") echo '[{"IPAM":{"Config":[{"Subnet":"172.30.42.0/24"}]}}]' ;;`,
+				"helm":   `"upgrade --install openclaw-enterprise deploy/helm/openclaw-enterprise "*) ;;`,
+			})
+			r := newRunner(Options{Repository: state.Repository})
+			r.engine = "docker"
+			if err := r.installKubernetesControlPlane(context.Background(), state, "controller@"+profileTestDigest, "postgres@"+profileTestDigest, true, time.Minute); err != nil {
+				t.Fatalf("%v\n%s", err, strings.Join(commands(), "\n"))
+			}
+			values := readJSONFile(t, filepath.Join(state.directory, "helm-values.json"))
+			if !reflect.DeepEqual(values["auth"], jsonValue(t, map[string]string{"baseUrl": test.origin})) {
+				t.Fatalf("authentication must use the published Console origin: %#v", values["auth"])
+			}
+			gatewayRouting := map[string]any{"enabled": true, "gatewayClassName": "eg", "apiKeySecretName": "occ-private-gateway-key"}
+			if test.sandboxDriver == "openshell" {
+				gatewayRouting["hostname"] = developmentGatewayServiceName("oce-system") + ".envoy-gateway-system.svc.cluster.local"
+			}
+			if !reflect.DeepEqual(values["gatewayRouting"], gatewayRouting) {
+				t.Fatalf("private Agent routing must remain enabled: %#v", values["gatewayRouting"])
+			}
+			gatewayKey := readJSONFile(t, filepath.Join(state.directory, "gateway-api-key.json"))
+			key, keyPresent := gatewayKey["stringData"].(map[string]any)["occ"].(string)
+			if gatewayKey["metadata"].(map[string]any)["name"] != "occ-private-gateway-key" ||
+				!keyPresent || key == "" {
+				t.Fatal("private Agent routing must retain its key")
+			}
+			if test.browserPort == 0 {
+				if _, exists := values["agentNativeAdmin"]; exists {
+					t.Fatal("OpenShell must not enable native administration")
+				}
+				for _, name := range []string{"browser-ca.crt", "browser-ca.key", "browser-tls.crt", "browser-tls.key", "browser-tls.json"} {
+					if _, err := os.Lstat(filepath.Join(state.directory, name)); !os.IsNotExist(err) {
+						t.Fatalf("HTTP-only Console must not create %s: %v", name, err)
+					}
+				}
+			} else {
+				if !reflect.DeepEqual(values["agentNativeAdmin"], jsonValue(t, map[string]any{
+					"enabled": true, "domain": "agents.occ-dev-owned.oce.localhost", "sharedCookieDomain": "occ-dev-owned.oce.localhost",
+				})) {
+					t.Fatalf("HTTPS Console must retain native administration: %#v", values["agentNativeAdmin"])
+				}
+				browserTLS := readJSONFile(t, filepath.Join(state.directory, "browser-tls.json"))
+				if browserTLS["metadata"].(map[string]any)["name"] != "occ-development-browser-tls" {
+					t.Fatal("HTTPS Console must retain its TLS Secret")
+				}
+			}
+			if helmErr != nil {
+				t.Log("helm is not installed; skipping chart rendering of the generated values")
+				return
+			}
+			render := exec.Command(realHelm, "template", "openclaw-enterprise", "deploy/helm/openclaw-enterprise",
+				"--namespace", "oce-system", "-f", filepath.Join(state.directory, "helm-values.json"))
+			render.Dir = state.Repository
+			output, err := render.CombinedOutput()
+			if err != nil {
+				t.Fatalf("the chart rejected the generated values: %v\n%s", err, output)
+			}
+			decoder := yaml.NewDecoder(bytes.NewReader(output))
+			for {
+				var resource map[string]any
+				if err := decoder.Decode(&resource); err == io.EOF {
+					t.Fatal("rendered API must receive its published Console origin")
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if resource["kind"] != "Deployment" || resource["metadata"].(map[string]any)["name"] != "openclaw-enterprise-api" {
+					continue
+				}
+				pod := resource["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+				for _, container := range pod["containers"].([]any) {
+					for _, entry := range container.(map[string]any)["env"].([]any) {
+						environment := entry.(map[string]any)
+						if environment["name"] == "OCC_AUTH_BASE_URL" && environment["value"] == test.origin {
+							return
+						}
+					}
+				}
+				t.Fatalf("rendered API must receive Console origin %s", test.origin)
 			}
 		})
 	}

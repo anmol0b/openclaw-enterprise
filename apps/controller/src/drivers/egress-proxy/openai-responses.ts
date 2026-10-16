@@ -20,21 +20,29 @@ const nullable =
   (value) =>
     value === null || check(value);
 const array =
-  (check: Validator, maximum = 4096): Validator =>
+  (check: Validator, maximum = 4096, minimum = 0): Validator =>
   (value) =>
-    Array.isArray(value) && value.length <= maximum && value.every(check);
-const object =
-  (fields: Readonly<Record<string, Validator>>, required: readonly string[] = []): Validator =>
-  (value) => {
+    Array.isArray(value) &&
+    value.length >= minimum &&
+    value.length <= maximum &&
+    value.every(check);
+type Fields = Readonly<Record<string, Validator>>;
+function object(required: Fields, optional: Fields = {}): Validator {
+  const fields = { ...optional, ...required };
+  const keys = Object.keys(required);
+  return (value) => {
     const record = asRecord(value);
     return (
       record !== undefined &&
-      required.every((key) => Object.hasOwn(record, key)) &&
+      keys.every((key) => Object.hasOwn(record, key)) &&
       Object.entries(record).every(
         ([key, item]) => Object.hasOwn(fields, key) && fields[key]!(item),
       )
     );
   };
+}
+
+const optionalFields = (fields: Fields): Validator => object({}, fields);
 
 function jsonValue(value: unknown, depth = 0): boolean {
   if (depth > 32) {
@@ -68,7 +76,7 @@ function jsonSchema(value: unknown, depth = 0): boolean {
     );
   };
   const type = oneOf("object", "array", "string", "number", "integer", "boolean", "null");
-  return object({
+  return optionalFields({
     type: (item) => type(item) || array(type, 7)(item),
     properties: definitions,
     required: array(text, 256),
@@ -106,110 +114,74 @@ function jsonSchema(value: unknown, depth = 0): boolean {
 }
 
 const functionTool = object(
-  {
-    type: oneOf("function"),
-    name,
-    description: text,
-    parameters: jsonSchema,
-    strict: bool,
-    defer_loading: bool,
-  },
-  ["type", "name", "parameters"],
+  { type: oneOf("function"), name, parameters: jsonSchema },
+  { description: text, strict: bool, defer_loading: bool },
 );
+const plainTextFormat = object({ type: oneOf("text") });
+const grammarFormat = object({
+  type: oneOf("grammar"),
+  syntax: oneOf("lark", "regex"),
+  definition: text,
+});
 const customTool = object(
+  { type: oneOf("custom"), name },
   {
-    type: oneOf("custom"),
-    name,
     description: text,
     defer_loading: bool,
-    format: (value) =>
-      object({ type: oneOf("text") }, ["type"])(value) ||
-      object(
-        {
-          type: oneOf("grammar"),
-          syntax: oneOf("lark", "regex"),
-          definition: text,
-        },
-        ["type", "syntax", "definition"],
-      )(value),
+    format: (value) => plainTextFormat(value) || grammarFormat(value),
   },
-  ["type", "name"],
 );
 const localTool: Validator = (value) => functionTool(value) || customTool(value);
-const tool: Validator = (value) =>
-  localTool(value) ||
-  object(
-    {
-      type: oneOf("namespace"),
-      name,
-      description: text,
-      tools: array(localTool, 128),
-    },
-    ["type", "name", "tools"],
-  )(value);
-const content: Validator = (value) =>
-  object({ type: oneOf("input_text", "output_text"), text }, ["type", "text"])(value);
+const namespaceTool = object(
+  { type: oneOf("namespace"), name, tools: array(localTool, 128) },
+  { description: text },
+);
+const tools = array((value) => localTool(value) || namespaceTool(value), 128);
+const toolChoice = oneOf("auto", "none", "required");
+
+const textPart = object({ type: oneOf("input_text", "output_text"), text });
+const contentParts = array(textPart);
+const content: Validator = (value) => text(value) || contentParts(value);
+const phase = oneOf("commentary", "partial_answer", "final_answer");
 const status = oneOf("in_progress", "completed", "incomplete");
-const summary = object({ type: oneOf("summary_text"), text }, ["type", "text"]);
-const inputItem: Validator = (value) => {
-  const item = asRecord(value);
-  if (!item) {
+const summary = object({ type: oneOf("summary_text"), text });
+const inputMessage = object(
+  { role: oneOf("system", "developer", "user", "assistant"), content },
+  { type: oneOf("message"), id: text, phase, status },
+);
+const reasoningItem = object(
+  { type: oneOf("reasoning"), summary: array(summary) },
+  {
+    id: text,
+    content: array(object({ type: oneOf("reasoning_text"), text })),
+    encrypted_content: nullable(text),
+    status,
+  },
+);
+const toolOutput = object(
+  {
+    type: oneOf("function_call_output", "custom_tool_call_output"),
+    call_id: text,
+    output: content,
+  },
+  { id: text, name, namespace: name },
+);
+const toolCall: Validator = (value) => {
+  const type = asRecord(value)?.type;
+  if (type !== "function_call" && type !== "custom_tool_call") {
     return false;
   }
-  if (item.type === undefined || item.type === "message") {
-    return object(
-      {
-        type: oneOf("message"),
-        id: text,
-        role: oneOf("system", "developer", "user", "assistant"),
-        content: (part) => text(part) || array(content)(part),
-        phase: oneOf("commentary", "partial_answer", "final_answer"),
-        status,
-      },
-      ["role", "content"],
-    )(item);
-  }
-  if (item.type === "reasoning") {
-    return object(
-      {
-        type: oneOf("reasoning"),
-        id: text,
-        summary: array(summary),
-        content: array(object({ type: oneOf("reasoning_text"), text }, ["type", "text"])),
-        encrypted_content: nullable(text),
-        status,
-      },
-      ["type", "summary"],
-    )(item);
-  }
-  if (item.type === "function_call" || item.type === "custom_tool_call") {
-    return object(
-      {
-        type: oneOf(item.type),
-        id: text,
-        call_id: text,
-        name,
-        namespace: name,
-        ...(item.type === "function_call" ? { arguments: text } : { input: text }),
-        status,
-      },
-      ["type", "call_id", "name", item.type === "function_call" ? "arguments" : "input"],
-    )(item);
-  }
+  const field = type === "function_call" ? "arguments" : "input";
   return object(
-    {
-      type: oneOf("function_call_output", "custom_tool_call_output"),
-      id: text,
-      call_id: text,
-      name,
-      namespace: name,
-      output: (part) => text(part) || array(content)(part),
-    },
-    ["type", "call_id", "output"],
-  )(item);
+    { type: oneOf(type), call_id: text, name, [field]: text },
+    { id: text, namespace: name, status },
+  )(value);
 };
+const inputItems = array(
+  (item) => inputMessage(item) || reasoningItem(item) || toolCall(item) || toolOutput(item),
+);
 
-const reasoning = object({
+const reasoning = optionalFields({
   effort: oneOf("none", "minimal", "low", "medium", "high", "xhigh"),
   summary: oneOf("auto", "concise", "detailed"),
   context: oneOf("auto", "current_turn", "all_turns"),
@@ -217,7 +189,7 @@ const reasoning = object({
 
 const metadataText: Validator = (value) => typeof value === "string" && value.length <= 8192;
 // These are telemetry fields emitted by the selected client, never OCC identities or grants.
-const clientMetadata = object({
+const clientMetadata = optionalFields({
   session_id: metadataText,
   thread_id: metadataText,
   turn_id: metadataText,
@@ -232,7 +204,7 @@ const clientMetadata = object({
       return false;
     }
     try {
-      return object({
+      return optionalFields({
         installation_id: metadataText,
         session_id: metadataText,
         thread_id: metadataText,
@@ -266,99 +238,105 @@ const clientMetadata = object({
     }
   },
 });
-const textFormat: Validator = (value) =>
-  object({ type: oneOf("text") }, ["type"])(value) ||
-  object(
-    { type: oneOf("json_schema"), name, description: text, strict: bool, schema: jsonSchema },
-    ["type", "name", "schema"],
-  )(value);
+const jsonFormat = object(
+  { type: oneOf("json_schema"), name, schema: jsonSchema },
+  { description: text, strict: bool },
+);
+const textSettings = optionalFields({
+  verbosity: oneOf("low", "medium", "high"),
+  format: (value) => plainTextFormat(value) || jsonFormat(value),
+});
 
-export function validResponsesRequest(body: Record<string, unknown>): boolean {
-  return object(
-    {
-      model: text,
-      instructions: text,
-      input: (value) => text(value) || array(inputItem)(value),
-      tools: array(tool, 128),
-      tool_choice: oneOf("auto", "none", "required"),
-      parallel_tool_calls: bool,
-      reasoning: nullable(reasoning),
-      store: oneOf(false),
-      stream: bool,
-      stream_options: object({
-        include_usage: bool,
-        include_obfuscation: bool,
-        reasoning_summary_delivery: oneOf("sequential_cutoff"),
-      }),
-      include: array(oneOf("reasoning.encrypted_content"), 1),
-      service_tier: oneOf("auto", "default", "flex", "priority"),
-      prompt_cache_key: text,
-      client_metadata: clientMetadata,
-      text: object({ verbosity: oneOf("low", "medium", "high"), format: textFormat }),
-      temperature: (value) => number(value) && Number(value) >= 0 && Number(value) <= 2,
-      top_p: (value) => number(value) && Number(value) >= 0 && Number(value) <= 1,
-      max_output_tokens: (value) => integer(value) && Number(value) > 0,
-    },
-    ["model", "input", "store"],
-  )(body);
-}
-
-const outputContent = object(
+export const validResponsesRequest = object(
+  { model: text, input: (value) => text(value) || inputItems(value), store: oneOf(false) },
   {
-    type: oneOf("output_text"),
-    text,
-    annotations: array(() => false, 0),
-    logprobs: array(() => false, 0),
+    instructions: text,
+    tools,
+    tool_choice: toolChoice,
+    parallel_tool_calls: bool,
+    reasoning: nullable(reasoning),
+    stream: bool,
+    stream_options: optionalFields({
+      include_usage: bool,
+      include_obfuscation: bool,
+      reasoning_summary_delivery: oneOf("sequential_cutoff"),
+    }),
+    include: array(oneOf("reasoning.encrypted_content"), 1),
+    service_tier: oneOf("auto", "default", "flex", "priority"),
+    prompt_cache_key: text,
+    client_metadata: clientMetadata,
+    text: textSettings,
+    temperature: (value) => number(value) && Number(value) >= 0 && Number(value) <= 2,
+    top_p: (value) => number(value) && Number(value) >= 0 && Number(value) <= 1,
+    max_output_tokens: (value) => integer(value) && Number(value) > 0,
   },
-  ["type", "text"],
+);
+
+// The legacy Chat surface accepts plain message strings and no tools.
+const chatNumber: Validator = (value) => number(value) && Number(value) >= 0;
+const chatMessages = array(
+  object({
+    role: (value) => ["system", "user", "assistant"].includes(String(value)),
+    content: (value) => typeof value === "string",
+  }),
+  128,
+  1,
+);
+export const validChatRequest = object(
+  {
+    model: (value) => typeof value === "string",
+    messages: chatMessages,
+  },
+  {
+    stream: oneOf(false),
+    store: oneOf(false),
+    temperature: chatNumber,
+    top_p: chatNumber,
+    max_completion_tokens: chatNumber,
+  },
+);
+
+const empty = array(() => false, 0);
+const outputContent = object(
+  { type: oneOf("output_text"), text },
+  { annotations: empty, logprobs: empty },
+);
+const outputMessage = object(
+  { type: oneOf("message"), id: text, role: oneOf("assistant"), content: array(outputContent) },
+  { status, phase },
 );
 const outputItem: Validator = (value) =>
-  object(
-    {
-      type: oneOf("message"),
-      id: text,
-      role: oneOf("assistant"),
-      status,
-      content: array(outputContent),
-      phase: oneOf("commentary", "partial_answer", "final_answer"),
-    },
-    ["type", "id", "role", "content"],
-  )(value) ||
-  (asRecord(value)?.type !== "message" &&
-    inputItem(value) &&
-    ["reasoning", "function_call", "custom_tool_call"].includes(String(asRecord(value)?.type)));
+  outputMessage(value) || reasoningItem(value) || toolCall(value);
 const usage = object(
+  { input_tokens: integer, output_tokens: integer, total_tokens: integer },
   {
-    input_tokens: integer,
-    output_tokens: integer,
-    total_tokens: integer,
-    input_tokens_details: object({ cached_tokens: integer }),
-    output_tokens_details: object({ reasoning_tokens: integer }),
+    input_tokens_details: optionalFields({ cached_tokens: integer }),
+    output_tokens_details: optionalFields({ reasoning_tokens: integer }),
   },
-  ["input_tokens", "output_tokens", "total_tokens"],
 );
-const error = object({ code: nullable(text), message: text, type: text, param: nullable(text) }, [
-  "message",
-]);
+const error = object(
+  { message: text },
+  { code: nullable(text), type: text, param: nullable(text) },
+);
 const response = object(
   {
     id: text,
+    status: oneOf("in_progress", "completed", "failed", "incomplete", "cancelled", "queued"),
+    output: array(outputItem),
+  },
+  {
     object: oneOf("response"),
     created_at: number,
     completed_at: nullable(number),
-    status: oneOf("in_progress", "completed", "failed", "incomplete", "cancelled", "queued"),
     model: text,
-    output: array(outputItem),
     usage: nullable(usage),
     error: nullable(error),
-    incomplete_details: nullable(
-      object({ reason: oneOf("max_output_tokens", "content_filter") }, ["reason"]),
-    ),
+    incomplete_details: nullable(object({ reason: oneOf("max_output_tokens", "content_filter") })),
     instructions: nullable(text),
-    tools: array(tool, 128),
-    tool_choice: oneOf("auto", "none", "required"),
+    tools,
+    tool_choice: toolChoice,
     parallel_tool_calls: bool,
-    reasoning: object({ effort: nullable(text), summary: nullable(text) }),
+    reasoning: optionalFields({ effort: nullable(text), summary: nullable(text) }),
     store: bool,
     background: oneOf(false),
     service_tier: text,
@@ -366,7 +344,7 @@ const response = object(
     top_p: nullable(number),
     max_output_tokens: nullable(integer),
     max_tool_calls: nullable(integer),
-    text: object({ verbosity: oneOf("low", "medium", "high"), format: textFormat }),
+    text: textSettings,
     previous_response_id: oneOf(null),
     prompt_cache_key: nullable(text),
     prompt_cache_retention: nullable(text),
@@ -375,7 +353,6 @@ const response = object(
     truncation: oneOf("disabled", "auto"),
     metadata: object({}),
   },
-  ["id", "status", "output"],
 );
 
 // The stream needs only this projection of the closed wire shapes checked below.
@@ -409,7 +386,8 @@ export function isResponsesEvent(value: unknown, model: string): value is Respon
   if (!event || typeof event.type !== "string") {
     return false;
   }
-  const base = { type: oneOf(event.type), sequence_number: integer };
+  const base = { type: oneOf(event.type) };
+  const optional = { sequence_number: integer };
   if (
     [
       "response.created",
@@ -421,7 +399,7 @@ export function isResponsesEvent(value: unknown, model: string): value is Respon
   ) {
     const envelope = asRecord(event.response);
     return (
-      object({ ...base, response }, ["type", "response"])(event) &&
+      object({ ...base, response }, optional)(event) &&
       (envelope?.model === undefined || envelope.model === model) &&
       envelope?.status === event.type.slice("response.".length).replace("created", "in_progress")
     );
@@ -429,35 +407,19 @@ export function isResponsesEvent(value: unknown, model: string): value is Respon
   if (["response.output_item.added", "response.output_item.done"].includes(event.type)) {
     return (
       typeof asRecord(event.item)?.id === "string" &&
-      object({ ...base, output_index: integer, item: outputItem }, [
-        "type",
-        "output_index",
-        "item",
-      ])(event)
+      object({ ...base, output_index: integer, item: outputItem }, optional)(event)
     );
   }
   const indexed = { ...base, item_id: text, output_index: integer };
   if (["response.content_part.added", "response.content_part.done"].includes(event.type)) {
-    return object({ ...indexed, content_index: integer, part: outputContent }, [
-      "type",
-      "item_id",
-      "output_index",
-      "content_index",
-      "part",
-    ])(event);
+    return object({ ...indexed, content_index: integer, part: outputContent }, optional)(event);
   }
   if (
     ["response.reasoning_summary_part.added", "response.reasoning_summary_part.done"].includes(
       event.type,
     )
   ) {
-    return object({ ...indexed, summary_index: integer, part: summary }, [
-      "type",
-      "item_id",
-      "output_index",
-      "summary_index",
-      "part",
-    ])(event);
+    return object({ ...indexed, summary_index: integer, part: summary }, optional)(event);
   }
   for (const [prefix, index, field] of [
     ["response.output_text", "content_index", "text"],
@@ -474,10 +436,12 @@ export function isResponsesEvent(value: unknown, model: string): value is Respon
           ...indexed,
           ...(index === undefined ? {} : { [index]: integer }),
           [dataField]: text,
-          ...(prefix === "response.output_text" ? { logprobs: array(() => false, 0) } : {}),
+        },
+        {
+          ...optional,
+          ...(prefix === "response.output_text" ? { logprobs: empty } : {}),
           ...(isDelta ? { obfuscation: text } : {}),
         },
-        ["type", "item_id", "output_index", dataField, ...(index === undefined ? [] : [index])],
       )(event);
     }
   }

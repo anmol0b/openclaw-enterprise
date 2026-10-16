@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import pg from "pg";
-import { postgresApp } from "../helpers/postgres-egress-app.mjs";
-import { databaseUrl, requiresPostgres } from "../helpers/postgres-database.mjs";
-import { commitAckProxy } from "../fixtures/postgres-commit-ack-proxy.mjs";
-import { staticEgressFixture } from "../helpers/static-egress.mjs";
+import { requiresPostgres } from "../helpers/postgres-database.mjs";
+import {
+  bindRuntimeSource,
+  commitLossScenario,
+  noMaterialSelection,
+} from "../helpers/postgres-protected-scenarios.mjs";
 import { receipts as installedReceipts } from "../helpers/egress-custody-observations.mjs";
 import { captureMetadata } from "../helpers/github-metadata-exchange.mjs";
 
@@ -15,13 +16,10 @@ test(
   "explicit protected credential-free metadata: both gates, false selections, lost COMMIT and last withdrawal",
   { ...requiresPostgres, timeout: 120_000 },
   async (t) => {
-    const proxy = await commitAckProxy(databaseUrl, { egressDispatch: true });
-    const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
     let issuerAccess = 0;
     let readsBeforeAdmission;
     const repository = { id: 7311, full_name: "fixture/credential-free" };
-    const f = await staticEgressFixture(t, {
-      appFactory: (t, options) => postgresApp(t, options, proxy.url),
+    const { f, pool, proxy, receipt, assertLostDispatch } = await commitLossScenario(t, {
       preparedGitHub: new Proxy(
         {},
         {
@@ -53,24 +51,8 @@ test(
         assert.equal(status, 201);
         assert.equal(source.egress.adoption, "credential_free");
         assert.deepEqual(source.secrets, {});
-        const bound = await app.request(
-          "PATCH",
-          "/namespaces/" + namespace.id + "/agents/" + agent.id,
-          {
-            body: {
-              configurationId: agent.configurationId,
-              harnessAuth: { method: "runtime" },
-              credentialSources: [{ sourceId: source.id }],
-            },
-          },
-        );
-        assert.equal(bound.status, 200);
-        return { agent: bound.data, source };
+        return bindRuntimeSource(app, namespace, agent, source);
       },
-    });
-    t.after(async () => {
-      await pool.end();
-      await proxy.close();
     });
     assert.equal(
       f.secretReads,
@@ -79,23 +61,10 @@ test(
     );
     const capture = (changed) => captureMetadata(f, changed);
     const resolve = async (captured, peer) => {
-      const { ready_without_material: selection, ready } = await f.resolve(captured, peer);
-      assert.equal(ready, undefined, "no credential-bearing selection");
-      assert.deepEqual(Object.keys(selection).sort(), [
-        "audience",
-        "operation_handle",
-        "request_id",
-      ]);
+      const selection = noMaterialSelection(await f.resolve(captured, peer), captured);
       return f.permitRequest(captured, selection, { noMaterial: true });
     };
     const emptyDigest = createHash("sha256").digest("hex");
-    const receipt = async (captured) =>
-      (
-        await pool.query(
-          "SELECT binding, authorized_dispatch AS dispatch, outcome, observation, settled, feedback FROM occ.egress_send_receipts WHERE use_id=$1",
-          [captured.request.context.request_id],
-        )
-      ).rows[0];
     const accepted = capture();
     for (const changed of [
       { target: { method: "POST" } },
@@ -203,25 +172,7 @@ test(
       "origin executed; not even its response head released",
     );
 
-    const lost = capture();
-    const pending = await resolve(lost);
-    proxy.arm({ instanceId: f.installation.enforcement.instanceId });
-    assert.ok((await f.authorize(pending)).refused, "unknown COMMIT cannot release permit");
-    assert.equal(
-      proxy.observedCommit,
-      true,
-      "lost the server's acknowledged authorized-dispatch COMMIT",
-    );
-    const uncertain = await receipt(lost);
-    assert.deepEqual(uncertain.outcome, { kind: "uncertain", dispatch: "possible" });
-    assert.equal(uncertain.dispatch.injectionDigest, emptyDigest);
-    assert.equal(uncertain.observation, null);
-    await f.restartAuthority();
-    assert.ok(
-      (await f.authorize(await resolve(lost))).refused,
-      "original request cannot produce second permit after restart",
-    );
-    assert.deepEqual(await receipt(lost), uncertain, "preserve original unknown outcome");
+    await assertLostDispatch(capture(), { noMaterial: true });
     assert.equal(
       proxy.egress.authorizations,
       3,

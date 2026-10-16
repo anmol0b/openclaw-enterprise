@@ -50,7 +50,6 @@ const reviewedImports = {
   // The image draft helper uses only its selected broker, session bearer and operator-projected public CA.
   "drivers/repo/github/credentials/client/draft-pr.ts": {
     "node:crypto": ["randomUUID"],
-    "node:fs/promises": ["readFile"],
     "node:https": ["Agent", "request"],
     "node:util": ["parseArgs"],
   },

@@ -4,6 +4,13 @@ import test from "node:test";
 import { requiresPostgres } from "../helpers/postgres-database.mjs";
 import { fixture, prepare } from "../fixtures/prepared-repository-git.mjs";
 
+// Refusal must come from the durable admission guard, before any issuer or retirement call.
+async function assertUseGuarded(f) {
+  const calls = f.gh.trace.length;
+  await assert.rejects(f.owner.use(f.request()), /custody transaction did not complete \(guard\)/);
+  assert.equal(f.gh.trace.length, calls, "denied use contacted the provider");
+}
+
 test(
   "prepared Git use binds durable admission, exact ref, session and one exchange before retirement",
   {
@@ -17,12 +24,7 @@ test(
         f.familyId,
       ]);
     assert.deepEqual((await familyRows()).rows, []);
-    const beforeCold = f.gh.trace.length;
-    await assert.rejects(
-      f.owner.use(f.request()),
-      /custody transaction did not complete \(guard\)/,
-    );
-    assert.equal(f.gh.trace.length, beforeCold, "cold use must not call the provider");
+    await assertUseGuarded(f);
     assert.equal(f.gh.issuesOfTokens.length, 0);
     assert.deepEqual((await familyRows()).rows, [], "cold use must not enroll a family");
 
@@ -86,12 +88,7 @@ test(
 
     // Closing the authoritative attempt denies immediately, before the periodic worker runs.
     await f.withdraw();
-    const beforeWithdrawalUse = f.gh.trace.length;
-    await assert.rejects(
-      f.owner.use(f.request()),
-      /custody transaction did not complete \(guard\)/,
-    );
-    assert.equal(f.gh.trace.length, beforeWithdrawalUse);
+    await assertUseGuarded(f);
     await f.owner.maintain();
     assert.equal(await f.providerStatus(used.value), 401, "withdrawal retires the provider token");
     assert.equal(f.gh.issuesOfTokens.length, 1, "withdrawal must never replace the token");
@@ -126,16 +123,10 @@ test(
       ),
     );
     assert.equal(await f.providerStatus(used.value), 401);
-    await assert.rejects(
-      f.owner.use(f.request()),
-      /custody transaction did not complete \(guard\)/,
-    );
+    await assertUseGuarded(f);
     await f.owner.maintain();
     assert.deepEqual((await retained()).rows, [{ custody: "unknown", retained: true }]);
-    await assert.rejects(
-      f.owner.use(f.request()),
-      /custody transaction did not complete \(guard\)/,
-    );
+    await assertUseGuarded(f);
     assert.equal(
       f.gh.issuesOfTokens.length,
       1,
@@ -189,18 +180,14 @@ for (const change of ["repository binding withdrawn", "revision superseded", "se
           }
         });
       }
-      const before = f.gh.trace.length;
-      const denied = () =>
-        assert.rejects(f.owner.use(f.request()), /custody transaction did not complete \(guard\)/);
-      await denied();
+      await assertUseGuarded(f);
       const receipt = await f.pool.query(
         "SELECT state FROM occ.repository_broker_receipts WHERE session_id=$1",
         [sessionId],
       );
       assert.equal(receipt.rows[0].state, "active");
-      assert.equal(f.gh.trace.length, before, "use contacted the provider");
       await f.owner.maintain();
-      await denied();
+      await assertUseGuarded(f);
       const family = await f.pool.query(
         "SELECT enabled FROM occ.prepared_github_families WHERE source_id=$1",
         [f.familyId],

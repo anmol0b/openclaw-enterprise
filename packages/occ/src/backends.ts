@@ -241,6 +241,7 @@ function validateOpenShellBackend(
     "requestTimeoutMs",
     "rootCertificatePath",
     "insecureTransport",
+    "operatorTls",
   ];
   for (const key of Object.keys(configuration)) {
     if (!allowed.includes(key)) {
@@ -350,6 +351,32 @@ function validateOpenShellBackend(
     endpoint === undefined
       ? (scheme ?? (rootCertificatePath === undefined ? "http" : "https")) === "https"
       : (endpoint as string).startsWith("https://");
+  let operatorTls: OpenShellBackendDefinition["configuration"]["operatorTls"];
+  if (configuration.operatorTls !== undefined) {
+    const record = asRecord(configuration.operatorTls);
+    if (
+      record === undefined ||
+      Object.keys(record).length !== 2 ||
+      !isNonEmptyString(record.certificatePath) ||
+      !isAbsolute(record.certificatePath) ||
+      !isNonEmptyString(record.privateKeyPath) ||
+      !isAbsolute(record.privateKeyPath)
+    ) {
+      throw new ScopeViolationError(
+        path(id, "configuration.operatorTls") +
+          " requires absolute certificatePath and privateKeyPath file paths.",
+      );
+    }
+    if (!tls) {
+      throw new ScopeViolationError(
+        path(id, "configuration.operatorTls") + " requires a direct HTTPS gateway endpoint.",
+      );
+    }
+    operatorTls = {
+      certificatePath: record.certificatePath,
+      privateKeyPath: record.privateKeyPath,
+    };
+  }
   if (auth?.mode === "mtls" && !tls) {
     throw new ScopeViolationError(path(id, "configuration.auth") + " mtls requires HTTPS.");
   }
@@ -392,6 +419,7 @@ function validateOpenShellBackend(
       ...(serviceName === undefined ? {} : { serviceName: serviceName as string }),
       ...(port === undefined ? {} : { port: port as number }),
       ...(auth === undefined ? {} : { auth }),
+      ...(operatorTls === undefined ? {} : { operatorTls }),
       ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs: requestTimeoutMs as number }),
       ...(rootCertificatePath === undefined
         ? {}

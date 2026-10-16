@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { text } from "node:stream/consumers";
 import { appModule } from "../fixtures/repository-credentials/runtime.mjs";
 import { createTestResourceScope } from "../fixtures/repository-credentials/resources.mjs";
 import { createTlsMaterial, listen } from "../fixtures/repository-credentials/process.mjs";
@@ -54,15 +55,11 @@ test(
     let scenario = {};
     const parsedRequests = [];
     const originServer = createServer(async (req, res) => {
-      const chunks = [];
-      for await (const chunk of req) {
-        chunks.push(chunk);
-      }
       parsedRequests.push({
         method: req.method,
         target: req.url,
         authorization: req.headers.authorization,
-        body: Buffer.concat(chunks).toString(),
+        body: await text(req),
       });
       const body =
         scenario.body ??
@@ -87,7 +84,7 @@ test(
     const policy = (profile) =>
       createRoutePolicy({
         repository: identity.full_name,
-        repositoryId: "73",
+        repositoryId: String(identity.id),
         profile,
         gatewayOrigin: "https://gateway.example",
         gitOrigin: observed.origin,
@@ -195,16 +192,9 @@ test(
       assert.equal(observed.connections.length, before);
       assert.equal(parsedRequests.length, before);
     });
-    await t.test("valid body and zero actual trailers: exact identity through FIN", async () => {
-      scenario = { body: JSON.stringify(identity) };
-      const index = observed.connections.length;
-      const raw = await receiveThroughFin(port, request());
-      const wire = await verifyOrigin(index);
-      assert.equal(observed.connections.length, index + 1);
-      assert.ok(wire.response.endsWith("0\r\n\r\n"), "no actual trailers on the origin socket");
-      assertFixedResponse(raw, "200 OK", JSON.stringify(identity));
-    });
-    for (const [name, value] of [
+    for (const [name, value, accepted = false] of [
+      ["valid identity with zero actual trailers", { body: JSON.stringify(identity) }, true],
+      ["a declaration alone is not an actual trailer", { declaration: true }, true],
       ["undeclared last actual trailer", { trailer: true, body: JSON.stringify(identity) }],
       [
         "last actual trailer beyond declaration",
@@ -220,18 +210,23 @@ test(
         { body: JSON.stringify({ ...identity, extra: "x".repeat(1024) }) },
       ],
     ]) {
-      await t.test(`${name}: no provider bytes through recipient FIN`, async () => {
+      await t.test(`${name}: exact response through recipient FIN`, async () => {
         scenario = value;
         const index = observed.connections.length;
         const raw = await receiveThroughFin(port, request());
         const wire = await verifyOrigin(index);
+        assert.equal(observed.connections.length, index + 1, "exactly one origin connection");
+        assert.equal(/\r\ntrailer: /i.test(wire.response), Boolean(value.declaration));
+        if (accepted) {
+          assert.ok(wire.response.endsWith("0\r\n\r\n"), "no actual trailers on the origin socket");
+          assertFixedResponse(raw, "200 OK", JSON.stringify(identity));
+          return;
+        }
         if (value.trailer) {
           assert.ok(
             wire.response.endsWith(`0\r\nx-forbidden-last: ${credential}\r\n\r\n`),
             "independent origin socket observer reached the only actual trailer",
           );
-          assert.equal(observed.connections.length, index + 1, "exactly one origin connection");
-          assert.equal(/\r\ntrailer: /i.test(wire.response), Boolean(value.declaration));
         }
         // Exact local error bytes distinguish a safe error from leaked provider headers/body.
         const body = '{"error":{"code":"exchange-uncertain"}}';
@@ -239,11 +234,6 @@ test(
         assert.equal(outcomes.at(-1).kind, "possibly-dispatched");
       });
     }
-    await t.test("a declaration alone is not an actual trailer", async () => {
-      scenario = { declaration: true };
-      const raw = await receiveThroughFin(port, request());
-      assertFixedResponse(raw, "200 OK", JSON.stringify(identity));
-    });
     await t.test("general git-read retains descriptions with a benign actual trailer", async () => {
       const description = "Fixture repository description";
       scenario = {

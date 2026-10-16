@@ -110,6 +110,21 @@ function exact(value: unknown, keys: readonly string[]): Record<string, unknown>
   return result;
 }
 
+/** A receipt shape is closed: every allowed field has exactly one projection. */
+function project<Fields extends Record<string, (value: unknown) => unknown>>(
+  value: unknown,
+  fields: Fields,
+): { [Key in keyof Fields]: ReturnType<Fields[Key]> } {
+  const item = exact(value, Object.keys(fields));
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, parse]) => [key, parse(item[key])]),
+  ) as { [Key in keyof Fields]: ReturnType<Fields[Key]> };
+}
+
+function literal<const Value extends string>(expected: Value) {
+  return (value: unknown): Value => (value === expected ? expected : invalid());
+}
+
 function text(value: unknown): string {
   if (typeof value !== "string" || value.length === 0) {
     return invalid();
@@ -126,113 +141,58 @@ function date(value: unknown): string {
 }
 
 function ref(value: unknown): EgressRef {
-  const item = exact(value, ["id", "generation"]);
-  if (
-    typeof item.generation !== "number" ||
-    !Number.isSafeInteger(item.generation) ||
-    item.generation < 1
-  ) {
-    return invalid();
-  }
-  return { id: text(item.id), generation: item.generation };
+  return project(value, { id: text, generation: positiveInteger });
 }
 
-const sourceFields = ["installationId", "namespaceId", "source", "backend", "provider"] as const;
-
-function projectSource(source: Record<string, unknown>): EgressSourceKey {
-  return {
-    installationId: text(source.installationId),
-    namespaceId: text(source.namespaceId),
-    source: ref(source.source),
-    backend: ref(source.backend),
-    provider: ref(source.provider),
-  };
+function positiveInteger(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : invalid();
 }
+
+function source(value: unknown): EgressSourceKey {
+  return project(value, {
+    installationId: text,
+    namespaceId: text,
+    source: ref,
+    backend: ref,
+    provider: ref,
+  });
+}
+
+const selectionFields = { source, binding: ref, grantHash: text, isolationId: text };
 
 function material(value: unknown): EgressMaterialEvidence {
   const item = object(value);
-  const common = [
-    "kind",
-    "source",
-    "binding",
-    "grantHash",
-    "isolationId",
-    "materialId",
-    "materialVersion",
-    "usableUntil",
-  ];
-  const source = exact(item.source, sourceFields);
   if (item.kind === "prepared_github") {
-    exact(item, [
-      ...common,
-      "family",
-      "ownerEpoch",
-      "inputVersion",
-      "preparationAttemptId",
-      "providerExpiresAt",
-    ]);
-    const epoch = item.ownerEpoch;
-    const usableUntil = date(item.usableUntil);
-    const providerExpiresAt = date(item.providerExpiresAt);
-    if (
-      typeof epoch !== "number" ||
-      !Number.isSafeInteger(epoch) ||
-      epoch < 1 ||
-      Date.parse(usableUntil) > Date.parse(providerExpiresAt)
-    ) {
-      return invalid();
-    }
-    return {
-      kind: "prepared_github",
-      source: projectSource(source),
-      binding: ref(item.binding),
-      grantHash: text(item.grantHash),
-      isolationId: text(item.isolationId),
-      family: ref(item.family),
-      ownerEpoch: epoch,
-      inputVersion: text(item.inputVersion),
-      preparationAttemptId: text(item.preparationAttemptId),
-      materialId: text(item.materialId),
-      materialVersion: text(item.materialVersion),
-      providerExpiresAt,
-      usableUntil,
-    };
+    const result = project(item, {
+      kind: literal("prepared_github"),
+      ...selectionFields,
+      family: ref,
+      ownerEpoch: positiveInteger,
+      inputVersion: text,
+      preparationAttemptId: text,
+      materialId: text,
+      materialVersion: text,
+      providerExpiresAt: date,
+      usableUntil: date,
+    });
+    return Date.parse(result.usableUntil) <= Date.parse(result.providerExpiresAt)
+      ? result
+      : invalid();
   }
-  exact(item, [
-    ...common,
-    "adoption",
-    "materialRefId",
-    "secret",
-    "secretDriver",
-    "authoritativeObservedAt",
-    "retention",
-  ]);
-  const secret = exact(item.secret, ["kind", "namespaceId", "id"]);
-  if (
-    secret.kind !== "secret" ||
-    item.kind !== "static" ||
-    item.adoption !== "live" ||
-    item.retention !== "none" ||
-    secret.namespaceId !== source.namespaceId
-  ) {
-    return invalid();
-  }
-  return {
-    kind: "static",
-    source: projectSource(source),
-    binding: ref(item.binding),
-    grantHash: text(item.grantHash),
-    isolationId: text(item.isolationId),
-    adoption: "live",
-    materialRefId: text(item.materialRefId),
-    secret: { kind: "secret", namespaceId: text(secret.namespaceId), id: text(secret.id) },
-    secretDriver: ref(item.secretDriver),
-    materialId: text(item.materialId),
-    materialVersion: text(item.materialVersion),
-    authoritativeObservedAt: date(item.authoritativeObservedAt),
-    usableUntil: date(item.usableUntil),
-    retention: "none",
-  };
+  const result = project(item, {
+    kind: literal("static"),
+    ...selectionFields,
+    adoption: literal("live"),
+    materialRefId: text,
+    secret: (entry) => project(entry, { kind: literal("secret"), namespaceId: text, id: text }),
+    secretDriver: ref,
+    materialId: text,
+    materialVersion: text,
+    authoritativeObservedAt: date,
+    usableUntil: date,
+    retention: literal("none"),
+  });
+  return result.secret.namespaceId === result.source.namespaceId ? result : invalid();
 }
 
 function selection(value: unknown): EgressSelectionEvidence {
@@ -240,44 +200,29 @@ function selection(value: unknown): EgressSelectionEvidence {
   if (selected.kind !== "no_material_required") {
     return material(value);
   }
-  const item = exact(selected, ["kind", "source", "binding", "grantHash", "isolationId"]);
-  const source = projectSource(exact(item.source, sourceFields));
+  const result = project(selected, { kind: literal("no_material_required"), ...selectionFields });
   if (
-    source.provider.id !== "credential-free-repository-metadata" ||
-    source.provider.generation !== 1
+    result.source.provider.id !== "credential-free-repository-metadata" ||
+    result.source.provider.generation !== 1
   ) {
     return invalid();
   }
-  return {
-    kind: "no_material_required",
-    source,
-    binding: ref(item.binding),
-    grantHash: text(item.grantHash),
-    isolationId: text(item.isolationId),
-  };
+  return result;
 }
 
 export function attempt(value: unknown, authenticatedSender: EgressRef): SendAttempt {
-  const item = exact(value, [
-    "sender",
-    "instanceId",
-    "useId",
-    "attemptId",
-    "material",
-    "deadlineAt",
-  ]);
-  const sender = ref(item.sender);
-  if (!isDeepStrictEqual(sender, ref(authenticatedSender))) {
+  const result = project(value, {
+    sender: ref,
+    instanceId: text,
+    useId: text,
+    attemptId: text,
+    material: (entry) => (entry === null ? null : selection(entry)),
+    deadlineAt: date,
+  });
+  if (!isDeepStrictEqual(result.sender, ref(authenticatedSender))) {
     return invalid();
   }
-  return {
-    sender,
-    instanceId: text(item.instanceId),
-    useId: text(item.useId),
-    attemptId: text(item.attemptId),
-    material: item.material === null ? null : selection(item.material),
-    deadlineAt: date(item.deadlineAt),
-  };
+  return result;
 }
 
 const refusalCodes: Readonly<Record<string, readonly string[]>> = {
@@ -391,71 +336,40 @@ export function observation(value: unknown): SendObservation {
 }
 
 export function authorizedSend(value: unknown): AuthorizedSend {
-  const item = exact(value, [
-    "association",
-    "requestDigest",
-    "injectionDigest",
-    "authorizedAt",
-    "sendStartBy",
-  ]);
-  const association = exact(item.association, [
-    "execution",
-    "installation",
-    "exchangeId",
-    "responseId",
-    "custodyId",
-  ]);
-  const execution = exact(association.execution, [
-    "installationId",
-    "namespaceId",
-    "agentId",
-    "servicePrincipalId",
-    "revisionId",
-    "executionId",
-  ]);
-  const claimedInstallation = object(association.installation);
-  const boundKey = "peerKeyId" in claimedInstallation;
-  const hasExecution = "authorityScope" in claimedInstallation;
-  const installation = exact(claimedInstallation, [
-    "sandboxId",
-    "instanceId",
-    "configurationId",
-    ...(boundKey ? ["peerKeyId"] : []),
-    ...(hasExecution ? ["policyHash", "authorityScope"] : []),
-    "plan",
-  ]);
-  if (hasExecution && installation.authorityScope !== "execution") {
-    return invalid();
-  }
-  return {
-    association: {
-      execution: {
-        installationId: text(execution.installationId),
-        namespaceId: text(execution.namespaceId),
-        agentId: text(execution.agentId),
-        servicePrincipalId: text(execution.servicePrincipalId),
-        revisionId: text(execution.revisionId),
-        executionId: text(execution.executionId),
-      },
-      installation: {
-        sandboxId: text(installation.sandboxId),
-        instanceId: text(installation.instanceId),
-        configurationId: text(installation.configurationId),
-        ...(boundKey ? { peerKeyId: text(installation.peerKeyId) } : {}),
-        ...(hasExecution
-          ? { policyHash: text(installation.policyHash), authorityScope: "execution" as const }
-          : {}),
-        plan: ref(installation.plan),
-      },
-      exchangeId: text(association.exchangeId),
-      responseId: text(association.responseId),
-      custodyId: text(association.custodyId),
-    },
-    requestDigest: text(item.requestDigest),
-    injectionDigest: text(item.injectionDigest),
-    authorizedAt: date(item.authorizedAt),
-    sendStartBy: date(item.sendStartBy),
-  };
+  return project(value, {
+    association: (association) =>
+      project(association, {
+        execution: (execution) =>
+          project(execution, {
+            installationId: text,
+            namespaceId: text,
+            agentId: text,
+            servicePrincipalId: text,
+            revisionId: text,
+            executionId: text,
+          }),
+        installation: (installation) => {
+          const claimed = object(installation);
+          return project(claimed, {
+            sandboxId: text,
+            instanceId: text,
+            configurationId: text,
+            ...("peerKeyId" in claimed ? { peerKeyId: text } : {}),
+            ...("authorityScope" in claimed
+              ? { policyHash: text, authorityScope: literal("execution") }
+              : {}),
+            plan: ref,
+          });
+        },
+        exchangeId: text,
+        responseId: text,
+        custodyId: text,
+      }),
+    requestDigest: text,
+    injectionDigest: text,
+    authorizedAt: date,
+    sendStartBy: date,
+  });
 }
 
 /** Trusted sender persistence. Receipts never authorize sending or retries. */

@@ -28,12 +28,11 @@ type AuthorityCall = {
   signal: AbortSignal;
 };
 const contractCapability = "openshell.supervisor-middleware.contract";
-const capabilities = [contractCapability, ...openShellExchangeCapabilities];
-const record = (input: unknown): Wire => asRecord(input) ?? {};
+export const record = (input: unknown): Wire => asRecord(input) ?? {};
 const string = (input: unknown): string => (typeof input === "string" ? input : "");
 const bytes = (input: unknown): Buffer =>
   input instanceof Uint8Array ? Buffer.from(input) : Buffer.alloc(0);
-const authorization = (metadata: Metadata): string => {
+export const middlewareBearer = (metadata: Metadata): string => {
   const values = metadata.get("authorization");
   return values.length === 1 ? string(values[0]) : "";
 };
@@ -74,6 +73,67 @@ function refused(kind: EgressRefusal["kind"]): Wire {
   return { refused: { code: refusalCodes[kind] ?? refusalCodes.denied } };
 }
 
+/** Both authorities speak this wire protocol but advertise different capability profiles. */
+export function loadOpenShellMiddleware() {
+  const definition = loadSync(
+    fileURLToPath(new URL("./proto/supervisor_middleware.proto", import.meta.url)),
+    { keepCase: true, longs: String, enums: Number, defaults: false, oneofs: true },
+  );
+  const loaded = loadPackageDefinition(definition) as unknown as {
+    openshell: { middleware: { v1: Record<string, { service: ServiceDefinition }> } };
+  };
+  return { definition, service: loaded.openshell.middleware.v1 };
+}
+
+export function describeOpenShellMiddleware(
+  gateway: unknown,
+  audience: string,
+  implementation: "static-egress" | "online-request-authorization",
+): Wire | undefined {
+  const execution = implementation === "static-egress";
+  const profile = execution
+    ? [contractCapability, ...openShellExchangeCapabilities]
+    : [contractCapability];
+  const peer = record(gateway);
+  const supported = peer.supported_capabilities;
+  const required = peer.required_capabilities;
+  if (
+    record(peer.protocol_version).major !== 1 ||
+    !Array.isArray(supported) ||
+    !supported.includes(contractCapability) ||
+    (execution && !advertisesOpenShellExecutionProfile(supported)) ||
+    // Describe precedes protected-policy selection; only the base contract is required here.
+    !Array.isArray(required) ||
+    !required.includes(contractCapability) ||
+    !required.every((capability) => profile.includes(capability))
+  ) {
+    return undefined;
+  }
+  const bindings = execution
+    ? [
+        [1, 1],
+        [4, 1],
+        [3, 2],
+      ]
+    : [[1, 1]];
+  return {
+    name: `oce-${implementation}`,
+    expected_audience: audience,
+    extension: {
+      protocol_version: { major: 1, minor: 0 },
+      implementation_name: `oce/${implementation}`,
+      implementation_version: "1",
+      supported_capabilities: profile,
+      required_capabilities: profile,
+    },
+    bindings: bindings.map(([operation, phase]) => ({
+      operation,
+      phase,
+      max_payload_bytes: 4 * 1024 * 1024,
+    })),
+  };
+}
+
 /** Actual gRPC adapter for the supervisor's exclusive static-credential authority. */
 export function createOpenShellEgressAuthority(
   identity: OpenShellEgressIdentity,
@@ -82,14 +142,7 @@ export function createOpenShellEgressAuthority(
   // The verifier owns acceptance on the actual stream. No separate synthetic owner,
   // bearer-only profile or caller-selected response destination can enter this composition.
   const forwarder = controller.createCredentialProxy(identity);
-  const definition = loadSync(
-    fileURLToPath(new URL("./proto/supervisor_middleware.proto", import.meta.url)),
-    { keepCase: true, longs: String, enums: Number, defaults: false, oneofs: true },
-  );
-  const loaded = loadPackageDefinition(definition) as unknown as {
-    openshell: { middleware: { v1: Record<string, { service: ServiceDefinition }> } };
-  };
-  const service = loaded.openshell.middleware.v1;
+  const { service, definition } = loadOpenShellMiddleware();
   const server = new Server({
     "grpc.max_receive_message_length": 5 * 1024 * 1024,
     "grpc.max_send_message_length": 5 * 1024 * 1024,
@@ -108,48 +161,21 @@ export function createOpenShellEgressAuthority(
     };
   server.addService(service.SupervisorMiddleware!.service, {
     Describe: unary(async (call) => {
-      const peer = record(call.request.gateway);
-      const supported = peer.supported_capabilities;
-      const required = peer.required_capabilities;
-      if (
-        !identity.verifyControl(authorization(call.metadata)) ||
-        record(peer.protocol_version).major !== 1 ||
-        !Array.isArray(supported) ||
-        !supported.includes(contractCapability) ||
-        !advertisesOpenShellExecutionProfile(supported) ||
-        !Array.isArray(required) ||
-        // Generic Describe runs before protected policy selection. Rust sends all
-        // supported capabilities, requires the base contract here, then verifies our
-        // complete required profile at protected-policy selection and installation.
-        !required.includes(contractCapability) ||
-        required.some((capability) => !capabilities.includes(String(capability)))
-      ) {
+      const description =
+        identity.verifyControl(middlewareBearer(call.metadata)) &&
+        describeOpenShellMiddleware(call.request.gateway, identity.audience, "static-egress");
+      if (!description) {
         throw new Error("Unsupported or unauthenticated counterpart.");
       }
-      return {
-        name: "oce-static-egress",
-        expected_audience: identity.audience,
-        extension: {
-          protocol_version: { major: 1, minor: 0 },
-          implementation_name: "oce/static-egress",
-          implementation_version: "1",
-          supported_capabilities: capabilities,
-          required_capabilities: capabilities,
-        },
-        bindings: [
-          { operation: 1, phase: 1, max_payload_bytes: 4 * 1024 * 1024 },
-          { operation: 4, phase: 1, max_payload_bytes: 4 * 1024 * 1024 },
-          { operation: 3, phase: 2, max_payload_bytes: 4 * 1024 * 1024 },
-        ],
-      };
+      return description;
     }),
     ValidateConfig: unary(async (call) => ({
       valid:
-        identity.verifyControl(authorization(call.metadata)) &&
+        identity.verifyControl(middlewareBearer(call.metadata)) &&
         Object.keys(record(record(call.request.config).fields)).length === 0,
     })),
     EvaluateHttpRequest: unary(async (call) => ({
-      decision: identity.supervisor(authorization(call.metadata)) ? 1 : 2,
+      decision: identity.supervisor(middlewareBearer(call.metadata)) ? 1 : 2,
       reason_code: "egress_identity",
     })),
   });
@@ -192,20 +218,17 @@ export function createOpenShellEgressAuthority(
     if (result.kind === "refused") {
       return refused(result.error.kind);
     }
+    const ready = {
+      request_id: context.request_id,
+      operation_handle: Buffer.from(result.handle),
+      audience: identity.audience,
+    };
     if (result.kind === "ready_without_material") {
-      return {
-        ready_without_material: {
-          request_id: context.request_id,
-          operation_handle: Buffer.from(result.handle),
-          audience: identity.audience,
-        },
-      };
+      return { ready_without_material: ready };
     }
     return {
       ready: {
-        request_id: context.request_id,
-        operation_handle: Buffer.from(result.handle),
-        audience: identity.audience,
+        ...ready,
         evidence: {
           material_id: result.evidence.materialId,
           material_version: result.evidence.materialVersion,
@@ -300,7 +323,7 @@ export function createOpenShellEgressAuthority(
   });
   server.addService(service.HttpInstallationExchange!.service, {
     Exchange(call: ServerDuplexStream<Wire, Wire>) {
-      const bearer = authorization(call.metadata);
+      const bearer = middlewareBearer(call.metadata);
       // This is only a preliminary check. acceptExchange repeats it and verifies
       // possession against the exact opening and challenge before granting authority.
       if (!identity.supervisor(bearer)) {

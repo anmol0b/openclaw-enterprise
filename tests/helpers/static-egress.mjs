@@ -7,6 +7,7 @@ import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buffer } from "node:stream/consumers";
 import { createConsoleAppFixture } from "./console-app.mjs";
 import { createDevelopmentComputeDriver } from "./development.mjs";
 import { createTestKubernetesComputeDriver } from "./kubernetes-compute.mjs";
@@ -26,6 +27,15 @@ const require = createRequire(new URL("../../apps/controller/package.json", impo
 const grpc = require("@grpc/grpc-js");
 const loader = require("@grpc/proto-loader");
 import { openShellExchangeCapabilities as capabilities } from "../../apps/controller/src/drivers/egress-proxy/openshell-exchange-capabilities.ts";
+
+export const loadGatewayDefinition = (options) =>
+  loader.loadSync(
+    new URL(
+      "../../apps/controller/src/drivers/sandbox/proto/openshell-gateway.proto",
+      import.meta.url,
+    ).pathname,
+    { keepCase: true, enums: String, longs: String, ...options },
+  );
 
 export const wireTime = (millis) => ({
   seconds: Math.floor(millis / 1000),
@@ -48,8 +58,23 @@ export const unary = (client, method, request, metadata, timeoutMs = 5000) =>
       (error, result) => (error ? reject(error) : resolve(result)),
     ),
   );
-const listen = (server) =>
-  new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
+async function listen(t, server) {
+  const port = await new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve(server.address().port)),
+  );
+  t.after(() => {
+    server.closeAllConnections();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  return port;
+}
+
+export function supervisorBearer(claims, privateKey) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const header = encode({ alg: "EdDSA", typ: "openshell-ext+jwt", kid: "fixture-key" });
+  const signed = header + "." + encode(claims);
+  return `Bearer ${signed}.${sign(null, Buffer.from(signed), privateKey).toString("base64url")}`;
+}
 
 /** Real app/auth/IAM/controller/Drivers. Storage and installed runtime observations are wire fixtures,
  * not a Kubernetes API server or an OpenShell supervisor. No authorization/provider logic is mocked. */
@@ -106,11 +131,9 @@ export async function staticEgressFixture(
   let secretReads = 0;
   let secretReadBarrier;
   let beforeNamespaceResponse;
-  const kubeRequests = [];
   const kube = createHttpsServer({ key, cert }, async (request, response) => {
     response.setHeader("content-type", "application/json");
     const url = new URL(request.url, "http://localhost");
-    kubeRequests.push([request.method, url.pathname]);
     if (url.pathname === "/api/v1/namespaces") {
       await beforeNamespaceResponse?.();
       const nsId = namespace.id;
@@ -142,11 +165,8 @@ export async function staticEgressFixture(
       return;
     }
     const parts = url.pathname.split("/");
-    const chunks = [];
-    for await (const chunk of request) {
-      chunks.push(chunk);
-    }
-    const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : undefined;
+    const bytes = await buffer(request);
+    const body = bytes.length ? JSON.parse(bytes) : undefined;
     const name = parts[6] || body?.metadata?.name;
     const previous = objects.get(name);
     if (request.method === "POST" || request.method === "PUT") {
@@ -183,11 +203,7 @@ export async function staticEgressFixture(
       response.writeHead(404).end(JSON.stringify({ code: 404 }));
     }
   });
-  const kubePort = await listen(kube);
-  t.after(() => {
-    kube.closeAllConnections();
-    return new Promise((resolve) => kube.close(resolve));
-  });
+  const kubePort = await listen(t, kube);
   const kubeconfigPath = join(directory, "fixture-kubeconfig.json");
   await writeFile(
     kubeconfigPath,
@@ -212,14 +228,7 @@ export async function staticEgressFixture(
     authentication: { mode: "kubeconfig", kubeconfigPath, context: "fixture" },
   });
 
-  const gatewayDefinition = loader.loadSync(
-    new URL(
-      "../../apps/controller/src/drivers/sandbox/proto/openshell-gateway.proto",
-      import.meta.url,
-    ).pathname,
-    { keepCase: true, enums: String, longs: String },
-  );
-  const Gateway = grpc.loadPackageDefinition(gatewayDefinition).openshell.v1.OpenShell;
+  const Gateway = grpc.loadPackageDefinition(loadGatewayDefinition()).openshell.v1.OpenShell;
   const gateway = new grpc.Server();
   const observed = { available: true, sandbox: undefined, policy: undefined, deleted: [] };
   // OpenShell reports negotiated capabilities in lexical order, including the base contract.
@@ -269,11 +278,7 @@ export async function staticEgressFixture(
       });
     },
     GetSandbox(call, callback) {
-      if (!observed.sandbox) {
-        callback({ code: grpc.status.NOT_FOUND });
-        return;
-      }
-      if (call.request.workspace_scope.workspace !== runtimeNamespace.name) {
+      if (!observed.sandbox || call.request.workspace_scope.workspace !== runtimeNamespace.name) {
         callback({ code: grpc.status.NOT_FOUND });
         return;
       }
@@ -431,28 +436,22 @@ export async function staticEgressFixture(
   runtimeNamespace = physicalPlacement
     ? await placement.resolveSandboxNamespace(namespace)
     : namespace;
-  const createdSecret = await app.request("POST", `/namespaces/${namespace.id}/secrets`, {
-    body: { name: "provider-key", value: "synthetic-key-initial" },
-  });
-  assert.equal(
-    createdSecret.status,
-    201,
-    JSON.stringify({ body: createdSecret.body, kubeRequests }),
-  );
-  const secret = createdSecret.data;
+  const post = async (resource, body) => {
+    const result = await app.request("POST", `/namespaces/${namespace.id}/${resource}`, { body });
+    assert.equal(result.status, 201, JSON.stringify(result.body));
+    return result.data;
+  };
+  const secret = await post("secrets", { name: "provider-key", value: "synthetic-key-initial" });
   const path = `/namespaces/${namespace.id}/credential-sources`;
   const providerRequests = [];
   let providerResponse = { status: 200, body: { output: "fixture answer" } };
   const provider = providerServer({ key, cert }, async (request, response) => {
-    const body = [];
-    for await (const part of request) {
-      body.push(part);
-    }
+    const bytes = await buffer(request);
     providerRequests.push({
       method: request.method,
       path: request.url,
       authorization: request.headers.authorization,
-      body: body.length ? JSON.parse(Buffer.concat(body)) : undefined,
+      body: bytes.length ? JSON.parse(bytes) : undefined,
       headers: request.headers,
     });
     response.writeHead(providerResponse.status, {
@@ -464,31 +463,23 @@ export async function staticEgressFixture(
     }
     response.end();
   });
-  const providerPort = await listen(provider);
-  t.after(() => {
-    provider.closeAllConnections();
-    return new Promise((resolve) => provider.close(resolve));
-  });
+  const providerPort = await listen(t, provider);
   let legacySource;
   if (includeLegacy) {
-    const legacy = await app.request("POST", path, {
-      body: { name: "approved-copy", type: "openai", secrets: { api_key: secret.ref } },
+    legacySource = await post("credential-sources", {
+      name: "approved-copy",
+      type: "openai",
+      secrets: { api_key: secret.ref },
     });
-    assert.equal(legacy.status, 201, JSON.stringify(legacy.body));
-    legacySource = legacy.data;
   }
   app.controller.registerDriver(egress);
   app.controller.selectDriver("credential_proxy", egress.id);
-  const created = await app.request("POST", path, {
-    body: {
-      name: "inference",
-      type: "openai",
-      config: { base_url: `https://provider.example.test:${providerPort}/v1` },
-      secrets: { api_key: secret.ref },
-    },
+  let source = await post("credential-sources", {
+    name: "inference",
+    type: "openai",
+    config: { base_url: `https://provider.example.test:${providerPort}/v1` },
+    secrets: { api_key: secret.ref },
   });
-  assert.equal(created.status, 201, JSON.stringify(created.body));
-  let source = created.data;
   const config = await app.createConfiguration(namespace.id, {
     agents: {
       defaults: {
@@ -497,27 +488,19 @@ export async function staticEgressFixture(
       },
     },
   });
-  const createdAgent = await app.request("POST", `/namespaces/${namespace.id}/agents`, {
-    body: {
-      name: "inference-agent",
-      configurationId: config.id,
-      executionMode: "dedicated",
-      harnessAuth: { method: "credential_source", sourceId: source.id },
-      credentialSources: [{ sourceId: source.id }],
-    },
+  let agent = await post("agents", {
+    name: "inference-agent",
+    configurationId: config.id,
+    executionMode: "dedicated",
+    harnessAuth: { method: "credential_source", sourceId: source.id },
+    credentialSources: [{ sourceId: source.id }],
   });
-  assert.equal(createdAgent.status, 201, JSON.stringify(createdAgent.body));
-  let agent = createdAgent.data;
   if (admitSource) {
     // A prepared provider may have a distinct issuer input; never pass it to the inference source.
-    let issuer = secret;
-    if (secretValue !== undefined) {
-      const enrolled = await app.request("POST", `/namespaces/${namespace.id}/secrets`, {
-        body: { name: "prepared-github-issuer", value: secretValue },
-      });
-      assert.equal(enrolled.status, 201);
-      issuer = enrolled.data;
-    }
+    const issuer =
+      secretValue === undefined
+        ? secret
+        : await post("secrets", { name: "prepared-github-issuer", value: secretValue });
     ({ agent, source } = await admitSource({
       app,
       agent,
@@ -530,25 +513,19 @@ export async function staticEgressFixture(
   }
   // Grant the real service principal through the supported policy API. Revocation later
   // commits between independent RPC transactions and must affect the final send check.
-  const role = await app.request("POST", `/namespaces/${namespace.id}/iam/roles`, {
-    body: {
-      name: "inference-use",
-      permissions: [{ action: "operate", resourceKind: "credential_source" }],
-    },
+  const role = await post("iam/roles", {
+    name: "inference-use",
+    permissions: [{ action: "operate", resourceKind: "credential_source" }],
   });
-  assert.equal(role.status, 201, JSON.stringify(role.body));
-  const grant = await app.request("POST", `/namespaces/${namespace.id}/iam/access-bindings`, {
-    body: {
-      subjectKind: "identity",
-      subjectId: agent.servicePrincipalId,
-      roleId: role.data.id,
-      resourceKind: "credential_source",
-      resourceId: source.id,
-    },
+  const grant = await post("iam/access-bindings", {
+    subjectKind: "identity",
+    subjectId: agent.servicePrincipalId,
+    roleId: role.id,
+    resourceKind: "credential_source",
+    resourceId: source.id,
   });
-  assert.equal(grant.status, 201, JSON.stringify(grant.body));
   if (!admitRevision) {
-    return { ...app, namespace, agent, source, grant: grant.data };
+    return { ...app, namespace, agent, source, grant };
   }
   const revisionMetadata = await app.deployAgent(namespace.id, agent.id);
   const revision = await app.controller.transact((unit) =>
@@ -692,11 +669,8 @@ export async function staticEgressFixture(
   });
   const metadata = (overrides = {}) => {
     const now = Math.floor(Date.now() / 1000);
-    const header = Buffer.from(
-      JSON.stringify({ alg: "EdDSA", typ: "openshell-ext+jwt", kid: "fixture-key" }),
-    ).toString("base64url");
-    const payload = Buffer.from(
-      JSON.stringify({
+    const token = supervisorBearer(
+      {
         iss: "https://gateway.example.test",
         aud: "oce-egress",
         sub: `spiffe://openshell/sandbox/${sandboxId}`,
@@ -711,11 +685,11 @@ export async function staticEgressFixture(
           ...exchangeKeys.publicKey.export({ format: "jwk" }),
         },
         ...overrides,
-      }),
-    ).toString("base64url");
-    const token = `${header}.${payload}.${sign(null, Buffer.from(`${header}.${payload}`), keys.privateKey).toString("base64url")}`;
+      },
+      keys.privateKey,
+    );
     const result = new grpc.Metadata();
-    result.set("authorization", `Bearer ${token}`);
+    result.set("authorization", token);
     return result;
   };
   const capture = (body = { model: "fixture-model", input: "hello", store: false }) => ({
@@ -768,20 +742,18 @@ export async function staticEgressFixture(
           port: providerPort,
           method: captured.request.target.method,
           path: captured.request.target.path,
-          headers: {
-            ...Object.fromEntries(captured.request.headers.map(({ name, value }) => [name, value])),
-            ...Object.fromEntries(ready.credential_headers.map(({ name, value }) => [name, value])),
-          },
+          headers: Object.fromEntries(
+            [...captured.request.headers, ...ready.credential_headers].map(({ name, value }) => [
+              name,
+              value,
+            ]),
+          ),
         },
         async (response) => {
-          const chunks = [];
-          for await (const chunk of response) {
-            chunks.push(chunk);
-          }
           resolve({
             status: response.statusCode,
             headers: [{ name: "content-type", value: response.headers["content-type"] }],
-            body: Buffer.concat(chunks),
+            body: await buffer(response),
             trailers: response.rawTrailers.flatMap((name, index, values) =>
               index % 2 ? [] : [{ name, value: values[index + 1] }],
             ),
@@ -956,6 +928,27 @@ export async function staticEgressFixture(
     },
     providerRequests,
     provider,
+    async exchangeResponse(response, request) {
+      const captured = capture(request);
+      const { ready } = await resolve(captured);
+      assert.ok(ready, "authority resolved this operation");
+      assert.ok((await authorize(permitRequest(captured, ready))).allowed);
+      const before = providerRequests.length;
+      providerResponse = response;
+      const result = await protect(captured, await send(captured, ready));
+      assert.equal(providerRequests.length, before + 1, "provider received the authorized request");
+      return result;
+    },
+    async rotateSecret(value) {
+      const result = await app.request(
+        "PATCH",
+        `/namespaces/${namespace.id}/secrets/${secret.id}`,
+        {
+          body: { value },
+        },
+      );
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+    },
     setResponse(value) {
       providerResponse = value;
     },
@@ -988,7 +981,7 @@ export async function staticEgressFixture(
     async revoke() {
       const result = await app.request(
         "DELETE",
-        `/namespaces/${namespace.id}/iam/access-bindings/${grant.data.id}`,
+        `/namespaces/${namespace.id}/iam/access-bindings/${grant.id}`,
       );
       assert.equal(result.status, 204, JSON.stringify(result.body));
     },

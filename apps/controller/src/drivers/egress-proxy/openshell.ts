@@ -1,6 +1,5 @@
 import type { PreparedGitHubEgressLifecycle } from "@openclaw-enterprise/contracts";
 import { credentialFreeMetadataProvider, githubMetadataProvider } from "./github-metadata.ts";
-import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
   Backend,
@@ -166,23 +165,21 @@ function enforcementEvidence(
     authorityScope: "execution" as const,
     // Local change fence, not the supplier's canonical policy hash. Both supplier
     // identities and complete decoded policies must remain stable on revalidation.
-    configurationId: createHash("sha256")
-      .update(
-        JSON.stringify([
-          sandboxId,
-          evidence.instance_id,
-          policyVersion,
-          observation.source_policy_hash,
-          evidence.policy_hash,
-          revisionNumber(evidence.config_revision),
-          revisionNumber(evidence.provider_env_revision),
-          capabilities,
-          wirePolicy(source),
-          wirePolicy(effective),
-          inertRule,
-        ]),
-      )
-      .digest("hex"),
+    configurationId: sha256Hex(
+      JSON.stringify([
+        sandboxId,
+        evidence.instance_id,
+        policyVersion,
+        observation.source_policy_hash,
+        evidence.policy_hash,
+        revisionNumber(evidence.config_revision),
+        revisionNumber(evidence.provider_env_revision),
+        capabilities,
+        wirePolicy(source),
+        wirePolicy(effective),
+        inertRule,
+      ]),
+    ),
   };
 }
 
@@ -343,25 +340,11 @@ export class OpenShellCredentialProxyDriver implements CredentialProxyDriver {
     if (!isDeepStrictEqual(prepared.plan, context.plan)) {
       throw new Error("The prepared Sandbox policy has a different admitted plan.");
     }
-    await this.sourceControl.assertAvailable(context.signal);
-    const ref = this.sandbox.harnessResource!(context);
-    const client = this.backend.client.clientForNamespace(ref.namespaceName);
-    const existing = await client.getSandbox(
-      { workspace: openShellWorkspaceName(context.namespace), name: ref.resourceName },
-      context.signal,
-    );
-    if (!existing) {
+    const observed = await this.loadedPolicy(context);
+    if (!observed) {
       return undefined;
     }
-    this.assertOwned(existing.annotations, context);
-    if (!existing.id || !client.getSandboxPolicyStatus) {
-      return undefined;
-    }
-    const status = await client.getSandboxPolicyStatus(
-      openShellWorkspaceName(context.namespace),
-      ref.resourceName,
-      context.signal,
-    );
+    const { status, sandboxId } = observed;
     const revision = asRecord(status.revision);
     const policy = asRecord(revision?.policy);
     const protectedConfiguration = openShellEgressConfiguration(context.plan, this.options);
@@ -412,18 +395,12 @@ export class OpenShellCredentialProxyDriver implements CredentialProxyDriver {
         "The installed egress source policy differs from its admitted policy.",
       );
     }
-    const enforcement = enforcementEvidence(
-      status,
-      existing.id,
-      context.plan.generation,
-      context.revision.id,
-      this.options,
-    );
+    const enforcement = observed.enforcement();
     return enforcement === undefined
       ? undefined
       : immutableCopy({
           plan: context.plan,
-          sandboxId: existing.id,
+          sandboxId,
           sender: this.sourceControl.sender,
           installedAt: new Date().toISOString(),
           enforcement,
@@ -436,40 +413,52 @@ export class OpenShellCredentialProxyDriver implements CredentialProxyDriver {
   ): Promise<boolean> {
     this.assertPlan(context);
     if (
+      typeof installation.sandboxId !== "string" ||
+      installation.sandboxId.length === 0 ||
       !installation.enforcement ||
       !isDeepStrictEqual(installation.plan, context.plan) ||
       !isDeepStrictEqual(installation.sender, this.sourceControl.sender)
     ) {
       return false;
     }
+    // The supplier revalidates registration, effective config and installed registry under
+    // its sandbox mutation lock. Exact equality also refuses replacements of our saved fence.
+    const observed = await this.loadedPolicy(context, installation.sandboxId);
+    return isDeepStrictEqual(observed?.enforcement(), installation.enforcement);
+  }
+
+  private async loadedPolicy(context: ProxyRevisionContext, expectedSandboxId?: string) {
     await this.sourceControl.assertAvailable(context.signal);
     const ref = this.sandbox.harnessResource!(context);
     const client = this.backend.client.clientForNamespace(ref.namespaceName);
-    const existing = await client.getSandbox(
-      { workspace: openShellWorkspaceName(context.namespace), name: ref.resourceName },
-      context.signal,
-    );
-    if (!existing || existing.id !== installation.sandboxId || !client.getSandboxPolicyStatus) {
-      return false;
+    const workspace = openShellWorkspaceName(context.namespace);
+    const name = ref.resourceName;
+    const existing = await client.getSandbox({ workspace, name }, context.signal);
+    if (
+      !existing ||
+      (expectedSandboxId !== undefined &&
+        (existing.id !== expectedSandboxId || !client.getSandboxPolicyStatus))
+    ) {
+      return undefined;
     }
     this.assertOwned(existing.annotations, context);
-    const status = await client.getSandboxPolicyStatus(
-      openShellWorkspaceName(context.namespace),
-      ref.resourceName,
-      context.signal,
-    );
-    // The supplier revalidates registration, effective config and installed registry under
-    // its sandbox mutation lock. Exact equality also refuses replacements of our saved fence.
-    return isDeepStrictEqual(
-      enforcementEvidence(
-        status,
-        existing.id,
-        context.plan.generation,
-        context.revision.id,
-        this.options,
-      ),
-      installation.enforcement,
-    );
+    if (!existing.id || !client.getSandboxPolicyStatus) {
+      return undefined;
+    }
+    const status = await client.getSandboxPolicyStatus(workspace, name, context.signal);
+    const sandboxId = existing.id;
+    return {
+      status,
+      sandboxId,
+      enforcement: () =>
+        enforcementEvidence(
+          status,
+          sandboxId,
+          context.plan.generation,
+          context.revision.id,
+          this.options,
+        ),
+    };
   }
 
   async withdrawBinding(context: ProxyRevisionContext, binding: EgressRef): Promise<boolean> {

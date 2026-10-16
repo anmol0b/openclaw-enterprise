@@ -1,4 +1,4 @@
-// Minimal OpenShell v0.1.3-pre.2 gateway surface used by OpenClaw Enterprise.
+// Minimal OpenShell v0.1.4 gateway surface used by OpenClaw Enterprise.
 //
 // This intentionally models only the messages needed for lifecycle-safe
 // Workspace, Sandbox, and credential provider lifecycle, plus the read-only
@@ -15,6 +15,9 @@ import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 service OpenShell {
+  rpc ExecSandbox(ExecSandboxRequest) returns (stream ExecSandboxEvent);
+  // Operator mTLS only; upstream v0.1.4 (5a7728c3) credential retrieval.
+  rpc GetProviderCredentials(GetProviderCredentialsRequest) returns (GetProviderCredentialsResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc GetGatewayInfo(GetGatewayInfoRequest) returns (GetGatewayInfoResponse);
   rpc GetSandboxPolicyStatus(GetSandboxPolicyStatusRequest) returns (GetSandboxPolicyStatusResponse);
@@ -238,6 +241,8 @@ message NetworkEndpoint {
   NetworkCredentialBinding credential_binding = 24;
   bool allow_uninspected_credentials = 25;
   bool provider_credentialed = 26;
+  // Gateway-derived credential authority identity in upstream v0.1.4.
+  string token_grant_owner = 27;
 }
 
 enum NetworkTlsMode {
@@ -273,6 +278,8 @@ message NetworkMiddlewareConfig {
   string on_error = 4;
   MiddlewareEndpointSelector endpoints = 5;
   int32 order = 6;
+  // Supplier extensions retain their existing wire numbers; stock v0.1.4
+  // has only fields 1-6 and cannot enforce protected execution.
   bool credential_authority = 7;
   repeated CredentialConnector credential_connectors = 8;
   bool execution_authority = 9;
@@ -548,6 +555,7 @@ message GetProviderRefreshStatusResponse {
 }
 
 message ConfigureProviderRefreshRequest {
+  google.protobuf.Timestamp expiration_time = 106;
   WorkspaceSelector workspace_scope = 7;
   string provider = 1;
   string credential_key = 2;
@@ -745,6 +753,55 @@ message SandboxLogLine {
   map<string, string> fields = 7;
 }
 
+// Upstream v0.1.4 (5a7728c3): ExecSandbox and credential retrieval retain
+// their independent operations and original field numbers.
+message ExecSandboxRequest {
+  reserved 5;
+  reserved "timeout_seconds";
+  string sandbox = 1;
+  repeated string command = 2;
+  string workdir = 3;
+  map<string, string> environment = 4;
+  bytes stdin = 6;
+  bool tty = 7;
+  uint32 cols = 8;
+  uint32 rows = 9;
+  bool no_login_shell = 10;
+  string request_id = 11;
+  WorkspaceSelector workspace_scope = 12;
+  google.protobuf.Duration execution_timeout = 105;
+}
+
+message ExecSandboxStdout { bytes data = 1; }
+
+message ExecSandboxStderr { bytes data = 1; }
+
+message ExecSandboxExit { int32 exit_code = 1; }
+
+message ExecSandboxEvent {
+  oneof payload {
+    ExecSandboxStdout stdout = 1;
+    ExecSandboxStderr stderr = 2;
+    ExecSandboxExit exit = 3;
+  }
+}
+
+message GetProviderCredentialsRequest {
+  WorkspaceSelector workspace_scope = 1;
+  string name = 2;
+  repeated string credential_keys = 3;
+  google.protobuf.Duration minimum_remaining_lifetime = 4;
+}
+
+message ProviderCredentialValue {
+  string value = 1;
+  google.protobuf.Timestamp expiration_time = 2;
+}
+
+message GetProviderCredentialsResponse {
+  map<string, ProviderCredentialValue> credentials = 1;
+}
+
 message GetGatewayInfoRequest {}
 message GetGatewayInfoResponse {
   ServiceStatus status = 1;
@@ -770,6 +827,8 @@ message GetSandboxPolicyStatusRequest {
 message GetSandboxPolicyStatusResponse {
   SandboxPolicyRevision revision = 1;
   uint32 active_version = 2;
+  // Supplier extension fields, absent from stock v0.1.4. Protected execution
+  // requires their negotiated capabilities and rejects missing observations.
   LoadedEnforcementEvidence loaded_enforcement = 3;
   LoadedPolicyObservationV1 loaded_policy_observation = 4;
 }

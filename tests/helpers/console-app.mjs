@@ -40,9 +40,14 @@ function computeDriver({
   repositoryCredentials = false,
   channelRuntime = false,
   discoverHarnessModels = async () => [],
+  agentProvisioning = false,
+  sandboxDriver,
+  credentialGatewayDriver,
 } = {}) {
   const driver = createTestKubernetesComputeDriver("console-compute", {
     repositoryCredentials,
+    sandboxDriver,
+    credentialGatewayDriver,
     channelRuntime,
   });
 
@@ -53,8 +58,9 @@ function computeDriver({
     ...(channelRuntime && !repositoryCredentials
       ? { requiresAgentRuntimeCredentials: undefined }
       : {}),
-    // In-memory State has no durable provisioning queue; this fixture supports draft creation.
-    agentProvisioning: undefined,
+    // Most Console cases use drafts. Branch-selection tests can retain the actual
+    // Compute capability while verifying that their flow avoids the durable queue.
+    ...(agentProvisioning ? {} : { agentProvisioning: undefined }),
     // Catalog data is the external Compute boundary; Console/OCC/IAM routes remain real.
     discoverHarnessModels,
     async ensureNamespace(namespace) {
@@ -62,6 +68,10 @@ function computeDriver({
     },
     async deleteNamespace(namespace) {
       return { namespaceId: namespace.id, namespaceDeleted: true };
+    },
+    // The same fixture placement is shared by source management and the Sandbox.
+    async resolveSandboxNamespace(namespace) {
+      return { ...namespace, name: `console-${namespace.id}` };
     },
     async prepareRevision(revision) {
       return {
@@ -325,6 +335,9 @@ export async function createConsoleAppFixture(t, options = {}) {
         repositoryCredentials: options.repositoryCredentials === true,
         channelRuntime: options.channelRuntime === true,
         discoverHarnessModels: options.discoverHarnessModels,
+        agentProvisioning: options.agentProvisioning,
+        sandboxDriver: options.sandboxDriver,
+        credentialGatewayDriver: options.credentialGatewayDriver,
       }),
     configurationDriver:
       configurationDriver ?? createTestConfigurationDriver({ id: "console-configuration" }),
@@ -597,6 +610,9 @@ export async function createConsoleAppFixture(t, options = {}) {
         configurationId: configuration.id,
         ...(options.backendId === undefined ? {} : { backendId: options.backendId }),
         harnessAuth,
+        ...(options.credentialSources === undefined
+          ? {}
+          : { credentialSources: options.credentialSources }),
         ...(options.executionMode === undefined ? {} : { executionMode: options.executionMode }),
       },
     });

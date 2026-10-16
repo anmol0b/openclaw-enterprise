@@ -25,7 +25,6 @@ import {
 import { resolveKubernetesControlNamespace } from "../../compute/kubernetes/index.ts";
 import { withComputeOperationDeadline } from "../../compute/operation-context.ts";
 import { createKubernetesClientConfiguration } from "../../kubernetes/client.ts";
-import { OAUTH_PHASE_ANNOTATION } from "../../kubernetes/oauth-seal.ts";
 import { kubernetesRequest } from "../../kubernetes/request.ts";
 import {
   createKubernetesAuthenticationOptionsSchema,
@@ -339,9 +338,6 @@ export class KubernetesSecretDriver implements SecretDriver {
   async update(secret: Secret, value: string): Promise<void> {
     validateValue(value);
     const { observed } = await this.readOwnedSecret(secret);
-    if (observed.metadata?.annotations?.[OAUTH_PHASE_ANNOTATION] !== undefined) {
-      throw new SecretConflictError("The Agent owns this OAuth credential; it cannot be updated.");
-    }
     await this.replaceOwnedSecret(secret, observed, value);
   }
 
@@ -349,10 +345,7 @@ export class KubernetesSecretDriver implements SecretDriver {
     validateValue(expected);
     validateValue(value);
     const { observed } = await this.readOwnedSecret(secret);
-    if (
-      observed.metadata?.annotations?.[OAUTH_PHASE_ANNOTATION] !== undefined ||
-      decodedValue(observed) !== expected
-    ) {
+    if (decodedValue(observed) !== expected) {
       return false;
     }
     try {

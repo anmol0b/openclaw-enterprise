@@ -6,15 +6,15 @@ remains closed until the installed pair and its release authority are qualified.
 
 ## Upgrade or withdraw a development installation
 
-Use a disposable database for the first upgrade. The supported starting schema
-includes `0054_credential_source_pat` and `0055_compute_revision_admission`.
-Migrations 0056 through 0061 add the egress schema and check the revision's
-Harness authentication shape. Migration checks compare the receipt ledger,
-catalog and effective grants.
+Start with a disposable database on the public migration history through
+`0057_canonical_harness_auth`. Migrations 0058 through 0065 add protected egress,
+credential custody and prepared repository access. Migration checks compare the
+receipt ledger, catalog and effective grants. They do not enable protected execution.
 
-A private development database whose 0055 was `static_egress` has a different history.
-Stop its writers and withdraw it using its own matching release and quiesced backup, or
-retire it and create a fresh disposable installation. Never renumber applied receipts.
+If a private database already recorded `static_egress` at 0057 or an earlier slot,
+its history conflicts with the public sequence. Keep its writers on their matching
+release until you can quiesce and retire that installation; start this version on a
+fresh database. Never renumber an applied migration or rewrite its receipt.
 
 Use this order when keeping a development database:
 
@@ -23,7 +23,7 @@ Use this order when keeping a development database:
    including any running anonymous reader. Retire predecessors and verify that no revision is
    active and no cleanup remains. If you cannot settle the work, stay on that release.
    If you need to deploy under that Agent identity again, stay on its owning release. Stopping an
-   Agent preserves its revisions; there is no supported in-place conversion for admissions through 0055.
+   Agent preserves its revisions; there is no in-place conversion of revision admissions made before migration 0058.
 2. **Quiesce writers and verify a physical snapshot.** Stop admission, workers and maintenance
    writers. On PostgreSQL 18.6, `CREATE DATABASE ... TEMPLATE ... STRATEGY FILE_COPY` with the
    same database-level access preserved the catalog and receipt history. A logical restore can
@@ -32,7 +32,7 @@ Use this order when keeping a development database:
    controller, runtime, supplier and configuration revisions.
 3. **Migrate once; retain the old Agent for inspection.** Start the matching API and workers
    with `credential_proxy` unselected. The revision list preserves the old identity; revision detail
-   reports `SAVED_CONFIGURATION_UNREADABLE` because 0055 recorded no execution admission.
+   reports `SAVED_CONFIGURATION_UNREADABLE` because those revisions recorded no execution admission.
    Deployment reads _all_ revisions so it can stop or retire them; on this Agent it returns 503
    without creating a revision or queuing work. Do not delete the history or invent an
    `execution_admission`. The saved peer admission and credential-source reference are history,

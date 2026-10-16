@@ -6,38 +6,45 @@ import type {
 } from "@openclaw-enterprise/contracts";
 import { asRecord, immutableCopy } from "@openclaw-enterprise/utils";
 import { normalizeOpenAiBaseUrl } from "../openai-endpoint.ts";
-import { validResponsesRequest } from "./openai-responses.ts";
+import { validChatRequest, validResponsesRequest } from "./openai-responses.ts";
 import { protectedResponseOutput, protectedResponsesStream } from "./openai-responses-stream.ts";
 import { parseUnambiguousJson } from "../repo/credentials/json-members.ts";
 
 const maximumResponseBytes = 4 * 1024 * 1024;
 
+const jsonType = /^application\/json(?:;\s*charset=utf-8)?$/i;
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+function contentType(headers: EgressRequest["headers"]): string {
+  const types = headers.filter(([name]) => name.toLowerCase() === "content-type");
+  return types.length === 1 ? types[0]![1] : "";
+}
+
+function validHeaders(headers: EgressRequest["headers"], forbidden: string[]): boolean {
+  return (
+    headers.length <= 64 &&
+    headers.every(
+      ([name, value]) => !/[\r\n\0]/.test(name + value) && !forbidden.includes(name.toLowerCase()),
+    )
+  );
+}
+
 function jsonRequest(request: EgressRequest): Record<string, unknown> | undefined {
   const headers = request.headers;
-  if (headers.length > 64 || headers.some(([name, value]) => /[\r\n\0]/.test(name + value))) {
-    return undefined;
-  }
-  const types = headers.filter(([name]) => name.toLowerCase() === "content-type");
-  if (types.length !== 1 || !/^application\/json(?:;\s*charset=utf-8)?$/i.test(types[0]![1])) {
-    return undefined;
-  }
   if (
-    headers.some(([name]) =>
-      [
-        "content-encoding",
-        "transfer-encoding",
-        "upgrade",
-        "proxy-authorization",
-        "x-oce-binding",
-      ].includes(name.toLowerCase()),
-    )
+    !jsonType.test(contentType(headers)) ||
+    !validHeaders(headers, [
+      "content-encoding",
+      "transfer-encoding",
+      "upgrade",
+      "proxy-authorization",
+      "x-oce-binding",
+    ])
   ) {
     return undefined;
   }
   try {
-    return asRecord(
-      parseUnambiguousJson(new TextDecoder("utf-8", { fatal: true }).decode(request.body)),
-    );
+    return asRecord(parseUnambiguousJson(utf8.decode(request.body)));
   } catch {
     return undefined;
   }
@@ -61,27 +68,17 @@ function protectedResponse(
   ) {
     return undefined;
   }
-  const types = response.headers.filter(([name]) => name.toLowerCase() === "content-type");
-  const mediaType = types[0]?.[1];
+  const mediaType = contentType(response.headers);
   const streaming = jsonRequest(request)?.stream === true;
-  const sse = streaming && /^text\/event-stream(?:;\s*charset=utf-8)?$/i.test(mediaType ?? "");
+  const sse = streaming && /^text\/event-stream(?:;\s*charset=utf-8)?$/i.test(mediaType);
   if (
-    types.length !== 1 ||
-    !(
-      sse ||
-      (/^application\/json(?:;\s*charset=utf-8)?$/i.test(mediaType ?? "") &&
-        (!streaming || response.status >= 400))
-    ) ||
-    response.headers.length > 64 ||
-    response.headers.some(([name, value]) => /[\r\n\0]/.test(name + value)) ||
-    response.headers.some(([name]) =>
-      ["content-encoding", "trailer", "upgrade"].includes(name.toLowerCase()),
-    )
+    !(sse || (jsonType.test(mediaType) && (!streaming || response.status >= 400))) ||
+    !validHeaders(response.headers, ["content-encoding", "trailer", "upgrade"])
   ) {
     return undefined;
   }
   try {
-    const body = new TextDecoder("utf-8", { fatal: true }).decode(response.body);
+    const body = utf8.decode(response.body);
     const encodings = [
       credential,
       encodeURIComponent(credential),
@@ -215,57 +212,12 @@ export const openAiStaticProvider: CredentialProviderDefinition =
         typeof body.model !== "string" ||
         route.binding.grant.kind !== "inference" ||
         route.binding.grant.providerTools !== "none" ||
-        !route.binding.grant.models.includes(body.model) ||
-        (body.store !== undefined && body.store !== false)
+        !route.binding.grant.models.includes(body.model)
       ) {
         return undefined;
       }
-      const responseApi = route.path.endsWith("/responses");
-      if (responseApi) {
-        return validResponsesRequest(body)
-          ? { kind: "inference", action: "generate", model: body.model }
-          : undefined;
-      }
-      if (body.stream !== undefined && body.stream !== false) {
-        return undefined;
-      }
-      const allowed = new Set([
-        "model",
-        "stream",
-        "store",
-        "temperature",
-        "top_p",
-        "messages",
-        "max_completion_tokens",
-      ]);
-      if (Object.keys(body).some((key) => !allowed.has(key))) {
-        return undefined;
-      }
-      for (const key of ["temperature", "top_p", "max_completion_tokens"]) {
-        if (
-          body[key] !== undefined &&
-          (typeof body[key] !== "number" || !Number.isFinite(body[key]) || body[key] < 0)
-        ) {
-          return undefined;
-        }
-      }
-      if (
-        !Array.isArray(body.messages) ||
-        body.messages.length === 0 ||
-        body.messages.length > 128 ||
-        body.messages.some((message) => {
-          const item = asRecord(message);
-          return (
-            !item ||
-            Object.keys(item).some((key) => key !== "role" && key !== "content") ||
-            !["system", "user", "assistant"].includes(String(item.role)) ||
-            typeof item.content !== "string"
-          );
-        })
-      ) {
-        return undefined;
-      }
-      return { kind: "inference", action: "generate", model: body.model };
+      const valid = route.path.endsWith("/responses") ? validResponsesRequest : validChatRequest;
+      return valid(body) ? { kind: "inference", action: "generate", model: body.model } : undefined;
     },
     inject(value) {
       if (value.length < 8 || value.length > 8192 || /[^\x21-\x7e]/.test(value)) {
@@ -277,20 +229,13 @@ export const openAiStaticProvider: CredentialProviderDefinition =
       if (
         response.status !== 401 ||
         response.body.byteLength > maximumResponseBytes ||
-        response.headers.filter(([name]) => name.toLowerCase() === "content-type").length !== 1 ||
-        !response.headers.some(
-          ([name, value]) =>
-            name.toLowerCase() === "content-type" &&
-            /^application\/json(?:;\s*charset=utf-8)?$/i.test(value),
-        ) ||
+        !jsonType.test(contentType(response.headers)) ||
         response.headers.some(([name]) => name.toLowerCase() === "content-encoding")
       ) {
         return false;
       }
       try {
-        const body = asRecord(
-          parseUnambiguousJson(new TextDecoder("utf-8", { fatal: true }).decode(response.body)),
-        );
+        const body = asRecord(parseUnambiguousJson(utf8.decode(response.body)));
         const error = asRecord(body?.error);
         return error?.code === "invalid_api_key" && error.type === "invalid_request_error";
       } catch {

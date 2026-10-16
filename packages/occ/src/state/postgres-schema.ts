@@ -659,7 +659,11 @@ export const agentRevisions = occSchema.table(
     })
       .onUpdate("restrict")
       .onDelete("restrict"),
-    check("agent_revisions_id_format", sql`${table.id} ~ ${identifierPatterns.revision}`),
+    // PostgreSQL stores these expressions as DDL; identifier patterns must be literals.
+    check(
+      "agent_revisions_id_format",
+      sql`${table.id} ~ ${identifierPatterns.revision}`.inlineParams(),
+    ),
     check("agent_revisions_revision_positive", sql`${table.revisionNumber} > 0`),
     check(
       "agent_revisions_backend_id_valid",
@@ -676,7 +680,7 @@ export const agentRevisions = occSchema.table(
         AND jsonb_typeof(${table.admittedSpec}->'egress_plan'->'routes') = 'array',
         false)`,
     ),
-    // Migration 0056 installs this NOT VALID to preserve old, unreadable history.
+    // Migration 0058 installs this NOT VALID to preserve old, unreadable history.
     check(
       "agent_revisions_execution_admission",
       sql`COALESCE(
@@ -703,7 +707,7 @@ export const agentRevisions = occSchema.table(
           - 'configuration_id' - 'configuration_kind' - 'configuration_generation'
           - 'draft_spec' - 'harness' - 'compute' - 'sandbox_driver_id'
           - 'secret_driver_id' - 'secret_bindings' - 'harness_auth' - 'credential_sources' - 'plugins'
-          - 'repository_credentials' - 'egress_plan' - 'execution_admission') = '{}'::jsonb
+          - 'plugin_approvers' - 'repository_credentials' - 'egress_plan' - 'execution_admission') = '{}'::jsonb
         AND jsonb_typeof(${table.admittedSpec}->'configuration_id') = 'string'
         AND (${table.admittedSpec}->>'configuration_id') ~ ${identifierPatterns.configuration}
         AND jsonb_typeof(${table.admittedSpec}->'configuration_kind') = 'string'
@@ -763,7 +767,16 @@ export const agentRevisions = occSchema.table(
         AND (
           NOT (${table.admittedSpec} ? 'plugins')
           OR jsonb_typeof(${table.admittedSpec}->'plugins') = 'object'
-        )`,
+        )
+        AND (
+          NOT (${table.admittedSpec} ? 'plugin_approvers')
+          OR (jsonb_typeof(${table.admittedSpec}->'plugin_approvers') = 'array'
+            AND jsonb_array_length(${table.admittedSpec}->'plugin_approvers') <= 64)
+        )
+        AND (
+          NOT (${table.admittedSpec} ? 'credential_sources')
+          OR occ.credential_source_snapshots_are_valid(${table.admittedSpec}->'credential_sources')
+        )`.inlineParams(),
     ),
   ],
 );

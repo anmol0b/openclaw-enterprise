@@ -2,9 +2,9 @@ package occdev
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/x509"
-	"encoding/pem"
 	"io"
 	"net/url"
 	"os"
@@ -28,51 +28,41 @@ func TestProtectedEgressSelectionFailsBeforeEffects(t *testing.T) {
 		env[key] = "/explicit/chart"
 	}
 	r := &runner{env: env}
-	if enabled, err := r.protectedEgressSelection("kubernetes", "openshell"); err != nil || !enabled {
-		t.Fatalf("complete explicit selection refused: %v", err)
-	}
-	for _, pair := range [][2]string{{"compose", "openshell"}, {"kubernetes", "none"}} {
-		if _, err := r.protectedEgressSelection(pair[0], pair[1]); err == nil {
-			t.Fatal("protected mode accepted an unsupported profile")
+	check := func(controlPlane, sandbox, want string) {
+		t.Helper()
+		enabled, err := r.protectedEgressSelection(controlPlane, sandbox)
+		if enabled != (want == "enabled") || (err != nil) != (want == "rejected") {
+			t.Fatalf("selection for %s/%s, env=%v: enabled=%t, err=%v, want %s", controlPlane, sandbox, r.env, enabled, err, want)
 		}
 	}
+	check("kubernetes", "openshell", "enabled")
+	check("compose", "openshell", "rejected")
+	check("kubernetes", "none", "rejected")
 	for key, value := range env {
 		if key == "OCC_DEVELOPMENT_PROTECTED_EGRESS" {
 			continue
 		}
 		delete(env, key)
-		if _, err := r.protectedEgressSelection("kubernetes", "openshell"); err == nil {
-			t.Fatalf("accepted missing %s", key)
-		}
+		check("kubernetes", "openshell", "rejected")
 		env[key] = value
 	}
 	// Only an explicitly selected owned private host can receive the native alias.
 	for _, address := range []string{"", "127.0.0.1", "0.0.0.0", "169.254.169.254", "8.8.8.8", "::1", "172.030.42.1", "host.example.test"} {
 		env["OCC_DEVELOPMENT_OPENSHELL_HOST_GATEWAY_IP"] = address
-		if _, err := r.protectedEgressSelection("kubernetes", "openshell"); err == nil {
-			t.Fatalf("accepted unsupported host alias address %q", address)
-		}
+		check("kubernetes", "openshell", "rejected")
 	}
 	env["OCC_DEVELOPMENT_OPENSHELL_HOST_GATEWAY_IP"] = "172.30.42.1"
-	if _, err := r.protectedEgressSelection("kubernetes", "openshell"); err != nil {
-		t.Fatal(err)
-	}
+	check("kubernetes", "openshell", "enabled")
 	env["OCC_DEVELOPMENT_PROTECTED_EGRESS"] = "0"
-	if _, err := r.protectedEgressSelection("kubernetes", "openshell"); err == nil {
-		t.Fatal("unprotected profile silently accepted host alias configuration")
-	}
+	check("kubernetes", "openshell", "rejected")
 	delete(env, "OCC_DEVELOPMENT_OPENSHELL_HOST_GATEWAY_IP")
 	for _, value := range []string{"true", "yes", "2"} {
 		env["OCC_DEVELOPMENT_PROTECTED_EGRESS"] = value
-		if _, err := r.protectedEgressSelection("kubernetes", "openshell"); err == nil {
-			t.Fatal("accepted ambiguous opt-in")
-		}
+		check("kubernetes", "openshell", "rejected")
 	}
 	for _, value := range []string{"", "0"} {
 		r.env = map[string]string{"OCC_DEVELOPMENT_PROTECTED_EGRESS": value}
-		if enabled, err := r.protectedEgressSelection("compose", "none"); err != nil || enabled {
-			t.Fatalf("default profile changed: %v", err)
-		}
+		check("compose", "none", "disabled")
 	}
 }
 
@@ -110,17 +100,12 @@ func TestProtectedPlatformInstallationOrdersAuthorityBeforeGatewayReadiness(t *t
 func testProtectedPlatformInstallation(t *testing.T, rolloutExit string) {
 	// Resolve the real tools before PATH is replaced by the command fixtures.
 	supplierChart := os.Getenv("OCC_TEST_OPENSHELL_CHART")
-	gatewayChart := supplierChart
-	if gatewayChart == "" {
-		// Only the fake helm sees this path; it is never rendered.
-		gatewayChart = "/supplier/openshell-gateway"
-	}
+	gatewayChart := cmp.Or(supplierChart, "/supplier/openshell-gateway")
 	realNode, nodeErr := exec.LookPath("node")
-	helm := os.Getenv("OCC_HELM_BIN")
-	if helm == "" {
-		helm = "helm"
+	helm, helmErr := exec.LookPath(cmp.Or(os.Getenv("OCC_HELM_BIN"), "helm"))
+	if supplierChart != "" && (nodeErr != nil || helmErr != nil) {
+		t.Fatalf("OCC_TEST_OPENSHELL_CHART requires Node and Helm: node=%v, helm=%v", nodeErr, helmErr)
 	}
-	helm, helmErr := exec.LookPath(helm)
 	state := kubernetesOnlyOpenShellState(t)
 	state.ProtectedEgress = true
 	state.DatabaseName = "openclaw_k8s_connected"
@@ -163,15 +148,10 @@ done
 "get secret openshell-gateway-jwt-keys --namespace oce-system -o jsonpath={.data.kid}") echo dGVzdC1raWQ= ;;
 "get node k3d-occ-dev-owned-server-0 -o json") echo '{"spec":{"podCIDR":"10.42.0.0/24"}}' ;;
 "get service openshell-gateway --namespace oce-system -o jsonpath={.spec.clusterIP}") echo 10.43.0.50 ;;
-"-n oce-system get pod bootstrap-password-prepare -o jsonpath={.status.phase}") echo Succeeded ;;
-"-n oce-system rollout status statefulset/postgres "*) ;;
-"-n oce-system get pod postgres-0 -o jsonpath={.status.podIP}") echo 10.42.0.20 ;;
-"-n default get endpoints kubernetes -o jsonpath={.subsets[0].addresses[0].ip}") echo 172.30.42.3 ;;
-"-n default get endpoints kubernetes -o jsonpath={.subsets[0].ports[0].port}") echo 6443 ;;
-"-n oce-system rollout status deployment/occ-development-api-proxy "*) ;;
+` + controlPlaneKubectlCases + `
 "rollout status statefulset/openshell-gateway --namespace oce-system --timeout 1m0s") exit ` + rolloutExit + ` ;;`,
 		"docker": `"exec k3d-occ-dev-owned-server-0 ip route get 10.42.0.2") echo '10.42.0.2 dev cni0 src 10.42.0.1' ;;
-"network inspect k3d-occ-dev-owned") echo '[{"IPAM":{"Config":[{"Subnet":"172.30.42.0/24"}]}}]' ;;`,
+` + controlPlaneNetworkCase,
 		"helm": `"upgrade --install openshell-gateway "*) ;;
 "upgrade "*"openclaw-enterprise deploy/helm/openclaw-enterprise "*) ` + render + ` ;;`,
 	})
@@ -201,16 +181,10 @@ done
 	kid := find("kubectl get secret openshell-gateway-jwt-keys ")
 	control := find("openclaw-enterprise deploy/helm/openclaw-enterprise ")
 	ready := find("kubectl rollout status statefulset/openshell-gateway ")
-	if authority >= gateway {
-		t.Fatal("the egress authority TLS material must exist before the Gateway installs")
-	}
-	if gateway >= kid || kid >= control {
-		t.Fatal("the Gateway key identifier must be read after Gateway install and before OCE install")
-	}
 	access := find("kubectl apply -f " + filepath.Join(state.directory, "development-tenant-access.json"))
 	network := find("kubectl apply -f " + filepath.Join(state.directory, "openshell-network-policies.json"))
-	if !(control < access && access < network && network < ready) {
-		t.Fatal("expected initial OCE release, tenant access, network policies, then Gateway rollout")
+	if !(authority < gateway && gateway < kid && kid < control && control < access && access < network && network < ready) {
+		t.Fatal("expected TLS, Gateway, key ID, OCE release, tenant access, policies, then Gateway readiness")
 	}
 	checkWorkerAccess(t, state.directory, state.PlatformNamespace)
 	if helmErr == nil {
@@ -248,40 +222,30 @@ done
 
 	// Use the actual startup parser/Driver composition, without provider or cluster I/O.
 	if nodeErr != nil {
-		if supplierChart != "" {
-			t.Fatalf("OCC_TEST_OPENSHELL_CHART requires Node to parse the generated Installation: %v", nodeErr)
-		}
 		t.Log("node not found; skipping the real startup parse of the generated Installation")
 	} else {
 		parseGeneratedInstallation(t, realNode, state)
 	}
 
-	// The generated server leaf must authenticate the exact registry hostname.
+	// The generated server leaf must authenticate the authority service hostname.
 	caPEM, _ := os.ReadFile(filepath.Join(state.directory, "egress-ca.crt"))
 	leafPEM, _ := os.ReadFile(filepath.Join(state.directory, "egress-tls.crt"))
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
 		t.Fatal("authority CA is invalid")
 	}
-	block, _ := pem.Decode(leafPEM)
-	if block == nil {
-		t.Fatal("authority leaf is missing")
-	}
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatal(err)
-	}
+	leaf := parseDevelopmentCertificate(t, leafPEM)
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "openclaw-enterprise-egress-authority.oce-system.svc.cluster.local"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Creation, readiness, migration and application URLs select one disposable database.
 	postgres := readJSONFile(t, filepath.Join(state.directory, "postgres.json"))
-	container := postgres["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
-	if container["env"].([]any)[0].(map[string]any)["value"] != state.DatabaseName {
+	container := field(t, postgres, "spec", "template", "spec", "containers", 0)
+	if field(t, container, "env", 0, "value") != state.DatabaseName {
 		t.Fatal("database creation selector diverged")
 	}
-	probe := container["readinessProbe"].(map[string]any)["exec"].(map[string]any)["command"].([]any)
+	probe := field(t, container, "readinessProbe", "exec", "command").([]any)
 	if probe[len(probe)-1] != state.DatabaseName {
 		t.Fatal("database readiness selector diverged")
 	}
@@ -289,10 +253,7 @@ done
 	urls := secrets[1].(map[string]any)["stringData"].(map[string]any)
 	for key, role := range map[string]string{"application-url": "occ_app", "migration-url": "occ_migrator"} {
 		u, err := url.Parse(urls[key].(string))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if u.Path != "/openclaw_k8s_connected" || u.User.Username() != role {
+		if err != nil || u.Path != "/openclaw_k8s_connected" || u.User.Username() != role {
 			t.Fatalf("database role or selector diverged for %s", key)
 		}
 	}
@@ -301,40 +262,33 @@ done
 		t.Fatal("selected owned host did not reach the supplier chart input")
 	}
 	if helmErr != nil {
-		if supplierChart != "" {
-			t.Fatalf("OCC_TEST_OPENSHELL_CHART requires Helm to render both charts (set OCC_HELM_BIN): %v", helmErr)
-		}
 		t.Log("helm not found (set OCC_HELM_BIN); skipping chart renders")
 		return
 	}
-	renders := []struct{ name, chart, values string }{
-		// Later repository setup upgrades from the saved values, without an override.
-		{"openclaw-enterprise", filepath.Join(state.Repository, "deploy/helm/openclaw-enterprise"), "install-values"},
-	}
+	// Later OCE upgrades use the saved values without a replica override.
+	assertDevelopmentReplicas(t, renderDevelopmentChart(t, helm, state, "openclaw-enterprise",
+		"deploy/helm/openclaw-enterprise", "install-values"), 1)
 	if supplierChart != "" {
-		renders = append(renders, struct{ name, chart, values string }{"openshell-gateway", supplierChart, "openshell-protected-values.json"})
+		out := renderDevelopmentChart(t, helm, state, openShellGatewayService, supplierChart,
+			"openshell-protected-values.json", "--set", "agentSandbox.preflight.enabled=false", "--set", "fullnameOverride=openshell-gateway")
+		if err := verifyProtectedOpenShellChart(out, state); err != nil {
+			t.Fatal(err)
+		}
 	} else {
 		t.Log("OCC_TEST_OPENSHELL_CHART unset; skipping the supplier chart render")
 	}
-	for _, selected := range renders {
-		args := []string{"template", selected.name, selected.chart, "--namespace", "oce-system", "-f", filepath.Join(state.directory, selected.values)}
-		if selected.name == "openshell-gateway" {
-			args = append(args, "--set", "agentSandbox.preflight.enabled=false", "--set", "fullnameOverride=openshell-gateway")
-		}
-		render := exec.Command(helm, args...)
-		render.Dir = state.Repository
-		out, err := render.CombinedOutput()
-		if err != nil {
-			t.Fatalf("%s chart refused launch values: %v\n%s", selected.name, err, out)
-		}
-		if selected.name == openShellGatewayService {
-			if err := verifyProtectedOpenShellChart(out, state); err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		assertDevelopmentReplicas(t, out, 1)
+}
+
+func renderDevelopmentChart(t *testing.T, helm string, state *developmentState, release, chart, values string, extra ...string) []byte {
+	t.Helper()
+	args := []string{"template", release, chart, "--namespace", state.PlatformNamespace, "-f", filepath.Join(state.directory, values)}
+	cmd := exec.Command(helm, append(args, extra...)...)
+	cmd.Dir = state.Repository
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s chart rejected launch values: %v\n%s", release, err, out)
 	}
+	return out
 }
 
 func assertDevelopmentReleaseReplicas(t *testing.T, dir, name string, workers int) {

@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
-import pg from "pg";
 import { postgresApp } from "../helpers/postgres-egress-app.mjs";
-import { databaseUrl, requiresPostgres } from "../helpers/postgres-database.mjs";
-import { commitAckProxy } from "../fixtures/postgres-commit-ack-proxy.mjs";
+import { requiresPostgres } from "../helpers/postgres-database.mjs";
+import { commitLossScenario } from "../helpers/postgres-protected-scenarios.mjs";
 import { staticEgressFixture } from "../helpers/static-egress.mjs";
 import { PostgresPlatformState } from "../../packages/occ/src/index.ts";
 import { validHarnessAuthSnapshot } from "../../packages/occ/src/state/platform-state.ts";
@@ -13,17 +11,7 @@ test(
   "losing the exact authorized-dispatch COMMIT reply yields no permit or origin, also after restart",
   { ...requiresPostgres, timeout: 60_000 },
   async (t) => {
-    const proxy = await commitAckProxy(databaseUrl, { egressDispatch: true });
-    const f = await staticEgressFixture(t, {
-      appFactory: (t, options) => postgresApp(t, options, proxy.url),
-    });
-    // Register after the app's pool shutdown. Closing a transport under unrelated
-    // idle pooled connections would inject a second fault during test teardown.
-    const observer = new pg.Pool({ connectionString: databaseUrl, max: 1 });
-    t.after(async () => {
-      await observer.end();
-      await proxy.close();
-    });
+    const { f, assertLostDispatch } = await commitLossScenario(t);
     const sibling = f.capture();
     const { ready } = await f.resolve(sibling);
     assert.ok((await f.authorize(f.permitRequest(sibling, ready))).allowed);
@@ -31,59 +19,7 @@ test(
     assert.equal(normal.response_complete, true);
     assert.equal(f.providerRequests.length, 1);
 
-    const captured = f.capture();
-    const select = () =>
-      observer
-        .query(
-          "SELECT authorized_dispatch, observation, outcome FROM occ.egress_send_receipts WHERE use_id=$1",
-          [captured.request.context.request_id],
-        )
-        .then(({ rows }) => rows[0]);
-    const custodyId = createHash("sha256").update(captured.response_custody).digest("hex");
-    let committed;
-    let permits = 0;
-    for (const phase of ["lost_ack", "restarted"]) {
-      const { ready } = await f.resolve(captured);
-      assert.ok(ready, "reach dispatch with genuine material and the original use still live");
-      if (phase === "lost_ack") {
-        proxy.arm({ instanceId: f.installation.enforcement.instanceId });
-      }
-      const decision = await f.authorize(f.permitRequest(captured, ready));
-      if (decision.allowed) {
-        permits++;
-        await f.send(captured, ready);
-      }
-      assert.ok(decision.refused, phase);
-      assert.equal(
-        proxy.observedCommit,
-        true,
-        "the server's real authorized-dispatch COMMIT was consumed",
-      );
-      assert.equal(permits, 0);
-      assert.equal(
-        f.providerRequests.length,
-        1,
-        "only the positive sibling ever reached the origin",
-      );
-      const row = await select();
-      if (phase === "lost_ack") {
-        assert.equal(
-          row.authorized_dispatch.association.custodyId,
-          custodyId,
-          "exact custody commitment, not raw proof",
-        );
-        assert.equal(row.observation, null);
-        assert.deepEqual(row.outcome, { kind: "uncertain", dispatch: "possible" });
-        committed = row;
-        await f.restartAuthority();
-      } else {
-        assert.deepEqual(
-          row,
-          committed,
-          "no replay or rewrite of the unacknowledged authorized dispatch",
-        );
-      }
-    }
+    await assertLostDispatch(f.capture());
   },
 );
 

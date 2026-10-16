@@ -1,24 +1,17 @@
 import { isIP } from "node:net";
-import { fileURLToPath } from "node:url";
-import { loadSync } from "@grpc/proto-loader";
+import { Server, status, type ServerUnaryCall, type sendUnaryData } from "@grpc/grpc-js";
 import {
-  loadPackageDefinition,
-  Server,
-  status,
-  type Metadata,
-  type ServerUnaryCall,
-  type ServiceDefinition,
-  type sendUnaryData,
-} from "@grpc/grpc-js";
-import { asRecord } from "@openclaw-enterprise/utils";
+  describeOpenShellMiddleware,
+  loadOpenShellMiddleware,
+  middlewareBearer,
+  record,
+} from "./openshell-authority.ts";
 import {
   OpenShellExtensionJwtVerifier,
   type OpenShellEgressIdentityOptions,
 } from "./openshell-identity.ts";
 
 type Wire = Record<string, unknown>;
-const record = (value: unknown): Wire => asRecord(value) ?? {};
-const contract = "openshell.supervisor-middleware.contract";
 const deny = { decision: 2, reason_code: "online_authorization_denied" };
 const boundedId = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(value);
@@ -61,11 +54,6 @@ export interface OpenShellOnlineAuthorityOptions {
     signal: AbortSignal,
   ) => Promise<"allow" | "deny">;
   readonly budgetMs?: number;
-}
-
-function bearer(metadata: Metadata): string {
-  const values = metadata.get("authorization");
-  return values.length === 1 && typeof values[0] === "string" ? values[0] : "";
 }
 
 function bindingId(config: unknown): string | undefined {
@@ -145,50 +133,30 @@ export function createOpenShellOnlineAuthority(options: OpenShellOnlineAuthority
   ) {
     throw new Error("Invalid OpenShell online authorization configuration.");
   }
-  const definition = loadSync(
-    fileURLToPath(new URL("./proto/supervisor_middleware.proto", import.meta.url)),
-    { keepCase: true, longs: String, enums: Number, defaults: false, oneofs: true },
-  );
-  const loaded = loadPackageDefinition(definition) as unknown as {
-    openshell: { middleware: { v1: { SupervisorMiddleware: { service: ServiceDefinition } } } };
-  };
+  const { service } = loadOpenShellMiddleware();
   const server = new Server({ "grpc.max_receive_message_length": 5 * 1024 * 1024 });
-  const claims = (call: ServerUnaryCall<Wire, Wire>) => verifier.verify(bearer(call.metadata));
+  const claims = (call: ServerUnaryCall<Wire, Wire>) =>
+    verifier.verify(middlewareBearer(call.metadata));
   const control = (identity: Wire | undefined) =>
     (identity?.caller_kind === "gateway" &&
       identity.sub === options.identity.issuer &&
       identity.sandbox_id === undefined) ||
     supervisor(identity) !== undefined;
   let pending = 0;
-  server.addService(loaded.openshell.middleware.v1.SupervisorMiddleware.service, {
+  server.addService(service.SupervisorMiddleware!.service, {
     Describe(call: ServerUnaryCall<Wire, Wire>, callback: sendUnaryData<Wire>) {
-      const peer = record(call.request.gateway);
-      const supported = peer.supported_capabilities;
-      const required = peer.required_capabilities;
-      if (
-        !control(claims(call)) ||
-        record(peer.protocol_version).major !== 1 ||
-        !Array.isArray(supported) ||
-        !supported.includes(contract) ||
-        !Array.isArray(required) ||
-        !required.includes(contract) ||
-        required.some((value) => value !== contract)
-      ) {
+      const description =
+        control(claims(call)) &&
+        describeOpenShellMiddleware(
+          call.request.gateway,
+          options.identity.audience,
+          "online-request-authorization",
+        );
+      if (description) {
+        callback(null, description);
+      } else {
         callback({ code: status.PERMISSION_DENIED, message: "Unsupported counterpart." }, null);
-        return;
       }
-      callback(null, {
-        name: "oce-online-request-authorization",
-        expected_audience: options.identity.audience,
-        extension: {
-          protocol_version: { major: 1, minor: 0 },
-          implementation_name: "oce/online-request-authorization",
-          implementation_version: "1",
-          supported_capabilities: [contract],
-          required_capabilities: [contract],
-        },
-        bindings: [{ operation: 1, phase: 1, max_payload_bytes: 4 * 1024 * 1024 }],
-      });
     },
     ValidateConfig(call: ServerUnaryCall<Wire, Wire>, callback: sendUnaryData<Wire>) {
       callback(null, {

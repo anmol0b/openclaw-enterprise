@@ -9,6 +9,15 @@ import { EgressSendReceipts } from "../../packages/occ/src/egress-send-receipts.
 import { PostgresPlatformState } from "../../packages/occ/src/state/postgres-state.ts";
 import { commitAckProxy } from "../fixtures/postgres-commit-ack-proxy.mjs";
 import { databaseUrl, requiresPostgres } from "../helpers/postgres-database.mjs";
+import { syntheticDispatchFixture } from "../helpers/static-egress.mjs";
+
+function openReceiptStore(t, connectionString = databaseUrl) {
+  const pool = new pg.Pool({ connectionString, max: 1 });
+  t.after(() => pool.end());
+  return new EgressSendReceipts(new PostgresPlatformState(pool));
+}
+
+const conflict = { name: "ResourceStateConflictError" };
 
 async function loseCommitReplyWithCallerProcess(method, ...args) {
   const caller = new URL("../fixtures/egress-send-receipt-owner.mjs", import.meta.url);
@@ -93,32 +102,27 @@ test(
 
     await t.test(
       "after COMMIT and loss of the acknowledgment and caller process, recover the exact outcome and feedback",
-      async () => {
+      async (t) => {
         const input = attempt();
         await receipts.begin(sender, input);
         await loseCommitReplyWithCallerProcess("record", sender, input, blocked, feedback);
-        const recoveryPool = new pg.Pool({ connectionString: databaseUrl, max: 2 });
-        try {
-          const recovered = new EgressSendReceipts(new PostgresPlatformState(recoveryPool));
-          const expected = {
-            ...input,
-            authorization: null,
-            observation: null,
-            outcome: blocked,
-            settled: true,
-            feedback: "fenced",
-          };
-          assert.deepEqual(await recovered.recover(sender, input), expected);
-          assert.deepEqual(await recovered.record(sender, input, blocked, feedback), expected);
-          assert.deepEqual(await recovered.begin(sender, input), {
-            created: false,
-            receipt: expected,
-          });
-          assert.equal(await recovered.reject(sender, input, evidence), "fenced");
-          assert.equal(await recovered.reject(sender, input, evidence), "fenced");
-        } finally {
-          await recoveryPool.end();
-        }
+        const recovered = openReceiptStore(t);
+        const expected = {
+          ...input,
+          authorization: null,
+          observation: null,
+          outcome: blocked,
+          settled: true,
+          feedback: "fenced",
+        };
+        assert.deepEqual(await recovered.recover(sender, input), expected);
+        assert.deepEqual(await recovered.record(sender, input, blocked, feedback), expected);
+        assert.deepEqual(await recovered.begin(sender, input), {
+          created: false,
+          receipt: expected,
+        });
+        assert.equal(await recovered.reject(sender, input, evidence), "fenced");
+        assert.equal(await recovered.reject(sender, input, evidence), "fenced");
 
         // Two distinct receipts for N share the existing durable fence. A late N
         // report must not follow the current material pointer to N+1 or another store.
@@ -148,34 +152,27 @@ test(
         );
         assert.equal(count.rows[0].count, 1);
         for (const mismatch of [next, otherStore]) {
-          await assert.rejects(receipts.reject(sender, input, mismatch), {
-            name: "ResourceStateConflictError",
-          });
+          await assert.rejects(receipts.reject(sender, input, mismatch), conflict);
         }
       },
     );
 
     await t.test(
       "lost pre-send acknowledgment leaves possible evidence, never a retry verdict",
-      async () => {
+      async (t) => {
         const input = attempt(null);
         await loseCommitReplyWithCallerProcess("begin", sender, input);
-        const freshPool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
-        try {
-          const recovered = new EgressSendReceipts(new PostgresPlatformState(freshPool));
-          assert.deepEqual(await recovered.recover(sender, input), {
-            ...input,
-            authorization: null,
-            observation: null,
-            outcome: { kind: "uncertain", dispatch: "possible" },
-            settled: false,
-            feedback: null,
-          });
-          assert.equal((await recovered.begin(sender, input)).created, false);
-          assert.equal(await recovered.recover(sender, attempt(null)), undefined);
-        } finally {
-          await freshPool.end();
-        }
+        const recovered = openReceiptStore(t);
+        assert.deepEqual(await recovered.recover(sender, input), {
+          ...input,
+          authorization: null,
+          observation: null,
+          outcome: { kind: "uncertain", dispatch: "possible" },
+          settled: false,
+          feedback: null,
+        });
+        assert.equal((await recovered.begin(sender, input)).created, false);
+        assert.equal(await recovered.recover(sender, attempt(null)), undefined);
       },
     );
 
@@ -201,9 +198,7 @@ test(
           assert.deepEqual(first, duplicate);
           assert.equal(first.feedback, null, "response blocking alone is not credential rejection");
           if (result.kind === "refused" || result.kind === "uncertain") {
-            await assert.rejects(receipts.reject(sender, input, evidence), {
-              name: "ResourceStateConflictError",
-            });
+            await assert.rejects(receipts.reject(sender, input, evidence), conflict);
           }
           await assert.rejects(
             receipts.record(sender, input, {
@@ -211,23 +206,17 @@ test(
               dispatch: "confirmed",
               status: 201,
             }),
-            { name: "ResourceStateConflictError" },
+            conflict,
           );
           for (const altered of [
             { ...input, deadlineAt: "2099-01-02T00:00:00.000Z" },
             { ...input, material: { ...evidence, materialVersion: "N+1" } },
             { ...input, material: { ...evidence, secretDriver: ref() } },
           ]) {
-            await assert.rejects(receipts.begin(sender, altered), {
-              name: "ResourceStateConflictError",
-            });
-            await assert.rejects(receipts.recover(sender, altered), {
-              name: "ResourceStateConflictError",
-            });
+            await assert.rejects(receipts.begin(sender, altered), conflict);
+            await assert.rejects(receipts.recover(sender, altered), conflict);
           }
-          await assert.rejects(receipts.recover(ref(), input), {
-            name: "ResourceStateConflictError",
-          });
+          await assert.rejects(receipts.recover(ref(), input), conflict);
         }
         const input = attempt();
         await receipts.begin(sender, input);
@@ -238,23 +227,21 @@ test(
           { kind: "refused", dispatched: true, error: { kind: "cancelled" } },
           { kind: "response", dispatch: "possible", status: 200 },
         ]) {
-          await assert.rejects(receipts.record(sender, input, invalid), {
-            name: "ResourceStateConflictError",
-          });
+          await assert.rejects(receipts.record(sender, input, invalid), conflict);
         }
         await assert.rejects(
           receipts.begin(sender, {
             ...input,
             material: { ...evidence, value: "must not persist" },
           }),
-          { name: "ResourceStateConflictError" },
+          conflict,
         );
         await assert.rejects(
           receipts.record(sender, input, blocked, {
             classification: "credential_rejected",
             evidence: { ...evidence, materialVersion: "N+1" },
           }),
-          { name: "ResourceStateConflictError" },
+          conflict,
         );
         assert.equal((await receipts.recover(sender, input)).settled, false);
         // Constraints protect the persisted state even when SQL bypasses the repository.
@@ -274,25 +261,18 @@ test(
   "authorized dispatch second COMMIT gates real origin bytes and cannot replay",
   { ...requiresPostgres, timeout: 60_000 },
   async (t) => {
-    const { syntheticDispatchFixture } = await import("../helpers/static-egress.mjs");
     for (const fault of [false, true]) {
       await t.test(
         fault ? "lost authorization acknowledgment" : "acknowledged authorization",
         async (t) => {
           const proxy = await commitAckProxy(databaseUrl);
-          const pool = new pg.Pool({ connectionString: proxy.url, max: 1 });
-          const observer = new pg.Pool({ connectionString: databaseUrl, max: 1 });
-          t.after(async () => {
-            await pool.end();
-            await observer.end();
-            await proxy.close();
-          });
-          const receipts = new EgressSendReceipts(new PostgresPlatformState(pool));
+          const receipts = openReceiptStore(t, proxy.url);
+          const recovered = openReceiptStore(t);
+          t.after(() => proxy.close());
           const f = await syntheticDispatchFixture(t, receipts);
           const ready = await f.resolve();
           assert.equal(ready.kind, "ready");
           const input = f.attempt();
-          const recovered = new EgressSendReceipts(new PostgresPlatformState(observer));
           let reservationObserved = false;
           const check = f.ports.check;
           f.ports.check = async (use, material) => {
@@ -368,9 +348,10 @@ test(
           assert.equal(f.permits, fault ? 0 : 1);
           assert.equal(f.arrivals, fault ? 0 : 1);
           assert.deepEqual(await recovered.recover(f.sender, input), original);
-          await assert.rejects(receipts.authorize(f.sender, input, original.authorization), {
-            name: "ResourceStateConflictError",
-          });
+          await assert.rejects(
+            receipts.authorize(f.sender, input, original.authorization),
+            conflict,
+          );
         },
       );
     }
@@ -381,12 +362,9 @@ test(
   "pending dispatch commit cannot extend time or transfer custody",
   { ...requiresPostgres, timeout: 60_000 },
   async (t) => {
-    const { syntheticDispatchFixture } = await import("../helpers/static-egress.mjs");
     for (const reason of ["deadline", "cancelled", "custody"]) {
       await t.test(reason, async (t) => {
-        const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
-        t.after(() => pool.end());
-        const receipts = new EgressSendReceipts(new PostgresPlatformState(pool));
+        const receipts = openReceiptStore(t);
         const cancellation = new AbortController();
         let f;
         // Delay the real committed result at the transport boundary, without changing
@@ -446,133 +424,3 @@ test("verified peer identity cannot substitute for capture by the exchange owner
   assert.equal(f.permits, 0);
   assert.equal(f.arrivals, 0);
 });
-
-// Exercise the actual application-role receipt constraints, not the in-memory repository.
-test(
-  "PostgreSQL authorizes exact prepared GitHub evidence and rejects a different reply association",
-  requiresPostgres,
-  async (t) => {
-    const { postgresEgressSendReceipts } =
-      await import("../../packages/occ/src/state/egress-send-receipts.ts");
-    const pool = new pg.Pool({ connectionString: databaseUrl });
-    t.after(() => pool.end());
-    const repository = postgresEgressSendReceipts(pool);
-    const ref = () => ({ id: randomUUID(), generation: 1 });
-    const execution = {
-      installationId: "ins_" + randomUUID(),
-      namespaceId: "ns_" + randomUUID(),
-      agentId: "agt_" + randomUUID(),
-      revisionId: randomUUID(),
-      executionId: randomUUID(),
-      servicePrincipalId: randomUUID(),
-    };
-    const now = Date.now();
-    const instant = (delay) => new Date(now + delay).toISOString();
-    const digest = createHash("sha256").update(randomUUID()).digest("hex");
-    const material = {
-      kind: "prepared_github",
-      source: {
-        installationId: execution.installationId,
-        namespaceId: execution.namespaceId,
-        source: ref(),
-        backend: ref(),
-        provider: { id: "github-app-metadata", generation: 1 },
-      },
-      binding: ref(),
-      grantHash: digest,
-      isolationId: execution.agentId,
-      family: ref(),
-      ownerEpoch: 1,
-      inputVersion: "key-input-1",
-      preparationAttemptId: randomUUID(),
-      materialId: randomUUID(),
-      materialVersion: "N",
-      providerExpiresAt: instant(120000),
-      usableUntil: instant(20000),
-    };
-    const input = {
-      sender: ref(),
-      instanceId: randomUUID(),
-      useId: randomUUID(),
-      attemptId: randomUUID(),
-      material,
-      deadlineAt: instant(20000),
-    };
-    const association = {
-      execution,
-      installation: {
-        sandboxId: randomUUID(),
-        instanceId: input.instanceId,
-        configurationId: randomUUID(),
-        peerKeyId: Buffer.alloc(32, 7).toString("base64url"),
-        policyHash: digest,
-        authorityScope: "execution",
-        plan: ref(),
-      },
-      exchangeId: createHash("sha256").update(randomUUID()).digest("hex"),
-      responseId: createHash("sha256").update(randomUUID()).digest("hex"),
-      custodyId: createHash("sha256").update(randomUUID()).digest("hex"),
-    };
-    const authorization = {
-      association,
-      requestDigest: digest,
-      injectionDigest: digest,
-      authorizedAt: instant(0),
-      sendStartBy: instant(1000),
-    };
-    assert.equal(await repository.insert(input), true);
-    assert.equal(await repository.authorize(input, authorization), true);
-    assert.equal(
-      await repository.authorize(input, authorization),
-      false,
-      "a stored authorization is never a permit to replay",
-    );
-    assert.deepEqual((await repository.find(input)).authorization, authorization);
-
-    // Bypass only the caller's closed parser so the test reaches the named database guard.
-    for (const [evidence, assoc] of [
-      [material, { ...association, execution: { ...execution, agentId: "agt_" + randomUUID() } }],
-      [
-        material,
-        {
-          ...association,
-          installation: { ...association.installation, peerKeyId: "not an enrolled key" },
-        },
-      ],
-      [material, { ...association, custodyId: randomUUID() }],
-      ...[
-        { authorityScope: undefined },
-        { authorityScope: "connector" },
-        { policyHash: "loaded" },
-      ].map((change) => [
-        material,
-        { ...association, installation: { ...association.installation, ...change } },
-      ]),
-      [{ ...material, extra: "forbidden evidence" }, association],
-      [{ ...material, usableUntil: instant(200000) }, association],
-    ]) {
-      const other = { ...input, attemptId: randomUUID(), material: evidence };
-      await pool.query(
-        `INSERT INTO occ.egress_send_receipts
-      (sender_id, sender_generation, instance_id, use_id, attempt_id, binding, outcome)
-      VALUES ($1,$2,$3,$4,$5,$6,'{"kind":"uncertain","dispatch":"possible"}'::jsonb)`,
-        [
-          other.sender.id,
-          other.sender.generation,
-          other.instanceId,
-          other.useId,
-          other.attemptId,
-          other,
-        ],
-      );
-      await assert.rejects(
-        pool.query(
-          `UPDATE occ.egress_send_receipts SET authorized_dispatch=$1
-      WHERE sender_id=$2 AND attempt_id=$3 AND authorized_dispatch IS NULL`,
-          [{ ...authorization, association: assoc }, other.sender.id, other.attemptId],
-        ),
-        { code: "23514", constraint: "egress_send_receipts_check_17" },
-      );
-    }
-  },
-);

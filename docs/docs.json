@@ -1003,6 +1003,7 @@
               "testing/slack",
               "testing/plugins",
               "testing/openshell",
+              "testing/openshell-oauth",
               "testing/openshell-coverage",
               "flows/agent-repository-credentials",
               "flows/public-github-reads",

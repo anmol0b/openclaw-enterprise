@@ -22,10 +22,10 @@ Replace `CredentialGatewayDriver` with the `credential_proxy` Installation capab
 
 The deployment selects an egress implementation; it does not separately select an authentication mechanism. Protection is an explicit admission decision, independent of how many credentials are configured.
 
-| Mode                                                     | What it means                                                                                                                                                                                                                                                                               |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Unprotected** · minimal CI or simple local development | OCE knows the Agent exists but does not authenticate or govern its direct requests. No managed route, clone, or provider credential. Asking for one fails admission, rather than silently using ambient credentials.                                                                        |
-| **Protected** · OpenShell, in production or locally      | Authenticate the whole Agent execution, prevent direct egress, and authorize each operation at the admitted level of protection. A route may explicitly require no provider credential; zero allowed routes means deny all. Failure to establish protection never selects unprotected mode. |
+| Mode | What it means |
+|---|---|
+| **Unprotected** · minimal CI or simple local development | OCE knows the Agent exists but does not authenticate or govern its direct requests. No managed route, clone, or provider credential. Asking for one fails admission, rather than silently using ambient credentials. |
+| **Protected** · OpenShell, in production or locally | Authenticate the whole Agent execution, prevent direct egress, and authorize each operation at the admitted level of protection. A route may explicitly require no provider credential; zero allowed routes means deny all. Failure to establish protection never selects unprotected mode. |
 
 ## Two levels of protection
 
@@ -35,6 +35,12 @@ mandatory check of each actual request, verified encrypted transport, and one ne
 sandbox identity per execution. If qualified, OCE decides whether the execution may make the
 request; OpenShell holds the scoped provider credential and sends it. An allow decision is not
 a send receipt.
+
+OCE already has an [experimental OpenShell-owned Codex OAuth path](../../../docs/testing/openshell-oauth.md).
+OpenShell keeps the refresh grant, the Harness uses a stable alias, and a separate
+operator connection can retrieve an access token. That credential lifecycle does
+not establish the three release requirements above. In particular, the released
+access-token RPC is not the proposed credential-access and dispatch protocol.
 
 Keep [exact dispatch](protocol.md) for installations that must bind the selected credential,
 one send attempt and its response to the same execution. Select the level explicitly at
@@ -51,6 +57,7 @@ protected level with an unprotected execution.
 
 A metadata read is not a Git clone or push. For the developer workflow, the
 [repository broker](../../../docs/reference/repository-credentials/prepared-native-git.md)
-checks native Git requests and uses a separately granted, already prepared installation
-token. Git verifies TLS to that broker. This path requires its own admission and
-recipient guarantees; it is not evidence that an OpenShell release satisfies them.
+authenticates the Agent session and checks the Git operation and review ref before
+using a separately granted, already prepared installation token. Creating a draft pull
+request requires an additional grant. Git verifies TLS to the broker. Qualify that
+path's admission and recipient separately from the OpenShell release requirements.
