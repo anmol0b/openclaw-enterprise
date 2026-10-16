@@ -46,8 +46,9 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
   assert.equal(input.topology, "compute-owned-prepared-private-git");
   assert.match(apiOrigin, /^http:\/\/127\.0\.0\.1:\d{4,5}$/);
   assert.match(namespaceId, /^ns_[A-Za-z0-9_-]+$/);
-  assert.match(context, /^k3d-skcomp[a-z0-9]+$/);
-  assert.match(modelContainer, /^skcomp[a-z0-9]+-model$/);
+  assert.match(context, /^k3d-occ-dev-skipper-[a-f0-9]{12}$/);
+  assert.equal(modelContainer, "oce-first-agent-smoke-model");
+  assert.match(clusterUID, /^[a-f0-9-]{36}$/);
   assert.equal(input.sourceCommit, (await exec("git", ["rev-parse", "HEAD"])).stdout.trim());
   const serviceKey = process.env.OCC_TEST_SKIPPER_COMPUTE_SERVICE_KEY;
   delete process.env.OCC_TEST_SKIPPER_COMPUTE_SERVICE_KEY;
@@ -61,7 +62,16 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
     ).stdout;
   const resource = async (...args) => JSON.parse(await kc("get", ...args, "-o", "json"));
   const uid = async () => (await resource("namespace", "kube-system")).metadata.uid;
+  // Use occ dev up's actual context, never an alias or the runner's default cluster.
+  const binding = JSON.parse(await kc("config", "view", "--minify", "-o", "json"));
+  assert.equal(binding["current-context"], context);
+  assert.equal(binding.contexts[0].context.cluster, context);
+  assert.equal(binding.clusters[0].name, context);
+  assert.equal(binding.clusters[0].cluster.server, input.kubernetesServer);
+  assert.match(input.kubernetesServer, /^https:\/\/127\.0\.0\.1:\d{4,5}$/);
   assert.equal(await uid(), clusterUID);
+  const nodes = (await resource("nodes")).items.map((n) => n.metadata.name);
+  assert.deepEqual(nodes, [context + "-server-0"]);
   const api = async (method, path, body, status = 200) => {
     const wire = serializeConnectedRequest(method, path, body);
     const response = await sendConnectedRequest(
@@ -210,6 +220,9 @@ export async function prepareComputeSkipper(t, inputPath, repositoryRef) {
   );
   const hc = harness.spec.containers.find((c) => c.name === "agent");
   assert.equal(hc.image, input.runtimeImage);
+  for (const name of ["prepare-repository-material", "prepare-repository-native-git"]) {
+    assert.equal(harness.spec.initContainers.find((c) => c.name === name)?.image, hc.image, name);
+  }
   assert.equal(harness.spec.securityContext.runAsNonRoot, true);
   assert.equal(hc.securityContext.allowPrivilegeEscalation, false);
   assert.notEqual(harness.spec.serviceAccountName, gateway.spec.serviceAccountName);
