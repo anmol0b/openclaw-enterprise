@@ -14,6 +14,68 @@ async function assertUseGuarded(f) {
 }
 
 test(
+  "OpenShell material delivery reads only an existing live revision token without issuing or authorizing use",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (t) => {
+    const f = await fixture(t, { draftPull: true, sessionLifetimeMs: 120_000 });
+    const signal = new AbortController().signal;
+    const read = (revisionId = f.revision.id) => f.owner.readOpenShellMaterial(revisionId, signal);
+    assert.equal(await read(), undefined);
+    assert.equal(f.gh.issuesOfTokens.length, 0, "cold material reads must not issue");
+    assert.deepEqual(
+      (
+        await f.pool.query(
+          "SELECT source_id FROM occ.prepared_github_families WHERE source_id=$1",
+          [f.familyId],
+        )
+      ).rows,
+      [],
+      "cold material reads must not enroll a family",
+    );
+    await prepare(f);
+    const before = f.gh.trace.length;
+    assert.equal(await read("rev_" + randomUUID()), undefined);
+    await assert.rejects(f.owner.readOpenShellMaterial(f.revision.id, AbortSignal.abort()));
+    const material = await read();
+    assert.ok(material?.value);
+    assert.equal(material.sessionId, f.sessionId);
+    for (const key of ["providerInstanceId", "repositoryId", "grantId"]) {
+      assert.equal(material[key], f.binding.grant[key]);
+    }
+    assert.equal(material.pushRef, f.request().pushRef);
+    assert.equal(material.pullRequestBase, "main");
+    assert.equal(material.apiOrigin, f.gh.origin);
+    assert.equal(Date.parse(material.expiresAt), f.deadlineWallMs);
+    const {
+      rows: [row],
+    } = await f.pool.query(
+      "SELECT id, material_version, admission FROM occ.prepared_github_attempts WHERE source_id=$1 AND custody='current'",
+      [f.familyId],
+    );
+    assert.equal(material.preparationAttemptId, row.id);
+    assert.equal(material.materialVersion, row.material_version);
+    assert.equal(material.repository, row.admission.grant.repository);
+    assert.deepEqual(await read(), material, "reading does not rotate material");
+    assert.equal(f.gh.trace.length, before, "material read must not contact the provider");
+    assert.equal(
+      (
+        await f.pool.query(
+          "SELECT count(*)::integer AS count FROM occ.prepared_repository_git_uses WHERE admission_id=$1",
+          [f.admissionId],
+        )
+      ).rows[0].count,
+      0,
+      "material delivery is not request authorization",
+    );
+    assert.equal(await f.providerStatus(material.value), 200);
+    assert.equal(await f.owner.authorizeOpenShellRequest(f.request(), material, signal), true);
+    await f.withdraw();
+    assert.equal(await read(), undefined, "withdrawal denies before background retirement");
+    assert.equal(await f.providerStatus(material.value), 200);
+  },
+);
+
+test(
   "prepared Git use binds durable admission, exact ref, session and one exchange before retirement",
   {
     ...requiresPostgres,
@@ -189,6 +251,10 @@ for (const change of ["repository binding withdrawn", "revision superseded", "se
       }
       await assertUseGuarded(f);
       assert.equal(
+        await f.owner.readOpenShellMaterial(f.revision.id, new AbortController().signal),
+        undefined,
+      );
+      assert.equal(
         await store.authorizeOpenShellRequest(f.request(), installed, new AbortController().signal),
         false,
       );
@@ -331,6 +397,9 @@ test(
     );
     await f.owner.maintain();
     const replacement = await f.owner.use(f.request());
+    const delivered = await f.owner.readOpenShellMaterial(f.revision.id, signal);
+    assert.equal(delivered?.preparationAttemptId, replacement.preparationAttemptId);
+    assert.equal(delivered?.value, replacement.value);
     assert.notEqual(replacement.preparationAttemptId, installed.preparationAttemptId);
     assert.notEqual(replacement.materialVersion, installed.materialVersion);
     assert.equal(await store.authorizeOpenShellRequest(f.request(), installed, signal), false);
@@ -347,6 +416,7 @@ test(
       [replacement.preparationAttemptId],
     );
     assert.equal(await store.authorizeOpenShellRequest(f.request(), replacement, signal), false);
+    assert.equal(await f.owner.readOpenShellMaterial(f.revision.id, signal), undefined);
   },
 );
 

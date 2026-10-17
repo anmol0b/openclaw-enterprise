@@ -100,6 +100,7 @@ let metricsClosing;
 let receiptServer;
 let preparedRepositoryGit;
 let preparedGitHub;
+let openShellGit;
 async function closeMetrics() {
   metricsClosing ??= (async () => {
     try {
@@ -169,6 +170,18 @@ try {
       });
     }
   }
+  openShellGit = drivers?.openShellGit;
+  if (openShellGit) {
+    if (!preparedRepositoryGit) {
+      throw new Error("OpenShell Git requires its live prepared GitHub owner.");
+    }
+    await openShellGit.start(preparedRepositoryGit, () =>
+      emitOccLogEvent(logger, {
+        event: "worker.error",
+        code: "OPENSHELL_GIT_RECONCILIATION_REQUIRED",
+      }),
+    );
+  }
   let metrics;
   if (metricsSettings !== undefined) {
     metricsPool = await createPostgresPool(databaseUrl, {
@@ -222,6 +235,7 @@ try {
       }
       try {
         try {
+          await openShellGit?.close();
           await preparedRepositoryGit?.close();
           await receiptServer?.close();
         } finally {
@@ -241,6 +255,7 @@ try {
   process.once("SIGINT", shutdown);
 } catch (error) {
   await preparedGitHub?.close().catch(() => {});
+  await openShellGit?.close().catch(() => {});
   await preparedRepositoryGit?.close().catch(() => {});
   await receiptServer?.close().catch(() => {});
   await closeMetrics().catch(() => {});

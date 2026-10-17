@@ -240,6 +240,10 @@ export async function startPreparedGitHubGitOwner(options: Options) {
   }
   return {
     use,
+    // Worker-only custody transfer to the verified OpenShell provider; never a control RPC.
+    readOpenShellMaterial(revisionId: string, signal: AbortSignal) {
+      return store.readOpenShellMaterial(revisionId, AbortSignal.any([signal, stop.signal]));
+    },
     // Internal authority callback only. Never expose it as a workload or token-disclosure RPC.
     authorizeOpenShellRequest(
       request: PreparedGitHubUseRequest,

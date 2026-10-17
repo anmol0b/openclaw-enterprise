@@ -395,6 +395,10 @@
                         "label": "Native Git with a Prepared Credential"
                       },
                       {
+                        "page": "reference/repository-credentials/openshell-git",
+                        "label": "OpenShell Git"
+                      },
+                      {
                         "page": "reference/public-github-reads",
                         "label": "Public GitHub Reads"
                       }

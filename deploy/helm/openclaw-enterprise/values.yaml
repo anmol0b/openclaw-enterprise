@@ -341,6 +341,17 @@ egressAuthority:
   # Every client requires both namespaceSelector and podSelector.matchLabels.
   clients: []
 
+# Optional request-phase Git middleware listener in the worker.
+# Requires repositoryCredentials.authority: prepared-git and matching Installation
+# drivers.repo.openShell configuration. Only public issuer material is mounted.
+openshellGit:
+  enabled: false
+  port: 8445
+  tlsSecretName: ""
+  issuerPublicKeyConfigMapName: ""
+  # Trusted OpenShell Gateway and supervisor callers: namespace and Pod labels required.
+  clients: []
+
 # Optional OCE custody for explicitly enrolled, Agent-scoped GitHub metadata reads.
 # In the Installation's drivers.credential_proxy.configuration.preparedGitHub set
 # custodyKeyPath: /etc/openclaw/prepared-github/custody.key. Supply a dedicated

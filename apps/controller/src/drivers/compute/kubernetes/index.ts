@@ -1,3 +1,4 @@
+import type { OpenShellGitRuntime } from "../../egress-proxy/openshell-git-runtime.ts";
 import { networkPolicySpecToJson } from "../../kubernetes/network-policy.ts";
 import {
   assertExecutionAdmission,
@@ -3187,6 +3188,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private readonly sandboxDriver: SandboxDriver | undefined;
   private readonly preprovisionedNamespace: PreprovisionedKubernetesNamespace | undefined;
   private readonly preparedRepositoryIngress: boolean;
+  private readonly openShellGit: OpenShellGitRuntime | undefined;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
   private readonly proxyDriver: CredentialProxyDriver | undefined;
   private readonly nodeEnrollment: GatewayNodeEnrollment | undefined;
@@ -3562,6 +3564,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       readonly lifecycleDrivers?: readonly Driver[];
       readonly sandboxDriver?: SandboxDriver;
       readonly preparedRepositoryIngress?: true;
+      readonly openShellGit?: OpenShellGitRuntime;
       readonly preprovisionedNamespace?: PreprovisionedKubernetesNamespace | undefined;
       readonly credentialGatewayDriver?: CredentialGatewayDriver;
       readonly proxyDriver?: CredentialProxyDriver;
@@ -3587,6 +3590,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       );
     }
     this.preparedRepositoryIngress = selection.preparedRepositoryIngress === true;
+    this.openShellGit = selection.openShellGit;
     if (selection.credentialGatewayDriver !== undefined && selection.sandboxDriver === undefined) {
       throw new ConfigurationFailure(
         "The Credential Gateway Driver requires a paired Sandbox Driver.",
@@ -3846,6 +3850,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
         "Repository credential delivery is not supported by the experimental two-cluster profile.",
       );
     }
+    if (
+      this.openShellGit &&
+      this.sandboxDriver?.implementation === "openshell" &&
+      this.options.runtime &&
+      (sandboxDriverId === undefined || sandboxDriverId === this.sandboxDriver.id)
+    ) {
+      return;
+    }
     // Repository authority is admitted before a session can be prepared or delivered.
     if (this.sandboxDriver?.implementation === "openshell") {
       throw new SandboxRepositoryRecipientUnverifiedError();
@@ -3869,6 +3881,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     this.validateRepositoryCredentialSupport(sandboxDriverId);
     if (!(
       (!this.preparedRepositoryIngress &&
+        !this.openShellGit &&
         harness.id === "openclaw" &&
         harness.mode === "embedded") ||
       (harness.id === "codex" && harness.mode === "dedicated")
@@ -8173,6 +8186,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): RepositoryMaterialSpec | undefined {
+    if (this.openShellGit && revision.repositoryCredentials !== undefined) {
+      this.validateRepositoryCredentials(revision.harness, revision.sandboxDriverId);
+      // The worker transfers prepared material directly to OpenShell. No broker bearer,
+      // installation token or App key is projected into this Sandbox.
+      return undefined;
+    }
     const spec = repositoryMaterialSpec(revision, context?.repositoryCredentials);
     if (spec !== undefined) {
       this.validateRepositoryCredentials(revision.harness, revision.sandboxDriverId);
@@ -13658,7 +13677,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       },
     ];
     const repositoryEgress =
-      revision.repositoryCredentials === undefined
+      revision.repositoryCredentials === undefined || this.openShellGit !== undefined
         ? []
         : [
             {

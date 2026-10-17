@@ -5634,3 +5634,127 @@ test(
     }
   },
 );
+
+test(
+  "OpenShell Git packaging exposes only the worker to selected supervisors",
+  tooling,
+  async () => {
+    const selected = {
+      ...repositoryCredentialValues,
+      "repositoryCredentials.authority": "prepared-git",
+      "repositoryCredentials.preparedCustodySecretName": "git-custody",
+      "openshellGit.enabled": "true",
+      "openshellGit.tlsSecretName": "openshell-git-tls",
+      "openshellGit.issuerPublicKeyConfigMapName": "openshell-gateway-public",
+      "openshellGit.clients[0].namespaceSelector.matchLabels.kubernetes\\.io/metadata\\.name":
+        "openshell-system",
+      "openshellGit.clients[0].podSelector.matchLabels.app": "openshell-supervisor",
+    };
+    const defaults = await resources((await render()).stdout);
+    assert.ok(!defaults.some(({ metadata }) => metadata?.name?.includes("openshell-git")));
+    const objects = await resources((await render(selected)).stdout);
+    const service = objects.find(
+      ({ kind, metadata }) =>
+        kind === "Service" && metadata.name === "openclaw-enterprise-openshell-git",
+    );
+    assert.equal(service.spec.type, "ClusterIP");
+    assert.equal(service.spec.selector["app.kubernetes.io/component"], "worker");
+    assert.deepEqual(service.spec.ports, [
+      { name: "openshell-git", port: 8445, targetPort: "openshell-git", protocol: "TCP" },
+    ]);
+    const policy = objects.find(
+      ({ kind, metadata }) =>
+        kind === "NetworkPolicy" && metadata.name === "openclaw-enterprise-openshell-git-ingress",
+    );
+    assert.equal(policy.spec.podSelector.matchLabels["app.kubernetes.io/component"], "worker");
+    assert.deepEqual(policy.spec.ingress, [
+      {
+        from: [
+          {
+            namespaceSelector: {
+              matchLabels: { "kubernetes.io/metadata.name": "openshell-system" },
+            },
+            podSelector: { matchLabels: { app: "openshell-supervisor" } },
+          },
+        ],
+        ports: [{ protocol: "TCP", port: 8445 }],
+      },
+    ]);
+    for (const object of objects.filter(({ kind }) => ["Deployment", "Job"].includes(kind))) {
+      const pod = object.spec.template.spec;
+      const volume = pod.volumes?.find(({ name }) => name === "openshell-git");
+      if (object.metadata.name !== "openclaw-enterprise-worker") {
+        assert.equal(volume, undefined);
+        continue;
+      }
+      assert.equal(volume.projected.defaultMode, 0o440);
+      assert.deepEqual(volume.projected.sources, [
+        {
+          secret: {
+            name: "openshell-git-tls",
+            items: [
+              { key: "tls.crt", path: "tls.crt" },
+              { key: "tls.key", path: "tls.key" },
+            ],
+          },
+        },
+        {
+          configMap: {
+            name: "openshell-gateway-public",
+            items: [{ key: "gateway-public.pem", path: "gateway-public.pem" }],
+          },
+        },
+      ]);
+      const worker = pod.initContainers.find(({ name }) => name === "worker");
+      assert.deepEqual(
+        worker.volumeMounts.find(({ name }) => name === "openshell-git"),
+        { name: "openshell-git", mountPath: "/etc/openclaw/openshell-git", readOnly: true },
+      );
+      assert.ok(
+        worker.ports.some(
+          ({ name, containerPort }) => name === "openshell-git" && containerPort === 8445,
+        ),
+      );
+      // The sidecar must not acquire the middleware TLS private key through this projection.
+      for (const container of pod.containers.filter(({ name }) => name !== "worker")) {
+        assert.ok(!container.volumeMounts?.some(({ name }) => name === "openshell-git"));
+      }
+    }
+    const sealed = await resources(
+      (
+        await render({
+          ...selected,
+          ...gatewayRoutingValues,
+          "preprovisionedNamespace.namespaceId": "ns_fixture",
+          "preprovisionedNamespace.uid": "11111111-2222-3333-4444-555555555555",
+        })
+      ).stdout,
+    );
+    const namespaceRules = sealed.flatMap(({ kind, rules }) =>
+      kind === "ClusterRole" ? rules.filter((rule) => rule.resources?.includes("namespaces")) : [],
+    );
+    assert.equal(namespaceRules.length, 2, "named namespace access for API and worker");
+    for (const rule of namespaceRules) {
+      assert.deepEqual(rule.verbs, ["get"]);
+      assert.equal(rule.resourceNames.length, 1);
+    }
+    assert.ok(!sealed.some(({ kind }) => kind === "Job"), "do not bootstrap a sealed installation");
+    for (const [override, diagnostic] of [
+      [{ "repositoryCredentials.authority": "github-app" }, /authority prepared-git/],
+      [{ "openshellGit.tlsSecretName": "" }, /openshellGit.tlsSecretName is required/],
+      [
+        { "openshellGit.issuerPublicKeyConfigMapName": "" },
+        /issuerPublicKeyConfigMapName is required/,
+      ],
+      [{ "openshellGit.clients": "null" }, /select trusted supervisor callers/],
+      [{ "openshellGit.clients[0].podSelector": "null" }, /podSelector.matchLabels/],
+      [{ "openshellGit.clients[0].namespaceSelector": "null" }, /namespaceSelector.matchLabels/],
+      [{ "openshellGit.port": "8443" }, /distinct from repository/],
+      [{ "openshellGit.port": "65536" }, /unprivileged TCP port/],
+      [{ "openshellGit.port": "8445.5" }, /positive safe integer/],
+      [{ "openshellGit.tlsSecretName": "repository-app-key" }, /must name a dedicated Secret/],
+    ]) {
+      await assert.rejects(render({ ...selected, ...override }), diagnostic);
+    }
+  },
+);

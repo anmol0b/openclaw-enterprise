@@ -82,12 +82,12 @@ test(
       const discovery = request("/example/project.git/info/refs", "GET", Buffer.alloc(0), [
         { name: "user-agent", value: "git/2.55.0" },
         { name: "accept", value: "*/*" },
+        { name: "accept-language", value: "en, *;q=0.9" },
         { name: "accept-encoding", value: "deflate, gzip, br, zstd" },
         { name: "pragma", value: "no-cache" },
         { name: "git-protocol", value: "version=2" },
       ]);
       discovery.target.query = `service=${service}`;
-      discovery.headers = [{ name: "pragma", value: "no-cache" }];
       assert.equal(await evaluate(discovery), 1);
       assert.equal(approvals.at(-1).q.operation, expected);
     }

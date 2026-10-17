@@ -74,6 +74,7 @@ async function wire(t) {
     conflict: false,
     lost: false,
     workspaceId: scope.workspaceId,
+    status: undefined,
   };
   const server = new grpc.Server();
   const record = (call) => {
@@ -81,6 +82,12 @@ async function wire(t) {
     assert.equal(call.request.workspace_scope.workspace, scope.workspace);
   };
   server.addService(OpenShell.service, {
+    GetSandboxProviderStatus(call, callback) {
+      record(call);
+      assert.equal(call.request.sandbox, scope.sandbox);
+      assert.equal(call.request.receipt_id, undefined);
+      callback(null, { status: state.status ?? { state: "PROVIDER_READINESS_STATE_PENDING" } });
+    },
     GetWorkspace(call, callback) {
       assert.equal(call.request.name, scope.workspace);
       callback(null, { workspace: { metadata: { name: scope.workspace, id: state.workspaceId } } });
@@ -314,4 +321,160 @@ test("prepared Git rejects credential and scope widening before provisioning", a
     assert.throws(() => new OpenShellPreparedGitProvider(client, { ...scope, ...widened }));
   }
   assert.equal(state.requests.length, 0);
+});
+
+function installedStatus(binding) {
+  const now = { seconds: String(Math.floor(Date.now() / 1000)), nanos: 0 };
+  return {
+    state: "PROVIDER_READINESS_STATE_READY",
+    reason: "PROVIDER_READINESS_REASON_UNSPECIFIED",
+    receipt: {
+      workspace: scope.workspace,
+      provider: binding.provider,
+      desired: {
+        sandbox_id: "sandbox-id",
+        sandbox: scope.sandbox,
+        attachment_epoch: "attachment-one",
+        provider_id: binding.providerId,
+        provider_resource_version: binding.resourceVersion,
+        provider_env_revision: "101",
+        config_revision: "202",
+        policy_hash: "policy-hash",
+      },
+    },
+    observed: {
+      session_id: "supervisor-session",
+      sequence: "1",
+      attachment_epoch: "attachment-one",
+      provider_env_revision: "101",
+      config_revision: "202",
+      policy_hash: "policy-hash",
+      credentials_installed: true,
+      policy_active: true,
+      launch_environment_installed: true,
+      process_instance_id: "process-instance",
+      reason: "PROVIDER_READINESS_REASON_UNSPECIFIED",
+    },
+    network_instance_id: "network-instance",
+    observed_time: now,
+    evaluated_time: now,
+  };
+}
+
+test("prepared Git bootstraps without privilege and distinguishes accepted rotation from exact installed state", async (t) => {
+  const { state, binding } = await wire(t);
+  const bootstrap = await binding.bootstrap(signal());
+  assert.equal(bootstrap.credentialState, "bootstrap");
+  assert.equal(bootstrap.expiresAt, "");
+  assert.equal(state.provider.credentials.GITHUB_TOKEN, "oce-unprivileged-bootstrap-sentinel");
+  assert.equal(await binding.observe(bootstrap, "sandbox-id", signal()), undefined);
+  state.status = installedStatus(bootstrap);
+  assert.equal(
+    (await binding.observe(bootstrap, "sandbox-id", signal())).credentialState,
+    "bootstrap",
+  );
+  const active = await binding.rotate(bootstrap, token(), signal());
+  assert.equal(active.credentialState, "active");
+  assert.equal(
+    await binding.observe(active, "sandbox-id", signal()),
+    undefined,
+    "old installed version is not updated provider evidence",
+  );
+  state.status = installedStatus(active);
+  const installed = await binding.observe(active, "sandbox-id", signal());
+  assert.equal(installed.providerResourceVersion, "2");
+  assert.equal(installed.supervisorSessionId, "supervisor-session");
+  assert.equal(installed.networkInstanceId, "network-instance");
+  assert.equal(installed.credentialState, "active");
+  assert.equal(await binding.observe(bootstrap, "sandbox-id", signal()), undefined);
+  state.status.observed.sequence = "2";
+  assert.deepEqual(
+    await binding.observe(active, "sandbox-id", signal()),
+    installed,
+    "heartbeat sequence is not a new installed identity",
+  );
+});
+
+test("prepared Git refuses stale, partial, mismatched and unavailable installation observations", async (t) => {
+  const { state, binding } = await wire(t);
+  const active = await binding.prepare(token(), signal());
+  const complete = installedStatus(active);
+  for (const mutate of [
+    (status) => {
+      delete status.receipt;
+    },
+    (status) => {
+      delete status.observed;
+    },
+    (status) => {
+      status.state = "PROVIDER_READINESS_STATE_PENDING";
+    },
+    (status) => {
+      status.receipt.workspace = "foreign";
+    },
+    (status) => {
+      status.receipt.provider = "foreign";
+    },
+    (status) => {
+      status.receipt.desired.sandbox_id = "replacement";
+    },
+    (status) => {
+      status.receipt.desired.provider_id = "replacement";
+    },
+    (status) => {
+      status.receipt.desired.provider_resource_version = "99";
+    },
+    (status) => {
+      status.observed.attachment_epoch = "old";
+    },
+    (status) => {
+      status.observed.provider_env_revision = "100";
+    },
+    (status) => {
+      status.observed.config_revision = "201";
+    },
+    (status) => {
+      status.observed.policy_hash = "old";
+    },
+    (status) => {
+      status.observed.session_id = "";
+    },
+    (status) => {
+      status.observed.credentials_installed = false;
+    },
+    (status) => {
+      status.observed.policy_active = false;
+    },
+    (status) => {
+      status.observed.launch_environment_installed = false;
+    },
+    (status) => {
+      status.observed.process_instance_id = "";
+    },
+    (status) => {
+      status.network_instance_id = "";
+    },
+    (status) => {
+      delete status.observed_time;
+    },
+    (status) => {
+      status.evaluated_time.seconds = "1";
+    },
+  ]) {
+    state.status = structuredClone(complete);
+    mutate(state.status);
+    assert.equal(await binding.observe(active, "sandbox-id", signal()), undefined);
+  }
+  state.status = complete;
+  assert.equal(await binding.observe(active, "different-sandbox", signal()), undefined);
+  assert.equal(
+    await binding.observe(
+      { ...active, expiresAt: new Date(0).toISOString() },
+      "sandbox-id",
+      signal(),
+    ),
+    undefined,
+  );
+  state.workspaceId = "replacement-workspace";
+  assert.equal(await binding.observe(active, "sandbox-id", signal()), undefined);
 });

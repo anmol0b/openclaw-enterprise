@@ -10,7 +10,11 @@ last_updated_session: authoring-run/97826393-386f-4988-ace7-afc669f1922f
 
 The Console lists approved repositories; admission saves selections and deployment
 freezes grants. Sessions reach embedded OpenClaw or dedicated Codex with compatible
-Harness authentication and no Sandbox Driver.
+Harness authentication and no Sandbox Driver. The opt-in
+[OpenShell path](../reference/repository-credentials/openshell-git.md) instead gives the
+sandbox a placeholder. The worker delivers prepared material to the observed provider; the
+signed request check uses the live grant and that material version without returning a token.
+An allowed draft creation remains a possible send, not proof GitHub created the pull request.
 See [service forwarding and retirement](repository-credentials.md) and
 [runtime qualification](../testing/repository-credentials.md).
 

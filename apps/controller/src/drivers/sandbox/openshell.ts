@@ -1,3 +1,4 @@
+import type { OpenShellGitRuntime } from "../egress-proxy/openshell-git-runtime.ts";
 import { networkPolicySpecToJson } from "../kubernetes/network-policy.ts";
 import {
   openShellEgressConfiguration,
@@ -152,6 +153,7 @@ export interface OpenShellSandboxDriverOptions {
 }
 
 export interface OpenShellSandboxDriverSelection {
+  readonly openShellGit?: OpenShellGitRuntime;
   readonly operatorOwnedKubernetesResources?: boolean;
   readonly id?: string;
   readonly implementation?: string;
@@ -1909,10 +1911,13 @@ function networkPolicyBinaries(policy: OpenShellNetworkPolicyRule) {
   }));
 }
 
-function assertNoRepositoryEnrollment(context: SandboxHarnessContext): void {
+function assertNoRepositoryEnrollment(
+  context: SandboxHarnessContext,
+  runtime?: OpenShellGitRuntime,
+): void {
   const { requirements, revision } = context;
   if (
-    revision.repositoryCredentials !== undefined ||
+    (revision.repositoryCredentials !== undefined && runtime === undefined) ||
     "repositorySession" in requirements ||
     requirements.environment.some(({ name }) => name === "OPENCLAW_REPOSITORY_ENROLLMENT")
   ) {
@@ -2308,6 +2313,7 @@ function canonicalSandboxSpec(spec: Readonly<Record<string, unknown>> | undefine
   const { restart_policy: restartPolicy, ...rest } = spec;
   return {
     ...withoutSyntheticOneofs(rest),
+    ...(spec.policy === undefined ? {} : { policy: canonicalProtobufValues(spec.policy) }),
     ...(ADOPTABLE_RESTART_POLICIES.has(restartPolicy as string | number | undefined)
       ? {}
       : { restart_policy: restartPolicy }),
@@ -2453,6 +2459,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   private readonly options: OpenShellSandboxDriverOptions;
   private readonly backend: Backend<OpenShellGateway>;
   private readonly operatorOwnedKubernetesResources: boolean;
+  private readonly openShellGit: OpenShellGitRuntime | undefined;
 
   static validateConfiguration(configuration: unknown): void {
     validateConfiguration(configuration);
@@ -2476,6 +2483,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       );
     }
     this.options = options;
+    this.openShellGit = selection.openShellGit;
     this.backend = selection.backend;
     this.operatorOwnedKubernetesResources = selection.operatorOwnedKubernetesResources === true;
   }
@@ -2689,7 +2697,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   }
 
   async provisionHarness(context: SandboxHarnessContext): Promise<SandboxResourceRef> {
-    assertNoRepositoryEnrollment(context);
+    assertNoRepositoryEnrollment(context, this.openShellGit);
     this.requireOperatorWorkspaceMode("provision a Harness");
     if (!isDeepStrictEqual(context.requirements.proxyWiring?.plan, context.revision.egressPlan)) {
       throw new OpenShellSandboxConfigurationFailure(
@@ -2730,6 +2738,25 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     const codex = context.revision.harness.id === "codex";
     const client = this.gatewayClientForNamespace(sandbox.namespaceName);
     const workspace = workspaceName(context.namespace);
+    const git =
+      context.revision.repositoryCredentials === undefined
+        ? undefined
+        : await this.openShellGit!.prepare(
+            context.revision,
+            client,
+            workspace,
+            sandbox.resourceName,
+            context.signal,
+            sandboxProviders(this.options, context.requirements),
+            this.options.policy.networkPolicies.flatMap((policy) =>
+              policy.endpoints.map((endpoint) => endpoint.host),
+            ),
+          );
+    if (git && context.requirements.proxyWiring) {
+      throw new OpenShellSandboxConfigurationFailure(
+        "OpenShell Git cannot share the protected execution proxy profile.",
+      );
+    }
     if (codex) {
       codexTransportVerifier(context.requirements);
     }
@@ -2781,11 +2808,24 @@ export class OpenShellSandboxDriver implements SandboxDriver {
           // A static placeholder would survive withdrawal and shadow its absence.
           ...(context.requirements.loginMode === "chatgptAuthTokens" ? ["CODEX_ACCESS_TOKEN"] : []),
           ...Object.keys(runtimeCredentialMaterial.credentials),
+          ...(git ? ["GITHUB_TOKEN"] : []),
         ]),
         runtimeCredentialMaterial.binding,
       ),
       serviceExposures,
     };
+    if (git) {
+      create.spec.providers.push(git.provider);
+      Object.assign(
+        create.spec.environment,
+        Object.fromEntries(git.environment.map(({ name, value }) => [name, value])),
+      );
+      Object.assign(create.spec.policy, { network_middlewares: git.middlewares });
+      create.spec.restart_policy = "SANDBOX_RESTART_POLICY_NEVER";
+      await this.openShellGit!.bind(context.revision.id, (observed) =>
+        verifyExistingSandbox(observed, { ...create, requestId: requestIds[0]! }),
+      );
+    }
     const prepared = context.requirements.proxyWiring;
     const result = immutableCopy({
       ...sandbox,
@@ -2899,7 +2939,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     installation: EgressInstallation,
     release: (startupId: string) => Promise<Readonly<Record<string, unknown>>>,
   ): Promise<void> {
-    assertNoRepositoryEnrollment(context);
+    assertNoRepositoryEnrollment(context, this.openShellGit);
     if (
       !context.revision.egressPlan ||
       !isDeepStrictEqual(installation.plan, context.revision.egressPlan)
@@ -3122,6 +3162,11 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   async cleanup(
     context: SandboxNamespaceContext & { readonly revision?: Readonly<AgentRevision> },
   ): Promise<void> {
+    if (context.revision) {
+      this.openShellGit?.withdraw(context.revision.id);
+    } else {
+      this.openShellGit?.withdrawNamespace(context.namespace.id);
+    }
     try {
       await this.cleanupResources(context);
     } catch (error) {

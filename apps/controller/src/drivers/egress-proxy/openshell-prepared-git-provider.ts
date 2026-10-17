@@ -36,6 +36,7 @@ export interface OpenShellPreparedGitBinding {
   readonly profileVersion: string;
   readonly resourceVersion: string;
   readonly expiresAt: string;
+  readonly credentialState: "bootstrap" | "active";
   readonly update: "accepted";
   readonly supervisor: "unknown";
   readonly readiness: {
@@ -44,6 +45,26 @@ export interface OpenShellPreparedGitBinding {
     readonly sandbox: string;
     readonly provider: string;
   };
+}
+
+/** Exact current installation identity; timestamps and sequence are not identity fields. */
+export interface OpenShellPreparedGitInstalled {
+  readonly workspace: string;
+  readonly sandbox: string;
+  readonly sandboxId: string;
+  readonly executionId: string;
+  readonly provider: string;
+  readonly providerId: string;
+  readonly providerResourceVersion: string;
+  readonly profileVersion: string;
+  readonly credentialState: "bootstrap" | "active";
+  readonly attachmentEpoch: string;
+  readonly providerEnvRevision: string;
+  readonly configRevision: string;
+  readonly policyHash: string;
+  readonly supervisorSessionId: string;
+  readonly processInstanceId: string;
+  readonly networkInstanceId: string;
 }
 
 export class OpenShellPreparedGitProviderError extends Error {
@@ -84,10 +105,9 @@ function origin(value: string): URL {
  * client must use the installation's authenticated gateway connection; never expose it to
  * workload callers. This class neither attaches a provider nor releases workload execution.
  *
- * TODO(OpenShell Git qualification): composition must lock profile/policy writers, bind the
- * actual Sandbox identity, exclude provider delete/recreate races (stock CAS checks only the
- * resource version), and verify mandatory authorization and TLS-only sending before
- * admission. Stock provider endpoints alone cannot enforce Git refs or PR request bodies.
+ * Composition owns profile/policy writers and the current sandbox identity. Stock CAS
+ * checks only resource version; its request-phase and TLS-reporting limitations remain
+ * explicit restricted-dogfood risks. Provider endpoints do not enforce refs or PR bodies.
  */
 export class OpenShellPreparedGitProvider {
   private readonly client: OpenShellGatewayClient;
@@ -240,6 +260,7 @@ export class OpenShellPreparedGitProvider {
     provider: OpenShellProviderResponse,
     profileVersion: string,
     expiresAt: string,
+    credentialState: "bootstrap" | "active" = "active",
   ): OpenShellPreparedGitBinding {
     if (
       provider.name !== this.provider ||
@@ -253,10 +274,8 @@ export class OpenShellPreparedGitProvider {
     ) {
       refuse();
     }
-    // GetSandboxProviderStatus is the authoritative channel after attachment. The current
-    // client drops desired/observed identities, so its READY string alone is insufficient.
-    // Correlate provider ID/version, Sandbox ID, attachment epoch and current supervisor
-    // evidence there before releasing execution; an accepted write is never that evidence.
+    // An accepted update is not evidence that the current supervisor installed it.
+    // observe() separately correlates the gateway's desired and installed identities.
     return Object.freeze({
       workspace: this.scope.workspace,
       sandbox: this.scope.sandbox,
@@ -267,6 +286,7 @@ export class OpenShellPreparedGitProvider {
       profileVersion,
       resourceVersion: provider.resourceVersion,
       expiresAt,
+      credentialState,
       update: "accepted",
       supervisor: "unknown",
       readiness: Object.freeze({
@@ -284,6 +304,23 @@ export class OpenShellPreparedGitProvider {
   ): Promise<OpenShellPreparedGitBinding> {
     token = Object.freeze({ ...token });
     this.token(token);
+    return this.create(token, "active", signal);
+  }
+
+  /** Creates an unprivileged provider so the sandbox can start before token preparation. */
+  async bootstrap(signal: AbortSignal): Promise<OpenShellPreparedGitBinding> {
+    return this.create(
+      { value: "oce-unprivileged-bootstrap-sentinel", expiresAt: "" },
+      "bootstrap",
+      signal,
+    );
+  }
+
+  private async create(
+    token: OpenShellPreparedGitToken,
+    credentialState: "bootstrap" | "active",
+    signal: AbortSignal,
+  ): Promise<OpenShellPreparedGitBinding> {
     let writing = false;
     try {
       await this.workspace(signal);
@@ -303,15 +340,126 @@ export class OpenShellPreparedGitProvider {
           type: this.profile.id,
           labels: { [OWNER]: this.fingerprint },
           credentials: { [KEY]: token.value },
-          credentialExpirationTimes: { [KEY]: token.expiresAt },
+          ...(credentialState === "active"
+            ? { credentialExpirationTimes: { [KEY]: token.expiresAt } }
+            : {}),
         },
         signal,
       );
-      return this.binding(provider, profileVersion, token.expiresAt);
+      return this.binding(provider, profileVersion, token.expiresAt, credentialState);
     } catch {
       // Gateway error details and echoed payloads may contain private material. Do not attach
       // a cause. A lost write reply stays unknown; do not automatically retry or delete it.
       throw new OpenShellPreparedGitProviderError(writing ? "unknown" : "refused");
+    }
+  }
+
+  private owns(binding: OpenShellPreparedGitBinding): boolean {
+    return (
+      binding.provider === this.provider &&
+      binding.profile === this.profile.id &&
+      binding.workspace === this.scope.workspace &&
+      binding.sandbox === this.scope.sandbox &&
+      binding.executionId === this.scope.executionId &&
+      (binding.credentialState === "bootstrap" || binding.credentialState === "active")
+    );
+  }
+
+  /** Read current state, never a historical receipt. A stale or partial response grants nothing. */
+  async observe(
+    binding: OpenShellPreparedGitBinding,
+    sandboxId: string,
+    signal: AbortSignal,
+  ): Promise<OpenShellPreparedGitInstalled | undefined> {
+    binding = Object.freeze({ ...binding });
+    if (
+      !this.owns(binding) ||
+      !sandboxId ||
+      (binding.credentialState === "active" && !(Date.parse(binding.expiresAt) > Date.now()))
+    ) {
+      return undefined;
+    }
+    try {
+      await this.workspace(signal);
+      await this.profileVersion(signal, binding.profileVersion);
+      const current = await this.client.getProvider(this.scope.workspace, this.provider, signal);
+      if (
+        !current ||
+        current.id !== binding.providerId ||
+        current.resourceVersion !== binding.resourceVersion
+      ) {
+        return undefined;
+      }
+      this.binding(current, binding.profileVersion, binding.expiresAt, binding.credentialState);
+      const requestedAt = Date.now();
+      const status = await this.client.getSandboxProviderStatus(
+        this.scope.workspace,
+        this.scope.sandbox,
+        this.provider,
+        signal,
+      );
+      const desired = status.receipt?.desired;
+      const observed = status.observed;
+      const evaluatedAt = Date.parse(status.evaluatedTime ?? "");
+      const observedAt = Date.parse(status.observedTime ?? "");
+      const unspecified = "PROVIDER_READINESS_REASON_UNSPECIFIED";
+      if (
+        status.state !== "PROVIDER_READINESS_STATE_READY" ||
+        (status.reason !== undefined && status.reason !== unspecified) ||
+        status.receipt?.workspace !== binding.workspace ||
+        status.receipt.provider !== binding.provider ||
+        !desired ||
+        desired.sandboxId !== sandboxId ||
+        desired.sandbox !== binding.sandbox ||
+        desired.providerId !== binding.providerId ||
+        desired.providerResourceVersion !== binding.resourceVersion ||
+        !desired.attachmentEpoch ||
+        !/^[1-9]\d*$/.test(desired.providerEnvRevision) ||
+        !/^[1-9]\d*$/.test(desired.configRevision) ||
+        !desired.policyHash ||
+        !observed ||
+        !observed.sessionId ||
+        !/^[1-9]\d*$/.test(observed.sequence) ||
+        observed.attachmentEpoch !== desired.attachmentEpoch ||
+        observed.providerEnvRevision !== desired.providerEnvRevision ||
+        observed.configRevision !== desired.configRevision ||
+        observed.policyHash !== desired.policyHash ||
+        !observed.credentialsInstalled ||
+        !observed.policyActive ||
+        !observed.launchEnvironmentInstalled ||
+        !observed.processInstanceId ||
+        (observed.reason !== "" && observed.reason !== unspecified) ||
+        !status.networkInstanceId ||
+        !Number.isFinite(evaluatedAt) ||
+        evaluatedAt < requestedAt - 30_000 ||
+        evaluatedAt > Date.now() + 30_000 ||
+        !Number.isFinite(observedAt) ||
+        observedAt > evaluatedAt ||
+        (binding.credentialState === "active" && !(Date.parse(binding.expiresAt) > Date.now()))
+      ) {
+        return undefined;
+      }
+      return Object.freeze({
+        workspace: binding.workspace,
+        sandbox: binding.sandbox,
+        sandboxId,
+        executionId: binding.executionId,
+        provider: binding.provider,
+        providerId: binding.providerId,
+        providerResourceVersion: binding.resourceVersion,
+        profileVersion: binding.profileVersion,
+        credentialState: binding.credentialState,
+        attachmentEpoch: desired.attachmentEpoch,
+        providerEnvRevision: desired.providerEnvRevision,
+        configRevision: desired.configRevision,
+        policyHash: desired.policyHash,
+        supervisorSessionId: observed.sessionId,
+        processInstanceId: observed.processInstanceId,
+        networkInstanceId: status.networkInstanceId,
+      });
+    } catch {
+      // Read failures are unavailable evidence; never echo gateway diagnostics or token values.
+      return undefined;
     }
   }
 
@@ -325,14 +473,7 @@ export class OpenShellPreparedGitProvider {
     this.token(token);
     let writing = false;
     try {
-      if (
-        previous.provider !== this.provider ||
-        previous.profile !== this.profile.id ||
-        previous.workspace !== this.scope.workspace ||
-        previous.sandbox !== this.scope.sandbox ||
-        previous.executionId !== this.scope.executionId ||
-        !this.client.updateProviderCredentialsConditionally
-      ) {
+      if (!this.owns(previous) || !this.client.updateProviderCredentialsConditionally) {
         refuse();
       }
       await this.workspace(signal);

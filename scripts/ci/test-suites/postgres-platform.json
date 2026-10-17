@@ -269,7 +269,10 @@
       "path": "tests/integration/postgres-prepared-repository-git-broker.test.mjs"
     },
     {
-      "path": "tests/integration/postgres-prepared-github-git-use.test.mjs"
+      "path": "tests/integration/postgres-prepared-github-git-use.test.mjs",
+      "expectedTests": [
+        "OpenShell material delivery reads only an existing live revision token without issuing or authorizing use"
+      ]
     },
     {
       "path": "tests/integration/postgres-openshell-online-git-journey.test.mjs",

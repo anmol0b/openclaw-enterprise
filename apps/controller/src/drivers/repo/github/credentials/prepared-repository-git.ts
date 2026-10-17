@@ -83,6 +83,22 @@ export interface PreparedRepositoryGitSource {
 }
 type Policy = (session: PreparedRepositorySession) => PreparedRepositoryGitSource | undefined;
 
+/** Private worker-plane material. Never serialize this through a workload-facing service. */
+export interface OpenShellRepositoryMaterial {
+  readonly value: string;
+  readonly expiresAt: string;
+  readonly preparationAttemptId: string;
+  readonly materialVersion: string;
+  readonly sessionId: string;
+  readonly providerInstanceId: string;
+  readonly repositoryId: string;
+  readonly grantId: string;
+  readonly repository: string;
+  readonly pushRef: string;
+  readonly pullRequestBase?: string;
+  readonly apiOrigin: string;
+}
+
 export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
   private readonly authority: string;
   private readonly policy: Policy;
@@ -153,6 +169,88 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
       );
       return (rows[0] as { admission: GitHubPreparationAdmission } | undefined)?.admission;
     });
+  }
+
+  /** Reads existing material for the worker's selected revision, never a workload request.
+   * This neither prepares material nor grants permission to send. Each later request must
+   * still authorize the exact installed attempt/version against current session authority. */
+  async readOpenShellMaterial(
+    revisionId: string,
+    signal: AbortSignal,
+  ): Promise<OpenShellRepositoryMaterial | undefined> {
+    let bytes: Buffer | undefined;
+    try {
+      signal.throwIfAborted();
+      const result = await this.transaction(async (c) => {
+        const { rows } = await c.query(
+          `SELECT session,end_ms FROM
+          (${sessions} AND s.live_revision_id=$1 FOR SHARE OF s,b,g) l`,
+          [revisionId],
+        );
+        // A revision with multiple eligible repository sessions has no single installation
+        // target. Do not select whichever row the database happens to return first.
+        if (rows.length !== 1) {
+          return undefined;
+        }
+        const current = rows[0] as { session: PreparedRepositorySession; end_ms: string };
+        const source = this.policy(current.session);
+        if (!source) {
+          return undefined;
+        }
+        const { rows: found } = await c.query(
+          `SELECT a.id,a.admission,a.material_version,a.usable_until,a.sealed
+          FROM ${families} f JOIN ${attempts} a USING(source_id)
+          WHERE f.source_id=$1 AND f.source=$2::jsonb AND f.enabled
+          AND f.admission->>'issuerAuthority'=$3
+          AND a.custody='current' AND a.state='committed' AND a.admission=f.admission
+          AND a.usable_until BETWEEN clock_timestamp() AND clock_timestamp() + interval '61 minutes'
+          AND a.provider_expires_at >= a.usable_until FOR SHARE OF f,a`,
+          [source.key.source.id, source, this.authority],
+        );
+        if (found.length !== 1) {
+          return undefined;
+        }
+        const material = found[0] as {
+          id: string;
+          admission: GitHubPreparationAdmission;
+          material_version: string;
+          usable_until: Date;
+          sealed: Buffer;
+        };
+        const until = Math.min(Number(current.end_ms), material.usable_until.getTime());
+        if (
+          !isDeepStrictEqual(material.admission.grant, source.grant) ||
+          !material.sealed ||
+          !material.material_version ||
+          signal.aborted ||
+          !Number.isFinite(until) ||
+          Date.now() >= until
+        ) {
+          return undefined;
+        }
+        bytes = this.open(material.sealed, material.admission, material.id);
+        return {
+          expiresAt: new Date(until).toISOString(),
+          preparationAttemptId: material.id,
+          materialVersion: material.material_version,
+          sessionId: current.session.sessionId,
+          ...current.session.binding.grant,
+          repository: source.grant.repository,
+          pushRef: source.grant.pushRef,
+          ...(source.grant.pullRequestBase
+            ? { pullRequestBase: source.grant.pullRequestBase }
+            : {}),
+          apiOrigin: this.authority.split("#")[0]!,
+        };
+      });
+      signal.throwIfAborted();
+      if (!result || !bytes || Date.now() >= Date.parse(result.expiresAt)) {
+        return undefined;
+      }
+      return Object.freeze({ ...result, value: bytes.toString("utf8") });
+    } finally {
+      bytes?.fill(0);
+    }
   }
 
   /** Authorizes a validated request from an authenticated OpenShell session mapping.

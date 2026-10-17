@@ -185,11 +185,9 @@ Dedicated Codex requires one lowercase `APP_TOKEN_SHA`, no `APP_SERVER_TOKEN`,
 and two bounded plugin-free runtime inputs. Selected plugins, a second model
 proxy, malformed files and other Secret-backed environment fail before Gateway mutation.
 
-The [Codex OAuth attachment](../testing/openshell-oauth.md) cannot identify repository
-session recipients. OCE refuses enrollment with `SANDBOX_REPOSITORY_RECIPIENT_UNVERIFIED`
-before sending a session.
-[Prepared Git and draft pull requests](../reference/repository-credentials/prepared-native-git.md)
-require an explicitly selected Compute-owned Harness, without OpenShell network isolation.
+[Codex OAuth](../testing/openshell-oauth.md) does not grant Git access. Separately,
+[OpenShell Git](../reference/repository-credentials/openshell-git.md) binds a live revision to its
+installed credential and authorizes each request. Other sandbox repository bindings remain refused.
 
 Revision providers use `oce-codex-runtime` or `oce-openclaw-runtime`. Both supply read-only setup and Gateway CA files; Codex requires `runtime.json` and `config.toml`, which native OpenClaw refuses. The validated setup Secret's complete expiring envelope, including `bootstrapToken`, becomes `node-setup.json`. WebSocket rewriting is unsupported: OpenClaw signs the literal token in its device proof.
 Before renewal, the Driver requires the same endpoint and TLS fingerprint, an

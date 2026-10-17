@@ -186,7 +186,8 @@
       "path": "tests/conformance/kubernetes-configuration.test.mjs"
     },
     {
-      "path": "tests/conformance/kubernetes-ownership.test.mjs"
+      "path": "tests/conformance/kubernetes-ownership.test.mjs",
+      "expectedTests": ["sealed Namespace compares SDK-deserialized ingress exactly"]
     },
     {
       "path": "tests/conformance/kubernetes-secret-driver.test.mjs"
@@ -296,7 +297,10 @@
       "path": "tests/integration/json-body-depth.test.mjs"
     },
     {
-      "path": "tests/integration/configuration-startup.test.mjs"
+      "path": "tests/integration/configuration-startup.test.mjs",
+      "expectedTests": [
+        "closed Installation observes only its operator-bound Namespace, including Secret and Configuration custody"
+      ]
     },
     {
       "path": "tests/integration/console-api.test.mjs"
@@ -428,7 +432,9 @@
     {
       "path": "tests/conformance/openshell-prepared-git-provider.test.mjs",
       "expectedTests": [
-        "prepared Git static token and rotation use released fields without returning credentials or readiness"
+        "prepared Git static token and rotation use released fields without returning credentials or readiness",
+        "prepared Git bootstraps without privilege and distinguishes accepted rotation from exact installed state",
+        "prepared Git refuses stale, partial, mismatched and unavailable installation observations"
       ]
     },
     {

@@ -113,7 +113,7 @@ function requestHead(request: OpenShellOnlineHttpRequest): RequestHead | undefin
     "user-agent",
     "accept",
     "accept-encoding",
-    "pragma",
+    "accept-language",
     "content-type",
     "git-protocol",
     "pragma",
@@ -123,12 +123,9 @@ function requestHead(request: OpenShellOnlineHttpRequest): RequestHead | undefin
     if (
       !allowed.includes(name) ||
       Object.hasOwn(headers, name) ||
+      (name === "accept-language" && value.length > 256) ||
       (name === "pragma" && value !== "no-cache")
     ) {
-      return undefined;
-    }
-    // Native Git sends this on discovery, including with protocol v2.
-    if (name === "pragma" && value !== "no-cache") {
       return undefined;
     }
     headers[name] = value;
@@ -244,8 +241,8 @@ function operation(
     : undefined;
 }
 
-/** Unregistered stock sender seam. Installation proof and provider material delivery remain
- * separate owners. No token, mutation, successful-send receipt or production admission here. */
+/** Authorize the stock sender's inspected request. The worker separately verifies installation
+ * and delivers material; an allow here records possible use, never a successful send. */
 export function createOpenShellOnlineGitAuthority(
   options: OpenShellOnlineGitAuthorityOptions,
 ): Server {

@@ -232,9 +232,43 @@ export interface OpenShellRefreshStatus {
   readonly failureCode?: string;
 }
 
+export interface OpenShellProviderDesiredIdentity {
+  readonly sandboxId: string;
+  readonly sandbox: string;
+  readonly attachmentEpoch: string;
+  readonly providerId: string;
+  readonly providerResourceVersion: string;
+  readonly providerEnvRevision: string;
+  readonly configRevision: string;
+  readonly policyHash: string;
+}
+
+export interface OpenShellProviderReadinessObservation {
+  readonly sessionId: string;
+  readonly sequence: string;
+  readonly attachmentEpoch: string;
+  readonly providerEnvRevision: string;
+  readonly configRevision: string;
+  readonly policyHash: string;
+  readonly credentialsInstalled: boolean;
+  readonly policyActive: boolean;
+  readonly launchEnvironmentInstalled: boolean;
+  readonly processInstanceId: string;
+  readonly reason: string;
+}
+
 export interface OpenShellSandboxProviderStatus {
   readonly state: string;
   readonly reason?: string;
+  readonly receipt?: {
+    readonly provider: string;
+    readonly workspace: string;
+    readonly desired?: OpenShellProviderDesiredIdentity;
+  };
+  readonly observed?: OpenShellProviderReadinessObservation;
+  readonly networkInstanceId?: string;
+  readonly observedTime?: string;
+  readonly evaluatedTime?: string;
 }
 
 /** Readiness for a detach, including a replay of one, is read through its receipt. */
@@ -1970,9 +2004,61 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     if (typeof status?.state !== "string") {
       throw new OpenShellGatewayFailure("OpenShell GetSandboxProviderStatus returned no state.");
     }
+    const receipt = asRecord(status.receipt);
+    const desired = asRecord(receipt?.desired);
+    const observed = asRecord(status.observed);
+    const text = (value: unknown): string => (typeof value === "string" ? value : "");
     return Object.freeze({
       state: status.state,
       ...(typeof status.reason === "string" ? { reason: status.reason } : {}),
+      ...(receipt
+        ? {
+            receipt: Object.freeze({
+              provider: text(receipt.provider),
+              workspace: text(receipt.workspace),
+              ...(desired
+                ? {
+                    desired: Object.freeze({
+                      sandboxId: text(desired.sandbox_id),
+                      sandbox: text(desired.sandbox),
+                      attachmentEpoch: text(desired.attachment_epoch),
+                      providerId: text(desired.provider_id),
+                      providerResourceVersion: text(desired.provider_resource_version),
+                      providerEnvRevision: text(desired.provider_env_revision),
+                      configRevision: text(desired.config_revision),
+                      policyHash: text(desired.policy_hash),
+                    }),
+                  }
+                : {}),
+            }),
+          }
+        : {}),
+      ...(observed
+        ? {
+            observed: Object.freeze({
+              sessionId: text(observed.session_id),
+              sequence: text(observed.sequence),
+              attachmentEpoch: text(observed.attachment_epoch),
+              providerEnvRevision: text(observed.provider_env_revision),
+              configRevision: text(observed.config_revision),
+              policyHash: text(observed.policy_hash),
+              credentialsInstalled: observed.credentials_installed === true,
+              policyActive: observed.policy_active === true,
+              launchEnvironmentInstalled: observed.launch_environment_installed === true,
+              processInstanceId: text(observed.process_instance_id),
+              reason: text(observed.reason),
+            }),
+          }
+        : {}),
+      ...(typeof status.network_instance_id === "string"
+        ? { networkInstanceId: status.network_instance_id }
+        : {}),
+      ...(timestampText(status.observed_time)
+        ? { observedTime: timestampText(status.observed_time)! }
+        : {}),
+      ...(timestampText(status.evaluated_time)
+        ? { evaluatedTime: timestampText(status.evaluated_time)! }
+        : {}),
     });
   }
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -1692,7 +1693,10 @@ test("API and worker name a Preset file failure in their startup error code", as
 
 test("closed Installation observes only its operator-bound Namespace, including Secret and Configuration custody", async (t) => {
   const { gatewayRouting, digest } = await import("../helpers/kubernetes-routed-scenarios.mjs");
-  const { KubernetesObjectApi } = await import("@kubernetes/client-node");
+  const controllerRequire = createRequire(
+    new URL("../../apps/controller/package.json", import.meta.url),
+  );
+  const { KubernetesObjectApi } = controllerRequire("@kubernetes/client-node");
   const configuration = credentialProxyInstallation();
   configuration.drivers.sandbox.configuration.gateway.operatorNamespaceLabels = {
     "openshell.ai/openclaw-workspace": "true",
