@@ -31,6 +31,7 @@ import { prepareGatewayRouting } from "./routing.mjs";
 import { prepareLogging, readDefaultCollectorImage } from "./logging.mjs";
 import { pullImage } from "./image-pull.mjs";
 import { keycloakResourceKind, prepareKeycloak, readKeycloakImage } from "./keycloak.mjs";
+import { imageInventory, laneImagesResourceKind } from "./lane-images.mjs";
 import { metricsMonitoringImages } from "./metrics-monitoring-images.mjs";
 import {
   prepareRepositoryCredentials,
@@ -58,7 +59,6 @@ const fixtureLanes = new Set([
   "k3d-fixture-configuration",
   "k3d-fixture-state",
   "k3d-fixture-plugins",
-  "k3d-fixture-oauth",
 ]);
 // These lanes' tests use no Ingress, LoadBalancer Service, metrics API or
 // Gateway API, so their clusters skip K3s's Traefik, ServiceLB and
@@ -2621,8 +2621,7 @@ async function prepareLane({ lane, statePath }) {
       break;
     case "k3d-fixture-configuration":
     case "k3d-fixture-state":
-    case "k3d-fixture-plugins":
-    case "k3d-fixture-oauth": {
+    case "k3d-fixture-plugins": {
       // PostgreSQL, the cluster and the fixture build are independent; the
       // fixture is imported only after the cluster passed its readiness gates.
       const [, cluster, built] = await timedPreparation(
@@ -3012,6 +3011,30 @@ async function prepareLane({ lane, statePath }) {
       );
       break;
     }
+    case "qa-matrix":
+      // On a hosted runner, record the starting images so cleanup can return the
+      // shared image store to them (lane-images.mjs, finding 1345). A workstation's
+      // launcher tags are the developer's own and stay as the run leaves them. A
+      // failed inventory only skips that: the QA run itself does not need it.
+      if (process.env.GITHUB_ACTIONS === "true") {
+        let images;
+        try {
+          images = await imageInventory({
+            execFile: (command, args) =>
+              execFile(command, args, { timeoutMs: imageCommandTimeoutMs }),
+            docker: process.env.OCC_DOCKER_BIN ?? "docker",
+          });
+        } catch (error) {
+          console.log(
+            `::warning::QA image baseline skipped: ${String(error.message).split("\n")[0]}`,
+          );
+        }
+        if (images) {
+          addResource(state, laneImagesResourceKind, { name, images, status: "ready" });
+          await writeState(resolvedStatePath, state);
+        }
+      }
+      break;
     case "helper-timeout":
       break;
   }

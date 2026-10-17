@@ -1,23 +1,21 @@
 ---
 created: 2026-09-30
-updated: 2026-10-13
-last_updated_session: authoring-run/57611bd1-494b-4484-940a-7767f8814376
+updated: 2026-10-16
+last_updated_session: codex/01a10a81-070c-7aa3-97d0-fbce8f285d4d
 ---
 
 # Agent runtime logs flow
 
 ## Overview
 
-OpenClaw Control Plane (OCC) authorizes status and log reads for an admitted
-revision, fetches raw data through its Compute Driver, and returns redacted,
-bounded records. Downloads stay local.
+OCC authorizes admitted-revision status/log reads and returns redacted, bounded
+Compute Driver records. Downloads stay local.
 
 ## Entry Points
 
-- Trigger: `GET /namespaces/:namespaceId/agents/:agentId/deployments/:deploymentId/runtime`
-  and `GET .../runtime/logs` (optionally `download=true`) from the console Logs
-  tab, `occ agent runtime|logs` (`internal/occcli/agent_runtime.go`) or the API.
-  CLI revision selection uses `agentRevision`/`latestRevisionID`; see the
+- `GET /namespaces/:namespaceId/agents/:agentId/deployments/:deploymentId/runtime`
+  and `GET .../runtime/logs` (`download=true` for attachments) from Console,
+  `occ agent runtime|logs` (`internal/occcli/agent_runtime.go`) or API. See
   [CLI reference](../reference/cli.md#runtime-status-and-logs).
 - Source: `apps/controller/src/index.ts:createFastifyApp`,
   `packages/occ/src/index.ts:OpenClawController.describeAgentRuntime` and
@@ -34,7 +32,16 @@ bounded records. Downloads stay local.
 
 ```mermaid
 graph TD
-  A["GET runtime or runtime/logs"] --> B["Feature switch"]
+  V["CLI revision probe"] --> W{"Pods?"}
+  W -->|yes| Z{"Proven older?"}
+  Z -->|no or unreadable| X["Select candidate"]
+  Z -->|yes| Y["Retain active"]
+  W -->|no| T{"Concrete Harness, proven newer?"}
+  T -->|yes| X
+  T -->|no or refused| Y
+  X --> A["GET runtime or runtime/logs"]
+  Y --> A
+  A --> B["Feature switch"]
   B -->|off| C["Return 501"]
   B -->|on| E["OCC authorizes revision and Agent tier"]
   E -->|denied| F["Audit denial, return 403"]
@@ -60,12 +67,18 @@ graph TD
 
 ### 1. Admit and authorize
 
-`apps/controller/src/index.ts:perform` rejects disabled runtime reads with `501`.
-`OpenClawController.agentRuntimeTarget` authorizes the tier action and Agent
-`read`, plus revision `read` for status. It resolves the exact revision and
-recorded Compute Driver, rejecting unsupported or Driver-owned logging.
-Only authorized reads reach `apps/controller/src/http/runtime-logs.ts:RuntimeLogLimiter`;
-denials are audited and spend no token.
+`internal/occcli/agent_runtime.go:agentRevision` honors `--revision`. Otherwise,
+`newerRevisionWithRuntime` reads Pod candidates unless exact active metadata
+(`Client.GetAgentRevision`) proves them older. Harness-only candidates must be
+proven newer. Status is reused.
+
+`packages/contracts/src/api/routes.ts:occApiRoutes` declares both GET routes and their
+closed query schema. `apps/controller/src/index.ts:perform` returns `501` when
+`agentRuntimeLogs` is disabled. `OpenClawController.agentRuntimeTarget` requires the
+tier action, Agent `read` and, for status, revision `read`. It resolves that Agent’s
+revision and rejects Drivers lacking `describeAgentRuntime` or declaring
+`runtimeLogging: "driver"`. `apps/controller/src/http/runtime-logs.ts:RuntimeLogLimiter`
+admits authorized reads; denials are audited and consume no token.
 
 ### 2. Describe the runtime
 
@@ -180,46 +193,40 @@ Sandbox, or concealed from a non-member) maps to
 Sandbox IDs are refused; a new Sandbox ID emits `stream_replaced`.
 `sanitizeSandboxLogLines` parses the OCSF shorthand into allowlisted fields.
 
-A download (`download=true`) forces `tailLines` to 1000, rejects a `cursor` with
-`400`, and starts a new view; `apps/controller/src/index.ts:auditAction`
+Downloads (`download=true`) force `tailLines=1000`, reject cursors (`400`), and start
+a new view; `apps/controller/src/index.ts:auditAction`
 names its audit event, and any denial, `openclaw.agents.runtime_logs.download`.
 
 ### 4. Return
 
-`apps/controller/src/http/runtime-logs.ts:runtimeLogPageBody` accepts only
-sanitized records and fails on the reserved `content` class.
-`runtimeLogDownloadBody` serializes the same branded records as text lines with
-the same check, and `runtimeLogDownloadFileName` names the attachment
-`<agent>-<revision>-<source>-<pod>.log`. A `minLevel` query
-(`runtime-logs/read.ts:runtimeLogPageAtLevel`) removes sanitized lines below that
-level after the cursor is signed, so polls resume after hidden lines; unknown-level
-lines, gaps and withheld counts stay. The console asks for `minLevel=info` unless
-**Include debug** is selected; its level chips and text filter
-(`apps/controller/src/console/agents/logs.mjs`) run only over loaded rows. The
-console caches a `403` per operator page session, so reopening adds no audited
-denial. Its status
-names log-text grants. Pod cards show every actual container's state and exit;
-the Pod/container picker selects its exact stream. Gateway views point to the Harness source while no Harness
-Pod is ready, or Deployment activity while none exists. The CLI rejects explicit
-zero or positive sub-second `--since` before revision selection or API client
-setup; omission keeps the unfiltered default. Its `--follow` loop re-sends the
-cursor every 2 seconds.
-`runAgentLogs` ends a follow cleanly on cancellation; without `--follow`, it is an
-error. Driver errors map to
-fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
+`apps/controller/src/http/runtime-logs.ts:runtimeLogPageBody` and
+`runtimeLogDownloadBody` reject reserved `content` records.
+Container headers label the requested `instance=current` or `instance=previous`, even
+without Pods. `runtimeLogDownloadFileName` and
+Console (`apps/controller/src/console/agents/logs.mjs`) use the download request
+for `-previous.log`; current and Sandbox filenames stay unchanged.
+`runtime-logs/read.ts:runtimeLogPageAtLevel` filters after signing, preserving unknown
+levels/gaps/withheld counts. Console filters loaded rows; debug is opt-in.
+Cached `403` avoids duplicate denials. Pod cards show state/exit; Gateway links
+Harness output or Deployment activity.
+CLI rejects zero/sub-second `--since`; omission leaves reads unfiltered.
+`runAgentLogs --follow` polls every two seconds. Cancelling follow succeeds; cancelling a one-shot read fails. `internal/occclient/transport.go:apiError` accepts
+`Retry-After` seconds/HTTP dates: positive delays ≤1h postpone `429` retries,
+rounded up to seconds; invalid/expired delays retain the interval.
+Driver failures use fixed `RUNTIME_LOGS_*` codes; requests have ten-second deadlines.
 
 ## Debugging and Verification
 
 - `go test ./internal/occcli -run '^TestResourceRequestStopsWhenCommandContextIsCanceled$'`
-  proves the loopback CLI cancellation above; it is not deployed OCC proof.
+  proves loopback CLI cancellation, not deployed OCC behavior.
 
-- `503 RUNTIME_LOGS_CLUSTER_RBAC` means the API ServiceAccount lacks
-  `pods/log`, `events` or, on an execution cluster, `pods` reads in that
-  namespace. `503 RUNTIME_LOGS_AUDIT_UNAVAILABLE` means no output was read.
+- `503 RUNTIME_LOGS_CLUSTER_RBAC`: API ServiceAccount lacks namespace
+  `pods/log`, `events` or execution-cluster `pods` reads.
+  `503 RUNTIME_LOGS_AUDIT_UNAVAILABLE`: no output read.
 - `runtime-logs-content.test.mjs` verifies handlers with synthetic Driver pages;
   `occ-api-security.test.mjs` verifies authorization and cursor failures.
-  Kubernetes conformance substitutes API observations. Sandbox conformance and wire tests prove their declared
-  handler/protocol boundaries, not real runtime execution.
+  Kubernetes conformance substitutes API observations; Sandbox conformance/wire tests prove
+  handler/protocol boundaries, not runtime execution.
 
 ## Related docs
 
@@ -233,7 +240,21 @@ fixed `RUNTIME_LOGS_*` codes; the whole request has a ten-second deadline.
 
 ## Changelog
 
-- 2026-10-13 13:43: Rename the shared exact-runtime authorization entry point. (authoring-run/57611bd1-494b-4484-940a-7767f8814376 - 0989be91e37275f690a9c048a9ff001b269f3aa6)
+- 2026-10-16 19:09: Retain Pods unless proven older. (codex/01a10a81-070c-7aa3-97d0-fbce8f285d4d - 646709121b8ad092df151d16cd4ca6a6c523e34d)
+
+- 2026-10-16 13:46: Require Pod candidate recency. (authoring-run/75d1c4b0-a13f-4188-9aec-3adb7fa43164 - 591feb34bdbaaf7f316607347a02f7335ee816c0)
+
+- 2026-10-15 20:56: Label container exports. (authoring-run/5d925828-f306-4469-bedb-9c60bc9c6def - 7041b4c11a1bc9109fbb150beac2f8bc430474a6)
+
+- 2026-10-15 22:11: Merge main; preserve both flows. (authoring-run/8e4e2c2d-907a-411c-96f0-f882c1118e6d - 20d9edc976cc)
+
+- 2026-10-15 10:38: Verify Podless Harness recency; unknown ordering retains active. (authoring-run/7163351c-af75-410f-bd45-a2809e178c9e - c1a15e2e953c)
+
+- 2026-10-15 09:08: Select newer provider Harness status before revision Pods exist. (authoring-run/7163351c-af75-410f-bd45-a2809e178c9e - 422cb3fe407204d4add49ea8494f0fd0ce49be52)
+
+- 2026-10-15 09:25: Honor HTTP-date Retry-After in CLI follow. (authoring-run/613fa018-dc4e-4c4d-b05b-f2f8f79e3244 - 422cb3fe407204d4add49ea8494f0fd0ce49be52)
+
+- 2026-10-13 13:43: Name shared revision authorization. (authoring-run/57611bd1-494b-4484-940a-7767f8814376 - 0989be91e37275f690a9c048a9ff001b269f3aa6)
 
 - 2026-10-13: Key cursor hashes; `v1` cursors expire. (#2274)
 

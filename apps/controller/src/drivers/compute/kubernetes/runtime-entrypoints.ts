@@ -72,6 +72,17 @@ async function answerRuntimeReadiness(response, readiness) {
   response.writeHead(ready ? 200 : 503, { "cache-control": "no-store" });
   response.end();
 }
+// A request target that is not a URL path, such as "//", gets 400: an uncaught
+// parse error would end the wrapper, and the restart would probe the model again.
+function runtimeRequestPathname(request, response) {
+  try {
+    return new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+  } catch {
+    response.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+    response.end(JSON.stringify({ error: "bad_request" }));
+    return undefined;
+  }
+}
 `;
 
 const RUNTIME_READINESS_SERVER_HELPER = String.raw`
@@ -82,13 +93,116 @@ function startRuntimeReadinessServer(readiness) {
     throw new Error("Runtime status port is invalid.");
   }
   const server = readinessCreateServer((request, response) => {
-    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    const pathname = runtimeRequestPathname(request, response);
+    if (pathname === undefined) return;
     if (request.method !== "GET" || pathname !== ${JSON.stringify(RUNTIME_READINESS_PATH)}) {
       response.writeHead(404, { "cache-control": "no-store" });
       response.end();
       return;
     }
     void answerRuntimeReadiness(response, readiness);
+  });
+  server.listen(port, "0.0.0.0");
+}
+`;
+
+// The status path Compute reads a held startup failure from, and the closed
+// vocabulary of codes a runtime may hold. Shared by the Codex Harness and the
+// dedicated OpenClaw worker programs.
+const RUNTIME_STATUS_CONSTANTS_HELPER = String.raw`
+const RUNTIME_STATUS_PATH = "/openclaw/runtime/status";
+const RUNTIME_DIAGNOSTIC_CODES = new Set([
+  "LOGIN_FAILED",
+  "MODEL_PROBE_FAILED",
+  "MODEL_PROBE_TIMEOUT",
+  "MODEL_PROBE_CPU_STARVED",
+  "UNAVAILABLE",
+  "NOT_CONFIGURED",
+  "AUTHENTICATION_FAILED",
+  "DISCONNECTED",
+  "INCOMPATIBLE_RESPONSE",
+  "PROBE_FAILED",
+]);
+`;
+
+// A provider-owned Harness (a Codex app-server or a dedicated OpenClaw worker) gets
+// only the transport token's verifier and no Compute status port, and Compute cannot
+// reach it through a Pod proxy. While a startup failure is held nothing else listens
+// on the Harness port, so the failure is served there, through the provider's
+// bearer-passthrough exposure, to a caller presenting the token the verifier names.
+// Compute reads it and fails the revision with the code the status port would have
+// reported. The response carries codes and fixed text only, never provider output.
+const HELD_RUNTIME_FAILURE_TRANSPORT_HELPER = String.raw`
+function requireNonEmptyString(value, description) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(description + " is missing.");
+  }
+  return value;
+}
+
+function runtimeStatusPort() {
+  if (process.env.OPENCLAW_RUNTIME_STATUS_PORT === undefined) return undefined;
+  const port = Number(process.env.OPENCLAW_RUNTIME_STATUS_PORT);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Runtime status port is invalid.");
+  }
+  return port;
+}
+
+function serveHeldRuntimeFailureToTransportPeer(check, code, cause) {
+  const verifier = process.env.APP_TOKEN_SHA;
+  const port = Number(process.env.APP_SERVER_PORT);
+  if (
+    runtimeStatusPort() !== undefined ||
+    typeof verifier !== "string" ||
+    !/^[a-f0-9]{64}$/.test(verifier) ||
+    !Number.isSafeInteger(port) || port < 1 || port > 65535
+  ) {
+    return;
+  }
+  requireNonEmptyString(check, "Runtime failure check");
+  if (!RUNTIME_DIAGNOSTIC_CODES.has(code)) {
+    throw new Error("Runtime failure code is invalid.");
+  }
+  const { createHash: heldFailureHash, timingSafeEqual: heldFailureEqual } = require("node:crypto");
+  const expected = Buffer.from(verifier, "hex");
+  const body = JSON.stringify({
+    runtimeFailure: {
+      component: "agent",
+      check,
+      checkedAt: new Date().toISOString(),
+      code,
+      ...(cause === undefined ? {} : { cause }),
+    },
+  });
+  const unavailable = JSON.stringify({ error: "runtime_failure_held", code });
+  const server = require("node:http").createServer((request, response) => {
+    const authorization = typeof request.headers.authorization === "string"
+      ? /^Bearer ([!-~]+)$/i.exec(request.headers.authorization)
+      : null;
+    const supplied = authorization === null
+      ? undefined
+      : heldFailureHash("sha256").update(authorization[1]).digest();
+    if (supplied === undefined || !heldFailureEqual(supplied, expected)) {
+      response.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const pathname = runtimeRequestPathname(request, response);
+    if (pathname === undefined) return;
+    // Anything else, such as the Agent Gateway's app-server upgrade, is told the
+    // Harness is unavailable and why, by code only, not that the route is missing.
+    if (request.method !== "GET" || pathname !== RUNTIME_STATUS_PATH) {
+      response.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(unavailable);
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    response.end(body);
+  });
+  // Keep holding the failure even if it cannot be served; Compute then times out.
+  server.on("error", (error) => {
+    console.error("Held runtime failure server failed: " + (error?.code ?? "unknown"));
   });
   server.listen(port, "0.0.0.0");
 }
@@ -122,27 +236,16 @@ const CODEX_PLUGIN_RUNTIME_REQUEST_TIMEOUT_MS = Number(process.env.OPENCLAW_PLUG
 const CODEX_PLUGIN_RUNTIME_INSTALL_DEADLINE_MS = Number(process.env.OPENCLAW_PLUGIN_RUNTIME_INSTALL_DEADLINE_MS ?? "60000");
 const PLUGIN_STATUS_PATH = "/openclaw/plugin-runtime/status";
 const REMOTE_PLUGIN_STATUS_PATH = "/openclaw/plugin-runtime/remote-status";
-const RUNTIME_STATUS_PATH = "/openclaw/runtime/status";
+${RUNTIME_STATUS_CONSTANTS_HELPER}
 const RUNTIME_DIAGNOSTICS_PATH = "/openclaw/runtime/diagnostics";
 const RUNTIME_IMAGE_PATH = "/openclaw/runtime/image";
 const RUNTIME_READINESS_PATH = ${JSON.stringify(RUNTIME_READINESS_PATH)};
 const PLUGIN_DIAGNOSTIC_CODES = new Set(["PLUGIN_INSTALL_FAILED", "PLUGIN_AUTH_REQUIRED"]);
-const RUNTIME_DIAGNOSTIC_CODES = new Set([
-  "LOGIN_FAILED",
-  "MODEL_PROBE_FAILED",
-  "MODEL_PROBE_TIMEOUT",
-  "MODEL_PROBE_CPU_STARVED",
-  "UNAVAILABLE",
-  "NOT_CONFIGURED",
-  "AUTHENTICATION_FAILED",
-  "DISCONNECTED",
-  "INCOMPATIBLE_RESPONSE",
-  "PROBE_FAILED",
-]);
 const pluginBaseAppServerToken = process.env.APP_SERVER_TOKEN;
 
 ${PLUGIN_APP_SERVER_TOKEN_DERIVATION_HELPER}
 ${RUNTIME_READINESS_RESPONSE_HELPER}
+${HELD_RUNTIME_FAILURE_TRANSPORT_HELPER}
 
 class PluginTerminalDiagnosticError extends Error {
   constructor(diagnostic, message) {
@@ -234,15 +337,6 @@ function pluginRuntimeStatusPort() {
   return port;
 }
 
-function runtimeStatusPort() {
-  if (process.env.OPENCLAW_RUNTIME_STATUS_PORT === undefined) return undefined;
-  const port = Number(process.env.OPENCLAW_RUNTIME_STATUS_PORT);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
-    throw new Error("Runtime status port is invalid.");
-  }
-  return port;
-}
-
 function runtimeStatusContainer() {
   return requireNonEmptyString(process.env.OPENCLAW_RUNTIME_STATUS_CONTAINER, "Runtime status container");
 }
@@ -296,66 +390,6 @@ function publishRuntimeFailure(check, code, cause) {
     code,
     ...(cause === undefined ? {} : { cause }),
   };
-}
-
-// A provider-owned Codex Harness gets only the transport token's verifier and
-// no Compute status port, and Compute cannot reach it through a Pod proxy. While
-// a startup failure is held nothing else listens on the app-server port, so the
-// failure is served there, through the provider's bearer-passthrough exposure,
-// to a caller presenting the token the verifier names. Compute reads it and
-// fails the revision with the code the status port would have reported.
-function serveHeldRuntimeFailureToTransportPeer(check, code, cause) {
-  const verifier = process.env.APP_TOKEN_SHA;
-  const port = Number(process.env.APP_SERVER_PORT);
-  if (
-    runtimeStatusPort() !== undefined ||
-    typeof verifier !== "string" ||
-    !/^[a-f0-9]{64}$/.test(verifier) ||
-    !Number.isSafeInteger(port) || port < 1 || port > 65535
-  ) {
-    return;
-  }
-  requireNonEmptyString(check, "Runtime failure check");
-  if (!RUNTIME_DIAGNOSTIC_CODES.has(code)) {
-    throw new Error("Runtime failure code is invalid.");
-  }
-  const { createHash: heldFailureHash } = require("node:crypto");
-  const expected = Buffer.from(verifier, "hex");
-  const body = JSON.stringify({
-    runtimeFailure: {
-      component: "agent",
-      check,
-      checkedAt: new Date().toISOString(),
-      code,
-      ...(cause === undefined ? {} : { cause }),
-    },
-  });
-  const server = pluginCreateServer((request, response) => {
-    const authorization = typeof request.headers.authorization === "string"
-      ? /^Bearer ([!-~]+)$/i.exec(request.headers.authorization)
-      : null;
-    const supplied = authorization === null
-      ? undefined
-      : heldFailureHash("sha256").update(authorization[1]).digest();
-    if (supplied === undefined || !pluginTimingSafeEqual(supplied, expected)) {
-      response.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
-      response.end(JSON.stringify({ error: "unauthorized" }));
-      return;
-    }
-    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
-    if (request.method !== "GET" || pathname !== RUNTIME_STATUS_PATH) {
-      response.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
-      response.end(JSON.stringify({ error: "not_found" }));
-      return;
-    }
-    response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-    response.end(body);
-  });
-  // Keep holding the failure even if it cannot be served; Compute then times out.
-  server.on("error", (error) => {
-    console.error("Held runtime failure server failed: " + (error?.code ?? "unknown"));
-  });
-  server.listen(port, "0.0.0.0");
 }
 
 function publishRuntimeReady() {
@@ -657,7 +691,8 @@ function startPluginRuntimeStatusServer(readiness) {
   const port = runtimeStatusPort() ?? pluginRuntimeStatusPort();
   if (port === undefined) return;
   const server = pluginCreateServer(async (request, response) => {
-    const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+    const pathname = runtimeRequestPathname(request, response);
+    if (pathname === undefined) return;
     if (request.method === "GET" && pathname === RUNTIME_READINESS_PATH) {
       await answerRuntimeReadiness(response, readiness);
       return;
@@ -1095,8 +1130,11 @@ function openClawPluginConfiguration(runtime, failures = [], base) {
     return pluginRuntimeTranslator.codexOpenClawConfiguration(
       runtime.manifest.selections ?? {},
       failures,
-      runtime.manifest.repositoryBrokerNetworkPolicy,
-      runtime.manifest.pluginApprovers,
+      {
+        ...runtime.manifest,
+        dedicatedCodex: process.env.APP_SERVER_URL !== undefined,
+        baseProxyEnabled: base?.plugins?.entries?.codex?.config?.appServer?.networkProxy?.enabled === true,
+      },
     );
   }
   return undefined;
@@ -1205,13 +1243,6 @@ function assertCodexPluginRuntime(runtime) {
   if (!isPlainObject(runtime.manifest.selections ?? {})) {
     throw new Error("Codex plugin selections are invalid.");
   }
-}
-
-function requireNonEmptyString(value, description) {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(description + " is missing.");
-  }
-  return value;
 }
 
 function openClawPluginPackageSpec(plugin) {
@@ -2042,11 +2073,16 @@ function probeOpenClawAuthenticationFailure() {
 // endpoint differs from the provider's, or an Anthropic setup token, skips this
 // request. The request goes to the
 // path of the configured API: a key may be scoped to one endpoint, and OpenAI
-// answers 401 for a missing scope.
+// answers 401 for a missing scope. A 401 is classified from the provider's error
+// code and a few fixed OpenAI and Anthropic phrases into a closed vocabulary (the
+// body itself is never kept): "missing_api_key" means the request arrived without
+// a credential, which under a Sandbox provider points at the credential proxy
+// rather than the key.
 const UPFRONT_ENDPOINTS = {
   openai: ["https://api.openai.com/v1", { "openai-responses": "/responses", "openai-completions": "/chat/completions" }, (key) => ({ authorization: "Bearer " + key })],
   anthropic: ["https://api.anthropic.com", { "anthropic-messages": "/v1/messages" }, (key) => !key.startsWith("sk-ant-oat") && { "x-api-key": key, "anthropic-version": "2023-06-01" }],
 };
+const UPFRONT_REJECTION_CODES = { 4: "invalid_api_key", 5: "missing_api_key", 6: "insufficient_permissions" };
 function credentialRejectedUpfront(provider, fragment, key, stage) {
   fragment ??= {};
   const [base, paths, authorize] = UPFRONT_ENDPOINTS[provider] ?? [];
@@ -2059,12 +2095,15 @@ function credentialRejectedUpfront(provider, fragment, key, stage) {
     (Array.isArray(fragment.models) && fragment.models.some((model) => (model?.api !== undefined && model.api !== api) || model?.baseUrl !== undefined))) return false;
   const path = paths[api];
   stage("preflight");
-  return require("node:child_process").spawnSync(process.execPath, ["-e",
-    'fetch(process.env.U,{method:"POST",headers:JSON.parse(process.env.H),body:"{}",signal:AbortSignal.timeout(8000)}).then((r)=>process.exit(r.status===401?3:0),()=>process.exit(0))',
+  // Exit 3-6 is a 401 (3: unclassified); anything else proves nothing.
+  const status = require("node:child_process").spawnSync(process.execPath, ["-e",
+    'fetch(process.env.U,{method:"POST",headers:JSON.parse(process.env.H),body:"{}",signal:AbortSignal.timeout(8000)}).then(async(r)=>{if(r.status!==401)process.exit(0);let e;try{e=(await r.json())?.error}catch{}const c=e?.code,m=typeof e?.message==="string"?e.message:"";process.exit(c==="invalid_api_key"||/invalid x-api-key/i.test(m)?4:/didn.t provide an api key|no api key provided|x-api-key header is required/i.test(m)?5:c==="insufficient_permissions"||/insufficient permissions|missing scopes/i.test(m)?6:3)},()=>process.exit(0))',
   ], {
     env: { U: base + path, H: JSON.stringify({ ...headers, "content-type": "application/json" }), NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS, SSL_CERT_FILE: process.env.SSL_CERT_FILE },
     stdio: "ignore", timeout: 10000, killSignal: "SIGKILL",
-  }).status === 3;
+  }).status;
+  if (!(status >= 3 && status <= 6)) return false;
+  return { providerStatus: 401, ...(UPFRONT_REJECTION_CODES[status] === undefined ? {} : { providerCode: UPFRONT_REJECTION_CODES[status] }) };
 }
 
 function runOpenClawAuthenticationProbe(fs, capMs) {
@@ -2083,7 +2122,8 @@ function runOpenClawAuthenticationProbe(fs, capMs) {
       !process.env[credentialEnvironment]?.trim()) return "UNAVAILABLE";
     const configuration = JSON.parse(process.env.OPENCLAW_HARNESS_PROBE_CONFIG);
     if (configuration.agents?.defaults?.model !== model) return "UNAVAILABLE";
-    if (credentialRejectedUpfront(provider, configuration.models?.providers?.[provider], process.env[credentialEnvironment], stage)) return "AUTHENTICATION_FAILED";
+    const rejected = credentialRejectedUpfront(provider, configuration.models?.providers?.[provider], process.env[credentialEnvironment], stage);
+    if (rejected !== false) return { code: "AUTHENTICATION_FAILED", ...rejected };
     configuration.agents.defaults.workspace = directory + "/workspace";
     fs.mkdirSync(directory + "/workspace", { mode: 0o700 });
     const configPath = directory + "/openclaw.json";
@@ -3084,122 +3124,6 @@ if (followsPeerStatus) {
 }
 `;
 
-const CODEX_OAUTH_BOOTSTRAP_WRITER = String.raw`
-try {
-const fs = require("node:fs");
-const path = require("node:path");
-const directory = process.env.CODEX_HOME;
-const expected = {
-  sourceUid: process.env.OCE_CODEX_OAUTH_SOURCE_UID,
-  volumeUid: process.env.OCE_CODEX_OAUTH_VOLUME_UID,
-};
-if (!directory || !expected.sourceUid || !expected.volumeUid) {
-  throw new Error("OAuth bootstrap identity is missing.");
-}
-const authPath = path.join(directory, "auth.json");
-const receiptPath = path.join(directory, ".oce-oauth.json");
-const validAuth = (auth) => auth?.auth_mode === "chatgpt" &&
-  [auth.tokens?.id_token, auth.tokens?.access_token, auth.tokens?.refresh_token]
-    .every((value) => typeof value === "string" && value.trim().length > 0);
-const readRegularJson = (target) =>
-  fs.lstatSync(target, { throwIfNoEntry: false })?.isFile()
-    ? JSON.parse(fs.readFileSync(target, "utf8"))
-    : undefined;
-if (fs.lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() === false) {
-  fs.rmSync(directory, { force: true });
-}
-fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-let receipt;
-try {
-  receipt = readRegularJson(receiptPath);
-} catch {
-  // An unreadable receipt proves nothing; seeding below replaces the directory contents.
-}
-if (receipt?.sourceUid === expected.sourceUid) {
-  if (receipt.volumeUid !== expected.volumeUid || !validAuth(readRegularJson(authPath))) {
-    throw new Error("OAuth runtime credentials require reconnect.");
-  }
-} else {
-  const auth = JSON.parse(fs.readFileSync(process.env.OCE_CODEX_OAUTH_SEED_PATH, "utf8"));
-  if (!validAuth(auth)) {
-    throw new Error("OAuth bootstrap credentials are invalid.");
-  }
-  // A new source starts from an empty Codex home: no previous login, sessions, or links.
-  // rmSync removes symbolic links themselves and never follows them.
-  for (const entry of fs.readdirSync(directory)) {
-    // Keep the locked inode: deleting it would let another writer lock a new file.
-    if (entry === ".oce-oauth-bootstrap.lock") continue;
-    fs.rmSync(path.join(directory, entry), { recursive: true, force: true });
-  }
-  const writeJson = (target, value) => {
-    const temporary = target + ".bootstrap";
-    // Exclusive creation fails on any existing path, including a planted symbolic link.
-    const descriptor = fs.openSync(temporary, "wx", 0o600);
-    try {
-      fs.writeFileSync(descriptor, JSON.stringify(value));
-      fs.fsyncSync(descriptor);
-    } finally {
-      fs.closeSync(descriptor);
-    }
-    fs.renameSync(temporary, target);
-  };
-  writeJson(authPath, auth);
-  writeJson(receiptPath, expected);
-  const descriptor = fs.openSync(directory, "r");
-  try {
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
-  }
-  // Successful exit reports only a verified final state.
-  const written = readRegularJson(receiptPath);
-  if (
-    !validAuth(readRegularJson(authPath)) ||
-    written?.sourceUid !== expected.sourceUid ||
-    written.volumeUid !== expected.volumeUid
-  ) {
-    throw new Error("OAuth bootstrap could not verify private credentials.");
-  }
-}
-} catch {
-  throw new Error("OAuth bootstrap could not initialize private credentials.");
-}
-`;
-
-export const CODEX_OAUTH_BOOTSTRAP_ENTRYPOINT = String.raw`
-try {
-const fs = require("node:fs");
-const path = require("node:path");
-const { spawnSync } = require("node:child_process");
-const directory = process.env.CODEX_HOME;
-if (!directory) throw new Error();
-if (fs.lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() === false) {
-  throw new Error();
-}
-fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-const descriptor = fs.openSync(
-  path.join(directory, ".oce-oauth-bootstrap.lock"),
-  fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
-  0o600,
-);
-try {
-  if (!fs.fstatSync(descriptor).isFile()) throw new Error();
-  // The pinned runtime base supplies flock. Kernel locks release on process
-  // death, so an interrupted Pod cannot leave a stale ownership marker. Pass
-  // the already-opened inode to avoid following a link planted in the home.
-  const result = spawnSync("/usr/bin/flock", [
-    "--exclusive", "--timeout", "60", "/proc/self/fd/3",
-    process.execPath, "-e", ${JSON.stringify(CODEX_OAUTH_BOOTSTRAP_WRITER)},
-  ], { stdio: ["ignore", "inherit", "inherit", descriptor] });
-  if (result.error || result.status !== 0) throw new Error();
-} finally {
-  fs.closeSync(descriptor);
-}
-} catch {
-  throw new Error("OAuth bootstrap could not initialize private credentials.");
-}
-`;
-
 // Codex 0.158 app-server hard-codes FmtSpan::FULL on its stderr layer, so each
 // instrumented call prints span "new" and "close" records, and each poll of an
 // instrumented future a span "enter" and "exit" record, at the span's level:
@@ -3386,7 +3310,11 @@ startPluginRuntimeStatusServer(agentRuntimeReady);
 const loginMode = process.env.CODEX_LOGIN_MODE;
 const apiKey = process.env.OPENAI_API_KEY;
 const accessToken = process.env.CODEX_ACCESS_TOKEN;
+const externalAccount = process.env.OCE_CODEX_CHATGPT_ACCOUNT;
 const nonempty = (value) => typeof value === "string" && value.trim().length > 0;
+if (loginMode !== "chatgptAuthTokens" && externalAccount !== undefined) {
+  throw new Error("External ChatGPT metadata requires external authentication.");
+}
 if (loginMode === "api_key") {
   if (!nonempty(apiKey) || accessToken !== undefined) {
     throw new Error("Codex API-key authentication configuration is invalid.");
@@ -3395,9 +3323,9 @@ if (loginMode === "api_key") {
   if (!nonempty(accessToken) || apiKey !== undefined) {
     throw new Error("Codex service account token authentication configuration is invalid.");
   }
-} else if (loginMode === "oauth") {
-  if (apiKey !== undefined || accessToken !== undefined) {
-    throw new Error("Codex OAuth authentication configuration is invalid.");
+} else if (loginMode === "chatgptAuthTokens") {
+  if ((accessToken !== undefined && !nonempty(accessToken)) || !nonempty(externalAccount) || apiKey !== undefined) {
+    throw new Error("Codex external authentication configuration is invalid.");
   }
 } else {
   throw new Error("Codex authentication mode is missing or unsupported.");
@@ -3418,18 +3346,24 @@ if (pluginRuntime !== undefined) {
   assertCodexPluginRuntime(pluginRuntime);
   writeCodexConfigToml(pluginRuntime);
 }
-const loginArguments = loginMode === "api_key"
-  ? ["-c", "cli_auth_credentials_store=file", "login", "--with-api-key"]
-  : [
-      "-c",
-      "cli_auth_credentials_store=file",
-      "login",
-      "--with-access-token",
-    ];
+// A Credential Gateway supplies an opaque token, so native CLI prefix detection cannot
+// classify it. The native PAT auth-file contract still hydrates and validates account metadata.
+const providerManagedPat = loginMode === "codex_pat" && process.env.OCE_CODEX_CREDENTIAL_SOURCE === "1";
+if (providerManagedPat) {
+  require("node:fs").writeFileSync(process.env.CODEX_HOME + "/auth.json",
+    JSON.stringify({ personal_access_token: accessToken }), { mode: 0o600 });
+}
+const loginFlag = loginMode === "api_key" ? "--with-api-key" : "--with-access-token";
+const loginArguments = [
+  "-c", "cli_auth_credentials_store=file", "login", providerManagedPat ? "status" : loginFlag,
+];
 function codexChildEnvironment() {
   const environment = { ...process.env };
   delete environment.APP_SERVER_TOKEN;
   delete environment.APP_TOKEN_SHA;
+  if (providerManagedPat) {
+    delete environment.CODEX_ACCESS_TOKEN;
+  }
   return environment;
 }
 // Codex reports provider HTTP rejections as "status 401 Unauthorized" or
@@ -3439,20 +3373,56 @@ function codexAuthenticationRejected(message) {
 }
 const loginStartedAt = Date.now();
 let login;
-if (loginMode === "oauth") {
+let externalAuthenticationUnavailable = false;
+if (loginMode === "chatgptAuthTokens") {
+  let temporary;
   try {
     const fs = require("node:fs");
-    const receipt = JSON.parse(fs.readFileSync(process.env.CODEX_HOME + "/.oce-oauth.json", "utf8"));
-    const auth = JSON.parse(fs.readFileSync(process.env.CODEX_HOME + "/auth.json", "utf8"));
-    const valid = receipt.sourceUid === process.env.OCE_CODEX_OAUTH_SOURCE_UID &&
-      receipt.volumeUid === process.env.OCE_CODEX_OAUTH_VOLUME_UID &&
-      typeof receipt.sourceUid === "string" && typeof receipt.volumeUid === "string" &&
-      auth.auth_mode === "chatgpt" &&
-      [auth.tokens?.id_token, auth.tokens?.access_token, auth.tokens?.refresh_token]
-        .every((value) => typeof value === "string" && value.trim().length > 0);
-    login = { status: valid ? 0 : 1 };
+    const account = JSON.parse(externalAccount);
+    if (!account || !nonempty(account.accountId) || !nonempty(account.planType) ||
+        (account.email !== undefined && !nonempty(account.email)) ||
+        (account.userId !== undefined && !nonempty(account.userId)) ||
+        (account.accountUserId !== undefined && !nonempty(account.accountUserId)) ||
+        (account.isFedramp !== undefined && typeof account.isFedramp !== "boolean")) {
+      throw new Error("Invalid external account metadata.");
+    }
+    // External custody can withhold material after withdrawal. Keep the failure
+    // observable without starting Codex or using authentication left by an earlier run.
+    if (accessToken === undefined) {
+      externalAuthenticationUnavailable = true;
+      throw new Error("External authentication material is unavailable.");
+    }
+    // The trusted egress layer owns the real tokens. This JWT carries local metadata only;
+    // keep its access placeholder byte-for-byte so the provider can recognize and replace it.
+    const claims = {
+      email: account.email,
+      "https://api.openai.com/auth": {
+        chatgpt_account_id: account.accountId,
+        chatgpt_plan_type: account.planType,
+        chatgpt_user_id: account.userId,
+        chatgpt_account_is_fedramp: account.isFedramp ?? false,
+      },
+    };
+    const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const auth = {
+      auth_mode: "chatgptAuthTokens",
+      OPENAI_API_KEY: null,
+      tokens: {
+        id_token: encode({ alg: "none", typ: "JWT" }) + "." + encode(claims) + ".placeholder",
+        access_token: accessToken,
+        refresh_token: "",
+        account_id: account.accountId,
+      },
+      last_refresh: new Date().toISOString(),
+    };
+    temporary = mkdtempSync(process.env.CODEX_HOME + "/.external-auth-");
+    fs.writeFileSync(temporary + "/auth.json", JSON.stringify(auth), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary + "/auth.json", process.env.CODEX_HOME + "/auth.json");
+    login = { status: 0 };
   } catch {
     login = { status: 1 };
+  } finally {
+    if (temporary !== undefined) rmSync(temporary, { recursive: true, force: true });
   }
 } else {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -3474,11 +3444,13 @@ logStartupPhase("codex-login", loginStartedAt, login.status !== 0 || login.error
 if (login.status !== 0 || login.error) {
   holdFailedAuthentication(
     "login",
-    login.error === undefined && codexAuthenticationRejected(login.stderr) ? "AUTHENTICATION_FAILED" : "LOGIN_FAILED",
+    externalAuthenticationUnavailable || (login.error === undefined && codexAuthenticationRejected(login.stderr))
+      ? "AUTHENTICATION_FAILED" : "LOGIN_FAILED",
   );
 } else {
 delete process.env.CODEX_ACCESS_TOKEN;
 delete process.env.OPENAI_API_KEY;
+delete process.env.OCE_CODEX_CHATGPT_ACCOUNT;
 
 // Codex reports an in-turn stream retry as a top-level error before retrying the
 // same sampling request. Only that exact transient shape, within Codex's small
@@ -3500,8 +3472,38 @@ function codexRateLimited(message) {
   return typeof message === "string" &&
     /too many requests|\bstatus:? 429\b|rate[ _-]?limit|usage[ _-]?limit|spend cap|insufficient_quota|exceeded your current quota|(?<!disk )quota exceeded/i.test(message);
 }
+// A provider 5xx, overload or server error, or a dropped stream or connection can
+// pass on its own, so the startup probe tries such a failure once more. A rate limit,
+// a credential marker or a Reconnecting notice the recovered-stream rule refused, except
+// Codex's network wait, is never transient: the provider account or the event shape
+// failed, not the transport. The pinned Codex reports each failed connection to an
+// unreachable provider as exactly CODEX_NETWORK_WAIT and keeps waiting, so that attempt
+// runs to its timeout and the notice is its transient failure. A network wait with any
+// other cause is held: a later Codex that names the cause could name a permanent one.
+// Nor is any provider 4xx, whatever its body says: the request itself was refused.
+// Codex prints a 400 as its bare body, so an invalid_request_error body counts as one.
+// Codex reports a content-filter stop, a host name its musl resolver cannot resolve
+// and a rejected certificate (also one a proxy's 5xx names) as a dropped stream or
+// error; they fail the same way again. Codex's HTTP client prints a failed connection
+// as "error sending request" without its cause, so a DNS or TLS failure it reports
+// only that way cannot be told from a dropped connection and keeps its retry.
+const CODEX_NETWORK_WAIT = "Reconnecting... waiting for network (Connection failed: error sending request)";
+function codexTransientFailure(message, summary) {
+  if (typeof message !== "string" || codexRateLimited(message) ||
+    /auth|unauthori[sz]ed|forbidden|credential|api.?key|\b40[13]\b/i.test(message) ||
+    (/Reconnecting\.\.\./i.test(message) && message !== CODEX_NETWORK_WAIT)) return false;
+  if (summary.providerStatus >= 400 && summary.providerStatus < 500) return false;
+  if (/invalid_request_error|content_filter|certificate|Name does not resolve|Name has no usable address/i.test(message)) return false;
+  return summary.providerStatus >= 500 ||
+    /server_error|overloaded|at capacity|high demand|stream disconnected|error sending request|connection (?:failed|reset|refused|closed)|broken pipe/i.test(message);
+}
 function codexProbeStatusFailure(message, detail) {
-  return { ...probeFailure("PROBE_STATUS", codexRateLimited(message) ? "rate_limit" : detail), ...providerErrorSummary(message) };
+  const summary = providerErrorSummary(message);
+  return {
+    ...probeFailure("PROBE_STATUS", codexRateLimited(message) ? "rate_limit" : detail),
+    ...summary,
+    ...(codexTransientFailure(message, summary) ? { transient: true } : {}),
+  };
 }
 
 function probeCodexAuthentication(timeout) {
@@ -3585,8 +3587,22 @@ function probeCodexAuthentication(timeout) {
     let turnStarted = false;
     let turnCompleted = false;
     let recoveredStreamErrors = 0;
+    // A transient failure is only a retry candidate: a later deterministic failure in
+    // the same attempt (a tool event, a rate limit) still holds at once. A transient
+    // message is never a recovered stream notice, so no recovered stream error lands here.
+    // Codex reconnects after a network wait on its own, so a network wait inside the turn
+    // of an attempt that exits 0 with an answer counts as recovered, like a stream notice.
+    let transientFailure;
+    let unrecoveredTransientFailure = false;
     for (const event of events) {
       if (event.type === "turn.started") turnStarted = true;
+      const failure = event.type === "error" ? codexProbeStatusFailure(event.message, "error-event")
+        : event.type === "turn.failed" ? codexProbeStatusFailure(event.error?.message, "turn-failed") : undefined;
+      if (failure?.transient === true) {
+        transientFailure ??= failure;
+        if (event.type !== "error" || event.message !== CODEX_NETWORK_WAIT || !turnStarted) unrecoveredTransientFailure = true;
+        continue;
+      }
       if (event.type === "error") {
         if (!turnStarted || turnCompleted || !isRecoveredNativeStreamError(event) ||
           ++recoveredStreamErrors > MAX_RECOVERED_STREAM_RETRIES) return finish(codexProbeStatusFailure(event.message, "error-event"));
@@ -3599,16 +3615,21 @@ function probeCodexAuthentication(timeout) {
       }
       if (event.type === "turn.completed") turnCompleted = true;
     }
-    // A timeout cannot make an observed tool call or protocol failure retryable.
-    if (result.error?.code === "ETIMEDOUT") return finish("MODEL_PROBE_TIMEOUT");
-    if (result.status !== 0 || result.error) return finish(probeExitFailure(result));
-    return finish(events.filter((event) => event.type === "turn.completed").length === 1 &&
+    const answered = events.filter((event) => event.type === "turn.completed").length === 1 &&
       events.filter((event) => event.type === "turn.started").length === 1 &&
       events.at(-1)?.type === "turn.completed" &&
       events.some((event) => event.type === "item.completed" && event.item?.type === "agent_message" &&
-        typeof event.item.text === "string" && event.item.text.trim().length > 0)
-        ? undefined
-        : probeFailure("PROBE_STATUS", "no-reply"));
+        typeof event.item.text === "string" && event.item.text.trim().length > 0);
+    if (transientFailure !== undefined &&
+      (unrecoveredTransientFailure || !answered || result.status !== 0 || result.error)) return finish(transientFailure);
+    // A timeout cannot make an observed tool call or protocol failure retryable.
+    if (result.error?.code === "ETIMEDOUT") return finish("MODEL_PROBE_TIMEOUT");
+    // A probe killed from outside (not by its own timeout) may pass on a second try.
+    if (result.status !== 0 || result.error) {
+      const exit = probeExitFailure(result);
+      return finish(result.error === undefined && ["SIGKILL", "SIGTERM"].includes(result.signal) ? { ...exit, transient: true } : exit);
+    }
+    return finish(answered ? undefined : probeFailure("PROBE_STATUS", "no-reply"));
   } catch {
     return finish(probeFailure("WRAPPER_ERROR"));
   } finally {
@@ -3643,9 +3664,18 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     setTimeout(() => startAuthenticatedCodex(2, deadline), 1000);
     return;
   }
+  // A transient failure gets the same single retry; every other failure is
+  // deterministic and held at once.
+  if (result.transient === true && attempt === 1 && performance.now() + 1000 < deadline) {
+    setTimeout(() => startAuthenticatedCodex(2, deadline), 1000);
+    return;
+  }
   if (result.code !== undefined) {
     logStartupPhase("model-probe", modelProbeStartedAt, "failed");
-    holdFailedAuthentication("model-probe", result.code, result.cause);
+    // The held cause is the last attempt's, and its detail says the check was retried.
+    holdFailedAuthentication("model-probe", result.code, attempt > 1 && result.cause?.detail !== undefined
+      ? { ...result.cause, detail: result.cause.detail + "-attempt" + attempt }
+      : result.cause);
     return;
   }
   logStartupPhase("model-probe", modelProbeStartedAt);
@@ -3703,7 +3733,7 @@ const child = spawn(
     "shell_environment_policy.experimental_use_profile=false",
     "-c",
     "shell_environment_policy.set.PATH=" + JSON.stringify(process.env.PATH ?? ""),
-    ...(loginMode === "oauth" ? ["-c", "cli_auth_credentials_store=file"] : []),
+    ...(loginMode === "chatgptAuthTokens" || providerManagedPat ? ["-c", "cli_auth_credentials_store=file"] : []),
     "app-server",
     "--listen",
     "ws://0.0.0.0:" + process.env.APP_SERVER_PORT,
@@ -4050,21 +4080,27 @@ const { execFile, spawn } = require("node:child_process");
 const { createServer: readinessCreateServer } = require("node:http");
 ${WORKSPACE_ASSET_HELPERS}
 ${RUNTIME_READINESS_SERVER_HELPER}
+${RUNTIME_STATUS_CONSTANTS_HELPER}
+${HELD_RUNTIME_FAILURE_TRANSPORT_HELPER}
 
+// The Compute-owned worker publishes readiness only; a provider-owned worker
+// (APP_TOKEN_SHA and APP_SERVER_PORT, no status port) serves a held model-check
+// failure on the Harness port, as the provider-owned Codex Harness does, so the
+// revision fails with that code instead of waiting for a node that never connects.
 function publishRuntimeFailure() {}
-function serveHeldRuntimeFailureToTransportPeer() {}
 ${OPENCLAW_AUTH_PROBE_HELPERS}
 
 const inferenceConfig = process.env.OPENCLAW_NATIVE_INFERENCE_CONFIG;
 const state = process.env.OPENCLAW_NODE_STATE_DIR;
 const setupCode = process.env.OPENCLAW_NODE_SETUP_CODE;
+const setupEnvelopePath = process.env.OPENCLAW_NODE_SETUP_ENVELOPE;
 const workspace = process.env.OPENCLAW_WORKSPACE_DIR;
 const temporary = process.env.TMPDIR;
 const workerCapacity = Number(process.env.OPENCLAW_NATIVE_WORKER_CAPACITY);
 if (
   !inferenceConfig ||
   !state ||
-  !setupCode ||
+  [Boolean(setupCode), Boolean(setupEnvelopePath)].filter(Boolean).length !== 1 ||
   !workspace?.startsWith("/") ||
   !temporary ||
   !Number.isSafeInteger(workerCapacity) ||
@@ -4106,7 +4142,11 @@ function nativeWorkerReady() {
   });
 }
 
-startRuntimeReadinessServer(nativeWorkerReady);
+// Compute-owned Pods use this private probe; Sandbox providers own their readiness
+// and intentionally receive no Compute status endpoint configuration.
+if (process.env.OPENCLAW_RUNTIME_STATUS_PORT !== undefined) {
+  startRuntimeReadinessServer(nativeWorkerReady);
+}
 mkdirSync(temporary, { recursive: true, mode: 0o700 });
 chmodSync(temporary, 0o700);
 initializeRuntimeAssets();
@@ -4140,20 +4180,25 @@ const nodeEnv = {
   OPENCLAW_STATE_DIR: state,
   OPENCLAW_CONFIG_PATH: workerConfigPath,
 };
-if (process.env.OPENCLAW_NODE_CA_PEM) {
+const gatewayCa = process.env.OPENCLAW_NODE_CA_PEM || (
+  process.env.OPENCLAW_NODE_CA_PATH
+    ? readFileSync(process.env.OPENCLAW_NODE_CA_PATH, "utf8")
+    : undefined
+);
+if (gatewayCa) {
   const caPath = join(state, "gateway-ca.pem");
+  // The node needs both Gateway trust and the Sandbox's model-egress trust.
   const inheritedCa = process.env.NODE_EXTRA_CA_CERTS
     ? readFileSync(process.env.NODE_EXTRA_CA_CERTS, "utf8")
     : "";
-  writeFileSync(
-    caPath,
-    [inheritedCa, process.env.OPENCLAW_NODE_CA_PEM].filter(Boolean).join("\n"),
-    { mode: 0o600 },
-  );
+  writeFileSync(caPath, [inheritedCa, gatewayCa].filter(Boolean).join("\n"), { mode: 0o600 });
   nodeEnv.NODE_EXTRA_CA_CERTS = caPath;
 }
+// Provider files carry the exact revision's setup envelope. Convert it to the
+// private one-shot target file consumed by connect, without exposing it in argv.
+const target = setupCode ?? Buffer.from(readFileSync(setupEnvelopePath, "utf8")).toString("base64url");
 const connectTargetPath = join(state, "connect-target");
-writeFileSync(connectTargetPath, setupCode, { mode: 0o600 });
+writeFileSync(connectTargetPath, target, { mode: 0o600 });
 const child = spawn(
   process.execPath,
   [

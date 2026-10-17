@@ -7,6 +7,7 @@ const createdAt = "2026-09-01T12:00:00.000Z";
 const namespaceId = "ns_00000000-0000-4000-8000-000000000001";
 const currentRevisionId = "rev_00000000-0000-4000-8000-000000000006";
 const candidateRevisionId = "rev_00000000-0000-4000-8000-000000000007";
+const hiddenRevisionId = "rev_00000000-0000-4000-8000-000000000008";
 const secretRef = (id) => ({ kind: "secret", namespaceId, id });
 const auth = { method: "api_key", source: secretRef("sec_demo_model") };
 const networkPolicyHash = "a".repeat(64);
@@ -44,6 +45,25 @@ function initialDeploymentProgress(status) {
     return null;
   }
   return { lastAttempt: null, nextAttemptAt: status === "queued" ? createdAt : null };
+}
+
+// Another browser's save in configurationChangedElsewhere: objects merge, other values replace.
+function mergeElsewhere(target, changes) {
+  for (const [key, value] of Object.entries(changes)) {
+    const current = target[key];
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      current !== null &&
+      typeof current === "object" &&
+      !Array.isArray(current)
+    ) {
+      mergeElsewhere(current, value);
+    } else {
+      target[key] = structuredClone(value);
+    }
+  }
 }
 
 function slackChannels(scenario) {
@@ -145,10 +165,25 @@ function candidateDeploymentError(scenario, checkedAt) {
       },
     };
   }
+  if (scenario.candidateSuperseded) {
+    return {
+      code: "REVISION_SUPERSEDED",
+      message: "Deployment was superseded by a newer revision.",
+    };
+  }
+  if (scenario.candidateStopped) {
+    return {
+      code: "REVISION_STOPPED",
+      message: "Deployment ended because the Agent was stopped.",
+    };
+  }
+  // Deployment error messages copy deploymentErrorMessage in
+  // packages/occ/src/state/controller-work.ts; keep them in step.
   if (scenario.candidateModelProbeCause) {
     return {
       code: "RUNTIME_MODEL_PROBE_FAILED",
-      message: "Deployment runtime startup model check failed.",
+      message:
+        "The startup model check failed for a reason other than a rejected credential, such as an unknown model, invalid provider settings, a provider or TLS error, a rate limit or quota, or, with Codex, a provider the runtime cannot reach. Check the model and its provider settings (such as baseUrl and api) in the Configuration, the provider account, and that the runtime can reach the provider, then deploy a new version.",
       data: {
         runtimeFailure: {
           component: "gateway",
@@ -168,7 +203,8 @@ function candidateDeploymentError(scenario, checkedAt) {
   }
   return {
     code: "CONVERGENCE_DEADLINE_EXCEEDED",
-    message: "Deployment convergence deadline exceeded.",
+    message:
+      "Deployment convergence deadline exceeded: the version did not become ready in time. Check its logs and runtime diagnostics, correct the cause if there is one, then deploy a new version.",
     data: {
       timeoutMs: 60000,
       runtimeFailure: { component: "harness", check: "readiness", code: "TIMEOUT", checkedAt },
@@ -192,11 +228,15 @@ export function installFixture(scenario, evidence) {
   const nextId = (prefix) =>
     `${prefix}_00000000-0000-4000-8000-${String(serial++).padStart(12, "0")}`;
   const configs = new Map();
+  const configurationReads = new Set();
+  let configurationChangedElsewhere = false;
   const agents = new Map();
   const revisions = new Map();
   const deployments = new Map();
   const provisioning = new Map();
   const credentials = new Map();
+  const credentialSources = new Map();
+  let credentialRegistrationFailed = false;
   const deviceLogins = new Map();
   const files = new Map();
   const secrets = new Map();
@@ -204,6 +244,7 @@ export function installFixture(scenario, evidence) {
   const roles = [];
   const bindings = [];
   const deleted = new Set();
+  const clearRevisionOnRead = new Set();
   const session = {
     authenticated: true,
     sessionKey: "storybook-session",
@@ -285,10 +326,13 @@ export function installFixture(scenario, evidence) {
           : scenario.auth === "codex_pat"
             ? { method: "codex_pat", source: secretRef("sec_demo_service_account") }
             : scenario.auth === "oauth"
-              ? { method: "oauth", source: secretRef("sec_demo_oauth_deployed") }
+              ? { method: "credential_source", sourceId: "cs_00000000-0000-4000-8000-000000000010" }
               : auth;
   let selectedRevisionId = null;
-  if (scenario.candidateDeploymentStatus) {
+  if (scenario.candidateSuperseded) {
+    // A newer v8 the viewer cannot read superseded v7 and is now selected.
+    selectedRevisionId = hiddenRevisionId;
+  } else if (scenario.candidateDeploymentStatus) {
     selectedRevisionId =
       scenario.candidateDeploymentStatus === "succeeded" || scenario.candidateSelected
         ? candidateRevisionId
@@ -305,6 +349,10 @@ export function installFixture(scenario, evidence) {
     configurationId: config.id,
     executionMode: "dedicated",
     harnessAuth: selectedAuth,
+    credentialSources: structuredClone(
+      scenario.credentialSources ??
+        (selectedAuth?.method === "credential_source" ? [{ sourceId: selectedAuth.sourceId }] : []),
+    ),
     ...(scenario.agentPlugins ? { plugins: structuredClone(scenario.agentPlugins) } : {}),
     ...(scenario.agentPluginApprovers !== undefined
       ? { pluginApprovers: structuredClone(scenario.agentPluginApprovers) }
@@ -345,6 +393,7 @@ export function installFixture(scenario, evidence) {
       configuration: structuredClone(configuration.values),
       secretBindings: structuredClone(configuration.secretBindings),
       harnessAuth: structuredClone(owner.harnessAuth),
+      credentialSources: structuredClone(owner.credentialSources),
       ...(owner.pluginApprovers !== undefined
         ? { pluginApprovers: structuredClone(owner.pluginApprovers) }
         : {}),
@@ -581,7 +630,7 @@ export function installFixture(scenario, evidence) {
       });
     }
   }
-  const response = (data, status = 200, errorCode, meta = {}, errorMessage) =>
+  const response = (data, status = 200, errorCode, meta = {}, errorMessage, details) =>
     new Response(
       JSON.stringify({
         ...(errorCode
@@ -589,6 +638,7 @@ export function installFixture(scenario, evidence) {
               error: {
                 code: errorCode,
                 message: errorMessage ?? "The selected preview simulates this failure.",
+                ...(details ? { details } : {}),
               },
             }
           : { data }),
@@ -609,7 +659,9 @@ export function installFixture(scenario, evidence) {
         (rule.method ?? "GET") !== method ||
         (rule.path && rule.path !== path) ||
         (rule.prefix && !path.startsWith(rule.prefix)) ||
+        (rule.pathIncludes && !path.includes(rule.pathIncludes)) ||
         (rule.suffix && !path.endsWith(rule.suffix)) ||
+        (rule.queryParam && !url.searchParams.has(rule.queryParam)) ||
         (rule.bodyHasIds !== undefined && rule.bodyHasIds !== Array.isArray(body.ids))
       ) {
         continue;
@@ -662,7 +714,10 @@ export function installFixture(scenario, evidence) {
         );
       }
       if (rule.status) {
-        return error(rule.status, rule.code, rule.message);
+        return response(null, rule.status, rule.code, {}, rule.message, rule.details);
+      }
+      if (rule.data !== undefined) {
+        return response(rule.data);
       }
     }
     if (path === "/api/auth/providers" && method === "GET") {
@@ -708,8 +763,19 @@ export function installFixture(scenario, evidence) {
           ...(scenario.unsupportedProvisioning === true
             ? {}
             : { agentProvisioning: { executionModes: ["dedicated"] } }),
-          ...(scenario.nativeWorkerSupport
-            ? { nativeWorkers: { support: scenario.nativeWorkerSupport } }
+          ...(scenario.nativeWorkerSupport === false
+            ? {}
+            : { nativeWorkers: { support: scenario.nativeWorkerSupport ?? "pinned-runtime" } }),
+          ...(scenario.openclawExecutionModes === undefined
+            ? {}
+            : {
+                openclaw: {
+                  executionModes: scenario.openclawExecutionModes,
+                  ...(scenario.sandboxDriverUnavailable ? { sandboxDriverUnavailable: true } : {}),
+                },
+              }),
+          ...(scenario.credentialSourceTypes !== undefined
+            ? { credentialSources: { types: scenario.credentialSourceTypes } }
             : {}),
           ...(scenario.pluginCapabilities ? { pluginPolicies: scenario.pluginCapabilities } : {}),
           ...(scenario.pluginDiscoveryCredential
@@ -741,20 +807,16 @@ export function installFixture(scenario, evidence) {
       if (deviceLogin) {
         const [, id, poll] = deviceLogin;
         if (!id && method === "POST") {
-          const source = secretRef(nextId("sec"));
+          const session = secretRef(nextId("sec"));
           const login = {
-            source,
+            session,
             status: "pending",
             verificationUrl: "https://auth.openai.com/codex/device",
             userCode: "DEMO-1234",
             expiresAt: new Date(Date.now() + (scenario.oauthExpired ? -1 : 600_000)).toISOString(),
             intervalSeconds: 1,
           };
-          deviceLogins.set(source.id, login);
-          secrets.set(
-            source.id,
-            secretMetadata(source.id, "Codex OAuth login (Experimental, simulated)"),
-          );
+          deviceLogins.set(session.id, login);
           return response(login);
         }
         const login = deviceLogins.get(id);
@@ -764,6 +826,7 @@ export function installFixture(scenario, evidence) {
         if (poll && method === "POST") {
           if (!scenario.oauthPending) {
             login.status = "ready";
+            login.source ??= { kind: "credential_source", namespaceId, id: nextId("cs") };
           }
           return response(login);
         }
@@ -909,6 +972,47 @@ export function installFixture(scenario, evidence) {
           complete: !nextCursor,
         });
       }
+      if (resource === "credential-sources") {
+        if (method === "GET") {
+          return response([...credentialSources.values()]);
+        }
+        if (method === "POST") {
+          const uncertain = scenario.credentialRegistrationOutcome && !credentialRegistrationFailed;
+          const saved = {
+            ...body,
+            id: nextId("csr"),
+            namespaceId,
+            driverId: "credential-gateway-storybook",
+            state:
+              uncertain && scenario.credentialRegistrationOutcome === "deleting"
+                ? "deleting"
+                : "ready",
+            createdAt,
+          };
+          credentialSources.set(saved.id, saved);
+          if (uncertain) {
+            // Preserve the server-owned registration after an uncertain response;
+            // recovery operates on the saved source, never another model Secret.
+            credentialRegistrationFailed = true;
+            return error(503, "DEPENDENCY_UNAVAILABLE");
+          }
+          return response(saved, 201);
+        }
+      }
+      if (resource.startsWith("credential-sources/")) {
+        const id = resource.split("/")[1];
+        const source = credentialSources.get(id);
+        if (!source) {
+          return error(404, "NOT_FOUND");
+        }
+        if (method === "GET") {
+          return response(source);
+        }
+        if (method === "DELETE") {
+          credentialSources.delete(id);
+          return new Response(null, { status: 204 });
+        }
+      }
       if (resource === "configurations" && method === "POST") {
         const saved = {
           ...body,
@@ -926,12 +1030,25 @@ export function installFixture(scenario, evidence) {
           return error(404);
         }
         if (method === "GET") {
+          // Another browser saves this Configuration once the page has read it
+          // (configurationChangedElsewhere), so the next save preflight finds a newer generation.
+          if (scenario.configurationChangedElsewhere && !configurationChangedElsewhere) {
+            if (configurationReads.has(saved.id)) {
+              configurationChangedElsewhere = true;
+              saved.generation += 1;
+              mergeElsewhere(saved.values, scenario.configurationChangedElsewhere.values ?? {});
+            }
+            configurationReads.add(saved.id);
+          }
           return response(saved);
         }
         if (method === "PATCH") {
           Object.assign(saved, body, { generation: saved.generation + 1 });
           return response(saved);
         }
+      }
+      if (resource === "permissions" && method === "GET") {
+        return response({ agents: { create: !scenario.readOnlyPermissionSummary } });
       }
       if (resource === "agents") {
         if (method === "GET") {
@@ -986,27 +1103,52 @@ export function installFixture(scenario, evidence) {
           createdAt,
           activeRevisionId: null,
           servicePrincipalId: "identity_demo_provisioned",
+          ...(agentBody.harnessAuth?.method === "credential_source"
+            ? { credentialSources: [{ sourceId: agentBody.harnessAuth.sourceId }] }
+            : {}),
         };
         agents.set(saved.id, saved);
         credentials.set(saved.id, { transportConfigured: true });
         for (const [filename, content] of Object.entries(initialWorkspaceFiles)) {
           files.set(`${saved.id}/${filename}`, content);
         }
-        const revision = snapshot(saved, nextId("rev"), 1);
-        revisions.set(revision.id, revision);
-        deployments.set(revision.id, {
-          deploymentId: revision.id,
-          namespaceId,
-          agentId: saved.id,
-          status: scenario.provisionedDeploymentStatus ?? "queued",
-          progress: initialDeploymentProgress(scenario.provisionedDeploymentStatus ?? "queued"),
-          reads: scenario.provisionedDeploymentStatus === undefined ? 0 : undefined,
-          error:
-            scenario.provisionedDeploymentStatus === "failed"
-              ? { code: "DEPENDENCY_UNAVAILABLE", message: "Deployment reconciliation failed." }
-              : null,
-          warnings: [],
-        });
+        // A Stop before the first revision cancels provisioning; the stopped Agent keeps its name.
+        const revision = scenario.provisioningCancelledByStop
+          ? null
+          : snapshot(saved, nextId("rev"), 1);
+        if (scenario.provisionedDeploymentStopped || scenario.provisioningCancelledByStop) {
+          saved.desiredRuntimeState = "stopped";
+        }
+        if (revision) {
+          revisions.set(revision.id, revision);
+          deployments.set(revision.id, {
+            deploymentId: revision.id,
+            namespaceId,
+            agentId: saved.id,
+            status: scenario.provisionedDeploymentStatus ?? "queued",
+            progress:
+              scenario.provisionedDeploymentAttempt === undefined
+                ? initialDeploymentProgress(scenario.provisionedDeploymentStatus ?? "queued")
+                : {
+                    lastAttempt: { at: createdAt, ...scenario.provisionedDeploymentAttempt },
+                    nextAttemptAt: createdAt,
+                  },
+            reads: scenario.provisionedDeploymentStatus === undefined ? 0 : undefined,
+            error:
+              scenario.provisionedDeploymentStatus !== "failed"
+                ? null
+                : scenario.provisionedDeploymentStopped
+                  ? {
+                      code: "REVISION_STOPPED",
+                      message: "Deployment ended because the Agent was stopped.",
+                    }
+                  : {
+                      code: "DEPENDENCY_UNAVAILABLE",
+                      message: "Deployment reconciliation failed.",
+                    },
+            warnings: [],
+          });
+        }
         provisioning.set(saved.id, {
           requestId,
           workId,
@@ -1014,7 +1156,7 @@ export function installFixture(scenario, evidence) {
           status: scenario.provisioningStatus ?? "queued",
           agentId: saved.id,
           configurationId: savedConfig.id,
-          revisionId: revision.id,
+          revisionId: revision?.id,
           url: `/namespaces/${namespaceId}/agents/provision/${workId}`,
         });
         provisioning.set(workId, provisioning.get(saved.id));
@@ -1063,7 +1205,8 @@ export function installFixture(scenario, evidence) {
               scenario.provisionedDeploymentStatus === "running"
                 ? "running"
                 : current.reads > 1
-                  ? scenario.provisionedDeploymentStatus === "failed"
+                  ? scenario.provisionedDeploymentStatus === "failed" ||
+                    scenario.provisioningCancelledByStop
                     ? "failed"
                     : "succeeded"
                   : "running";
@@ -1078,16 +1221,26 @@ export function installFixture(scenario, evidence) {
               url: current.url,
               ...(current.status === "failed"
                 ? {
-                    error: {
-                      code:
-                        scenario.provisionedDeploymentStatus === "failed"
-                          ? "HARNESS_CREDENTIAL_BOOTSTRAP_FAILED"
-                          : "PROVISIONING_FAILED",
-                      message:
-                        scenario.provisionedDeploymentStatus === "failed"
-                          ? "Harness credential initialization failed. Correct the cause and deploy again."
-                          : "The worker could not finish provisioning.",
-                    },
+                    error: scenario.provisioningCancelledByStop
+                      ? {
+                          code: "PROVISIONING_CANCELLED",
+                          message: "Provisioning was cancelled because the Agent was stopped.",
+                        }
+                      : scenario.provisionedDeploymentStopped
+                        ? {
+                            code: "REVISION_STOPPED",
+                            message: "The Agent was stopped before its first deployment finished.",
+                          }
+                        : {
+                            code:
+                              scenario.provisionedDeploymentStatus === "failed"
+                                ? "HARNESS_CREDENTIAL_BOOTSTRAP_FAILED"
+                                : "PROVISIONING_FAILED",
+                            message:
+                              scenario.provisionedDeploymentStatus === "failed"
+                                ? "Harness credential initialization failed. Correct the cause and deploy again."
+                                : "The worker could not finish provisioning.",
+                          },
                   }
                 : {}),
               ...(current.status === "succeeded" || current.reads > 1
@@ -1128,6 +1281,9 @@ export function installFixture(scenario, evidence) {
               agents.delete(id);
               return error(404);
             }
+            if (clearRevisionOnRead.delete(id)) {
+              saved.activeRevisionId = null;
+            }
             return response(saved);
           }
           if (method === "PATCH") {
@@ -1141,8 +1297,22 @@ export function installFixture(scenario, evidence) {
             return response(saved, 202);
           }
         }
+        if (suffix === "/permissions" && method === "GET") {
+          const allowed = !scenario.readOnlyPermissionSummary;
+          return response(
+            scenario.agentPermissionSummary ?? {
+              update: allowed,
+              deploy: allowed,
+              operate: allowed,
+              delete: allowed,
+            },
+          );
+        }
         if (suffix === "/stop" && method === "POST") {
           saved.desiredRuntimeState = "stopped";
+          if (scenario.clearRevisionOnStopReadback) {
+            clearRevisionOnRead.add(id);
+          }
           return response(saved, 202);
         }
         if (suffix === "/native-admin" && method === "GET") {
@@ -1819,7 +1989,9 @@ export function installFixture(scenario, evidence) {
           return response(
             scenario.emptySecrets
               ? []
-              : [...secrets.values()].map((secret) => structuredClone(secret)),
+              : [...secrets.values()]
+                  .filter(({ id }) => id !== scenario.unreadableSecretId)
+                  .map((secret) => structuredClone(secret)),
           );
         }
         if (method === "POST") {
@@ -1835,7 +2007,7 @@ export function installFixture(scenario, evidence) {
       if (resource.startsWith("secrets/")) {
         const id = resource.split("/")[1];
         const secret = secrets.get(id);
-        if (!secret) {
+        if (!secret || id === scenario.unreadableSecretId) {
           return error(404);
         }
         if (method === "GET") {

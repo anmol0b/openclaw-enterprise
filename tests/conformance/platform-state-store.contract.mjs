@@ -113,7 +113,11 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     },
     harnessAuth: { ...apiKeyBinding, secretDriverId: harnessSecret.driverId },
     harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
-    compute: { id: "compute-contract", implementation: "deterministic-contract" },
+    compute: {
+      id: "compute-contract",
+      implementation: "deterministic-contract",
+      admission: `driver-state:v1:${"a".repeat(64)}`,
+    },
     servicePrincipalId: agent.servicePrincipalId,
     createdAt: new Date().toISOString(),
   };
@@ -148,6 +152,25 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     await transaction.audit.append(audit);
     await transaction.operations.append(operation);
   });
+
+  for (const admission of ["", "a".repeat(1025), "bad\nvalue"]) {
+    await assert.rejects(
+      store.transact((transaction) =>
+        transaction.revisions.createRevision({
+          ...revision,
+          id: identifier("rev"),
+          revision: 2,
+          compute: { ...revision.compute, admission },
+        }),
+      ),
+      storeRefusal(
+        "ScopeViolationError",
+        "An AgentRevision requires valid Configuration metadata, a native document, and pinned Harness and Compute descriptors.",
+        postgresOwnershipViolation,
+      ),
+      "malformed Compute admission must be rejected",
+    );
+  }
 
   // The draft binding and the pending deployment both reference the key: one Agent entry.
   await store.read(async (state) => {
@@ -2812,4 +2835,58 @@ async function verifyCredentialSourceContract(
       false,
     );
   });
+
+  // External auth snapshots retain a source reference and login mode, never workload metadata.
+  const externalSource = {
+    ...source,
+    id: identifier("cs"),
+    name: "External ChatGPT " + randomUUID(),
+    type: "chatgpt",
+    config: {},
+    secrets: {},
+  };
+  const externalAgent = {
+    ...sourceAgent,
+    id: identifier("agt"),
+    name: "External ChatGPT agent " + randomUUID(),
+    servicePrincipalId: identifier("service-agent"),
+    executionMode: "dedicated",
+    harnessAuth: { method: "credential_source", sourceId: externalSource.id },
+    credentialSources: [{ sourceId: externalSource.id }],
+  };
+  const externalRevision = {
+    ...sourceRevision,
+    id: identifier("rev"),
+    agentId: externalAgent.id,
+    servicePrincipalId: externalAgent.servicePrincipalId,
+    harness: { id: "codex", version: "1.0.0", mode: "dedicated" },
+    sandboxDriverId: "sandbox-contract",
+    credentialSources: [
+      {
+        sourceId: externalSource.id,
+        credentialGatewayId: externalSource.driverId,
+        sourceType: externalSource.type,
+      },
+    ],
+    harnessAuth: {
+      ...externalAgent.harnessAuth,
+      credentialGatewayId: externalSource.driverId,
+      sourceType: externalSource.type,
+      loginMode: "chatgptAuthTokens",
+    },
+  };
+  await store.transact(async (transaction) => {
+    await transaction.credentialSources.createCredentialSource(externalSource);
+    await transaction.agents.createAgent(externalAgent);
+    assertCreatedRevision(
+      await transaction.revisions.createRevision(externalRevision),
+      externalRevision,
+    );
+  });
+  assert.deepEqual(
+    await store.read((state) =>
+      state.revisions.findRevision(sourceNamespace.id, externalAgent.id, externalRevision.id),
+    ),
+    externalRevision,
+  );
 }

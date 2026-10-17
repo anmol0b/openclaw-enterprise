@@ -689,7 +689,11 @@ test("OCC Fastify serves singleton, Namespace, Configuration, and Agent resource
 
   const singleton = await controller.request("GET", "/installation");
   assert.equal(singleton.status, 200);
-  assert.deepEqual(singleton.data, installation);
+  // No Sandbox Driver is selected: Embedded OpenClaw is the one mode admission accepts (#2670).
+  assert.deepEqual(singleton.data, {
+    ...installation,
+    capabilities: { openclaw: { executionModes: ["embedded"] } },
+  });
   const bootstrappedDefault = await defaultNamespace(controller);
 
   const namespace = await createNamespace(controller, "research");
@@ -825,7 +829,7 @@ test("OCC Fastify serves singleton, Namespace, Configuration, and Agent resource
   assert.equal(auditEndpoint.status, 404);
 
   const unchanged = await controller.request("GET", "/installation");
-  assert.deepEqual(unchanged.data, installation);
+  assert.deepEqual(unchanged.data, { ...installation, capabilities: singleton.data.capabilities });
 });
 
 test("Namespace IAM routes manage exact Role and AccessBinding policy through the selected Driver", async () => {
@@ -2089,6 +2093,7 @@ test("OCC rejects Namespace lifecycle Role Permissions before any IAM Driver or 
   const permissiveDriver = {
     id: "iam-permissive-role-sink",
     capability: "iam",
+    namespacePolicyTransaction: "platform-unit-of-work",
     implementation: "occ-permission-isolation-test",
     async lookupIdentity(input) {
       return input.issuer === fixture.principal.issuer &&
@@ -2372,7 +2377,7 @@ test("Namespace IAM read routes serialize broad native policy without widening m
   assert.equal(broadBindingCreate.body.error.code, "INVALID_REQUEST");
 });
 
-test("Namespace IAM routes fail closed without policy management and roll back audit failures", async () => {
+test("Namespace IAM routes fail closed without policy management and roll back audit failures", async (t) => {
   const unsupportedFixture = await createInjectedFixture();
   const unsupported = {
     request: (method, path, options) =>
@@ -2427,6 +2432,80 @@ test("Namespace IAM routes fail closed without policy management and roll back a
       unit.iamPolicy.listRoles(unsupportedNamespace.id),
     ),
     [],
+  );
+
+  // A Driver must declare transaction participation before any policy write.
+  // Keep the real native implementation; omit only its optional capability declaration.
+  const transactionFixture = await createInjectedFixture();
+  const transactional = {
+    request: (method, path, options) =>
+      injectedRequest(transactionFixture.app, method, path, options),
+  };
+  await bootstrap(transactional);
+  const transactionNamespace = await createNamespace(transactional, "undeclared-iam-transaction");
+  const policyPath = `/namespaces/${transactionNamespace.id}/iam`;
+  const namespaceRole = await transactional.request("POST", `${policyPath}/roles`, {
+    body: { permissions: [{ action: "read", resourceKind: "namespace" }] },
+  });
+  assert.equal(namespaceRole.status, 201);
+  const unusedRole = await transactional.request("POST", `${policyPath}/roles`, {
+    body: { permissions: [{ action: "read", resourceKind: "agent" }] },
+  });
+  assert.equal(unusedRole.status, 201);
+  const binding = {
+    subjectKind: "identity",
+    subjectId: transactionFixture.principal.id,
+    roleId: namespaceRole.data.id,
+    resourceKind: "namespace",
+    resourceId: transactionNamespace.id,
+  };
+  const existingBinding = await transactional.request("POST", `${policyPath}/access-bindings`, {
+    body: binding,
+  });
+  assert.equal(existingBinding.status, 201);
+  const policy = () =>
+    transactionFixture.platformState.read(async (unit) => ({
+      roles: await unit.iamPolicy.listRoles(transactionNamespace.id),
+      bindings: await unit.iamPolicy.listAccessBindings(transactionNamespace.id),
+      principals: await unit.iamPolicy.listServicePrincipals(transactionNamespace.id),
+    }));
+  const before = await policy();
+  const undeclared = new NativeIAMDriver(
+    { loadNativeIAMState: async () => transactionFixture.state },
+    { id: "iam-without-declared-transaction" },
+  );
+  delete undeclared.namespacePolicyTransaction;
+  transactionFixture.controller.registerDriver(undeclared);
+  transactionFixture.controller.selectDriver("iam", undeclared.id);
+  assert.equal((await transactional.request("GET", `${policyPath}/roles`)).status, 200);
+  const refusedStatuses = [];
+  for (const [method, path, body] of [
+    ["POST", `${policyPath}/roles`, { permissions: [{ action: "read", resourceKind: "agent" }] }],
+    ["DELETE", `${policyPath}/roles/${unusedRole.data.id}`],
+    ["POST", `${policyPath}/access-bindings`, binding],
+    ["DELETE", `${policyPath}/access-bindings/${existingBinding.data.id}`],
+    ["POST", `${policyPath}/service-principals`, {}],
+  ]) {
+    const refused = await transactional.request(method, path, body === undefined ? {} : { body });
+    assert.equal(refused.status, 503, `${method} ${path}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.body.error.code, "DEPENDENCY_UNAVAILABLE");
+    refusedStatuses.push(refused.status);
+    assert.deepEqual(await policy(), before);
+    const events = transactionFixture.auditSink.events;
+    assert.equal(
+      events.some(
+        (event) => event.requestId === refused.body.meta.requestId && event.kind === "mutation",
+      ),
+      false,
+    );
+  }
+  t.diagnostic(
+    JSON.stringify({
+      scenario: "transaction-capability-refusal",
+      statuses: refusedStatuses,
+      policyPreserved: true,
+      successAudit: 0,
+    }),
   );
 
   const rollbackFixture = await createInjectedFixture();
@@ -2751,7 +2830,12 @@ test("Installation API exposes Agent provisioning capabilities without configure
 
   const installation = await controller.request("GET", "/installation");
   assert.equal(installation.status, 200);
-  assert.deepEqual(installation.data.capabilities, bootstrapped.capabilities);
+  // Without a provisioning Sandbox Driver, dedicated OpenClaw cannot be admitted (finding 1608);
+  // without any Sandbox Driver, Embedded OpenClaw can (#2670). Bootstrap reports neither.
+  assert.deepEqual(installation.data.capabilities, {
+    ...bootstrapped.capabilities,
+    openclaw: { executionModes: ["embedded"] },
+  });
 
   const backends = await controller.request("GET", "/backends");
   assert.equal(backends.status, 200);
@@ -2820,7 +2904,9 @@ test("Agent deployment status polls the admitted revision work with exact read a
     cleanup: null,
     error: {
       code: "CONVERGENCE_DEADLINE_EXCEEDED",
-      message: "Deployment convergence deadline exceeded.",
+      // occ and HTTP clients print this message as is, so it names the next step (finding 1393).
+      message:
+        "Deployment convergence deadline exceeded: the version did not become ready in time. Check its logs and runtime diagnostics, correct the cause if there is one, then deploy a new version.",
       data: { timeoutMs: 900_000, runtimeFailure },
     },
     warnings: [],
@@ -2925,6 +3011,18 @@ test("a refused deployment's status names its cause and remedy without naming pr
       "A dependency the controller needs stayed unavailable through every attempt. Deploy again; if it keeps failing, ask an admin to check the controller worker log.",
     LEASE_EXPIRED:
       "The controller worker stopped or lost its claim during this deployment's last attempt. Deploy again.",
+    // Finding 1393: held runtime failures name the next step too, so occ and HTTP clients get
+    // the guidance the console used to add on its own.
+    RUNTIME_AUTHENTICATION_FAILED:
+      "The model provider rejected this version's credential (HTTP 401 or 403). Check that the key or token is valid and can use the selected model, update or replace the Agent's model credential, then deploy a new version.",
+    RUNTIME_CPU_STARVED:
+      "Deployment runtime did not get enough CPU to finish its startup model check, because of a CPU limit below one core or a busy node. Ask an admin to raise the limit or free node capacity, then deploy a new version.",
+    RUNTIME_MODEL_PROBE_TIMEOUT:
+      "The startup model check did not get a reply from the model provider in time. With OpenClaw this includes a provider the runtime cannot reach (refused connection or unknown host). Check that the runtime can reach the provider (network egress, proxy, or a custom baseUrl in the Configuration) and that the provider is responding, then deploy a new version.",
+    RUNTIME_LOGIN_FAILED:
+      "Deployment runtime could not sign in to the model provider. Check the Agent's model credential (for an OAuth login, sign in again) and that the runtime can reach the provider, then deploy a new version.",
+    RUNTIME_STARTUP_FAILED:
+      "Deployment runtime failed a startup check. Check this version's logs for the failed check and correct its cause, then deploy a new version.",
     // Internal inconsistencies keep the generic text.
     INVALID_REVISION_OWNER: "Deployment reconciliation failed.",
   };

@@ -15,32 +15,90 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
+## 2026-10-16: stored model provider settings are checked at deploy
+
+**What breaks.** On every Compute, deploying or redeploying an Agent runs the
+Configuration save's model provider rules on the stored Configuration. A
+Configuration an older build stored with a provider or model `baseUrl` that is
+not an absolute `http` or `https` URL (`ftp://models.example/v1`, `/v1`,
+`https:/v1`), an `api` the runtime does not support, or a header name that is
+not a valid HTTP field name used to deploy, and then failed at the model probe
+or not at all. Deployment now answers `400` and creates no revision, even for a
+provider the Agent does not use. A provisioning attempt queued before the
+upgrade is rejected without retry.
+
+**Who is affected.** Agents whose stored Configuration holds such a value.
+Header names were already checked at deploy on Kubernetes Compute.
+
+**How to tell.** The deploy `400` carries the save's message, such as
+`Configuration field /models/providers/<provider>/baseUrl must be an absolute http or https URL.`
+or `... must name a model API the runtime supports, ...`. A rejected queued
+attempt records `PROVISIONING_REJECTED` with the same message.
+
+**Steps.** Edit the Configuration: fix or remove the field the message names,
+save, and deploy again.
+
 ## 2026-10-14: OAuth2 token_url hosts must be DNS names
 
 **What breaks.** Creating an OpenShell `oauth2-client-credentials` or
 `oauth2-refresh-token` credential source refuses a `token_url` whose host is an
-IP address in any spelling (`10.0.0.5`, `0x7f000001`, `127.1`, `[::1]`) or a
-`localhost` name. The OpenShell gateway posts the source's client secret and
+IP address in any spelling (`10.0.0.5`, `0x7f000001`, `127.1`, `[::1]`), a
+`localhost` name, a name ending in `.localdomain`, `.localdomain4` or
+`.localdomain6`, or a single-label name (`keycloak`, `ip6-localhost`). Those
+are the shapes of the loopback, link-local and own-hostname aliases in the
+gateway Pod's `/etc/hosts`. The OpenShell gateway posts the source's client secret and
 refresh token to that URL from its own network position. A deployment that
 binds an existing source with such a `token_url` fails. Until it is deleted,
 the gateway keeps refreshing that source against the stored `token_url`, and
 rotating it does too. DNS names, including
 in-cluster Service names such as `keycloak.idp.svc.cluster.local`, stay
-accepted.
+accepted. Names that reach the gateway Pod itself are refused too: a Pod DNS
+name (`10-42-0-5.idp.pod.cluster.local`), also with extra leading labels or
+without the cluster domain (`x.10-42-0-5.idp.pod`), and, when the OpenShell Backend's
+`endpoint` or `serviceName` names the gateway's namespace, any name in that
+namespace (`openshell-gateway.openshell-system.svc`,
+`openshell-gateway-0.openshell-gateway-peer`, `grpc.tcp.openshell-gateway`). OCC now stores `token_url` in
+normalized form (`https://Login.Example.test:443/token` becomes
+`https://login.example.test/token`). A `bearer-token` or OAuth2 `host` ending in a
+numeric or `0x` label (`0x7f.0x1`, `example.123`) is refused like an IP address.
 
 **Who is affected.** Installations with OAuth2 credential sources whose issuer
-is addressed by IP address or `localhost`.
+is addressed by IP address, a `localhost` name, a single-label name, a Pod DNS
+name, or a name in the OpenShell gateway's namespace, and `bearer-token` or
+OAuth2 sources whose `host` ends in a numeric or `0x` label.
 
 **How to tell.** Creation returns `400` for `/config/token_url` with `... token_url
-host must be an exact DNS name, not an IP address or localhost.` A deployment
-that binds such a source fails with the same message. `GET` on the source shows
-its stored `config.token_url`.
+host must be a DNS name with at least two labels, not an IP address or a
+localhost or localdomain name.` or `... token_url host must not be a Kubernetes
+Pod name or a name in the OpenShell gateway's namespace.` A deployment that binds such a source fails with the same
+message, or with `... token_url port must be 1 to 65535.` for a stored port `0`. `GET` on the source shows
+its stored `config.token_url`. Creation with such a `host` returns `400` for
+`/config/host` with `... host must be an exact DNS name.`, and deploying or
+updating the value of a stored source with such a `host` fails with the same
+message.
+
+To find affected sources before upgrading, print every source's `token_url`
+and `host` with the [CLI](../../reference/cli.md) and `jq`, as an account that
+can read every Namespace and credential source (lists return only readable ones):
+
+```sh
+for ns in $(occ namespace list -o json | jq -r '.[].id'); do
+  occ credential-source list --namespace "$ns" -o json | jq -r '.[]
+    | select(.config.token_url or .config.host)
+    | [.namespaceId, .id, .type, .config.token_url // "-", .config.host // "-"]
+    | @tsv'
+done
+```
+
+Compare each host with the shapes under **What breaks**. This was checked
+against the CLI and the list response shape, not a live Installation.
 
 **Steps.** _untested_ against a live Installation:
 
-1. Give the issuer a DNS name its TLS certificate covers, such as its Service
-   name.
-2. Register a replacement source with that `token_url`.
+1. Give the issuer (or, for a `host`, the protected API) a DNS name its TLS
+   certificate covers, such as its Service name with its Namespace
+   (`keycloak.idp.svc.cluster.local`).
+2. Register a replacement source with that `token_url` or `host`.
 3. For each Agent bound to the old source, grant its service principal
    `operate` on the replacement, list the replacement in `credentialSources`
    instead of the old source, and deploy.
@@ -245,44 +303,3 @@ or `Channel proxy URL host must not be an unspecified or IPv4-mapped IPv6 addres
 **Steps.** Write the proxy's own address, an IPv4 host as four decimal octets
 (`127.0.0.1` for `0177.0.0.1`, `10.42.0.15` for `[::ffff:10.42.0.15]`), and
 restart.
-
-## 2026-10-13: shorthand observability IPv4 hosts are refused
-
-**What breaks.** An observability URL whose IPv4 host is not four decimal
-octets from 0 to 255, with no leading zeros, is refused. Shorthand, hex, a
-single integer, and leading zeros used to be stored as a different address
-(`192.168.1` became `192.168.0.1`; `2130706433` became `127.0.0.1`).
-
-**Who is affected.** Profiles with `controlPlane.observabilityUrl`, and
-Installations whose startup `observability.url` uses one of those spellings.
-A canonical host such as `192.168.1.1`, and any DNS name, still loads.
-
-**How to tell.** The profile reports `controlPlane.observabilityUrl IPv4 host
-must be four decimal octets from 0 to 255 with no leading zeros; other
-spellings parse as a different address.` API and worker startup log
-`OBSERVABILITY_URL_INVALID`.
-
-**Steps.** Write the four decimal octets you mean, then render or restart.
-
-## 2026-10-13: IP database hosts are verified against the certificate
-
-**What breaks.** A PostgreSQL URL whose host is an IP literal and whose TLS
-mode verifies the server (`sslmode=verify-full`; without `uselibpqcompat=true`
-also `prefer`, `require` and `verify-ca`; or `PGSSLMODE` set to one of those)
-now requires the server certificate to list that IP as an IP subjectAltName, as
-libpq does. Before, the check ran against the name `localhost`, so any
-certificate for `localhost` signed by the database CA was accepted.
-
-**Who is affected.** Installations that reach PostgreSQL by IP with a
-certificate issued only for DNS names. DNS hosts, Unix sockets,
-`sslmode=disable`, `no-verify`, and libpq-compatible `prefer`, `require` and
-`verify-ca` are unchanged.
-
-**How to tell.** The API logs `startup-error` and the worker logs
-`worker.startup-error`, both with code `DATABASE_TLS_CERTIFICATE_INVALID` and
-reason `ERR_TLS_CERT_ALTNAME_INVALID`. Bootstrap logs `PERSISTENCE_UNAVAILABLE`
-and the migrator `MIGRATION_FAILED`.
-
-**Steps.** Reissue the server certificate with `IP:<address>` in its
-subjectAltName, or connect by a DNS name the certificate carries, then restart
-the API and worker.

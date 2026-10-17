@@ -13,6 +13,7 @@ export function bindPlatformUnitOfWork(
       "getInstallation",
       "createInstallation",
       "holdPrincipalAccount",
+      "holdAuthenticationSession",
     ]),
     namespaces: bindRepository(repositories.namespaces, lifetime, [
       "findNamespace",
@@ -153,6 +154,7 @@ export function bindPlatformUnitOfWork(
       "settleEffect",
       "cancel",
       "cancelByAgent",
+      "settleAbandonedEffect",
       "retryByWorkId",
       "releaseConfiguration",
     ]),

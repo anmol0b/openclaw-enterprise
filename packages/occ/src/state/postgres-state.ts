@@ -58,6 +58,7 @@ import {
 } from "@openclaw-enterprise/contracts";
 import { immutableCopy, immutableSnapshot, isNonEmptyString } from "@openclaw-enterprise/utils";
 import {
+  AuthorizationDeniedError,
   AGENT_NAME_CONFLICT,
   CREDENTIAL_SOURCE_NAME_CONFLICT,
   DELETED_NAMESPACE_NAME_CONFLICT,
@@ -828,6 +829,13 @@ function databaseError(error: unknown): Error {
   }
 
   const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
+  if (
+    code === "23514" &&
+    "constraint" in error &&
+    error.constraint === "held_authentication_session_is_current"
+  ) {
+    return new AuthorizationDeniedError("The assigning session is no longer current.");
+  }
   if (code === "23505") {
     const constraint =
       "constraint" in error && typeof error.constraint === "string" ? error.constraint : undefined;
@@ -1917,6 +1925,25 @@ export class PostgresPlatformState implements PlatformStateStore {
         );
         return account === undefined || account.disabled === false;
       },
+      holdAuthenticationSession: async (sessionId, userId) => {
+        // Account and method revocation lock the user first. Take the same order
+        // before Namespace/policy locks; deleting a held session then waits for COMMIT.
+        const user = await client.query('SELECT id FROM occ."user" WHERE id = $1 FOR SHARE', [
+          userId,
+        ]);
+        if (user.rowCount !== 1) {
+          return false;
+        }
+        // The unchanged UPDATE both holds this row and queues its deferred
+        // currentness constraint. No session timestamp or lifetime is extended.
+        const session = await client.query(
+          `UPDATE occ.session SET updated_at = updated_at
+           WHERE id = $1 AND user_id = $2 AND expires_at > clock_timestamp()
+           RETURNING id`,
+          [sessionId, userId],
+        );
+        return session.rowCount === 1;
+      },
     };
 
     const namespaces: NamespaceRepository = {
@@ -2884,6 +2911,12 @@ export class PostgresPlatformState implements PlatformStateStore {
                          AND r.admitted_spec #>> '{harness_auth,sourceId}' = $2)
                      OR r.admitted_spec->'credential_sources' @> jsonb_build_array(
                           jsonb_build_object('sourceId', $2::text)))
+               ) OR EXISTS (
+                 -- Before an Agent exists, its queued plan still holds the model source.
+                 SELECT 1 FROM occ.agent_provisioning_work AS p
+                 WHERE p.namespace_id = $1 AND p.status IN ('queued', 'running')
+                   AND p.plan #>> '{harnessAuth,method}' = 'credential_source'
+                   AND p.plan #>> '{harnessAuth,sourceId}' = $2
                ) OR EXISTS (SELECT 1 FROM held_work WHERE NOT withdrawal) AS referenced,
                EXISTS (SELECT 1 FROM held_work WHERE withdrawal) AS withdrawal_work`,
               [namespaceId, credentialSourceId, CREDENTIAL_WITHDRAWAL_TARGET],
@@ -4581,7 +4614,14 @@ export class PostgresPlatformState implements PlatformStateStore {
 		                   SET status = 'cancelled',
 		                       progress = provisioning.progress || jsonb_build_object(
 		                         'error', jsonb_build_object('code', $3::text, 'message', $4::text)
-		                       ),
+		                       ) || CASE
+		                         -- The live claim's attempt may still be writing until its lease
+		                         -- runs out: its worker stops issuing requests by then.
+		                         WHEN owner.state = 'claimed' THEN jsonb_build_object(
+		                           'cancelledClaimExpiresAt', to_jsonb(owner.lease_expires_at)
+		                         )
+		                         ELSE '{}'::jsonb
+		                       END,
 		                       updated_at = clock_timestamp()
                    FROM owner
                    WHERE provisioning.work_id = owner.idempotency_key
@@ -4606,6 +4646,50 @@ export class PostgresPlatformState implements PlatformStateStore {
             ).rows,
           );
           return cancelled[0] === undefined ? undefined : provisioningRecordFromRow(cancelled[0]);
+        },
+        settleAbandonedEffect: async (namespaceId, agentId) => {
+          // A cancelled job never runs again (finding 1384). Once the claim that began its
+          // transport write has lapsed, its worker has stopped issuing requests, so the exact
+          // pending effect is recorded as settled, as Agent deletion does (a request already sent
+          // may still land; the write creates only absent Secrets). A receipt that already
+          // exists, or malformed evidence, matches nothing and stays fail-closed.
+          const settled = rows(
+            (
+              await client.query(
+                `WITH matched AS MATERIALIZED (
+                   SELECT provisioning.work_id,
+                          provisioning.progress -> 'pendingEffect' ->> 'owner' AS owner
+                   FROM occ.agent_provisioning_work AS provisioning
+                   WHERE provisioning.namespace_id = $1
+                     AND provisioning.agent_id = $2
+                     AND provisioning.status = 'cancelled'
+                     AND provisioning.revision_id IS NULL
+                     AND provisioning.progress -> 'pendingEffect' ->> 'kind' = 'transport'
+                     AND provisioning.progress -> 'pendingEffect' ->> 'targetId' = $2
+                     AND COALESCE(provisioning.progress -> 'pendingEffect' ->> 'owner', '') <> ''
+                     AND NOT (provisioning.progress ? 'effectReceipt')
+                     AND COALESCE(
+                       (provisioning.progress ->> 'cancelledClaimExpiresAt')::timestamptz
+                         <= clock_timestamp(),
+                       true
+                     )
+                   FOR UPDATE
+                 )
+                 UPDATE occ.agent_provisioning_work AS provisioning
+                 SET progress = provisioning.progress || jsonb_build_object(
+                       'effectReceipt', jsonb_build_object(
+                         'kind', 'transport', 'owner', matched.owner, 'targetId', $2::text
+                       )
+                     ),
+                     updated_at = clock_timestamp()
+                 FROM matched
+                 WHERE provisioning.work_id = matched.work_id
+                 RETURNING provisioning.*`,
+                [namespaceId, agentId],
+              )
+            ).rows,
+          );
+          return settled[0] === undefined ? undefined : provisioningRecordFromRow(settled[0]);
         },
         retryByWorkId: async (namespaceId, workId, actorId) => {
           const retried = rows(

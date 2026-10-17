@@ -498,6 +498,20 @@ export class ResourceStateConflictError extends ResourceConflictError {
   }
 }
 
+/**
+ * The Configuration moved past the generation the update named. HTTP marks it with an
+ * `/expectedGeneration` detail, so a caller can tell it from other Configuration conflicts,
+ * such as one reserved for provisioning, and reread before saving again.
+ */
+export class ConfigurationGenerationConflictError extends ResourceStateConflictError {
+  constructor() {
+    super(
+      "The Configuration changed since it was read. Read its current generation before updating it.",
+    );
+    this.name = "ConfigurationGenerationConflictError";
+  }
+}
+
 const SECRET_CONSUMER_LABELS = [
   ["agents", "Agent", "Agents"],
   ["configurations", "Configuration", "Configurations"],
@@ -688,6 +702,24 @@ export class NativeWorkerSupportError extends Error {
   }
 }
 
+export const DEDICATED_OPENCLAW_SANDBOX_REQUIRED =
+  "Dedicated OpenClaw requires a provisioning SandboxDriver with networking, filesystem, and process containment.";
+
+/**
+ * Dedicated native OpenClaw needs a provisioning SandboxDriver with networking, filesystem and
+ * process containment, and the Installation selects none. The Installation's shape refuses
+ * every new attempt the same way, so a new provisioning request or deploy answers the 409 other
+ * plan refusals use, with this fixed message (finding 1609). Stored provisioning work never
+ * throws this: it stays a retryable DependencyUnavailableError (503) carrying the same message,
+ * and resumes once a qualifying Driver is selected.
+ */
+export class DedicatedOpenClawSandboxError extends ResourceStateConflictError {
+  constructor() {
+    super(DEDICATED_OPENCLAW_SANDBOX_REQUIRED);
+    this.name = "DedicatedOpenClawSandboxError";
+  }
+}
+
 /**
  * A platform dependency a Compute Driver, or the Sandbox Driver it calls, reaches while
  * it reconciles a revision. `sandbox_admission` is the Sandbox gateway's per-caller
@@ -729,6 +761,19 @@ export class TransientDependencyError extends Error {
     this.dependency = dependency;
     this.reason = reason;
     this.code = TRANSIENT_DEPENDENCY_CODES[dependency];
+  }
+}
+
+/**
+ * A Sandbox Driver's provider refused a Namespace step because the controller's own
+ * identity is unauthenticated or lacks a permission there. Retrying cannot help until an
+ * operator fixes that identity or grant, so Compute fails the Namespace step at once.
+ * The message names only the provider's refusal code, never provider text.
+ */
+export class SandboxNamespaceRefusedError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SandboxNamespaceRefusedError";
   }
 }
 

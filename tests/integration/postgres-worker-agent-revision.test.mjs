@@ -1311,13 +1311,16 @@ revisionTest(
   async (fixture) => {
     const unscheduled = await fixture.agent("pending-unschedulable");
     const unpaired = await fixture.agent("pending-node");
+    const overQuota = await fixture.agent("pending-pod-quota");
     const unscheduledRevision = await fixture.revision(unscheduled, 1);
+    const overQuotaRevision = await fixture.revision(overQuota, 1);
     // Admitted five minutes ago by PostgreSQL's clock, which judges work age (finding 1187),
     // and still inside the 900-second deadline.
     const unpairedRevision = await fixture.revision(unpaired, 1, { workAge: "300 seconds" });
     const reasons = new Map([
       [unscheduledRevision.id, "WORKLOAD_UNSCHEDULABLE"],
       [unpairedRevision.id, "WORKSPACE_NODE_PENDING"],
+      [overQuotaRevision.id, "NAMESPACE_POD_QUOTA_EXCEEDED"],
     ]);
     const delays = new Map([
       [unscheduledRevision.idempotencyKey, []],
@@ -1369,6 +1372,12 @@ revisionTest(
     assert.deepEqual(await progress(unpaired, unpairedRevision), {
       code: "WORKSPACE_NODE_PENDING",
       message: "Workloads are ready; waiting for the workspace node to connect to the Gateway.",
+    });
+    // Finding 1617: a full Namespace Pod quota is named, without its numbers.
+    assert.deepEqual(await progress(overQuota, overQuotaRevision), {
+      code: "NAMESPACE_POD_QUOTA_EXCEEDED",
+      message:
+        "The Namespace's Pod quota is full. Stop or delete an Agent, or ask an administrator to raise the quota.",
     });
     const firstDelay = async (revision) => {
       const recorded = delays.get(revision.idempotencyKey);
@@ -1682,7 +1691,8 @@ revisionTest(
     assert.equal(status.status, "failed");
     assert.deepEqual(status.error, {
       code: "CONVERGENCE_DEADLINE_EXCEEDED",
-      message: "Deployment convergence deadline exceeded.",
+      message:
+        "Deployment convergence deadline exceeded: the version did not become ready in time. Check its logs and runtime diagnostics, correct the cause if there is one, then deploy a new version.",
       data: { timeoutMs: 1, runtimeFailure },
     });
     assert.deepEqual(status.warnings, []);
@@ -1729,7 +1739,8 @@ revisionTest(
     assert.equal(status.status, "failed");
     assert.deepEqual(status.error, {
       code: "CONVERGENCE_DEADLINE_EXCEEDED",
-      message: "Deployment convergence deadline exceeded.",
+      message:
+        "Deployment convergence deadline exceeded: the version did not become ready in time. Check its logs and runtime diagnostics, correct the cause if there is one, then deploy a new version.",
       data: { timeoutMs: 1 },
     });
     assert.notEqual(status.cleanup, null);
@@ -2029,7 +2040,8 @@ for (const scenario of [
       activeRevisionId: null,
       error: {
         code: "RUNTIME_AUTHENTICATION_FAILED",
-        message: "Deployment runtime credentials were rejected.",
+        message:
+          "The model provider rejected this version's credential (HTTP 401 or 403). Check that the key or token is valid and can use the selected model, update or replace the Agent's model credential, then deploy a new version.",
       },
     },
   },
@@ -2048,7 +2060,8 @@ for (const scenario of [
       activeRevisionId: null,
       error: {
         code: "RUNTIME_CPU_STARVED",
-        message: "Deployment runtime did not get enough CPU to start.",
+        message:
+          "Deployment runtime did not get enough CPU to finish its startup model check, because of a CPU limit below one core or a busy node. Ask an admin to raise the limit or free node capacity, then deploy a new version.",
       },
     },
   },
@@ -2089,6 +2102,16 @@ revisionTest(
       component: "agent",
       cause: { kind: "WRAPPER_ERROR" },
     };
+    // Only failed model probes retain evidence in both persisted and public errors.
+    const expectedProbeFailure = (runtimeFailure) => ({
+      resultData: { runtimeFailure },
+      error: {
+        code: "RUNTIME_MODEL_PROBE_FAILED",
+        message:
+          "The startup model check failed for a reason other than a rejected credential, such as an unknown model, invalid provider settings, a provider or TLS error, a rate limit or quota, or, with Codex, a provider the runtime cannot reach. Check the model and its provider settings (such as baseUrl and api) in the Configuration, the provider account, and that the runtime can reach the provider, then deploy a new version.",
+        data: { runtimeFailure },
+      },
+    });
     const cases = [
       {
         label: "held-runtime-0",
@@ -2101,34 +2124,20 @@ revisionTest(
         expected: {
           error: {
             code: "RUNTIME_MODEL_PROBE_TIMEOUT",
-            message: "Deployment runtime startup model check timed out.",
+            message:
+              "The startup model check did not get a reply from the model provider in time. With OpenClaw this includes a provider the runtime cannot reach (refused connection or unknown host). Check that the runtime can reach the provider (network egress, proxy, or a custom baseUrl in the Configuration) and that the provider is responding, then deploy a new version.",
           },
         },
       },
       {
         label: "held-runtime-1",
         runtimeFailure: probeStatusFailure,
-        // Only failed model probes retain their classified runtime evidence.
-        expected: {
-          resultData: { runtimeFailure: probeStatusFailure },
-          error: {
-            code: "RUNTIME_MODEL_PROBE_FAILED",
-            message: "Deployment runtime startup model check failed.",
-            data: { runtimeFailure: probeStatusFailure },
-          },
-        },
+        expected: expectedProbeFailure(probeStatusFailure),
       },
       {
         label: "held-runtime-2",
         runtimeFailure: wrapperFailure,
-        expected: {
-          resultData: { runtimeFailure: wrapperFailure },
-          error: {
-            code: "RUNTIME_MODEL_PROBE_FAILED",
-            message: "Deployment runtime startup model check failed.",
-            data: { runtimeFailure: wrapperFailure },
-          },
-        },
+        expected: expectedProbeFailure(wrapperFailure),
       },
       {
         label: "held-runtime-3",
@@ -2141,7 +2150,8 @@ revisionTest(
         expected: {
           error: {
             code: "RUNTIME_LOGIN_FAILED",
-            message: "Deployment runtime could not sign in to the model provider.",
+            message:
+              "Deployment runtime could not sign in to the model provider. Check the Agent's model credential (for an OAuth login, sign in again) and that the runtime can reach the provider, then deploy a new version.",
           },
         },
       },
@@ -2156,7 +2166,8 @@ revisionTest(
         expected: {
           error: {
             code: "RUNTIME_STARTUP_FAILED",
-            message: "Deployment runtime failed a startup check.",
+            message:
+              "Deployment runtime failed a startup check. Check this version's logs for the failed check and correct its cause, then deploy a new version.",
           },
         },
       },
@@ -2277,7 +2288,7 @@ revisionTest(
       failure: () =>
         new SandboxRevisionUnsupportedError(
           "SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED",
-          "OpenShell v0.1.3-pre.2 cannot receive secretKeyRef environment APP_SERVER_TOKEN.",
+          "OpenShell v0.1.4 cannot receive secretKeyRef environment APP_SERVER_TOKEN.",
         ),
       expected: {
         error: {

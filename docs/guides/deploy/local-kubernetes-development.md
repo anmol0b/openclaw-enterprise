@@ -1,8 +1,7 @@
 # Local Kubernetes development
 
-Run OpenClaw Enterprise (OCE) against a disposable, loopback-only k3d cluster.
-Start with the Kubernetes-only profile below, which runs PostgreSQL, the
-OpenClaw Control Plane (OCC), and Agent workloads in the owned cluster.
+Run OpenClaw Enterprise (OCE) in a disposable, loopback-only k3d cluster. The
+Kubernetes-only profile runs PostgreSQL, the OpenClaw Control Plane (OCC), and Agents.
 
 ## Start the profile
 
@@ -132,7 +131,7 @@ export OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell
 ./scripts/dev-up
 ```
 
-The CLI creates one k3d cluster with pinned OpenShell `v0.1.3-pre.2`, Agent
+The CLI creates one k3d cluster with pinned OpenShell `v0.1.4`, Agent
 Sandbox, cert-manager, and Envoy Gateway assets and digest-resolved images.
 PostgreSQL, the central OpenShell Gateway, and OCE run in `oce-system`; the
 Agent Sandbox controller stays in `agent-sandbox-system`. Tenant Workspaces,
@@ -140,15 +139,18 @@ Sandboxes, and Agent Pods use separate OCC-owned `oce-*` Namespaces. Startup
 exposes a loopback-only proxy, waits for bootstrap Namespace/Workspace readiness,
 and writes kubeconfig and the administrator service key to private state.
 
-If Agent Sandbox rollout fails, startup tries to print bounded controller status,
-image identities and Warning reasons before the unchanged rollback; messages,
-environment values and logs are excluded.
+If Agent Sandbox rollout fails, startup tries to report bounded controller status, image
+identities, and Warning reasons before rollback; diagnostics omit messages,
+environment values, and logs.
 
-Set `OCC_DEVELOPMENT_CONTROL_PLANE=compose` to keep PostgreSQL, OCC and its
-Kubernetes worker in Compose. This OpenShell profile installs the pinned private
-Envoy route in k3d, mounts its service key and public CA only into the Compose
-controller and `worker-kubernetes`, and records the node hostname and Envoy
-NodePort in the Installation; skip manual hybrid routing.
+Set `OCC_DEVELOPMENT_CONTROL_PLANE=compose` to run PostgreSQL, OCC, and its
+Kubernetes worker in Compose. Startup installs private Envoy routing in k3d,
+mounts its service key and public CA only into the controller and
+`worker-kubernetes`, and records the node hostname and Envoy NodePort in the
+Installation. It enables OCC native administration, publishes loopback HTTPS
+for console and Agent hosts, and prints the browser CA path.
+`OCC_DEVELOPMENT_BROWSER_PORT` must differ from Compose and k3d API ports.
+Skip manual hybrid routing.
 
 First startup requires network access. To use reviewed local assets instead,
 set
@@ -156,34 +158,24 @@ set
 `OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART`, and
 `OCC_DEVELOPMENT_OPENSHELL_AGENT_SANDBOX_MANIFEST` to absolute paths.
 
-To choose the host engine:
-
-```bash
-export OCC_DEVELOPMENT_CONTAINER_ENGINE=podman
-./scripts/dev-up
-```
-
-Use `docker` for Docker Engine. Kubernetes-only startup needs no Compose and
-rejects Compose arguments. Keep profile exports for cleanup; without them,
-startup defaults to Compose with Docker Compute.
+Set `OCC_DEVELOPMENT_CONTAINER_ENGINE=podman` or `docker` to select the host
+engine. Kubernetes-only startup rejects Compose arguments. Keep profile exports
+for cleanup; otherwise startup defaults to Compose with Docker Compute.
 
 Startup prints the private [state directory](../../reference/settings/development.md#required-development-controller-environment)
 containing kubeconfig and credentials. Its default is `openclaw-development`
-under the temporary directory (macOS: `/private/var/folders/<id>/T`). To override,
-set absolute `OCC_DEVELOPMENT_STATE_DIRECTORY` for startup and cleanup; parent
+under the temporary directory (macOS: `/private/var/folders/<id>/T`). Set absolute
+`OCC_DEVELOPMENT_STATE_DIRECTORY` for startup and cleanup to override it; parent
 paths cannot contain symlinks (macOS: use `/private/tmp/...`, not `/tmp/...`).
-`OCC_DEVELOPMENT_STARTUP_TIMEOUT_SECONDS` bounds k3d
-readiness and each later startup wait. A cluster timeout triggers owned-resource
-rollback; follow the printed cleanup instruction if state is retained. A failed
-exclusive key-file write removes its partial output so you can retry after
-resolving the filesystem error. Existing destination files are never removed;
-if removal itself fails, the error reports both failures. Startup
-refuses an existing state directory or cluster. To pick up source changes,
-[rebuild the running services](#rebuild-after-a-source-edit); cleanup is for
-discarding the Installation. The state directory remains mode `0700`; generated
-files mounted into the non-root controller and worker are container-readable but
-inaccessible to other host users through that directory. The helper does not
-modify the default kubeconfig or current kubectl context.
+`OCC_DEVELOPMENT_STARTUP_TIMEOUT_SECONDS` bounds cluster readiness and later waits.
+Failures roll back owned resources; retained state includes cleanup instructions.
+Failed exclusive key writes remove partial outputs, never existing files, and
+report removal errors alongside write errors.
+
+Startup refuses existing state or clusters. For source edits,
+[rebuild services](#rebuild-after-a-source-edit); cleanup discards the Installation.
+State stays mode `0700`; generated mounts are container-readable but inaccessible
+to other host users. The helper preserves the default kubeconfig and context.
 
 For separate stacks, select distinct state directories, cluster names, bridge
 subnets and published ports. Compose also needs a distinct `OCC_POSTGRES_PORT`;
@@ -266,11 +258,11 @@ Verify directory search and gateway Socket Mode using the
 
 ## Verify the local boundary
 
-Startup prints API and Kubernetes access paths. Sandbox Driver `none` also prints
-the HTTPS Console URL and browser CA; follow
+Startup prints API and Kubernetes access paths. Sandbox Driver `none` and
+Compose-backed OpenShell also print the HTTPS Console URL and browser CA; follow
 [Local Setup](../quickstart.md#open-the-platform-console) and its
 [shared session boundary](../../reference/agent-native-admin.md#shared-session-boundary).
-OpenShell does not configure that browser endpoint.
+Kubernetes-only OpenShell does not configure that browser endpoint.
 
 Use the printed paths with other tools:
 
@@ -334,9 +326,8 @@ the [Kubernetes model-turn procedure](../../testing/kubernetes.md#kubernetes-mod
 
 ## Configure workspace storage on single-node k3d
 
-Dedicated Agents use separate RWO workspace and Gateway claims on stock k3d
-`local-path` storage. Each deployment has a downtime window while the worker
-stops the previous revision; see
+Dedicated Agents use separate RWO workspace and Gateway claims on `local-path`
+storage. Deployment stops the previous revision, causing downtime; see
 [storage ownership and recovery](../../reference/drivers/kubernetes-compute/storage-and-credentials.md#harness-storage).
 
 Check the Agent namespace with the printed kubeconfig and context:
@@ -346,9 +337,8 @@ kubectl --kubeconfig '<profile-kubeconfig>' --context '<profile-context>' \
   -n '<agent-kubernetes-namespace>' get pvc,pods
 ```
 
-Expect the workspace to become `Bound` with access mode `RWO`, followed by a
-running Harness Pod. With `WaitForFirstConsumer`, a pending claim before Pod
-creation is normal. Legacy RWX claims are unsupported; before upgrading an older
+Expect a `Bound` RWO claim, then a running Harness Pod. With
+`WaitForFirstConsumer`, claims remain pending until Pod creation. Legacy RWX claims are unsupported; before upgrading an older
 installation, follow the [storage transition prerequisite](upgrade-checklist.md#remove-legacy-rwx-workspaces).
 Do not change a PVC's access mode in place.
 
@@ -439,6 +429,6 @@ data-plane pools. See [production Namespace preparation](production-agents.md#pr
 for the scoped RoleBindings.
 
 - This is a development environment, not a production deployment recipe.
-- Stock OpenShell `v0.1.3-pre.2` remains fail-closed for unsupported Secret and
+- Stock OpenShell `v0.1.4` remains fail-closed for unsupported Secret and
   workload-identity projections, so Workspace readiness does not prove that an
   Agent Sandbox can start or complete a model turn.

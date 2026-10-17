@@ -15,10 +15,17 @@
   "fileConcurrency": 3,
   "parallelFiles": [
     "tests/integration/runtime-image-startup.test.mjs",
+    "tests/integration/runtime-image-public-github-read.test.mjs",
     "tests/integration/runtime-image-managed-files.test.mjs",
     "tests/integration/workspace-files-native.test.mjs"
   ],
   "files": [
+    {
+      "path": "tests/integration/runtime-image-public-github-read.test.mjs",
+      "expectedTests": [
+        "stock Codex reads the projected public GitHub skill and returns a provider-only pull title"
+      ]
+    },
     {
       "path": "tests/integration/runtime-image-startup.test.mjs",
       "expectedTests": [
@@ -30,7 +37,7 @@
         "runtime image publishes dedicated assets with the Kubernetes gateway entrypoint",
         "runtime image Gateway hot-loads its workspace node binding without restarting OpenClaw",
         "runtime image validates the configuration dedicated native OpenClaw renders",
-        "runtime image spawns custom-provider subagents with intact native model IDs"
+        "runtime image spawns custom-provider subagents with intact native model IDs in the remote workspace"
       ]
     },
     {
