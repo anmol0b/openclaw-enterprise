@@ -6352,6 +6352,7 @@ test(
         ).stdout,
       );
     const proof = {
+      scenarioComplete: false,
       harness: selectedHarness,
       revisionId: topology.revision.id,
       gateway: {
@@ -6372,6 +6373,8 @@ test(
       modelTurns: [],
       directInvocationProbes: [],
     };
+    // Retain completed-phase evidence even if a later assertion fails.
+    context.after(() => context.diagnostic(JSON.stringify(proof)));
     // Keep config evidence bounded; never export the native snapshot or credentials.
     const { config } = await client.request("config.get", {});
     proof.effectivePolicy = {
@@ -6995,7 +6998,7 @@ test(
       ...(afterSearch ? { catalogSearch: afterSearch } : {}),
       allowedGatewayOperationSucceeded: true,
     };
-    context.diagnostic(JSON.stringify(proof));
+    proof.scenarioComplete = true;
   },
 );
 
