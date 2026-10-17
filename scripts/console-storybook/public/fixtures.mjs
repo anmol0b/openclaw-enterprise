@@ -630,7 +630,9 @@ export function installFixture(scenario, evidence) {
         (rule.method ?? "GET") !== method ||
         (rule.path && rule.path !== path) ||
         (rule.prefix && !path.startsWith(rule.prefix)) ||
+        (rule.pathIncludes && !path.includes(rule.pathIncludes)) ||
         (rule.suffix && !path.endsWith(rule.suffix)) ||
+        (rule.queryParam && !url.searchParams.has(rule.queryParam)) ||
         (rule.bodyHasIds !== undefined && rule.bodyHasIds !== Array.isArray(body.ids))
       ) {
         continue;
@@ -684,6 +686,9 @@ export function installFixture(scenario, evidence) {
       }
       if (rule.status) {
         return response(null, rule.status, rule.code, {}, rule.message, rule.details);
+      }
+      if (rule.data !== undefined) {
+        return response(rule.data);
       }
     }
     if (path === "/api/auth/providers" && method === "GET") {
@@ -1216,6 +1221,19 @@ export function installFixture(scenario, evidence) {
                     revisionId: current.revisionId,
                   }
                 : {}),
+              // After handoff the job names its first deployment's wait, as it does for a
+              // reader of that deployment (#2744).
+              ...(scenario.provisioningNamesDeploymentWait &&
+              current.reads > 1 &&
+              (current.status === "queued" || current.status === "running")
+                ? {
+                    progress: {
+                      phase: "deployment",
+                      lastAttempt:
+                        deployments.get(current.revisionId)?.progress?.lastAttempt ?? null,
+                    },
+                  }
+                : {}),
             },
           });
         }
@@ -1726,7 +1744,9 @@ export function installFixture(scenario, evidence) {
           return response(
             scenario.emptySecrets
               ? []
-              : [...secrets.values()].map((secret) => structuredClone(secret)),
+              : [...secrets.values()]
+                  .filter(({ id }) => id !== scenario.unreadableSecretId)
+                  .map((secret) => structuredClone(secret)),
           );
         }
         if (method === "POST") {
@@ -1742,7 +1762,7 @@ export function installFixture(scenario, evidence) {
       if (resource.startsWith("secrets/")) {
         const id = resource.split("/")[1];
         const secret = secrets.get(id);
-        if (!secret) {
+        if (!secret || id === scenario.unreadableSecretId) {
           return error(404);
         }
         if (method === "GET") {

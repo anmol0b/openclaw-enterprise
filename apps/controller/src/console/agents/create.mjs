@@ -10,7 +10,14 @@ import { createPresetFields } from "./presets.mjs";
 import { createPluginDiscovery } from "./plugin-discovery.mjs";
 import { createSlackApproverField } from "./slack-approvers.mjs";
 import { renderChannels } from "../channels.mjs";
-import { GENERIC_CONFLICT, link, message, namespacePath, rejectionMessage } from "./list.mjs";
+import {
+  GENERIC_CONFLICT,
+  link,
+  message,
+  namespacePath,
+  preAdmissionRefusal,
+  rejectionMessage,
+} from "./list.mjs";
 
 // The API's duplicate-name sentence. Other Agent conflicts reach the client as generic text,
 // so only this one is shown as sent.
@@ -130,16 +137,10 @@ function provisioningStatusText(status) {
   }
 }
 
-// The API's 503 answers that name no reason: the catch-all outage, and a commit whose outcome
-// the API itself could not confirm.
-const UNNAMED_DEPENDENCY_FAILURES = new Set([
-  "A required platform dependency is unavailable.",
-  "The operation outcome is unknown. Do not retry automatically; inspect current state before a deliberate new action.",
-]);
-
 // The server's own sentence for a refused request, unless it is a catch-all answer (finding
-// 1609). Among 5xx answers only a named 503 DEPENDENCY_UNAVAILABLE refuses the request; any
-// other 5xx leaves its outcome unknown.
+// 1609). Among 5xx answers only a 503 whose code the API sends before admission refuses the
+// request (finding 1635); any other 5xx, including a 503 without such a code, leaves its
+// outcome unknown.
 function namedRefusal(error) {
   const message = error.serverMessage;
   if (message === undefined) {
@@ -148,11 +149,7 @@ function namedRefusal(error) {
   if (error.status === 409) {
     return message === GENERIC_CONFLICT ? undefined : message;
   }
-  return error.status === 503 &&
-    error.code === "DEPENDENCY_UNAVAILABLE" &&
-    !UNNAMED_DEPENDENCY_FAILURES.has(message)
-    ? message
-    : undefined;
+  return preAdmissionRefusal(error);
 }
 
 function wait(ms) {
@@ -196,54 +193,102 @@ async function cancelledAgentState(request, namespaceId, agentId) {
 
 // First-deployment waits that someone must act on (finding 1617): the deployment's own fixed
 // sentence replaces the bare provisioning line. The deployment read needs read access to the
-// Agent; a reader without it, or any other wait, keeps the bare line.
+// Agent. Clear the reason if the deployment is no longer readable or names a different wait;
+// keep it through a cancelled read or temporary outage (finding 1637).
 const NAMED_DEPLOYMENT_WAITS = new Set(["NAMESPACE_POD_QUOTA_EXCEEDED"]);
 // An outage, unlike the Installation's shape, needs no administrator change (finding 1624). Agent
 // save and deploy answer 503 for every harness until the selected Sandbox Driver returns.
 const SANDBOX_DRIVER_OUTAGE =
   "Agents cannot be created right now: this installation's Sandbox Driver is unavailable. Reload this page to check again, or ask an administrator if it persists.";
+// The deployment read was refused (401, 403 or 404): the reader can't see its waits now.
+const DEPLOYMENT_UNREADABLE = Symbol("deployment unreadable");
 
-async function namedDeploymentWait(request, namespaceId, job) {
+// The deployment's actionable wait (a sentence), none (null), DEPLOYMENT_UNREADABLE, or undefined
+// when the read was cut off or temporarily unavailable.
+async function namedDeploymentWait(request, namespaceId, job, signal) {
   if (
     typeof job.agentId !== "string" ||
     !job.agentId ||
     typeof job.revisionId !== "string" ||
     !job.revisionId
   ) {
-    return undefined;
+    return null;
   }
   try {
     const deployment = await request(
       `${namespacePath(namespaceId)}/agents/${encodeURIComponent(job.agentId)}/deployments/${encodeURIComponent(job.revisionId)}`,
+      { signal },
     );
     const attempt = deployment?.progress?.lastAttempt;
     return NAMED_DEPLOYMENT_WAITS.has(attempt?.code) &&
       typeof attempt.message === "string" &&
       attempt.message
       ? attempt.message
-      : undefined;
-  } catch {
-    return undefined;
+      : null;
+  } catch (error) {
+    return [401, 403, 404].includes(error.status) ? DEPLOYMENT_UNREADABLE : undefined;
   }
 }
 
-async function waitForProvisioning({ request, status, first, namespaceId }) {
+// The wait a job past handoff names for its first deployment (finding 1690), as the deployment's
+// status does: its fixed sentence after the provisioning line. A reader who can't read the
+// deployment gets the job's own PROVISIONING_DEPLOYMENT_PENDING, which says no more than the
+// provisioning line, so that line stays. A wait someone must act on stands alone, as above, and
+// so does a stop, which provisioning no longer continues.
+const STANDALONE_JOB_WAITS = new Set([...NAMED_DEPLOYMENT_WAITS, "AGENT_STOP_YIELDED"]);
+
+function jobDeploymentWait(job) {
+  const attempt = job.progress?.lastAttempt;
+  if (
+    typeof attempt?.message !== "string" ||
+    !attempt.message ||
+    attempt.code === "PROVISIONING_DEPLOYMENT_PENDING"
+  ) {
+    return null;
+  }
+  return STANDALONE_JOB_WAITS.has(attempt.code)
+    ? attempt.message
+    : `${provisioningStatusText("running")} ${attempt.message}`;
+}
+
+async function waitForProvisioning({ request, status, first, namespaceId, isCurrent }) {
   let current = first.provisioning ?? first;
   const jobUrl = current?.url;
   // A started job goes back to queued between retries. Keep one label once it has started,
   // and write it only when it changes, since this rereads every second (finding 1424).
   let started = false;
+  // The quota wait the last fresh deployment read named. It fills in when a later read is cut off
+  // or unavailable and the job names no wait, so the line doesn't flip back to the bare text
+  // (finding 1637); a fresh answer or a refusal replaces it.
+  let named = null;
   while (current?.status === "queued" || current?.status === "running") {
-    started ||= current.status === "running";
-    setText(
-      status,
-      (await namedDeploymentWait(request, namespaceId, current)) ??
-        provisioningStatusText(started ? "running" : current.status),
-    );
     if (typeof current.url !== "string" || !current.url) {
       throw new Error("Provisioning status URL is unavailable.");
     }
-    await wait(1_000);
+    started ||= current.status === "running";
+    // Spend the interval between polls on optional detail. At the next poll, stop that read
+    // even if only its headers arrived; the provisioning job remains the source of truth.
+    const detail = new AbortController();
+    const nextPoll = wait(1_000).then(() => detail.abort());
+    const read = await namedDeploymentWait(request, namespaceId, current, detail.signal);
+    let detailText;
+    if (read === DEPLOYMENT_UNREADABLE) {
+      // A refusal clears every detail, the job's too: the job was read before the refusal.
+      named = null;
+      detailText = null;
+    } else if (read !== undefined) {
+      // A fresh answer's actionable wait comes first; otherwise the job names the wait.
+      named = read;
+      detailText = read ?? jobDeploymentWait(current);
+    } else {
+      // Without a fresh answer, the job's wait is newer than the one kept from an earlier read.
+      detailText = jobDeploymentWait(current) ?? named;
+    }
+    setText(status, detailText ?? provisioningStatusText(started ? "running" : current.status));
+    await nextPoll;
+    if (!isCurrent()) {
+      throw new DOMException("View closed", "AbortError");
+    }
     const next = await request(current.url);
     current = next.provisioning ?? next;
   }
@@ -278,7 +323,7 @@ async function waitForProvisioning({ request, status, first, namespaceId }) {
   return { agentId: current.agentId, revisionId: current.revisionId };
 }
 
-async function finishProvisioningAttempt({ request, status, namespaceId, attempt }) {
+async function finishProvisioningAttempt({ request, status, namespaceId, attempt, isCurrent }) {
   status.textContent = "Submitting provisioning request…";
   const provisioned =
     attempt.retryUrl === undefined
@@ -300,6 +345,7 @@ async function finishProvisioningAttempt({ request, status, namespaceId, attempt
     status,
     first: provisioned,
     namespaceId,
+    isCurrent,
   });
 }
 
@@ -532,6 +578,8 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     role: "alert",
     hidden: true,
   });
+  const selectedModeUnavailable = () =>
+    !nativeWorkersUnavailable.hidden || !openclawModeUnavailable.hidden;
   const configuration = element("textarea", {
     id: "configuration-json",
     name: "configuration",
@@ -1707,7 +1755,10 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       openclawModeUnavailable.textContent = modeRefusal;
     }
     openclawModeUnavailable.hidden = !modeRefusal;
-    runtimeModeSummary.textContent = ` · ${mode.value === "dedicated" ? "Dedicated" : "Embedded"}`;
+    const modeUnavailable = selectedModeUnavailable();
+    runtimeModeSummary.textContent = modeUnavailable
+      ? " · Execution mode unavailable"
+      : ` · ${mode.value === "dedicated" ? "Dedicated" : "Embedded"}`;
     const modeHint = form.querySelector("#execution-mode-hint");
     if (modeHint) {
       modeHint.textContent = sandboxDriverOutage
@@ -1721,11 +1772,14 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
               : "Codex uses Dedicated execution. OpenClaw uses Dedicated execution with a Sandbox Driver that provisions it, and Embedded execution without a Sandbox Driver. Slack requires Dedicated execution.";
     }
     if (capabilityDiscoveryDone) {
-      const nextStatus = shouldProvision()
-        ? "Dedicated Agents are provisioned and deployed when created."
-        : mode.value === "embedded"
-          ? "Embedded Agents are saved as drafts. Deploy them from the Agent page after creation."
-          : "This installation creates draft Agents for later deployment.";
+      let nextStatus = "";
+      if (!modeUnavailable) {
+        nextStatus = shouldProvision()
+          ? "Dedicated Agents are provisioned and deployed when created."
+          : mode.value === "embedded"
+            ? "Embedded Agents are saved as drafts. Deploy them from the Agent page after creation."
+            : "This installation creates draft Agents for later deployment.";
+      }
       if (capabilityStatus.textContent !== nextStatus) {
         capabilityStatus.textContent = nextStatus;
       }
@@ -1861,8 +1915,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       pending ||
       outcomeUnknown ||
       !capabilityDiscoveryDone ||
-      !nativeWorkersUnavailable.hidden ||
-      !openclawModeUnavailable.hidden ||
+      selectedModeUnavailable() ||
       credentialSourceRefused() ||
       Boolean(provisioningAttempt);
     checkCredentialRegistration.hidden = !credentialRegistration;
@@ -1995,6 +2048,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         status: savedStatus,
         namespaceId,
         attempt,
+        isCurrent: context.isCurrent,
       });
       focusFeedbackLine(savedStatus);
       const { agentId, revisionId } = await finishing;
@@ -2126,8 +2180,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       provisioningAttempt ||
       (!savedAgent && repositoryRetryLocked()) ||
       !capabilityDiscoveryDone ||
-      !nativeWorkersUnavailable.hidden ||
-      !openclawModeUnavailable.hidden ||
+      selectedModeUnavailable() ||
       credentialSourceRefused() ||
       !form.reportValidity()
     ) {

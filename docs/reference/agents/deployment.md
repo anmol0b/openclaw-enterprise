@@ -159,21 +159,25 @@ the setting and what is accepted, never its value, before any revision is create
 
 ### Pending deployment progress
 
-Deployment `progress.lastAttempt.code` reports the worker's last observation.
-Kubernetes reports `REVISION_UNSCHEDULABLE` for a live revision Pod's
-`PodScheduled=False`, reason `Unschedulable`, or `NAMESPACE_POD_QUOTA_EXCEEDED`
-when the Deployment's `ReplicaFailure` names a Pod quota still full.
-For a provider-owned Harness, Compute reports the first pending check: one matching Ready Pod
-(`PROVIDER_HARNESS_POD_PENDING`), workspace connection (`WORKSPACE_NODE_PENDING`),
-then credential attachments (`CREDENTIAL_ATTACHMENT_PENDING`). Later checks may not have run.
-During preparation, other Harnesses can also report
-`WORKSPACE_NODE_PENDING` while waiting for the workspace node to connect to its
-Gateway. Activation of a dedicated revision reports
-`WORKSPACE_NODE_BINDING_PENDING` until the gateway applies its assigned
-workspace node, then `WORKSPACE_NODE_PENDING` until that node connects.
-Otherwise the code is `REVISION_INCOMPLETE`. Rechecks start at 500 ms, reach
-5 s at deployment age 200 s, and end at readiness, held runtime failure or
-the convergence deadline.
+While a revision is not ready, deployment `progress.lastAttempt.code` says why
+when Compute knows. Kubernetes reports `REVISION_UNSCHEDULABLE` when a live
+Pod has `PodScheduled` `False` with reason `Unschedulable`,
+`NAMESPACE_POD_QUOTA_EXCEEDED` when a revision Deployment's `ReplicaFailure`
+names a full Pod quota, `WORKSPACE_SETUP_RETRYING` while restarting a failed
+workspace setup, and `WORKSPACE_NODE_PENDING` when only the workspace node's
+gateway connection is outstanding.
+For a provider-owned Harness, Compute reports the first check still pending:
+`PROVIDER_HARNESS_POD_PENDING` for the provider Pod, `WORKSPACE_NODE_PENDING`
+for its workspace connection once the Gateway is ready, or `CREDENTIAL_ATTACHMENT_PENDING`
+for its credential attachments. Later checks may not have run. The worker records this detail
+alongside `REVISION_INCOMPLETE`, so an older worker still recognizes progress past credential bootstrap.
+Activation of a dedicated revision reports
+`WORKSPACE_NODE_BINDING_PENDING` while the gateway has not yet applied the
+workspace node it was handed, and `WORKSPACE_NODE_PENDING` while that node has
+not connected. Otherwise the code is `REVISION_INCOMPLETE`. The revision stays
+pending until it is ready, a held failure (such as `WORKSPACE_SETUP_REFUSED`)
+ends it, or the convergence deadline passes. The worker rechecks an unready
+revision after 500 ms, growing with the deployment's age to 5 s at 200 s.
 
 A dedicated gateway that refuses its own in-Pod CLI as unauthorized can never
 apply its workspace node, so activation fails at once with
@@ -187,13 +191,13 @@ A dependency that fails while it converges is pending too.
 through its route yet (for example, the route answers 404 until the gateway
 proxy has the new route, or 503 until it has the ready Pod), and
 `KUBERNETES_API_UNAVAILABLE` means a Kubernetes API request timed out, could not
-connect, or got 429 or 5xx. Both apply during preparation and
-activation. `SANDBOX_ADMISSION_LIMIT_REACHED` means the OpenShell gateway
-refuses new requests from the controller because it holds OpenShell's limit of
-durable request admissions; see the
-[OpenShell troubleshooting](../drivers/openshell-sandbox.md#troubleshooting).
-The worker retries on the same cadence without spending its
-`OCC_WORKER_MAX_ATTEMPTS` budget. A dependency still failing at the convergence
+connect, or got 429 or 5xx. Both apply in preparation and
+activation. `SANDBOX_ADMISSION_LIMIT_REACHED` means the OpenShell gateway holds
+its limit of durable request admissions and refuses requests (see
+[OpenShell troubleshooting](../drivers/openshell-sandbox.md#troubleshooting));
+`SANDBOX_GATEWAY_UNAVAILABLE`, that it left a Harness status read unanswered.
+The worker retries on the same cadence without spending
+`OCC_WORKER_MAX_ATTEMPTS`. A dependency still failing at the convergence
 deadline fails the deployment with its own code.
 
 `REFUSED_CANDIDATE_STOP_PENDING` means the worker refused the candidate but could
@@ -207,7 +211,7 @@ says why the stop fails. If an
 authorization or backend refusal lifts (`deploy` granted again), the deployment
 continues, or past its convergence deadline stops the candidate and fails
 `CONVERGENCE_DEADLINE_EXCEEDED`; other refusals stand. A deployment that a
-newer revision supersedes still finishes the stop, even of a lifted refusal, and
+newer revision supersedes still finishes the stop, even of a lifted refusal,
 then ends superseded.
 
 `AGENT_STOP_YIELDED` means the Agent was stopped and its gateway is
@@ -224,7 +228,7 @@ an optional `detail` token from this closed vocabulary. A Codex `detail` ending
 
 | `kind`           | Meaning                                                    | `detail`                                                                                                                                                                         |
 | ---------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PROCESS_EXIT`   | The check process exited nonzero, was killed, or never ran | `exit-<status>`, `signal-<SIGNAL>`, or `error-<ERRNO>`, such as `error-ENOBUFS` for oversized OpenClaw output                                                                    |
+| `PROCESS_EXIT`   | The check process exited nonzero, was killed, or never ran | `exit-<status>`, `signal-<SIGNAL>`, or `error-<ERRNO>`, such as `error-ENOBUFS` (oversized output); others are dropped                                                           |
 | `PROBE_STATUS`   | The check ran and reported the model unusable              | OpenClaw `format`, `rate_limit`, `billing`, `unknown`, `no_model`, or `other`; Codex `rate_limit`, `turn-failed`, `error-event`, `tool-event`, `unexpected-event`, or `no-reply` |
 | `INVALID_OUTPUT` | The check's output was not what the runtime expects        | `json` (unparseable) or `shape` (an unexpected result, such as another provider's)                                                                                               |
 | `WRAPPER_ERROR`  | The runtime wrapper could not prepare or read the check    | none                                                                                                                                                                             |
@@ -233,7 +237,7 @@ OpenClaw's `format` covers an unknown model or a request the provider rejected
 as malformed, such as invalid provider settings. A 429 or usage limit is
 `rate_limit`. A rejected credential is
 `RUNTIME_AUTHENTICATION_FAILED` and a timeout `RUNTIME_MODEL_PROBE_TIMEOUT`;
-neither has a cause. Compute drops any cause outside these tokens but keeps the
+neither has a cause. Compute drops any other cause but keeps the
 code, so a cause never carries native output, provider text, or credentials. The
 console shows it as **Cause**, and `occ agent deployment-status` prints it.
 

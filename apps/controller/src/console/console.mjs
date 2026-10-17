@@ -618,11 +618,21 @@ function showStillChecking() {
 // the shown page's own: the navigation and header change together with the body, never around
 // it (finding 1515). Its selector names the destination's Namespace, but a Namespace recovery
 // block appears only if the shown page had one (finding 1527). Returns null when no page is shown.
-function holdShownView(current, { busyCue = true } = {}) {
+// keepFocus: focus in the shown page, which falls to the body once the page goes inert, on its
+// heading (which the console focused, say for a load this one replaces), or in the sidebar, whose
+// pressed link the pending shell replaces, moves to the held heading instead (findings 1626,
+// 1636, 1653).
+function holdShownView(current, { busyCue = true, keepFocus = false } = {}) {
   const view = app.querySelector('.content [aria-live="polite"]');
   if (!view) {
     return null;
   }
+  const focused = document.activeElement;
+  const focusHeld =
+    keepFocus &&
+    (view.contains(focused) ||
+      focused === app.querySelector(".content h1") ||
+      app.querySelector(".sidebar")?.contains(focused) === true);
   const title = app.querySelector(".content h1")?.textContent;
   const scope = app.querySelector(".content .scope")?.textContent;
   const diagnostics = app.querySelector(".runtime-debug");
@@ -648,7 +658,45 @@ function holdShownView(current, { busyCue = true } = {}) {
     shell.diagnostics = diagnostics;
   }
   window.scrollTo({ top: scrollY, left: 0 });
+  if (focusHeld) {
+    app.querySelector(".content h1").focus({ preventScroll: true });
+  }
   return shell;
+}
+
+// The control focused in the shown page, which a refocus recheck blurs when it holds the page
+// inert (finding 1654). restore() gives focus back once the page remounts (an input keeps its
+// caret), unless the reader has moved focus since. A deployment link that the list's reread
+// replaced gives it to the cell's pending deployment instead, as Back does, and so does a
+// pending deployment that a second refocus's reread replaced (finding 1663). A shell control
+// outside the page (sidebar, page header, navigation toggle), which the recheck's shells replace,
+// gives it to the same control in the remounted shell, unless that control is gone or disabled
+// (finding 1662).
+function focusInShownView() {
+  const view = app.querySelector('.content [aria-live="polite"]');
+  const focused = document.activeElement;
+  const inView = view?.contains(focused) === true;
+  const shellControl = !inView && focused?.closest?.(".shell") != null;
+  if (!inView && !shellControl) {
+    return null;
+  }
+  const href = focused.href ?? focused.dataset?.returnFocusHref ?? null;
+  return {
+    restore(remounted) {
+      if (!document.hasFocus() || document.activeElement !== document.body) {
+        return;
+      }
+      const target = shellControl
+        ? shellUI.matchingControl(focused)
+        : remounted.contains(focused)
+          ? focused
+          : href &&
+            Array.from(remounted.querySelectorAll("[data-return-focus-href]")).find(
+              (item) => item.dataset.returnFocusHref === href,
+            );
+      target?.focus({ preventScroll: true });
+    },
+  };
 }
 
 // Mounts a retained view that revalidated unchanged, active at once.
@@ -1037,10 +1085,25 @@ async function loadPage({
   let retained = retainedView !== null;
   // An Agent link opens its destination immediately. Other visits keep the shown page inert
   // until a retained view revalidates or admission and the destination's first read settle.
+  // On a navigation, focus that was in the held page waits on its heading until the destination
+  // takes it: the Agent's heading for an Agent page loading behind it (the new version an
+  // admitted deployment opens, say; finding 1626), or the Agent's link on a return to the Agents
+  // list (finding 1636). The pending shell also replaces a pressed sidebar link (finding 1653).
+  // On refocus, restore the reader’s place only if we reuse the view (finding 1654).
+  const refocused = resumingView ? focusInShownView() : null;
   let shell =
-    knownPrivateState && !openingAgent ? holdShownView(current, { busyCue: !resumingView }) : null;
+    knownPrivateState && !openingAgent
+      ? holdShownView(current, { busyCue: !resumingView, keepFocus: !resumingView })
+      : null;
   let held = shell !== null;
+  // The stand-in's heading while it holds focus for the page loading behind it.
+  let heldHeading =
+    held && document.activeElement === app.querySelector(".content h1")
+      ? document.activeElement
+      : null;
   let agentReturnHref = null;
+  // Gives a refocus its reader's place back once the reused view's shell is usable.
+  let restoreRefocus = null;
   let pendingAgentHeading = null;
   let focusAgentResult = false;
   // The page kept on screen while an Agent's overview renders behind it, and the Agent's title
@@ -1079,6 +1142,7 @@ async function loadPage({
       history.back();
     }
   };
+  const openingAgentTitle = "Agent details";
   const showOpeningPanel = () => {
     shell = renderShell(current.feature, true);
     shell.view.replaceChildren(
@@ -1091,7 +1155,7 @@ async function loadPage({
     );
     shell.view.setAttribute("aria-busy", "false");
     pendingAgentHeading = app.querySelector(".content h1");
-    pendingAgentHeading.textContent = "Agent details";
+    pendingAgentHeading.textContent = openingAgentTitle;
     pendingAgentHeading.focus();
   };
   if (openingAgent && !startup) {
@@ -1136,8 +1200,15 @@ async function loadPage({
             }
             held = false;
             loadingShownAt = performance.now();
+            // The loading page's heading takes focus from the held one it replaces.
+            const headingFocused = heldHeading !== null && document.activeElement === heldHeading;
+            const keepHeadingFocus = () => {
+              heldHeading = headingFocused ? app.querySelector(".content h1") : null;
+              heldHeading?.focus({ preventScroll: true });
+            };
             if (!accessResolved) {
               shell = pendingNamespaceShell = renderPendingNamespaceShell(current.feature);
+              keepHeadingFocus();
               return;
             }
             // An Agent page rendering hidden behind the startup status keeps rendering behind
@@ -1156,6 +1227,7 @@ async function loadPage({
               shell.view.after(behind);
               shell = { ...shell, view: behind, diagnostics: null };
             }
+            keepHeadingFocus();
           }, loadingDelay);
   const stopLoadingTimer = () => {
     clearTimeout(loadingTimer);
@@ -1448,12 +1520,14 @@ async function loadPage({
         );
     }
     // Resolve the old link in the admitted list, even if its row reads were unfinished and we
-    // must rebuild it. Capture focus before replacing the shell, not after it falls back to body.
+    // must rebuild it. Capture focus before replacing the shell, not after it falls back to body
+    // (or leaves the held heading).
     if (
       retained &&
       reuseView &&
       !agentsNamespaceUnavailable &&
-      document.activeElement === document.body
+      (document.activeElement === document.body ||
+        (heldHeading !== null && document.activeElement === heldHeading))
     ) {
       agentReturnHref = retainedView.returnHref;
     }
@@ -1462,6 +1536,9 @@ async function loadPage({
     if (unchanged) {
       stopLoadingTimer();
       forgetRetainedView(taken);
+      // Holding the page made it inert. If the reader moved on, don't reclaim focus even if
+      // replacing the shell briefly leaves it on the body again.
+      const restoreFocus = document.activeElement === document.body ? refocused : null;
       shell = mountRetainedView(current, retainedView);
       // The chat-link notice belongs to that landing: a refocus keeps it, a return does not.
       if (!resumingView) {
@@ -1477,6 +1554,7 @@ async function loadPage({
       navigateAgentTab = retainedState.tabNavigation;
       mountedAgent = retainedState.agent;
       markMountedRoute(current);
+      restoreRefocus = () => restoreFocus?.restore(shell.view);
       return;
     }
     // The destination rebuilds: a retained view that did not match is stale from here on.
@@ -1529,8 +1607,14 @@ async function loadPage({
       view: shell.view,
     };
     mountedViewState = viewState;
+    // A read the view redoes when it resumes (rereadOnResume, the Agents list's row
+    // deployments) neither keeps the view from being reused while it runs nor, if it fails,
+    // afterwards (finding 1663). Leaving aborts it, and its section rereads it on resume.
     const viewRequest = async (path, options = {}) => {
-      viewState.pending += 1;
+      const counted = !options.rereadOnResume;
+      if (counted) {
+        viewState.pending += 1;
+      }
       if ((options.method ?? "GET") !== "GET" && !options.readOnly) {
         viewState.reusable = false;
         viewState.mutations += 1;
@@ -1559,12 +1643,16 @@ async function loadPage({
           if (options.revalidate !== false) {
             viewState.reads.set(path, refusedRead(error.status));
           }
-        } else {
+        } else if (counted) {
+          // A reread on resume replaces what an unfinished or failed one showed, including a
+          // read the next view's reset aborts.
           viewState.reusable = false;
         }
         throw error;
       } finally {
-        viewState.pending -= 1;
+        if (counted) {
+          viewState.pending -= 1;
+        }
       }
     };
     const attachDiagnostics = (diagnostics) => {
@@ -1752,6 +1840,7 @@ async function loadPage({
           // the Agent's heading, focused once under its name.
           const focusHeading =
             document.activeElement === pendingAgentHeading ||
+            (heldHeading !== null && document.activeElement === heldHeading) ||
             shownNow.view.contains(document.activeElement);
           shell = renderShell(current.feature, false);
           shell.view.replaceWith(detailView);
@@ -1911,6 +2000,7 @@ async function loadPage({
                 ? "Backend discovery unavailable"
                 : "Request unavailable";
     if (openingAgent && ![400, 403, 404].includes(error.status)) {
+      app.querySelector(".content h1").textContent = openingAgentTitle;
       panel(
         shell.view,
         "Could not load agent details",
@@ -1953,6 +2043,7 @@ async function loadPage({
     if (lifetime.isCurrent(active) && shell) {
       shell.refresh.disabled = false;
       shell.view.setAttribute("aria-busy", "false");
+      restoreRefocus?.();
       if (focusAgentResult && document.activeElement === document.body) {
         const heading =
           shell.view.querySelector(":scope > .state-panel > h2") ??
@@ -1964,12 +2055,13 @@ async function loadPage({
         previousMountedRouteKey !== routeKey(current) &&
         document.activeElement === document.body
       ) {
-        const link =
+        // A deployment being reread can receive return focus, but is not a link until it settles.
+        const focusTarget =
           agentReturnHref &&
-          Array.from(shell.view.querySelectorAll("a[href]")).find(
-            (item) => item.href === agentReturnHref,
+          Array.from(shell.view.querySelectorAll("a[href], [data-return-focus-href]")).find(
+            (item) => (item.dataset.returnFocusHref ?? item.href) === agentReturnHref,
           );
-        (link || app.querySelector(".content h1"))?.focus({ preventScroll: true });
+        (focusTarget || app.querySelector(".content h1"))?.focus({ preventScroll: true });
       }
       if (fromRefresh && document.activeElement === document.body) {
         // The held page's shell, and the Refresh button pressed in it, were replaced.

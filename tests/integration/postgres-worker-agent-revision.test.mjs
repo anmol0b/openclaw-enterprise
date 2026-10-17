@@ -1314,10 +1314,14 @@ revisionTest(
     const overQuota = await fixture.agent("pending-pod-quota");
     const providerPod = await fixture.agent("pending-provider-pod");
     const providerRevision = await fixture.revision(providerPod, 1);
+    const providerNode = await fixture.agent("pending-provider-node");
+    const nodeRevision = await fixture.revision(providerNode, 1);
     const attachment = await fixture.agent("pending-attachment");
     const attachmentRevision = await fixture.revision(attachment, 1);
+    const setupRetrying = await fixture.agent("pending-workspace-setup");
     const unscheduledRevision = await fixture.revision(unscheduled, 1);
     const overQuotaRevision = await fixture.revision(overQuota, 1);
+    const setupRetryingRevision = await fixture.revision(setupRetrying, 1);
     // Admitted five minutes ago by PostgreSQL's clock, which judges work age (finding 1187),
     // and still inside the 900-second deadline.
     const unpairedRevision = await fixture.revision(unpaired, 1, { workAge: "300 seconds" });
@@ -1326,7 +1330,9 @@ revisionTest(
       [unpairedRevision.id, "WORKSPACE_NODE_PENDING"],
       [overQuotaRevision.id, "NAMESPACE_POD_QUOTA_EXCEEDED"],
       [providerRevision.id, "PROVIDER_HARNESS_POD_PENDING"],
+      [nodeRevision.id, "PROVIDER_WORKSPACE_NODE_PENDING"],
       [attachmentRevision.id, "CREDENTIAL_ATTACHMENT_PENDING"],
+      [setupRetryingRevision.id, "WORKSPACE_SETUP_RETRYING"],
     ]);
     const delays = new Map([
       [unscheduledRevision.idempotencyKey, []],
@@ -1377,11 +1383,15 @@ revisionTest(
     });
     assert.deepEqual(await progress(unpaired, unpairedRevision), {
       code: "WORKSPACE_NODE_PENDING",
-      message: "Waiting for the workspace node to connect to the Gateway.",
+      message: "Workloads are ready; waiting for the workspace node to connect to the Gateway.",
     });
     assert.deepEqual(await progress(providerPod, providerRevision), {
       code: "PROVIDER_HARNESS_POD_PENDING",
       message: "Waiting for one matching provider Harness Pod to be ready.",
+    });
+    assert.deepEqual(await progress(providerNode, nodeRevision), {
+      code: "WORKSPACE_NODE_PENDING",
+      message: "Waiting for the workspace node to connect to the Gateway.",
     });
     assert.deepEqual(await progress(attachment, attachmentRevision), {
       code: "CREDENTIAL_ATTACHMENT_PENDING",
@@ -1392,6 +1402,12 @@ revisionTest(
       code: "NAMESPACE_POD_QUOTA_EXCEEDED",
       message:
         "The Namespace's Pod quota is full. Stop or delete an Agent, or ask an administrator to raise the quota.",
+    });
+    // Finding 1677: Kubernetes is restarting a failed workspace setup that may still pass.
+    assert.deepEqual(await progress(setupRetrying, setupRetryingRevision), {
+      code: "WORKSPACE_SETUP_RETRYING",
+      message:
+        "Workspace setup failed; Kubernetes is retrying it. If it keeps failing, ask an admin to check the Agent's workspace storage and runtime image.",
     });
     const firstDelay = async (revision) => {
       const recorded = delays.get(revision.idempotencyKey);
@@ -1701,13 +1717,29 @@ revisionTest(
       [candidate.id],
     );
     assert.deepEqual(evidence.rows, [{ reason: "CONVERGENCE_DEADLINE_EXCEEDED" }]);
+    // The Compute observation carried a check and code outside the runtime's vocabulary. They
+    // are recorded as UNRECOGNIZED, so neither the stored work nor its status carries them
+    // (finding 1660).
+    const recordedRuntimeFailure = {
+      ...runtimeFailure,
+      check: "UNRECOGNIZED",
+      code: "UNRECOGNIZED",
+    };
+    const recorded = await fixture.observerPool.query(
+      "SELECT result_data FROM occ.controller_work WHERE idempotency_key = $1",
+      [candidate.idempotencyKey],
+    );
+    assert.deepEqual(recorded.rows[0].result_data, {
+      timeoutMs: 1,
+      runtimeFailure: recordedRuntimeFailure,
+    });
     const status = await fixture.deploymentStatus(owner, candidate);
     assert.equal(status.status, "failed");
     assert.deepEqual(status.error, {
       code: "CONVERGENCE_DEADLINE_EXCEEDED",
       message:
         "Deployment convergence deadline exceeded: the version did not become ready in time. Check its logs and runtime diagnostics, correct the cause if there is one, then deploy a new version.",
-      data: { timeoutMs: 1, runtimeFailure },
+      data: { timeoutMs: 1, runtimeFailure: recordedRuntimeFailure },
     });
     assert.deepEqual(status.warnings, []);
     // A runtime that failed by itself stays for diagnosis: nothing retires it.
@@ -2099,6 +2131,27 @@ for (const scenario of [
       },
     },
   },
+  {
+    // Finding 1677: the kubelet restarts the init container, but a refusal repeats.
+    name: "a refused workspace setup fails deployment before the convergence deadline",
+    label: "refused-workspace-setup",
+    pendingPasses: 1,
+    runtimeFailure: {
+      component: "agent",
+      check: "workspace-setup",
+      checkedAt: "2026-10-17T08:00:00.000Z",
+      code: "WORKSPACE_SETUP_REFUSED",
+    },
+    expected: {
+      preparations: 2,
+      activeRevisionId: null,
+      error: {
+        code: "WORKSPACE_SETUP_REFUSED",
+        message:
+          "Initial workspace setup refused this version's workspace, and every retry would refuse it again: the workspace files or setup record, or the runtime's default files, do not match what the Agent was created with. Ask an admin to check the Agent's workspace storage and runtime image; do not delete the setup record to force a replay.",
+      },
+    },
+  },
 ]) {
   revisionTest(scenario.name, async (fixture) => {
     const [{ candidate }] = await runRuntimeFailureCases(fixture, [scenario]);
@@ -2136,6 +2189,16 @@ revisionTest(
       component: "agent",
       cause: { kind: "WRAPPER_ERROR" },
     };
+    // Only failed model probes retain evidence in both persisted and public errors.
+    const expectedProbeFailure = (runtimeFailure) => ({
+      resultData: { runtimeFailure },
+      error: {
+        code: "RUNTIME_MODEL_PROBE_FAILED",
+        message:
+          "The startup model check failed for a reason other than a rejected credential, such as an unknown model, invalid provider settings, a provider or TLS error, a rate limit or quota, or, with Codex, a provider the runtime cannot reach. Check the model and its provider settings (such as baseUrl and api) in the Configuration, the provider account, and that the runtime can reach the provider, then deploy a new version.",
+        data: { runtimeFailure },
+      },
+    });
     const cases = [
       {
         label: "held-runtime-0",
@@ -2156,29 +2219,12 @@ revisionTest(
       {
         label: "held-runtime-1",
         runtimeFailure: probeStatusFailure,
-        // Only failed model probes retain their classified runtime evidence.
-        expected: {
-          resultData: { runtimeFailure: probeStatusFailure },
-          error: {
-            code: "RUNTIME_MODEL_PROBE_FAILED",
-            message:
-              "The startup model check failed for a reason other than a rejected credential, such as an unknown model, invalid provider settings, a provider or TLS error, a rate limit or quota, or, with Codex, a provider the runtime cannot reach. Check the model and its provider settings (such as baseUrl and api) in the Configuration, the provider account, and that the runtime can reach the provider, then deploy a new version.",
-            data: { runtimeFailure: probeStatusFailure },
-          },
-        },
+        expected: expectedProbeFailure(probeStatusFailure),
       },
       {
         label: "held-runtime-2",
         runtimeFailure: wrapperFailure,
-        expected: {
-          resultData: { runtimeFailure: wrapperFailure },
-          error: {
-            code: "RUNTIME_MODEL_PROBE_FAILED",
-            message:
-              "The startup model check failed for a reason other than a rejected credential, such as an unknown model, invalid provider settings, a provider or TLS error, a rate limit or quota, or, with Codex, a provider the runtime cannot reach. Check the model and its provider settings (such as baseUrl and api) in the Configuration, the provider account, and that the runtime can reach the provider, then deploy a new version.",
-            data: { runtimeFailure: wrapperFailure },
-          },
-        },
+        expected: expectedProbeFailure(wrapperFailure),
       },
       {
         label: "held-runtime-3",
@@ -2524,7 +2570,10 @@ revisionTest(
           "WORKSPACE_NODE_BINDING_PENDING",
           "Workloads are ready; waiting for the Gateway to apply the workspace node.",
         ],
-        ["WORKSPACE_NODE_PENDING", "Waiting for the workspace node to connect to the Gateway."],
+        [
+          "WORKSPACE_NODE_PENDING",
+          "Workloads are ready; waiting for the workspace node to connect to the Gateway.",
+        ],
         [
           "AGENT_GATEWAY_UNAVAILABLE",
           "The Agent Gateway was not reachable through its route yet. The controller will retry until the deployment deadline.",

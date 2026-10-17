@@ -743,6 +743,37 @@ export const AgentProvisioningStatusSchema = Type.Object(
         { additionalProperties: false },
       ),
     ),
+    progress: Type.Optional(
+      Type.Object(
+        {
+          phase: Type.Literal("deployment", {
+            description: "Handoff is done; the job waits for its initial deployment.",
+          }),
+          lastAttempt: Type.Union(
+            [
+              Type.Null(),
+              Type.Object(
+                {
+                  at: Timestamp,
+                  code: Type.String({ minLength: 1, maxLength: 64 }),
+                  message: Type.String({ minLength: 1 }),
+                },
+                { additionalProperties: false },
+              ),
+            ],
+            {
+              description:
+                "With `agent_revision:read`, this can report the deployment's named wait. Otherwise it reports the job's own `PROVISIONING_DEPLOYMENT_PENDING`, or null if the job has not recorded that wait. The controller writes the message; a refusal can include a code restricted to uppercase letters, digits, and underscores.",
+            },
+          ),
+        },
+        {
+          additionalProperties: false,
+          description:
+            "Present while a job past handoff is queued or running. The job defers without spending attempts while it waits, so `attemptCount` can stay 0.",
+        },
+      ),
+    ),
   },
   { additionalProperties: false },
 );
@@ -1341,7 +1372,7 @@ export const AgentDeploymentStatusSchema = Type.Object(
       ],
       {
         description:
-          "Null unless deployment failed. A failure contains code, a fixed safe message, and optional allowlisted data. CONVERGENCE_DEADLINE_EXCEEDED may include data.timeoutMs and data.runtimeFailure with bounded startup-failure evidence. RUNTIME_MODEL_PROBE_FAILED may include data.runtimeFailure with the classified cause of the startup model check failure. Native error text is never returned.",
+          "Null unless deployment failed. A failure contains code, a fixed safe message, and optional allowlisted data. CONVERGENCE_DEADLINE_EXCEEDED may include data.timeoutMs and data.runtimeFailure with bounded startup-failure evidence; a component, check or code outside the runtime's own vocabulary reads UNRECOGNIZED. RUNTIME_MODEL_PROBE_FAILED may include data.runtimeFailure with the classified cause of the startup model check failure. Native error text is never returned.",
       },
     ),
     warnings: Type.Array(

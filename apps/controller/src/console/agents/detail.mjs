@@ -26,12 +26,14 @@ import {
   rejectionMessage,
   assertReadableConfiguration,
   isStaleGeneration,
+  configurationConflictMessage,
   GENERIC_CONFLICT,
   GENERIC_DENIAL,
   NAMESPACE_NOT_READY_MESSAGE,
   NEUTRAL_DEPLOYMENT_NOTES,
   deploymentOutcome,
   neutralDeploymentOutcome,
+  preAdmissionRefusal,
 } from "./list.mjs";
 import {
   createChannelSecretsPanel,
@@ -50,9 +52,30 @@ async function readRevisionPage(request, path, cursor = null) {
   return { revisions: page.data, nextCursor: page.meta?.nextCursor ?? null };
 }
 
+// Empties a status just inserted with `text` and writes it again once screen readers have seen
+// it empty, so they announce it as a change. A timer, unlike a frame, also runs in a hidden tab.
+function announceAfterShown(status, text) {
+  status.textContent = "";
+  setTimeout(() => {
+    status.textContent = text;
+  }, 100);
+}
+
+// A 503 the deploy request answered before admission: no version was created, so Deploy stays
+// available. Create Agent treats the same codes the same way (finding 1638).
+function deployRefusedBeforeAdmission(error) {
+  return (
+    error.code === "RUNTIME_CREDENTIALS_CLUSTER_RBAC" || preAdmissionRefusal(error) !== undefined
+  );
+}
+
 function deployFailureText(error, submitted) {
   if (error.code === "RUNTIME_CREDENTIALS_CLUSTER_RBAC") {
     return "Deployment refused: the cluster denied OCC access to this Agent's connection credentials. Ask a platform operator to grant the documented tenant RoleBindings, then deploy again.";
+  }
+  const refusal = submitted ? preAdmissionRefusal(error) : undefined;
+  if (refusal !== undefined) {
+    return refusal;
   }
   if (error.status === 409 && error.code === "NAMESPACE_NOT_READY") {
     return NAMESPACE_NOT_READY_MESSAGE;
@@ -768,7 +791,7 @@ function createVersionDeploymentRecord(
         "div",
         { className: "deployment-heading" },
         element("h3", {}, "This version’s deployment record"),
-        button(loading ? "Refreshing..." : "Refresh record", () => void load(), {
+        button(loading ? "Refreshing…" : "Refresh record", () => void load(), {
           disabled: loading,
         }),
       ),
@@ -817,6 +840,10 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
   let diagnostics = null;
   let error = null;
   let loading = false;
+  // The id of the result that describes the button after a run. render() sets it on both: a
+  // deployment poll re-renders the panel, and patchChildren drops attributes that render()
+  // does not set (finding 1712).
+  let outcomeId = null;
 
   async function run() {
     if (loading || !context.isCurrent()) {
@@ -825,7 +852,13 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
     loading = true;
     error = null;
     diagnostics = null;
+    outcomeId = null;
     render();
+    // The button disables itself while it waits: move focus to the waiting line, as Deploy
+    // does, so a keyboard reader is not dropped to the page (finding 1705).
+    const runButton = section.querySelector(".deployment-heading button");
+    const waitingLine = section.lastElementChild;
+    focusSaveOutcome(section, [], waitingLine);
     try {
       diagnostics = await context.request(
         `${path}/deployments/${encodeURIComponent(revisionId)}/diagnostics`,
@@ -842,13 +875,33 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
       error = cause;
     } finally {
       if (context.isCurrent()) {
+        const waited = document.activeElement === waitingLine;
         loading = false;
         render();
+        // The result replaces the waiting line: focus returns to the button, described by
+        // the alert or the "Observed" line (not the whole check list, which the view's live
+        // region already reads), unless the reader has moved on.
+        if (waited) {
+          const outcome = error
+            ? section.querySelector('[role="alert"]')
+            : section.lastElementChild.firstElementChild;
+          focusSaveOutcome(section, [runButton], outcome);
+          outcomeId = runButton.getAttribute("aria-describedby") ? outcome.id : null;
+        }
       }
     }
   }
 
   function renderChecks() {
+    if (loading) {
+      // Focusable here, not only by focusSaveOutcome: a deployment poll re-renders the panel,
+      // and patchChildren drops attributes that render() does not set.
+      return element(
+        "p",
+        { className: "muted", role: "status", tabindex: "-1" },
+        "Waiting for diagnostic results…",
+      );
+    }
     if (!diagnostics) {
       return element(
         "p",
@@ -872,7 +925,11 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
     return element(
       "div",
       {},
-      element("p", { className: "muted" }, `Observed ${displayDate(diagnostics.observedAt)}`),
+      element(
+        "p",
+        { className: "muted", ...describedOutcome() },
+        `Observed ${displayDate(diagnostics.observedAt)}`,
+      ),
       diagnostics.checks.length
         ? checks
         : element("p", { className: "muted" }, "No diagnostic checks were returned."),
@@ -923,6 +980,10 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
       : [];
   }
 
+  function describedOutcome() {
+    return outcomeId ? { id: outcomeId } : {};
+  }
+
   // The version's record calls this on every deployment poll: rewrite only what changed.
   function render() {
     patchChildren(section, [
@@ -930,13 +991,13 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
         "div",
         { className: "deployment-heading" },
         element("h3", {}, "Current observations"),
-        button(
-          loading ? "Running diagnostics..." : "Run diagnostics for this version",
-          () => void run(),
-          {
-            disabled: loading,
-          },
-        ),
+        // The button keeps its label while it waits, as Deploy and Save do: the status line
+        // below is the one announcement, and a changed label inside the Agent view's live
+        // region was announced as well (finding 1698).
+        button("Run diagnostics for this version", () => void run(), {
+          disabled: loading,
+          ...(outcomeId ? { "aria-describedby": outcomeId } : {}),
+        }),
       ),
       element(
         "p",
@@ -952,7 +1013,7 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
         ? [
             element(
               "p",
-              { className: "error", role: "alert" },
+              { className: "error", role: "alert", ...describedOutcome() },
               error.status === 403
                 ? "Diagnostics require Agent read and operate access plus read access to this version. Ask a Namespace administrator to confirm those grants."
                 : error.status === 503
@@ -1265,17 +1326,18 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     recoveryActions,
   );
   let recoveryTarget;
+  const overviewStatus = element(
+    "div",
+    { className: "agent-overview-status" },
+    currentSummary,
+    statusLine,
+    deploymentStatus,
+  );
   view.replaceChildren(
     header,
     recovery,
     nativeAdmin.section,
-    element(
-      "div",
-      { className: "agent-overview-status" },
-      currentSummary,
-      statusLine,
-      deploymentStatus,
-    ),
+    overviewStatus,
     // Sharing policy reads need Installation administration and a denial is audited, so
     // skip the panel when the session probe already showed that access is missing.
     ...(context.installationAdmin === false ? [] : [renderAgentAccess(context, agent)]),
@@ -1789,13 +1851,24 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     // waits for the caller's permission answer, which decides its draft link, so it never
     // shows a draft link the answer then withdraws (finding 1478). That read starts first, so
     // it has usually settled by now.
-    setHidden(
-      recovery,
+    const hideRecovery =
       latestDeploymentStatus !== "failed" ||
-        currentHidden ||
-        currentUnknown ||
-        !callerPermissionsSettled,
-    );
+      currentHidden ||
+      currentUnknown ||
+      !callerPermissionsSettled;
+    // A page shown before its failure lands (a deploy the reader is watching, say) cannot wait
+    // for it as a load does (finding 1489): above the overview, the card pushed what the reader
+    // was watching down (finding 1655). It lands below the deployment activity it explains
+    // instead, and moves only the cards under it.
+    if (
+      recovery.hidden &&
+      !hideRecovery &&
+      !view.classList.contains("agent-detail-pending") &&
+      overviewStatus.nextElementSibling !== recovery
+    ) {
+      overviewStatus.after(recovery);
+    }
+    setHidden(recovery, hideRecovery);
     if (!recovery.hidden) {
       const version = `v${latest.revision}`;
       const code = latestDeploymentErrorCode;
@@ -2419,11 +2492,17 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
             context.onExpired();
             return;
           }
-          // The cluster refused the credential check before admission: no version was created.
-          const clusterRbac = error.code === "RUNTIME_CREDENTIALS_CLUSTER_RBAC";
           deployFeedback.textContent = deployFailureText(error, submitted);
-          if (!submitted || clusterRbac || [400, 403, 404, 409, 429].includes(error.status)) {
+          if (
+            !submitted ||
+            deployRefusedBeforeAdmission(error) ||
+            [400, 403, 404, 409, 429].includes(error.status)
+          ) {
             deployPending = false;
+          } else {
+            // The request ended, not necessarily the deployment. Keep Deploy disabled and let
+            // the alert explain the unknown outcome instead of leaving “Deploying…” beside it.
+            deployStatus.textContent = "";
           }
         } finally {
           if (context.isCurrent()) {
@@ -2668,7 +2747,14 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       ? [...content.querySelectorAll('[role="status"]')].find((node) => node.textContent === saved)
       : null;
     let control = named ?? tabControls.get(selectedTab);
-    if (status && named) {
+    // Disabling Save or replacing its editor can leave focus on the body. Restore it then, but
+    // don't take it back from a control the reader reached while saving.
+    const focusMoved = Boolean(document.activeElement) && document.activeElement !== document.body;
+    if (status && focusMoved) {
+      // No control we focus names the status then, so it announces itself: a live region speaks
+      // when its text changes after it is shown, not when it is inserted with it (finding 1641).
+      announceAfterShown(status, saved);
+    } else if (status && named) {
       // A status inserted with its text is rarely announced; the focused control names it.
       status.id = "draft-save-status";
       control.setAttribute("aria-describedby", status.id);
@@ -2678,8 +2764,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       status.tabIndex = -1;
       control = status;
     }
-    // Focus scrolls only if the control left the viewport.
-    control.focus();
+    if (!focusMoved) {
+      control.focus();
+    }
   }
 
   async function renderTab({ activated = false } = {}) {
@@ -2999,7 +3086,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
               error.name === "TypeError"
             ) {
               if (!configurationSaved) {
-                error.message = rejectionMessage(error, mutationStarted);
+                error.message =
+                  configurationConflictMessage(error, mutationStarted) ??
+                  rejectionMessage(error, mutationStarted);
               }
             }
             error.outcomeUnknown =
@@ -3734,7 +3823,13 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       pending = true;
       feedback.textContent = "Checking Configuration…";
       feedbackLocked = true;
+      const saveFocused = document.activeElement === save;
       updateState();
+      // Save is disabled while it runs; its status takes focus so a keyboard reader is not
+      // dropped to the page, as Deploy's does (finding 1646).
+      if (saveFocused) {
+        focusSaveOutcome(container, [], feedback);
+      }
       let mutationStarted = false;
       let configurationSaved = false;
       try {
@@ -3791,7 +3886,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           reloadRequired = true;
           return;
         }
-        feedback.textContent = rejectionMessage(error, mutationStarted);
+        feedback.textContent =
+          configurationConflictMessage(error, mutationStarted && !configurationSaved) ??
+          rejectionMessage(error, mutationStarted);
         feedbackLocked = true;
         outcomeUnknown = mutationStarted && ![400, 403, 404, 409, 429].includes(error.status);
       } finally {

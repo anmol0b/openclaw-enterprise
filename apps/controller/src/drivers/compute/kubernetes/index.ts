@@ -84,6 +84,7 @@ import type {
   NamespaceEnsureResult,
   SandboxDriver,
   SandboxHarnessEndpoint,
+  SandboxHarnessStatus,
   SandboxEnvironmentVariable,
   SandboxNamespaceContext,
   SandboxResourceRef,
@@ -124,6 +125,7 @@ import {
   RuntimeLogsForbiddenByClusterError,
   runtimeFailureCause,
   SandboxNamespaceRefusedError,
+  SandboxWorkspaceSetupRefusedError,
   ServiceAccountCredentialSecretExistsError,
   TransientDependencyError,
   validRuntimeLogFrontierTime,
@@ -137,6 +139,7 @@ import {
   HARNESS_WORKSPACE,
   MANAGED_WORKSPACE,
   requireWorkspaceSetupConfiguration,
+  WORKSPACE_SETUP_REFUSED_EXIT_STATUS,
   WORKSPACE_SETUP_RUNTIME,
   workspaceSetupMainEntry,
   workspaceSetupVerifier,
@@ -1269,6 +1272,9 @@ const WORKSPACE_NODE_PAIRING_WAIT_MS = 8_000;
 // one (a full map, or a controller restart) only grants that setup one more wait.
 const MAX_WORKSPACE_NODE_PAIRING_BUDGETS = 1_024;
 const WORKSPACE_NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+// The node Secret key naming the revision whose node readiness last saw paired or connected;
+// the device itself is the Agent's (finding 1671).
+const WORKSPACE_NODE_ENROLLED_REVISION_KEY = "enrolledRevisionId";
 const GATEWAY_PRIVATE_STATE_CATEGORIES = Object.freeze([
   ["state", "/home/node/.openclaw/state"],
   ["agent", "/home/node/.openclaw/agents/main/agent"],
@@ -5453,11 +5459,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
         namespace,
         workspaceSetup !== undefined,
       );
+      // A setup the kubelet is retrying names that wait; a held failure needs none.
       const reason =
         pendingReason ??
         (runtimeFailure === undefined
           ? ((await observedPendingReason()) ?? fallbackReason)
-          : undefined);
+          : runtimeFailure.code === "WORKSPACE_SETUP_FAILED"
+            ? "WORKSPACE_SETUP_RETRYING"
+            : undefined);
       return {
         ...result,
         ...(runtimeFailure === undefined ? {} : { runtimeFailure }),
@@ -5760,7 +5769,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
         context,
         harnessAuth,
         namespace,
-        sandboxDriver?.implementation === "openshell" && revision.harness.id === "codex"
+        // A provider-owned Harness gets the transport token's verifier only: Codex
+        // authenticates its app-server with it, and both Codex and the dedicated
+        // OpenClaw worker serve a held startup failure to the token holder.
+        sandboxDriver?.implementation === "openshell" &&
+          (revision.harness.id === "codex" || revision.harness.id === "openclaw")
           ? "verifier"
           : "secret",
       ),
@@ -6088,13 +6101,36 @@ export class KubernetesComputeDriver implements ComputeDriver {
             ...this.credentialSourceEnvironment(revision, attachments),
           ],
         };
-        const sandbox = await this.prepareRevisionStage("sandbox_provision", () =>
-          sandboxDriver.provisionHarness!({
-            ...sandboxContext,
-            revision,
-            requirements,
-          }),
-        );
+        // Whether the node has ever enrolled, read before provisioning: a dedicated OpenClaw
+        // worker's exposure serves only Compute's status read before its first enrollment,
+        // and the provider withdraws it from a Sandbox adopted after that (finding 1657).
+        const nodeEnrolled = await this.workspaceNodeEnrolled(revision, namespace);
+        const harnessContext = {
+          ...sandboxContext,
+          revision,
+          requirements,
+          workspaceNodeEnrolled: nodeEnrolled,
+        };
+        let sandbox: SandboxResourceRef;
+        try {
+          sandbox = await this.prepareRevisionStage("sandbox_provision", () =>
+            sandboxDriver.provisionHarness!(harnessContext),
+          );
+        } catch (error) {
+          if (!(error instanceof SandboxWorkspaceSetupRefusedError)) {
+            throw error;
+          }
+          // The provider's private setup refused the workspace, which every retry repeats:
+          // the held failure the init container reports, so the deployment fails at once
+          // (finding 1708).
+          const runtimeFailure: RuntimeFailureEvidence = {
+            component: "agent",
+            check: "workspace-setup",
+            code: "WORKSPACE_SETUP_REFUSED",
+            checkedAt: new Date().toISOString(),
+          };
+          return { ...result, runtimeFailure };
+        }
         this.verifySandboxResourceRef(sandbox, revision, namespace);
         if (this.options.runtime !== undefined) {
           // The Sandbox, and with it the supervisor's exact peer labels, exists only
@@ -6110,11 +6146,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           nativeRuntime !== undefined || sandboxDriver.harnessEndpoint === undefined
             ? undefined
             : await this.prepareRevisionStage("sandbox_provision", () =>
-                sandboxDriver.harnessEndpoint!({
-                  ...sandboxContext,
-                  revision,
-                  requirements,
-                }),
+                sandboxDriver.harnessEndpoint!(harnessContext),
               );
         if (
           providerEndpoint !== undefined &&
@@ -6134,8 +6166,102 @@ export class KubernetesComputeDriver implements ComputeDriver {
         if (!(await this.providerHarnessReady(revision, namespace, requirements.labels))) {
           return incomplete({ fallbackReason: "PROVIDER_HARNESS_POD_PENDING" });
         }
+        // The provider-owned Harness's own view of its startup, read through the
+        // provider with the Agent transport token. `failed` carries a held startup
+        // failure (a failed model probe), validated like a Compute-owned status port.
+        // A provider that does not answer is no evidence about the Harness, and no reason
+        // to spend the attempt budget: like a Kubernetes API that is converging, it is
+        // rechecked until the deployment deadline (finding 1658). A Driver's own transient
+        // class is not a DependencyUnavailableError and passes through; refusals and invalid
+        // data keep their classes.
+        const transientProviderFailure = (error: unknown, message: string): unknown =>
+          error instanceof DependencyUnavailableError
+            ? new TransientDependencyError("sandbox_gateway", "unavailable", message, {
+                cause: error,
+              })
+            : error;
+        const observeProviderHarness = async (): Promise<SandboxHarnessStatus> =>
+          this.prepareRevisionStage("sandbox_provision", async () => {
+            const transportToken = await this.prepareRevisionStage("harness_auth", () =>
+              this.sandboxTransportTokenText(revision),
+            );
+            try {
+              return await sandboxDriver.harnessStatus!({ ...harnessContext, transportToken });
+            } catch (error) {
+              throw transientProviderFailure(
+                error,
+                "The Sandbox provider did not answer the Harness status read.",
+              );
+            }
+          });
+        // The node has enrolled: the worker is past its checks, and from now on agent-run
+        // code may bind the worker's transport port, so the exposure Compute's read used
+        // must go before the revision is ready (finding 1657). A withdrawal that fails
+        // keeps the revision unready; the provider completes it on the next adoption.
+        const withdrawProviderExposure = async (): Promise<void> => {
+          if (nativeRuntime === undefined || sandboxDriver.withdrawHarnessExposure === undefined) {
+            return;
+          }
+          await this.prepareRevisionStage("sandbox_provision", async () => {
+            try {
+              await sandboxDriver.withdrawHarnessExposure!({
+                ...harnessContext,
+                workspaceNodeEnrolled: true,
+              });
+            } catch (error) {
+              throw transientProviderFailure(
+                error,
+                "The Sandbox provider did not answer the Harness exposure withdrawal.",
+              );
+            }
+          });
+        };
+        const heldProviderHarnessFailure = (
+          harness: SandboxHarnessStatus,
+        ): ComputeReadiness | undefined => {
+          if (harness.state !== "failed") {
+            return undefined;
+          }
+          const runtimeFailure = this.runtimeFailureEvidence(harness.runtimeFailure);
+          // `failed` without evidence is as invalid as malformed evidence.
+          if (runtimeFailure === undefined) {
+            throw new DependencyUnavailableError("Runtime failure status returned invalid data.");
+          }
+          return { ...result, runtimeFailure };
+        };
         if (!(await this.workspaceNodeReady(revision, namespace))) {
-          return incomplete({ fallbackReason: "PROVIDER_WORKSPACE_NODE_PENDING" });
+          if (nativeRuntime !== undefined && !nodeEnrolled) {
+            // The readiness check may have recorded the device of a node that enrolled but
+            // is not connected yet: the exposure goes now, not on the next pass.
+            if (await this.workspaceNodeEnrolled(revision, namespace)) {
+              await withdrawProviderExposure();
+            } else if (sandboxDriver.harnessStatus !== undefined) {
+              // A dedicated OpenClaw worker holding a failed model check never connects
+              // its node, and nothing else reports the hold: read it through the
+              // provider and fail the revision with its code instead of waiting for
+              // the deadline (finding 1642). A worker that is still starting, or one
+              // that has started its node, serves nothing there; once the node has
+              // enrolled, the exposure the read used is withdrawn.
+              const held = heldProviderHarnessFailure(await observeProviderHarness());
+              if (held !== undefined) {
+                return held;
+              }
+            }
+          }
+          // Name the node wait only after its Gateway is ready. A rollout, held failure or
+          // more specific pending observation keeps its own outcome.
+          return (await this.gatewayReady(
+            gatewayOwnership,
+            gatewayName,
+            gatewayNamespace,
+            revision.id,
+          ))
+            ? incomplete({ fallbackReason: "PROVIDER_WORKSPACE_NODE_PENDING" })
+            : incomplete();
+        }
+        if (!nodeEnrolled) {
+          // The node enrolled this pass.
+          await withdrawProviderExposure();
         }
         if (credentialContext !== undefined) {
           const statuses = await this.requireCredentialGateway().attachmentStatus({
@@ -6163,23 +6289,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
           // readiness probe, require the Harness transport to answer, and fail on
           // the Harness's held startup failure (a failed model probe) instead of
           // activating a revision whose Codex never started.
-          const harness = await this.prepareRevisionStage("sandbox_provision", async () =>
-            sandboxDriver.harnessStatus!({
-              ...sandboxContext,
-              revision,
-              requirements,
-              transportToken: await this.prepareRevisionStage("harness_auth", () =>
-                this.sandboxTransportTokenText(revision),
-              ),
-            }),
-          );
-          if (harness.state === "failed") {
-            const runtimeFailure = this.runtimeFailureEvidence(harness.runtimeFailure);
-            // `failed` without evidence is as invalid as malformed evidence.
-            if (runtimeFailure === undefined) {
-              throw new DependencyUnavailableError("Runtime failure status returned invalid data.");
-            }
-            return { ...result, runtimeFailure };
+          const harness = await observeProviderHarness();
+          const held = heldProviderHarnessFailure(harness);
+          if (held !== undefined) {
+            return held;
           }
           if (harness.state !== "serving") {
             return incomplete();
@@ -6580,7 +6693,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
       throw new Error("The exact AgentRevision workspace node is not enrolled.");
     }
     const activatedHarnessAuth =
-      sandboxDriver?.implementation === "openshell" && revision.harness.id === "codex"
+      sandboxDriver?.implementation === "openshell" &&
+      (revision.harness.id === "codex" || revision.harness.id === "openclaw")
         ? {
             ...harnessAuth,
             environment: [
@@ -6975,9 +7089,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
 
   /**
    * Revokes one credential source from the revision's paired Sandbox. The Sandbox identity is
-   * derived exactly as provisioning created it; a missing Namespace or Sandbox has nothing left
-   * to revoke. A configuration that cannot reach the Sandbox, or an object this Driver does
-   * not own, is a CredentialWithdrawalRefusedError: retrying cannot change it.
+   * derived exactly as provisioning created it, so the gateway withdraws and confirms whether or
+   * not the Kubernetes Namespace still exists: the provider's Workspace record outlives the
+   * Namespace, and only the gateway can tell a missing Sandbox from a hidden one (finding 1693).
+   * A configuration that cannot reach the Sandbox, or an object this Driver does not own, is a
+   * CredentialWithdrawalRefusedError: retrying cannot change it.
    */
   async withdrawCredentialSource(
     revision: Readonly<AgentRevision>,
@@ -7026,14 +7142,17 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
     const { name: namespace, external } = await this.resolveNamespace(revision.namespaceId);
     const existingNamespace = await this.getNamespace(namespace);
-    if (existingNamespace === undefined) {
-      return Object.freeze({ sourceId: source.id, state: "absent" });
+    // A missing Namespace proves nothing about the Sandbox (finding 1693): only its ownership
+    // check needs the object; the gateway withdraws and confirms either way. Without the object
+    // the placement is the derived default, so an adopted Namespace of another name fails closed
+    // in the gateway (no such Workspace) rather than reporting absence.
+    if (existingNamespace !== undefined) {
+      this.verifyNamespaceOwnership(
+        existingNamespace,
+        { namespaceId: revision.namespaceId },
+        external,
+      );
     }
-    this.verifyNamespaceOwnership(
-      existingNamespace,
-      { namespaceId: revision.namespaceId },
-      external,
-    );
     const sandboxNamespace = this.sandboxNamespaceForRevision(revision, namespace);
     const sandbox = sandboxDriver.harnessResource({ namespace: sandboxNamespace, revision });
     this.verifySandboxResourceRef(sandbox, revision, namespace);
@@ -7049,6 +7168,58 @@ export class KubernetesComputeDriver implements ComputeDriver {
       throw new OwnershipFailure("The Credential Gateway withdrew another credential source.");
     }
     return status;
+  }
+
+  /**
+   * Withdraws a dedicated OpenClaw worker's provider exposure outside a preparation pass. An
+   * active revision gets no pass without a maintenance interval, which this Driver declares
+   * none of, so one deployed by a controller that kept the exposure for the Sandbox's lifetime
+   * would keep it until redeploy (finding 1669); a revision that failed for good keeps its
+   * Sandbox for diagnosis and, until now, the exposure with it (finding 1672). Nothing of
+   * Compute's reads through it in either state. Effect-free for revisions without one.
+   */
+  async withdrawHarnessExposure(
+    revision: Readonly<AgentRevision>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (
+      revision.compute.id !== this.id ||
+      revision.compute.implementation !== this.implementation
+    ) {
+      throw new Error(
+        "Refusing to withdraw a Harness exposure from an AgentRevision pinned to another Compute Driver.",
+      );
+    }
+    if (revision.harness.mode !== "dedicated" || revision.harness.id !== "openclaw") {
+      return;
+    }
+    const sandboxDriver = this.sandboxDriverForRevision(revision);
+    if (sandboxDriver?.withdrawHarnessExposure === undefined) {
+      return;
+    }
+    const { name: namespace, external } = await this.resolveNamespace(revision.namespaceId);
+    const existingNamespace = await this.getNamespace(namespace);
+    // The Namespace's teardown releases the provider's Workspace with every Sandbox in it, but
+    // a Namespace missing before that proves nothing about the exposure (finding 1693): only
+    // its ownership check needs the object; the provider withdraws and confirms either way, in
+    // the derived default placement (an adopted Namespace of another name then fails closed).
+    if (existingNamespace !== undefined) {
+      this.verifyNamespaceOwnership(
+        existingNamespace,
+        { namespaceId: revision.namespaceId },
+        external,
+      );
+    }
+    const context = await this.sandboxNamespaceContext(
+      this.sandboxNamespaceForRevision(revision, namespace),
+      namespace,
+    );
+    await sandboxDriver.withdrawHarnessExposure({
+      ...context,
+      signal: AbortSignal.any([context.signal, signal]),
+      revision,
+      workspaceNodeEnrolled: true,
+    });
   }
 
   async stopRevision(revision: AgentRevision): Promise<void> {
@@ -9375,16 +9546,17 @@ export class KubernetesComputeDriver implements ComputeDriver {
               ? undefined
               : asRecord(asRecord(initialized?.lastState)?.terminated));
           if (typeof terminated?.exitCode === "number" && terminated.exitCode !== 0) {
-            return {
-              component,
-              check: "workspace-setup",
-              code: "WORKSPACE_SETUP_FAILED",
-              checkedAt:
-                typeof terminated.finishedAt === "string" &&
-                this.validIsoTimestamp(terminated.finishedAt)
-                  ? terminated.finishedAt
-                  : (validKubernetesTime(terminated.finishedAt) ?? new Date().toISOString()),
-            };
+            const checkedAt =
+              typeof terminated.finishedAt === "string" &&
+              this.validIsoTimestamp(terminated.finishedAt)
+                ? terminated.finishedAt
+                : (validKubernetesTime(terminated.finishedAt) ?? new Date().toISOString());
+            // The kubelet restarts a failed init container (these Pods restart Always), which
+            // can pass after an I/O or native setup failure. A refusal fails every restart the
+            // same way (finding 1677).
+            return terminated.exitCode === WORKSPACE_SETUP_REFUSED_EXIT_STATUS
+              ? { component, check: "workspace-setup", code: "WORKSPACE_SETUP_REFUSED", checkedAt }
+              : { component, check: "workspace-setup", code: "WORKSPACE_SETUP_FAILED", checkedAt };
           }
         }
       }
@@ -10269,6 +10441,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
         setupId: setup.setupId,
         setupCode: setup.setupCode,
         expiresAtMs: String(setup.expiresAtMs),
+        // The device observed on an expired setup may have been redeemed by a predecessor's
+        // node; the revision whose node connects is credited by the readiness check.
         ...(observed === undefined ? {} : { deviceId: observed.deviceId }),
       };
       const clients = await this.clients(namespace.plane);
@@ -10515,6 +10689,41 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     }
   }
 
+  /**
+   * Whether this revision's workspace node has enrolled: the node Secret records the device,
+   * and names this revision as the one whose node readiness saw paired or connected. The
+   * device is the Agent's and outlives revisions, so without the second part every redeploy
+   * would count as enrolled from its first pass, skip the provider's held-failure read and
+   * create its exposure only to delete it at once (finding 1671). A Secret that records a
+   * device under no revision was written before this check existed; its revision is the one
+   * that enrolled it, so it still counts. Without node enrollment there is no enrollment window
+   * to observe a provider-owned Harness in, as `workspaceNodeReady` holds, so a native exposure
+   * is withdrawn on the first pass.
+   */
+  private async workspaceNodeEnrolled(
+    revision: AgentRevision,
+    namespace: KubernetesNamespaceAddress,
+  ): Promise<boolean> {
+    if (
+      this.nodeEnrollment === undefined ||
+      this.options.runtime === undefined ||
+      this.getGatewayEndpoint(revision) === undefined
+    ) {
+      return true;
+    }
+    const secret = await this.getOwned(
+      "Secret",
+      this.workspaceNodeName(revision),
+      namespace,
+      this.workspaceNodeOwnership(revision),
+    );
+    const read = (key: string) => Buffer.from(secret?.data?.[key] ?? "", "base64").toString("utf8");
+    const enrolledRevisionId = read(WORKSPACE_NODE_ENROLLED_REVISION_KEY);
+    return (
+      read("deviceId") !== "" && (enrolledRevisionId === "" || enrolledRevisionId === revision.id)
+    );
+  }
+
   private async workspaceNodeReady(
     revision: AgentRevision,
     namespace: KubernetesNamespaceAddress,
@@ -10572,11 +10781,43 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       }
     };
     if (deviceId) {
-      if (dropSetupCode && secret.data?.setupCode !== undefined) {
-        await replaceSecret(withoutSetupCode(secret.data));
+      const dropping = dropSetupCode && secret.data?.setupCode !== undefined;
+      let connected: boolean;
+      try {
+        connected = await enrollment.isConnected(url, deviceId, this.operationSignal());
+      } catch (error) {
+        // The code goes even when the Gateway does not answer; that answer is the error kept.
+        if (dropping) {
+          try {
+            await replaceSecret(withoutSetupCode(secret.data ?? {}));
+            await setupCodeRemoved();
+          } catch {
+            // The next pass drops it.
+          }
+        }
+        throw error;
+      }
+      // A replacement reconnects as the Agent's device. Record that this revision's node is
+      // the one connected, so this revision counts as enrolled from here on (finding 1671).
+      // The marker names the revision, not its Sandbox: the same revision given a new Sandbox
+      // (a stop and start, a removed stale Sandbox) counts as enrolled from its first pass and
+      // takes the pre-marker path, which fails closed. One write with the dropped code: a
+      // second replace with the same resourceVersion would conflict.
+      const marking = connected && read(WORKSPACE_NODE_ENROLLED_REVISION_KEY) !== revision.id;
+      if (dropping || marking) {
+        await replaceSecret({
+          ...withoutSetupCode(secret.data ?? {}),
+          ...(marking
+            ? {
+                [WORKSPACE_NODE_ENROLLED_REVISION_KEY]: Buffer.from(revision.id, "utf8").toString(
+                  "base64",
+                ),
+              }
+            : {}),
+        });
         await setupCodeRemoved();
       }
-      return enrollment.isConnected(url, deviceId, this.operationSignal());
+      return connected;
     }
     const setupId = required(read("setupId"), "Workspace node setup ID");
     const spentMs = this.workspaceNodePairingSpentMs.get(setupId) ?? 0;
@@ -10616,6 +10857,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
       withoutSetupCode({
         ...secret.data,
         deviceId: Buffer.from(observation.deviceId, "utf8").toString("base64"),
+        [WORKSPACE_NODE_ENROLLED_REVISION_KEY]: Buffer.from(revision.id, "utf8").toString("base64"),
       }),
     );
     // With the device recorded, later passes check its presence, not the setup.
@@ -14272,6 +14514,12 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
             name: "OPENCLAW_NATIVE_INFERENCE_CONFIG",
             value: nativeRuntime.configuration,
           });
+          if (useRuntimeWorkspace) {
+            // A provider-owned worker serves a held model-check failure on this
+            // port, through the provider's bearer-passthrough exposure, as the
+            // provider-owned Codex Harness does (finding 1642).
+            variables.push({ name: "APP_SERVER_PORT", value: String(AGENT_TRANSPORT_PORT) });
+          }
         }
       }
     }

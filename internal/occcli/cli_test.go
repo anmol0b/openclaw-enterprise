@@ -53,10 +53,7 @@ func TestResourceRequestStopsWhenCommandContextIsCanceled(t *testing.T) {
 			defer server.Close()
 			defer close(release)
 
-			keyFile := filepath.Join(t.TempDir(), "service-key.json")
-			if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -279,10 +276,7 @@ func runLogsCommandTo(t *testing.T, ctx context.Context, stub *runtimeLogStub, o
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(stub.serve))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	command := New(out, errOut)
 	command.SetArgs(append(args, "--url", server.URL, "--service-key-file", keyFile, "--namespace", "ns_1"))
 	return command.ExecuteContext(ctx)
@@ -652,40 +646,32 @@ func TestAgentCommandsSelectNewerPodlessHarnessStatus(t *testing.T) {
 }
 
 func TestAgentRuntimeRetainsActiveWhenCandidateIsNotProvablyNewer(t *testing.T) {
-	for _, test := range []struct{ name, activeID, revisions, metadata string }{
-		{"older-only readable list", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`},
-		{"active metadata denied", "rev_1", `[{"id":"rev_2","revision":2}]`, "forbidden"},
-		{"active number missing", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_1"}`},
-		{"active identity mismatched", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_other","revision":1}`},
+	for _, test := range []struct {
+		name, activeID, revisions, metadata string
+		podless                             []string
+	}{
+		{"older-only readable list/podless=true", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`, []string{"rev_1"}},
+		// Pod candidates retain the active revision only when proven older.
+		{"older-only readable list/podless=false", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`, nil},
+		{"active metadata denied/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, "forbidden", []string{"rev_2"}},
+		{"active number missing/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_1"}`, []string{"rev_2"}},
+		{"active identity mismatched/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_other","revision":1}`, []string{"rev_2"}},
 	} {
-		for _, podless := range []bool{true, false} {
-			// Pod candidates retain the active revision only when proven older.
-			if !podless && test.name != "older-only readable list" {
-				continue
+		t.Run(test.name, func(t *testing.T) {
+			stub := &runtimeLogStub{t: t, activeID: test.activeID, activeRevision: test.metadata, revisions: test.revisions, podless: test.podless, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
+			out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
+			if err != nil {
+				t.Fatal(err)
 			}
-			t.Run(fmt.Sprintf("%s/podless=%t", test.name, podless), func(t *testing.T) {
-				candidate := "rev_2"
-				if test.activeID == "rev_2" {
-					candidate = "rev_1"
-				}
-				stub := &runtimeLogStub{t: t, activeID: test.activeID, activeRevision: test.metadata, revisions: test.revisions, podless: []string{candidate}, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
-				if !podless {
-					stub.podless = nil
-				}
-				out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
-				if err != nil {
-					t.Fatal(err)
-				}
-				// The runtime description returned to the operator must be the active revision.
-				var description map[string]any
-				if err := json.Unmarshal([]byte(out), &description); err != nil || description["revisionId"] != test.activeID {
-					t.Fatalf("runtime output=%q error=%v", out, err)
-				}
-				if !strings.Contains(notices, "reading the active revision "+test.activeID) || strings.Contains(notices, "newer than") {
-					t.Fatalf("notice=%q", notices)
-				}
-			})
-		}
+			// The runtime description returned to the operator must be the active revision.
+			var description map[string]any
+			if err := json.Unmarshal([]byte(out), &description); err != nil || description["revisionId"] != test.activeID {
+				t.Fatalf("runtime output=%q error=%v", out, err)
+			}
+			if !strings.Contains(notices, "reading the active revision "+test.activeID) || strings.Contains(notices, "newer than") {
+				t.Fatalf("notice=%q", notices)
+			}
+		})
 	}
 }
 
@@ -934,10 +920,7 @@ func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
 		_, _ = io.WriteString(w, `{"data":{"id":"agt_1","name":"stopped-agent","namespaceId":"ns_1","desiredRuntimeState":"stopped"},"meta":{"requestId":"req_1"}}`)
 	}))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	var out, errOut strings.Builder
 	command := New(&out, &errOut)
 	command.SetArgs([]string{"agent", "stop", "agt_1", "--url", server.URL, "--service-key-file", keyFile, "--namespace", "ns_1"})
@@ -989,10 +972,7 @@ func TestCredentialSourceListTableOmitsTheLiveGatewayStatusOnlyGetCarries(t *tes
 		}
 	}))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	for _, test := range []struct {
 		args []string
 		rows [][]string
@@ -1043,10 +1023,7 @@ func TestRedirectIsReportedWithItsTargetAndNotFollowed(t *testing.T) {
 				w.WriteHeader(http.StatusPermanentRedirect)
 			}))
 			defer origin.Close()
-			keyFile := filepath.Join(t.TempDir(), "service-key.json")
-			if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 			command := New(io.Discard, io.Discard)
 			command.SetArgs([]string{"installation", "get", "--url", origin.URL, "--service-key-file", keyFile})
 			err := command.Execute()

@@ -1143,7 +1143,20 @@ export interface SandboxNamespaceContext {
 export interface SandboxHarnessContext extends SandboxNamespaceContext {
   readonly revision: Readonly<AgentRevision>;
   readonly requirements: HarnessWorkloadRequirements;
+  /**
+   * True once the revision's workspace node has enrolled with its Agent Gateway. A dedicated
+   * OpenClaw worker's Harness exposure serves Compute's status read only before that: a Driver
+   * withdraws it on `provisionHarness` and `withdrawHarnessExposure`, and refuses `harnessStatus`.
+   */
+  readonly workspaceNodeEnrolled?: boolean;
 }
+
+/**
+ * What `withdrawHarnessExposure` needs: the revision names the exact Sandbox, and the Workspace
+ * comes with the Namespace. Compute calls it outside a preparation pass too (for a revision that
+ * is already active, or one that failed for good), where no Harness requirements are rendered.
+ */
+export type SandboxHarnessWithdrawalContext = Omit<SandboxHarnessContext, "requirements">;
 
 export interface SandboxHarnessStatusContext extends SandboxHarnessContext {
   /** The Agent transport token the Agent Gateway presents to the Harness. */
@@ -1551,11 +1564,23 @@ export interface SandboxDriver extends Driver {
    */
   harnessEndpoint?(context: SandboxHarnessContext): Promise<SandboxHarnessEndpoint>;
   /**
-   * Observes the provider-owned Harness through the endpoint `harnessEndpoint` returns, with the
-   * Agent transport token. Compute treats only `serving` as ready and fails the revision with a
-   * valid held `runtimeFailure`. `serving` requires an authenticated transport handshake.
+   * Observes the provider-owned Harness through its exposed port, with the Agent transport
+   * token. Compute fails the revision with a valid held `runtimeFailure`. For a Codex Harness it
+   * treats only `serving` as ready, which requires an authenticated transport handshake; for a
+   * dedicated OpenClaw worker it reads this only while the worker's node has not connected.
    */
   harnessStatus?(context: SandboxHarnessStatusContext): Promise<SandboxHarnessStatus>;
+  /**
+   * Removes the exposure `provisionHarness` created for Compute's status read of a dedicated
+   * OpenClaw worker, once its workspace node has enrolled: nothing of Compute's listens there
+   * afterwards, and the exposure would route unauthenticated traffic to whatever does. Resolves
+   * only once the provider confirms the exposure gone, with a read it can trust (a provider
+   * that hides unauthorized Sandboxes behind "not found" confirms nothing by that alone);
+   * Compute does not report the revision ready before that. Idempotent: called again for a
+   * revision without the exposure, it resolves without a mutation. A Codex Harness keeps its
+   * exposure as the Gateway's transport.
+   */
+  withdrawHarnessExposure?(context: SandboxHarnessWithdrawalContext): Promise<void>;
   /**
    * The exact Sandbox `provisionHarness` creates for this revision, derived without effects.
    * Required to revoke credentials from a running revision.
@@ -1736,6 +1761,7 @@ export type ComputePendingReason =
   | "PROVIDER_WORKSPACE_NODE_PENDING"
   | "WORKSPACE_NODE_PENDING"
   | "CREDENTIAL_ATTACHMENT_PENDING"
+  | "WORKSPACE_SETUP_RETRYING"
   | "HARNESS_CREDENTIAL_BOOTSTRAP_PENDING";
 
 export interface ComputeReadiness extends Scope {
@@ -1990,6 +2016,16 @@ export interface ComputeDriver extends Driver {
     options?: { readonly recheck?: boolean },
   ): Promise<CredentialAttachmentStatus>;
   /**
+   * Withdraws the Harness exposure a Sandbox Driver created for Compute's status read of a
+   * dedicated OpenClaw worker, outside a preparation pass: the worker calls it for every such
+   * revision that is already active when it starts (an upgrade from a controller that kept the
+   * exposure) and for one that failed for good while its Sandbox stays for diagnosis. Idempotent
+   * and effect-free for revisions without such an exposure (a Codex Harness, no Sandbox Driver).
+   * Resolves only once the provider confirms the exposure gone; the worker retries a bounded
+   * number of times and logs the failure code.
+   */
+  withdrawHarnessExposure?(revision: Readonly<AgentRevision>, signal: AbortSignal): Promise<void>;
+  /**
    * Throws OCC's ComputePreparationFailedError when initialization is terminal.
    * The worker durably fails deployment and schedules stopRevision for cleanup.
    */
@@ -2061,6 +2097,20 @@ export {
   presetTemplateDefaults,
   presetTemplateDefaultsWithPlaceholders,
 } from "./preset-variables.mjs";
+
+export {
+  PROCESS_EXIT_ERROR_CODES,
+  PROCESS_EXIT_MAX_STATUS,
+  PROCESS_EXIT_SIGNALS,
+  RUNTIME_COMPONENTS,
+  RUNTIME_DIAGNOSTIC_CHECKS,
+  RUNTIME_DIAGNOSTIC_CODES,
+  RUNTIME_FAILURE_CHECKS,
+  UNRECOGNIZED_RUNTIME_VALUE,
+  WORKSPACE_SETUP_CHECK,
+  WORKSPACE_SETUP_FAILED,
+  WORKSPACE_SETUP_REFUSED,
+} from "./runtime-failure.mjs";
 
 export type { InitialWorkspaceFiles, WorkspaceSetup } from "./workspace-setup.ts";
 export { normalizeInitialWorkspaceFiles, normalizeWorkspaceDefaultsId } from "./workspace-setup.ts";

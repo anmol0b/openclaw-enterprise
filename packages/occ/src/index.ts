@@ -251,6 +251,7 @@ import {
   normalizeProvisioningHarnessAuth,
   normalizeProvisioningWorkspace,
   normalizeRequestSecretBindings,
+  PROVISIONING_DEPLOYMENT_PENDING,
   provisioningProgress,
   requireProvisioningRequestId,
   type ProvisionAgentInput,
@@ -280,6 +281,7 @@ export {
   restrictionsRemovedWithAgent,
 } from "./iam-policy-cleanup.ts";
 export type { RemovedAccessBinding } from "./iam-policy-cleanup.ts";
+export { operationRefusalHint } from "./state/controller-work.ts";
 export {
   ActivationFailedError,
   ComputePreparationFailedError,
@@ -335,8 +337,11 @@ export {
   RuntimeLogsError,
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
+  SANDBOX_DELETION_UNCONFIRMED,
+  SandboxGatewayUnauthorizedError,
   SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
+  SandboxWorkspaceSetupRefusedError,
   ScopeViolationError,
   SecretBindingDriverError,
   ServiceAccountCredentialSecretExistsError,
@@ -2545,7 +2550,12 @@ export class OpenClawController {
         await this.authorizeProvisioningRecord(state, principalId, replay);
         const work = await state.operations.findWork(replay.workId);
         const result = Object.freeze({
-          provisioning: provisioningProgress(replay, work, this.clock()),
+          provisioning: provisioningProgress(
+            replay,
+            work,
+            this.clock(),
+            await this.provisioningDeploymentProgress(state, principalId, replay, work),
+          ),
         });
         if (auditEvent) {
           await state.audit.append(auditEvent(result));
@@ -2676,8 +2686,59 @@ export class OpenClawController {
       if (work === undefined) {
         throw new DependencyUnavailableError("The provisioning work is unavailable.");
       }
-      return Object.freeze({ provisioning: provisioningProgress(record, work, this.clock()) });
+      return Object.freeze({
+        provisioning: provisioningProgress(
+          record,
+          work,
+          this.clock(),
+          await this.provisioningDeploymentProgress(state, principalId, record, work),
+        ),
+      });
     });
+  }
+
+  /**
+   * The initial deployment's progress for a job waiting on it after handoff (finding 1634).
+   * The provisioning read does not check `agent_revision:read`, which the deployment read
+   * needs, so a caller without it gets undefined and the job reports only its own deferral.
+   */
+  private async provisioningDeploymentProgress(
+    state: PlatformReadView,
+    principalId: string,
+    record: Readonly<AgentProvisioningRecord>,
+    work: { readonly state: string } | undefined,
+  ): Promise<DeploymentStatusResult["progress"] | undefined> {
+    const revisionId = record.revisionId;
+    if (
+      revisionId === undefined ||
+      record.agentId === undefined ||
+      (record.status !== "queued" && record.status !== "running") ||
+      work === undefined ||
+      work.state === "failed_permanent"
+    ) {
+      return undefined;
+    }
+    const key = `agent_revision:${revisionId}:reconcile`;
+    const deployment = await state.operations.findWork(key);
+    if (
+      deployment === undefined ||
+      deployment.namespaceId !== record.namespaceId ||
+      deployment.agentId !== record.agentId ||
+      deployment.revisionId !== revisionId ||
+      !(await this.canRead(principalId, {
+        kind: "agent_revision",
+        id: revisionId,
+        namespaceId: record.namespaceId,
+      }))
+    ) {
+      return undefined;
+    }
+    return deploymentProgressForWork(
+      deployment,
+      deployment.state === "queued" || deployment.state === "claimed"
+        ? await state.operations.findWorkAttempt(key)
+        : undefined,
+    );
   }
 
   async retryAgentProvisioning(
@@ -3771,7 +3832,7 @@ export class OpenClawController {
           : deploymentError;
       const pending = status !== "failed";
       const code = pending
-        ? "PROVISIONING_DEPLOYMENT_PENDING"
+        ? PROVISIONING_DEPLOYMENT_PENDING
         : (error?.code ?? "PROVISIONING_DEPLOYMENT_FAILED");
       const message = pending
         ? "Waiting for the initial deployment to complete."

@@ -40,6 +40,7 @@ import {
   DependencyUnavailableError,
   ResourceConflictError,
   ResourceStateConflictError,
+  SandboxWorkspaceSetupRefusedError,
   ServiceAccountCredentialSecretExistsError,
   TransientDependencyError,
   resolveConfiguredHarnessId,
@@ -698,6 +699,8 @@ test("preparation records a device redeemed on an expired setup before renewing 
     );
     assert.equal(data.setupId, "setup-b");
     assert.equal(data.deviceId, redeemed ? deviceId : undefined);
+    // The readiness check credits the revision whose node connects, not an observed setup.
+    assert.equal(data.enrolledRevisionId, undefined);
   }
 });
 
@@ -887,6 +890,8 @@ function dedicatedFirstDeployFixture({
   const state = {
     setupCalls: 0,
     connected: false,
+    // What a redeemed setup reports about the node's connection (enrolled, not connected yet).
+    observedConnected: true,
     enrollmentAvailable: true,
     // The node OpenClaw reports applied through the wrapper's runtime status,
     // or the reason it has not.
@@ -941,7 +946,9 @@ function dedicatedFirstDeployFixture({
                 clock.now + 250 > deadline ||
                 (options?.stopWaiting !== undefined && (await options.stopWaiting()))
               ) {
-                return state.connected ? { deviceId: "node-1", connected: true } : undefined;
+                return state.connected
+                  ? { deviceId: "node-1", connected: state.observedConnected }
+                  : undefined;
               }
               clock.now += 250;
             }
@@ -958,7 +965,9 @@ function dedicatedFirstDeployFixture({
             } else if (!state.connected) {
               clock.now = deadline;
             }
-            return state.connected ? { deviceId: "node-1", connected: true } : undefined;
+            return state.connected
+              ? { deviceId: "node-1", connected: state.observedConnected }
+              : undefined;
           }
           const deadline = Date.now() + (options?.waitMs ?? 0);
           while (!state.connected && Date.now() < deadline) {
@@ -968,7 +977,9 @@ function dedicatedFirstDeployFixture({
             signal.throwIfAborted();
             await new Promise((resolve) => setTimeout(resolve, 2));
           }
-          return state.connected ? { deviceId: "node-1", connected: true } : undefined;
+          return state.connected
+            ? { deviceId: "node-1", connected: state.observedConnected }
+            : undefined;
         },
         async isConnected() {
           return state.connected;
@@ -1093,8 +1104,21 @@ function dedicatedFirstDeployFixture({
         }
         return read(kind, name, target);
       };
-      const write = async ({ body }) => {
+      const write = async ({ body }, { replace = false } = {}) => {
         const previous = objects.get(key(kind, body.metadata.name, body.metadata.namespace));
+        // Like the API server: every write bumps resourceVersion, and a replace that names a
+        // stale one is a 409 Conflict (finding 1678). Two writes with the metadata of one read,
+        // as workspaceNodeReady once did (#2750 review), fail here as they do live.
+        const current = previous?.metadata.resourceVersion;
+        const named = body.metadata.resourceVersion;
+        if (replace && previous !== undefined && named !== undefined && named !== current) {
+          throw Object.assign(
+            new Error(
+              `Operation cannot be fulfilled on ${kind} ${body.metadata.name}: the object has been modified`,
+            ),
+            { statusCode: 409 },
+          );
+        }
         const changed =
           kind === "Deployment" && JSON.stringify(previous?.spec) !== JSON.stringify(body.spec);
         const value = {
@@ -1104,7 +1128,7 @@ function dedicatedFirstDeployFixture({
             ...previous?.metadata,
             ...body.metadata,
             uid: `${body.metadata.name}-uid`,
-            resourceVersion: "1",
+            resourceVersion: String(Number(current ?? "0") + 1),
           },
         };
         if (kind === "Deployment") {
@@ -1134,7 +1158,7 @@ function dedicatedFirstDeployFixture({
       };
       api[`patchNamespaced${kind}`] = write;
       api[`createNamespaced${kind}`] = write;
-      api[`replaceNamespaced${kind}`] = write;
+      api[`replaceNamespaced${kind}`] = (request) => write(request, { replace: true });
     }
   }
   clients.core.listNamespace = async () => ({ items: [] });
@@ -1442,7 +1466,15 @@ test("native OpenClaw preparation and activation use only outbound Sandbox enrol
     async harnessEndpoint() {
       assert.fail("native OpenClaw has no inbound Harness endpoint");
     },
+    async withdrawHarnessExposure(context) {
+      withdrawals.push(context);
+      if (withdrawalFailure !== undefined) {
+        throw withdrawalFailure;
+      }
+    },
   };
+  const withdrawals = [];
+  let withdrawalFailure;
   const fixture = dedicatedFirstDeployFixture({
     sandboxDriver,
     revision: {
@@ -1522,14 +1554,53 @@ test("native OpenClaw preparation and activation use only outbound Sandbox enrol
     ["gpt-5"],
   );
   // The provider's observed Pod readiness and enrolled node are independent of provisioning.
+  // Until the provider's Pod is Ready, the wait has no named reason.
+  const podPending = await prepare();
+  assert.equal(podPending.ready, false);
+  assert.equal(podPending.pendingReason, undefined);
   state.providerPod = {
     apiVersion: "v1",
     kind: "Pod",
     metadata: { name: "native-harness", namespace, labels: provisions[0].requirements.labels },
     status: { conditions: [{ type: "Ready", status: "True" }] },
   };
+  // A Ready Pod whose node has not connected names that wait (finding 1629): the
+  // deployment reads WORKSPACE_NODE_PENDING instead of a bare REVISION_INCOMPLETE,
+  // but only while the Gateway is ready too ("Workloads are ready").
+  const gatewayDeployment = read("Deployment", gatewayName);
+  const gatewayStatus = gatewayDeployment.status;
+  delete gatewayDeployment.status;
+  save(gatewayDeployment);
+  const gatewayPending = await prepare();
+  assert.equal(gatewayPending.ready, false);
+  assert.equal(gatewayPending.pendingReason, undefined);
+  gatewayDeployment.status = gatewayStatus;
+  save(gatewayDeployment);
+  const nodePending = await prepare();
+  assert.equal(nodePending.ready, false);
+  assert.equal(nodePending.pendingReason, "WORKSPACE_NODE_PENDING");
+  // Finding 1657: the provider is told the node has not enrolled, and no exposure is withdrawn
+  // before it has.
+  assert.ok(provisions.every(({ workspaceNodeEnrolled }) => workspaceNodeEnrolled === false));
+  assert.deepEqual(withdrawals, []);
+  // A node that has enrolled but is not connected yet already loses the exposure: the pass
+  // that records its device withdraws. A deletion the provider does not confirm keeps its
+  // class and the pass fails; the provider completes the withdrawal on its next adoption.
   state.connected = true;
+  state.observedConnected = false;
+  withdrawalFailure = new Error("OpenShell DeleteService did not confirm deletion.");
+  await assert.rejects(prepare(), /did not confirm deletion/);
+  assert.equal(withdrawals.length, 1);
+  assert.equal(withdrawals[0].revision, revision);
+  assert.equal(withdrawals[0].workspaceNodeEnrolled, true);
+  assert.deepEqual(withdrawals[0].requirements.labels, provisions[0].requirements.labels);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, false);
+  // With the device recorded, later passes provision with the node enrolled and withdraw
+  // nothing more; the connected node makes the revision ready.
+  withdrawalFailure = undefined;
   assert.equal((await prepare()).ready, true);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, true);
+  assert.equal(withdrawals.length, 1);
   assert.deepEqual(read("NetworkPolicy", stale.metadata.name), stale);
   assert.deepEqual(deleted, []);
   await assert.rejects(
@@ -1567,6 +1638,519 @@ test("native OpenClaw preparation and activation use only outbound Sandbox enrol
   );
   const harness = read("Service", `agent-${suffix}`);
   assert.equal(harness.spec.selector["app.kubernetes.io/name"], `agent-${suffix}-inactive`);
+});
+
+// Finding 1642: a native worker under a Sandbox provider holds a failed model check and never
+// connects its node. Compute hands the provider the bearer-passthrough exposure (APP_SERVER_PORT
+// with the APP_TOKEN_SHA verifier, never the token) and, while the node is pending, reads the
+// held failure through the provider to fail the revision with its code.
+test("Kubernetes native Sandbox provisioning fails a revision on the worker's held model-check failure", async () => {
+  const heldFailure = {
+    component: "agent",
+    check: "model-probe",
+    checkedAt: "2026-10-17T08:30:00.000Z",
+    code: "AUTHENTICATION_FAILED",
+  };
+  const provisions = [];
+  const observations = [];
+  const withdrawals = [];
+  let answer = { state: "starting" };
+  let withdrawalFailure;
+  const sandboxDriver = {
+    id: "native-sandbox",
+    implementation: "openshell",
+    capability: "sandbox",
+    facets: ["networking", "filesystem", "process"],
+    async workspaceNodePeerLabels({ revision: target }) {
+      return provisions.some(({ revision: { id } }) => id === target.id)
+        ? supervisorPeerLabels(target.id)
+        : undefined;
+    },
+    async provisionHarness(context) {
+      provisions.push(context);
+      return {
+        namespaceName: context.namespace.name,
+        resourceName: "native-harness",
+        agentId: context.revision.agentId,
+        revisionId: context.revision.id,
+      };
+    },
+    async harnessEndpoint() {
+      assert.fail("native OpenClaw has no inbound Harness endpoint");
+    },
+    async harnessStatus(context) {
+      observations.push(context);
+      if (answer instanceof Error) {
+        throw answer;
+      }
+      return answer;
+    },
+    async withdrawHarnessExposure(context) {
+      withdrawals.push(context);
+      if (withdrawalFailure !== undefined) {
+        throw withdrawalFailure;
+      }
+    },
+  };
+  const { revision, state, namespace, gatewayName, markReady, prepare } =
+    dedicatedFirstDeployFixture({
+      sandboxDriver,
+      revision: {
+        harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" },
+        sandboxDriverId: sandboxDriver.id,
+        configuration: admitLoggingConfiguration(
+          createHarnessConfiguration("openclaw", "gpt-5"),
+          "info",
+        ),
+        plugins: undefined,
+      },
+    });
+  assert.equal((await prepare()).ready, false);
+  markReady(gatewayName);
+  assert.equal((await prepare()).ready, false);
+  assert.equal(provisions.length, 1);
+  const environment = provisions[0].requirements.environment;
+  const named = (name) => environment.filter((entry) => entry.name === name);
+  assert.deepEqual(named("APP_SERVER_PORT"), [{ name: "APP_SERVER_PORT", value: "18790" }]);
+  assert.equal(named("APP_TOKEN_SHA").length, 1);
+  assert.match(named("APP_TOKEN_SHA")[0].value, /^[a-f0-9]{64}$/);
+  assert.deepEqual(named("APP_SERVER_TOKEN"), [], "the provider never receives the raw token");
+  // Nothing is observed before the provider's Pod is Ready.
+  assert.equal((await prepare()).pendingReason, undefined);
+  assert.deepEqual(observations, []);
+  state.providerPod = {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: { name: "native-harness", namespace, labels: provisions[0].requirements.labels },
+    status: { conditions: [{ type: "Ready", status: "True" }] },
+  };
+  // A worker that is still starting keeps the named wait; the read carries the transport
+  // token the worker's verifier hashes.
+  const nodePending = await prepare();
+  assert.equal(nodePending.ready, false);
+  assert.equal(nodePending.pendingReason, "WORKSPACE_NODE_PENDING");
+  assert.equal(nodePending.runtimeFailure, undefined);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].revision, revision);
+  assert.equal(
+    createHash("sha256").update(observations[0].transportToken, "utf8").digest("hex"),
+    named("APP_TOKEN_SHA")[0].value,
+  );
+  assert.deepEqual(observations[0].requirements.labels, provisions[0].requirements.labels);
+  // The held failure fails the revision with its code; a provider cause is dropped, since
+  // only MODEL_PROBE_FAILED keeps one.
+  answer = {
+    state: "failed",
+    runtimeFailure: { ...heldFailure, cause: { kind: "PROVIDER_TEXT", detail: "key sk-123" } },
+  };
+  const held = await prepare();
+  assert.equal(held.ready, false);
+  assert.equal(held.pendingReason, undefined);
+  assert.deepEqual(held.runtimeFailure, heldFailure);
+  assert.equal(observations.length, 2);
+  // Malformed or missing evidence is as invalid as for a Compute-owned status port.
+  for (const runtimeFailure of [
+    undefined,
+    "AUTHENTICATION_FAILED",
+    { ...heldFailure, code: "not a code" },
+    { ...heldFailure, checkedAt: "yesterday" },
+  ]) {
+    answer = { state: "failed", runtimeFailure };
+    await assert.rejects(prepare(), /Runtime failure status returned invalid data/);
+  }
+  // Finding 1658: a provider that does not answer is no evidence. The read's failure is a
+  // transient dependency failure the worker rechecks until the deadline without spending
+  // attempts: a Driver's own classification passes through, a plain dependency failure is
+  // classified here, and a refusal keeps its class.
+  const unanswered = new DependencyUnavailableError(
+    "OpenShell GetService failed with gRPC status 14.",
+  );
+  answer = unanswered;
+  await assert.rejects(prepare(), (error) => {
+    assert.ok(error instanceof TransientDependencyError, String(error));
+    assert.equal(error.dependency, "sandbox_gateway");
+    assert.equal(error.reason, "unavailable");
+    assert.equal(error.code, "SANDBOX_GATEWAY_UNAVAILABLE");
+    assert.equal(error.cause, unanswered);
+    return true;
+  });
+  const classified = new TransientDependencyError("sandbox_gateway", "timeout", "timed out");
+  answer = classified;
+  await assert.rejects(prepare(), (error) => error === classified);
+  const refusal = new Error("OpenShell refused the observation: PERMISSION_DENIED");
+  answer = refusal;
+  await assert.rejects(prepare(), (error) => error === refusal);
+  // Every read so far told the provider the node had not enrolled.
+  assert.ok(observations.every(({ workspaceNodeEnrolled }) => workspaceNodeEnrolled === false));
+  assert.ok(provisions.every(({ workspaceNodeEnrolled }) => workspaceNodeEnrolled === false));
+  assert.deepEqual(withdrawals, []);
+  // Once the node has connected the worker is past its checks: nothing more is read, and the
+  // exposure the reads used is withdrawn before the revision is ready (finding 1657). A
+  // withdrawal the provider cannot confirm keeps the revision unready.
+  answer = { state: "starting" };
+  state.connected = true;
+  observations.length = 0;
+  // A provider that does not answer the withdrawal is as transient as one that does not
+  // answer the read, and keeps the revision unready.
+  const unansweredWithdrawal = new DependencyUnavailableError(
+    "OpenShell DeleteService failed with gRPC status 14.",
+  );
+  withdrawalFailure = unansweredWithdrawal;
+  await assert.rejects(prepare(), (error) => {
+    assert.ok(error instanceof TransientDependencyError, String(error));
+    assert.equal(error.code, "SANDBOX_GATEWAY_UNAVAILABLE");
+    assert.equal(error.cause, unansweredWithdrawal);
+    return true;
+  });
+  assert.equal(withdrawals.length, 1);
+  assert.equal(withdrawals[0].workspaceNodeEnrolled, true);
+  assert.deepEqual(observations, []);
+  // The device is recorded: the provider now provisions with the node enrolled, which has
+  // it complete the withdrawal itself, and Compute asks for no second withdrawal.
+  withdrawalFailure = undefined;
+  assert.equal((await prepare()).ready, true);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, true);
+  assert.equal(withdrawals.length, 1);
+  assert.deepEqual(observations, []);
+  // An enrolled node that is reconnecting is waited for, not read: the exposure is gone, and
+  // the worker is past the checks the read was for.
+  state.connected = false;
+  assert.equal((await prepare()).ready, false);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, true);
+  assert.deepEqual(observations, []);
+  assert.equal(withdrawals.length, 1);
+});
+
+// Finding 1708: a provider-owned Harness's private workspace setup that refuses the workspace
+// (the setup runner's exit status 2) refuses every retry the same way, so Compute reports the
+// held WORKSPACE_SETUP_REFUSED failure its own init container reports, and the deployment fails
+// at once instead of spending its retries.
+test("Kubernetes Sandbox provisioning fails a revision at once when the provider's workspace setup refuses", async () => {
+  const provisions = [];
+  let failure = new SandboxWorkspaceSetupRefusedError(
+    "OpenShell workspace initialization refused.",
+  );
+  const sandboxDriver = {
+    id: "native-sandbox",
+    implementation: "openshell",
+    capability: "sandbox",
+    facets: ["networking", "filesystem", "process"],
+    async workspaceNodePeerLabels() {
+      return undefined;
+    },
+    async provisionHarness(context) {
+      provisions.push(context);
+      throw failure;
+    },
+    async harnessEndpoint() {
+      assert.fail("native OpenClaw has no inbound Harness endpoint");
+    },
+    async harnessStatus() {
+      assert.fail("a refused setup is reported without a status read");
+    },
+    async withdrawHarnessExposure() {},
+  };
+  const { gatewayName, markReady, prepare } = dedicatedFirstDeployFixture({
+    sandboxDriver,
+    revision: {
+      harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" },
+      sandboxDriverId: sandboxDriver.id,
+      configuration: admitLoggingConfiguration(
+        createHarnessConfiguration("openclaw", "gpt-5"),
+        "info",
+      ),
+      plugins: undefined,
+    },
+  });
+  assert.equal((await prepare()).ready, false);
+  markReady(gatewayName);
+  const before = Date.now();
+  const refused = await prepare();
+  assert.equal(provisions.length, 1);
+  assert.equal(refused.ready, false);
+  assert.equal(refused.pendingReason, undefined);
+  const { checkedAt, ...evidence } = refused.runtimeFailure;
+  assert.deepEqual(evidence, {
+    component: "agent",
+    check: "workspace-setup",
+    code: "WORKSPACE_SETUP_REFUSED",
+  });
+  assert.ok(Date.parse(checkedAt) >= before - 1000, checkedAt);
+  // Any other provisioning failure, a setup that may pass on a retry included, keeps its path.
+  failure = new Error("OpenShell workspace initialization failed.");
+  await assert.rejects(prepare(), /OpenShell workspace initialization failed/);
+  assert.equal(provisions.length, 2);
+});
+
+// Finding 1671: the node Secret is the Agent's, so a redeploy found a recorded device from its
+// first pass, counted as enrolled, never read the provider's held failure, and created its
+// exposure only to delete it at once; a redeploy holding a failed model check waited for the
+// deadline. Enrollment is per revision: the Secret names the revision whose node readiness saw
+// paired or connected, and a replacement counts as enrolled only once its own node connects.
+test("Kubernetes native Sandbox redeploy reads the held failure before its own node enrolls", async () => {
+  const heldFailure = {
+    component: "agent",
+    check: "model-probe",
+    checkedAt: "2026-10-17T12:30:00.000Z",
+    code: "AUTHENTICATION_FAILED",
+  };
+  const provisions = [];
+  const observations = [];
+  const withdrawals = [];
+  let answer = { state: "starting" };
+  const sandboxDriver = {
+    id: "native-sandbox",
+    implementation: "openshell",
+    capability: "sandbox",
+    facets: ["networking", "filesystem", "process"],
+    async workspaceNodePeerLabels({ revision: target }) {
+      return provisions.some(({ revision: { id } }) => id === target.id)
+        ? supervisorPeerLabels(target.id)
+        : undefined;
+    },
+    async provisionHarness(context) {
+      provisions.push(context);
+      return {
+        namespaceName: context.namespace.name,
+        resourceName: "native-harness",
+        agentId: context.revision.agentId,
+        revisionId: context.revision.id,
+      };
+    },
+    async harnessEndpoint() {
+      assert.fail("native OpenClaw has no inbound Harness endpoint");
+    },
+    async harnessStatus(context) {
+      observations.push(context);
+      return answer;
+    },
+    async withdrawHarnessExposure(context) {
+      withdrawals.push(context);
+    },
+  };
+  const nativeRevision = {
+    harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" },
+    sandboxDriverId: sandboxDriver.id,
+    configuration: admitLoggingConfiguration(
+      createHarnessConfiguration("openclaw", "gpt-5"),
+      "info",
+    ),
+    plugins: undefined,
+  };
+  const encode = (value) => Buffer.from(value, "utf8").toString("base64");
+  const decode = (value) => Buffer.from(value ?? "", "base64").toString("utf8");
+  // The predecessor enrolled the Agent's device under its own revision.
+  const seedNodeSecret = (fixture, data) => {
+    const nodeName = fixture.driver.workspaceNodeName(fixture.revision);
+    const manifest = fixture.driver.manifest(
+      "v1",
+      "Secret",
+      nodeName,
+      fixture.driver.workspaceNodeOwnership(fixture.revision),
+      { name: fixture.namespace, plane: "execution" },
+    );
+    fixture.save({
+      ...manifest,
+      type: "Opaque",
+      metadata: { ...manifest.metadata, uid: "node-uid", resourceVersion: "1" },
+      data: Object.fromEntries(Object.entries(data).map(([key, value]) => [key, encode(value)])),
+    });
+    return fixture.key("Secret", nodeName);
+  };
+  const redeploy = dedicatedFirstDeployFixture({ sandboxDriver, revision: nativeRevision });
+  const nodeSecretKey = seedNodeSecret(redeploy, {
+    deviceId: "node-1",
+    enrolledRevisionId: "rev_predecessor",
+    setupId: "setup-0",
+    expiresAtMs: String(Date.now() + 60_000),
+  });
+  const { revision, state, namespace, gatewayName, markReady, prepare, objects } = redeploy;
+  // The Agent's node setup is in place, so the provider is provisioned from the first pass.
+  assert.equal((await prepare()).ready, false);
+  markReady(gatewayName);
+  assert.equal((await prepare()).ready, false);
+  assert.equal(provisions.length, 2);
+  // The predecessor's enrollment is not this revision's: the provider is told so, so the
+  // Sandbox carries the exposure Compute's read needs, and nothing is withdrawn yet.
+  assert.ok(provisions.every(({ workspaceNodeEnrolled }) => workspaceNodeEnrolled === false));
+  assert.deepEqual(withdrawals, []);
+  assert.equal(state.setupCalls, 0, "the Agent's device needs no new setup");
+  state.providerPod = {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: { name: "native-harness", namespace, labels: provisions[0].requirements.labels },
+    status: { conditions: [{ type: "Ready", status: "True" }] },
+  };
+  const nodePending = await prepare();
+  assert.equal(nodePending.ready, false);
+  assert.equal(nodePending.pendingReason, "WORKSPACE_NODE_PENDING");
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].workspaceNodeEnrolled, false);
+  // The redeploy's held failure fails it with its code instead of waiting for the deadline.
+  answer = { state: "failed", runtimeFailure: heldFailure };
+  const held = await prepare();
+  assert.equal(held.ready, false);
+  assert.deepEqual(held.runtimeFailure, heldFailure);
+  assert.equal(observations.length, 2);
+  assert.deepEqual(withdrawals, []);
+  assert.equal(decode(objects.get(nodeSecretKey).data.enrolledRevisionId), "rev_predecessor");
+  // Its own node connects: the Secret now names this revision, the exposure goes before the
+  // revision is ready, and later passes provision with the node enrolled.
+  answer = { state: "starting" };
+  state.connected = true;
+  assert.equal((await prepare()).ready, true);
+  assert.equal(decode(objects.get(nodeSecretKey).data.enrolledRevisionId), revision.id);
+  assert.equal(decode(objects.get(nodeSecretKey).data.deviceId), "node-1");
+  assert.equal(withdrawals.length, 1);
+  assert.equal(withdrawals[0].workspaceNodeEnrolled, true);
+  assert.equal(observations.length, 2);
+  assert.equal((await prepare()).ready, true);
+  assert.equal(provisions.at(-1).workspaceNodeEnrolled, true);
+  assert.equal(withdrawals.length, 1);
+  assert.equal(observations.length, 2);
+
+  // A Secret written before this check named no revision: the device it records enrolled
+  // under the revision that wrote it, so that revision still counts as enrolled, and the
+  // exposure its provider creates again goes at once (as before this change).
+  provisions.length = 0;
+  observations.length = 0;
+  withdrawals.length = 0;
+  const upgraded = dedicatedFirstDeployFixture({ sandboxDriver, revision: nativeRevision });
+  const upgradedSecretKey = seedNodeSecret(upgraded, {
+    deviceId: "node-1",
+    setupId: "setup-0",
+    expiresAtMs: String(Date.now() + 60_000),
+  });
+  assert.equal((await upgraded.prepare()).ready, false);
+  upgraded.markReady(upgraded.gatewayName);
+  assert.equal((await upgraded.prepare()).ready, false);
+  assert.equal(provisions.length, 2);
+  assert.ok(provisions.every(({ workspaceNodeEnrolled }) => workspaceNodeEnrolled === true));
+  upgraded.state.providerPod = {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: {
+      name: "native-harness",
+      namespace: upgraded.namespace,
+      labels: provisions[0].requirements.labels,
+    },
+    status: { conditions: [{ type: "Ready", status: "True" }] },
+  };
+  assert.equal((await upgraded.prepare()).pendingReason, "WORKSPACE_NODE_PENDING");
+  assert.deepEqual(observations, []);
+  upgraded.state.connected = true;
+  assert.equal((await upgraded.prepare()).ready, true);
+  assert.equal(
+    decode(upgraded.objects.get(upgradedSecretKey).data.enrolledRevisionId),
+    upgraded.revision.id,
+  );
+  assert.deepEqual(withdrawals, []);
+});
+
+// Findings 1669 and 1672: a revision that gets no preparation pass (already active at an
+// upgrade from a controller that kept the exposure, or failed for good with its Sandbox kept
+// for diagnosis) has its exposure withdrawn through Compute's own hook, outside a pass, with the
+// revision and its provider Workspace only; no Harness requirements are rendered for it.
+test("Kubernetes Compute withdraws a native Harness exposure outside a preparation pass", async () => {
+  const withdrawals = [];
+  let withdrawalFailure;
+  const sandboxDriver = {
+    id: "native-sandbox",
+    implementation: "openshell",
+    capability: "sandbox",
+    facets: ["networking", "filesystem", "process"],
+    async provisionHarness() {
+      assert.fail("no preparation pass runs here");
+    },
+    async harnessEndpoint() {
+      assert.fail("native OpenClaw has no inbound Harness endpoint");
+    },
+    async withdrawHarnessExposure(context) {
+      withdrawals.push(context);
+      if (withdrawalFailure !== undefined) {
+        throw withdrawalFailure;
+      }
+    },
+  };
+  const { driver, revision, namespace, clients } = dedicatedFirstDeployFixture({
+    sandboxDriver,
+    revision: {
+      harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" },
+      sandboxDriverId: sandboxDriver.id,
+      configuration: admitLoggingConfiguration(
+        createHarnessConfiguration("openclaw", "gpt-5"),
+        "info",
+      ),
+      plugins: undefined,
+    },
+  });
+  const signal = new AbortController().signal;
+  await driver.withdrawHarnessExposure(revision, signal);
+  assert.equal(withdrawals.length, 1);
+  assert.equal(withdrawals[0].revision, revision);
+  assert.equal(withdrawals[0].workspaceNodeEnrolled, true);
+  assert.equal(withdrawals[0].namespace.id, tenant.id);
+  assert.equal(withdrawals[0].namespace.name, namespace);
+  assert.equal(withdrawals[0].requirements, undefined);
+  assert.notEqual(withdrawals[0].kubernetes, undefined);
+  assert.equal(withdrawals[0].signal.aborted, false);
+  // The worker's signal reaches the provider: a stopping worker ends the call.
+  const stopping = new AbortController();
+  stopping.abort(new Error("stopping"));
+  await driver.withdrawHarnessExposure(revision, stopping.signal);
+  assert.equal(withdrawals.length, 2);
+  assert.equal(withdrawals[1].signal.aborted, true);
+  // An unconfirmed withdrawal keeps its class: the worker logs it by code and retries.
+  withdrawalFailure = new Error("OpenShell DeleteService did not confirm deletion.");
+  await assert.rejects(
+    driver.withdrawHarnessExposure(revision, signal),
+    (error) => error === withdrawalFailure,
+  );
+  withdrawalFailure = undefined;
+  assert.equal(withdrawals.length, 3);
+  // Nothing is asked of the provider for a Codex Harness (its exposure is the Gateway's
+  // transport), for a revision without a Sandbox Driver, or for one pinned to another Compute.
+  await driver.withdrawHarnessExposure(
+    { ...revision, harness: { id: "codex", version: "1.0.0", mode: "dedicated" } },
+    signal,
+  );
+  await driver.withdrawHarnessExposure({ ...revision, sandboxDriverId: undefined }, signal);
+  await assert.rejects(
+    driver.withdrawHarnessExposure(
+      { ...revision, compute: { ...revision.compute, id: "other-compute" } },
+      signal,
+    ),
+    /pinned to another Compute Driver/,
+  );
+  assert.equal(withdrawals.length, 3);
+  // A missing Namespace proves nothing about the exposure (finding 1693): the provider's
+  // Workspace outlives it, so the provider is still asked, in the derived placement.
+  const readNamespace = clients.core.readNamespace;
+  clients.core.readNamespace = async () => {
+    throw Object.assign(new Error("Not found"), { statusCode: 404 });
+  };
+  await driver.withdrawHarnessExposure(revision, signal);
+  assert.equal(withdrawals.length, 4);
+  assert.equal(withdrawals[3].revision, revision);
+  assert.equal(withdrawals[3].namespace.name, namespace);
+  assert.equal(withdrawals[3].workspaceNodeEnrolled, true);
+  // A Namespace at the derived name that another Namespace owns (none claims this one by label)
+  // fails before the provider is asked.
+  const listNamespace = clients.core.listNamespace;
+  clients.core.listNamespace = async () => ({ items: [] });
+  clients.core.readNamespace = async () => ({
+    ...driver.manifest("v1", "Namespace", namespace, {
+      namespaceId: "ns_00000000-0000-4000-8000-000000000009",
+    }),
+    status: { phase: "Active" },
+  });
+  await assert.rejects(
+    driver.withdrawHarnessExposure(revision, signal),
+    /Refusing an unowned Kubernetes namespace/,
+  );
+  assert.equal(withdrawals.length, 4);
+  clients.core.listNamespace = listNamespace;
+  clients.core.readNamespace = readNamespace;
 });
 
 // Finding 1297: the projection covers every setting the Harness model rule checks, not only
@@ -1851,11 +2435,17 @@ test("dedicated startup initializes Harness plugins before enrolling its workspa
   assert.equal(state.setupCalls, 1);
   // Once the device is recorded the node reconnects with its saved device
   // token. The setup code, readable by Codex in the same container, is removed.
+  // The Secret names this revision as the one whose node enrolled (finding 1671).
   assert.deepEqual(Object.keys(objects.get(nodeSecretKey).data).sort(), [
     "deviceId",
+    "enrolledRevisionId",
     "expiresAtMs",
     "setupId",
   ]);
+  assert.equal(
+    Buffer.from(objects.get(nodeSecretKey).data.enrolledRevisionId, "base64").toString("utf8"),
+    revision.id,
+  );
   // The removal nudges the running Harness Pod again, with a new value, so the
   // kubelet removes the file now instead of on its periodic resync.
   assert.equal(podPatches.length, 3);
@@ -1976,7 +2566,10 @@ test("an upgraded file-delivered node drops its leftover setup code and tolerate
   }
   assert.equal(ready, true);
   assert.equal(state.setupCalls, 0, "a recorded device needs no new setup");
-  assert.deepEqual(nodeSecretReplaces, [["deviceId", "expiresAtMs", "setupId"]]);
+  // One write drops the code and records the connected node's revision as enrolled.
+  assert.deepEqual(nodeSecretReplaces, [
+    ["deviceId", "enrolledRevisionId", "expiresAtMs", "setupId"],
+  ]);
   assert.equal(objects.get(key("Secret", nodeName)).data.setupCode, undefined);
   assert.deepEqual(
     podPatches.map(({ name }) => name).filter((name) => name === "agent-pod"),
@@ -2352,6 +2945,21 @@ test("a pending dedicated deploy names a full Namespace Pod quota", async () => 
   assert.equal(await pendingReasonWith(agentName, podRefusal), undefined);
   state.unreadableKind = undefined;
   assert.equal(await pendingReasonWith(agentName, podRefusal), quota);
+  // One unreadable quota does not hide another quota's full Pods: the Harness Deployment,
+  // read first, names a quota that cannot be read, and the Gateway's quota is full.
+  clients.core.readNamespacedResourceQuota = (request) =>
+    request.name === "broken-quota"
+      ? Promise.reject(Object.assign(new Error("forbidden"), { statusCode: 403 }))
+      : readQuota(request);
+  setConditions(gatewayName, podRefusal);
+  assert.equal(
+    await pendingReasonWith(agentName, [
+      failure(refusal("pods=1", "pods=2", "pods=2", "broken-quota")),
+    ]),
+    quota,
+  );
+  setConditions(gatewayName, []);
+  clients.core.readNamespacedResourceQuota = readQuota;
   // A held runtime failure leads instead of any pending reason.
   state.gatewayRuntimeFailure = {
     component: "gateway",
@@ -2378,6 +2986,29 @@ test("a pending dedicated deploy names a full Namespace Pod quota", async () => 
   assert.equal(await driver.safePodQuotaObservation([foreign]), false);
   setConditions(gatewayName, []);
   assert.equal(await driver.safePodQuotaObservation([foreign, gateway]), false);
+  // The owner's cancellation during the Deployment or quota read ends the pass instead of
+  // reading as no quota.
+  const readDeployment = clients.apps.readNamespacedDeployment;
+  const cancellation = new Error("revision pass cancelled");
+  setConditions(gatewayName, podRefusal);
+  for (const [api, method] of [
+    [clients.apps, "readNamespacedDeployment"],
+    [clients.core, "readNamespacedResourceQuota"],
+  ]) {
+    const owner = new AbortController();
+    api[method] = async () => {
+      owner.abort(cancellation);
+      throw Object.assign(new Error("forbidden"), { statusCode: 403 });
+    };
+    await assert.rejects(
+      withComputeAbortSignal(owner.signal, () => driver.safePodQuotaObservation([gateway])),
+      (error) => error === cancellation,
+      method,
+    );
+    clients.apps.readNamespacedDeployment = readDeployment;
+    clients.core.readNamespacedResourceQuota = readQuota;
+  }
+  setConditions(gatewayName, []);
   // A quota of the same name in another Namespace (a split-plane Gateway's) is its own quota.
   const otherNamespace = `${namespace}-gateways`;
   const elsewhere = read("Deployment", gatewayName);
@@ -2405,6 +3036,11 @@ test("a pending dedicated deploy names a full Namespace Pod quota", async () => 
   state.unschedulableRole = undefined;
   markReady(agentName);
   markReady(gatewayName);
+  // A known pending reason leads: ready workloads waiting for their node keep that reason
+  // beside a stale quota refusal (a made-up shape).
+  setConditions(agentName, [failure(refusal("pods=1"))]);
+  assert.equal((await prepare()).pendingReason, "WORKSPACE_NODE_PENDING");
+  setConditions(agentName, []);
   state.connected = true;
   const ready = await prepare();
   assert.equal(ready.ready, true);
@@ -6746,12 +7382,21 @@ test("credential withdrawal revokes through the revision's exact Sandbox", async
     status: { phase: "Active" },
   };
   let namespaceExists = true;
+  let foreignNamespace;
   driver.apiClients = Promise.resolve({
     core: {
       async listNamespace() {
-        return { items: namespaceExists ? [structuredClone(namespaceResource)] : [] };
+        return {
+          items:
+            namespaceExists && foreignNamespace === undefined
+              ? [structuredClone(namespaceResource)]
+              : [],
+        };
       },
       async readNamespace() {
+        if (foreignNamespace !== undefined) {
+          return structuredClone(foreignNamespace);
+        }
         if (!namespaceExists) {
           throw Object.assign(new Error("Not found"), { statusCode: 404 });
         }
@@ -6822,14 +7467,35 @@ test("credential withdrawal revokes through the revision's exact Sandbox", async
   );
   assert.equal(withdrawals.length, 0);
 
-  // Without the Namespace there is no Sandbox left to revoke, and the gateway is not called.
+  // A Namespace at the derived name that this Namespace does not own (none claims it by label)
+  // is checked before the gateway is asked: retrying cannot change it, so the worker fails the
+  // withdrawal at once.
+  foreignNamespace = {
+    ...driver.manifest("v1", "Namespace", namespace, {
+      namespaceId: "ns_00000000-0000-4000-8000-000000000009",
+    }),
+    status: { phase: "Active" },
+  };
+  await assert.rejects(driver.withdrawCredentialSource(revision, source, signal), (error) => {
+    assert.ok(error instanceof CredentialWithdrawalRefusedError, String(error));
+    assert.equal(error.code, "CREDENTIAL_WITHDRAWAL_OWNERSHIP_CONFLICT");
+    assert.match(error.message, /Refusing an unowned Kubernetes namespace/);
+    return true;
+  });
+  assert.equal(withdrawals.length, 0);
+  foreignNamespace = undefined;
+
+  // A missing Namespace proves nothing about the Sandbox (finding 1693): the gateway's record
+  // outlives it, so the gateway still withdraws, in the derived placement, and its answer stands.
   namespaceExists = false;
   withdrawals.length = 0;
   assert.deepEqual(await driver.withdrawCredentialSource(revision, source, signal), {
     sourceId: source.id,
-    state: "absent",
+    state: "revoked",
   });
-  assert.equal(withdrawals.length, 0);
+  assert.equal(withdrawals.length, 1);
+  assert.equal(withdrawals[0].namespace.name, namespace);
+  assert.equal(withdrawals[0].sandbox.resourceName, "os-rev-withdraw");
   await assert.rejects(
     driver.withdrawCredentialSource(
       { ...revision, compute: { id: "other-compute", implementation: driver.implementation } },
@@ -10781,8 +11447,14 @@ test("embedded startup probes its selected provider and allows graceful Gateway 
                     timeout: options.timeout,
                   });
                   if (args[0] === "-e") {
-                    // The upfront request's child exits 3 only on the provider's 401.
-                    return { status: upfront ? 3 : 0 };
+                    // The upfront request's child exits 3-6 (plus 10 or 20 for the
+                    // responder) only on the provider's 401: 13 is an unclassified
+                    // 401 that carried OpenAI's response headers. Its stdout names
+                    // the body's shape and closed-set error code and type.
+                    return {
+                      status: upfront ? 13 : 0,
+                      stdout: upfront ? '["json-error-code","other","invalid_request_error"]' : "",
+                    };
                   }
                   if (variant.startsWith("cap exceeded")) {
                     return {
@@ -10848,16 +11520,21 @@ test("embedded startup probes its selected provider and allows graceful Gateway 
         assert.equal(calls.length, upfront ? 1 : 2);
         assert.equal(probeTemplate, "/approved-temporary/openclaw-auth-probe-");
         // The upfront request carries the credential as OpenClaw sends it to
-        // the provider's default endpoint, and nothing else from the environment.
+        // the provider's default endpoint, the closed sets of error codes (C) and
+        // types (T) it may name, and nothing else from the environment.
         const [upfrontCall, probeCall] = calls;
         assert.equal(upfrontCall.command, "/usr/local/bin/node");
         assert.equal(upfrontCall.timeout, 10_000);
         assert.deepEqual(Object.keys(upfrontCall.environment).sort(), [
+          "C",
           "H",
           "NODE_EXTRA_CA_CERTS",
           "SSL_CERT_FILE",
+          "T",
           "U",
         ]);
+        assert.ok(JSON.parse(upfrontCall.environment.C).includes("invalid_api_key"));
+        assert.ok(JSON.parse(upfrontCall.environment.T).includes("invalid_request_error"));
         assert.equal(upfrontCall.environment.NODE_EXTRA_CA_CERTS, "/run/openshell/ca.crt");
         assert.deepEqual(
           [upfrontCall.environment.U, JSON.parse(upfrontCall.environment.H)],
@@ -10978,8 +11655,18 @@ test("embedded startup probes its selected provider and allows graceful Gateway 
         assert.equal(JSON.parse(body).runtimeFailure?.code, failureCode);
         assert.deepEqual(JSON.parse(body).runtimeFailure?.cause, cause);
         assert.deepEqual(probeLog.cause, cause);
-        // The log line keeps the provider's HTTP status from its error, never the text.
-        assert.equal(probeLog.providerStatus, cause?.kind === "PROBE_STATUS" ? 404 : undefined);
+        // The log line keeps the provider's HTTP status from its error, never the text;
+        // the upfront rejection names its 401, who answered it and only a
+        // closed-vocabulary code.
+        assert.equal(
+          probeLog.providerStatus,
+          upfront ? 401 : cause?.kind === "PROBE_STATUS" ? 404 : undefined,
+        );
+        assert.equal(probeLog.providerCode, undefined);
+        assert.equal(probeLog.responseHeaderMarker, upfront ? "provider-like" : undefined);
+        assert.equal(probeLog.bodyShape, upfront ? "json-error-code" : undefined);
+        assert.equal(probeLog.providerErrorCode, upfront ? "other" : undefined);
+        assert.equal(probeLog.providerErrorType, upfront ? "invalid_request_error" : undefined);
         assert.doesNotMatch(body + probeLines[0], /fixture-model-key|provider-detail/);
         if (accepted) {
           signals.get("SIGTERM")();
@@ -15753,7 +16440,7 @@ function workspaceSetupFixture(
                         name: "initialize-workspace",
                         state: {
                           terminated: {
-                            exitCode: 1,
+                            exitCode: state.initializerExitCode ?? 1,
                             finishedAt: "2026-09-22T00:00:00Z",
                             message: "private-content-must-not-escape",
                           },
@@ -16734,6 +17421,17 @@ for (const embedded of [true, false]) {
       code: "WORKSPACE_SETUP_FAILED",
       checkedAt: "2026-09-22T00:00:00Z",
     });
+    // The kubelet restarts the init container, which may pass: the wait is named (finding 1677).
+    assert.equal(result.pendingReason, "WORKSPACE_SETUP_RETRYING");
+    // The setup runner refused the workspace, which every restart repeats: no wait to name.
+    fixture.state.initializerExitCode = 2;
+    const refused = await fixture.driver.prepareRevision(fixture.revision, fixture.context);
+    assert.equal(refused.ready, false);
+    assert.deepEqual(refused.runtimeFailure, {
+      ...result.runtimeFailure,
+      code: "WORKSPACE_SETUP_REFUSED",
+    });
+    assert.equal(Object.hasOwn(refused, "pendingReason"), false);
     const secret = [...fixture.objects.values()].find(
       ({ kind, metadata }) => kind === "Secret" && metadata.name.startsWith("workspace-setup-"),
     );
@@ -16746,6 +17444,8 @@ for (const embedded of [true, false]) {
     for (const scenario of [
       { finishedAt: new Date("2026-09-22T00:00:00Z"), waiting: false },
       { finishedAt: new Date("2026-09-22T00:00:00Z"), waiting: true },
+      // A refusal in back-off is read from the last failed instance too (finding 1677).
+      { finishedAt: new Date("2026-09-22T00:00:00Z"), waiting: true, exitCode: 2 },
       { finishedAt: new Date(Number.NaN) },
       { finishedAt: null },
       { finishedAt: undefined },
@@ -16758,6 +17458,7 @@ for (const embedded of [true, false]) {
     ]) {
       const fixture = workspaceSetupFixture(embedded);
       fixture.state.failedInitializer = true;
+      fixture.state.initializerExitCode = scenario.exitCode;
       const clients = await fixture.driver.apiClients;
       const list = clients.core.listNamespacedPod;
       // The shipped SDK decodes the API's finishedAt into Date. A waiting
@@ -16781,7 +17482,10 @@ for (const embedded of [true, false]) {
       const result = await fixture.driver.prepareRevision(fixture.revision, fixture.context);
       const after = Date.now();
       assert.equal(result.ready, false);
-      assert.equal(result.runtimeFailure.code, "WORKSPACE_SETUP_FAILED");
+      assert.equal(
+        result.runtimeFailure.code,
+        scenario.exitCode === 2 ? "WORKSPACE_SETUP_REFUSED" : "WORKSPACE_SETUP_FAILED",
+      );
       const checkedAt = Date.parse(result.runtimeFailure.checkedAt);
       if (scenario.expected !== undefined) {
         assert.equal(result.runtimeFailure.checkedAt, scenario.expected);

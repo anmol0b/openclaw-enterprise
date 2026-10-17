@@ -8,9 +8,25 @@ const candidateVersion =
   "/console/agents/agt_00000000-0000-4000-8000-000000000001?namespace=ns_00000000-0000-4000-8000-000000000001&revision=rev_00000000-0000-4000-8000-000000000007";
 const create = "/console/agents/new?namespace=ns_00000000-0000-4000-8000-000000000001";
 const click = (text) => ({ click: text });
+const runtimeLogsPage = {
+  group: "Pages/Agent detail",
+  path: `${candidateVersion}&tab=logs`,
+  deployed: true,
+  candidateDeploymentStatus: "succeeded",
+};
+const refuseLogRead = { suffix: "/runtime/logs", status: 403, code: "FORBIDDEN" };
 const form = [click("Start with default Preset")];
 const oauthForm = [...form, { selector: "#agent-auth-method", value: "credential_source" }];
 const startOAuthLogin = [...oauthForm, click("Sign in with OAuth")];
+const reservedConfigurationWrite = {
+  path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
+  method: "PATCH",
+  status: 409,
+  code: "RESOURCE_CONFLICT",
+  message:
+    "The Configuration is reserved for provisioning and is not available for this operation.",
+};
+
 const createModelSecret = (value) => [
   { selector: "#provider-credential-secret", value: "__openclaw_create_secret__" },
   { selector: "#create-provider-credential-secret-value", value },
@@ -683,6 +699,25 @@ export const scenarios = {
       "Reload the story: the cold visit shows the session status, then Agents, with no loading panels between them.",
     ],
   },
+  navigationAgentReadRetry: {
+    group: "Pages/Navigation",
+    name: "Retry opening an Agent",
+    rules: [
+      {
+        method: "GET",
+        suffix: "/agents/agt_00000000-0000-4000-8000-000000000002",
+        delayMs: 900,
+        status: 503,
+        once: true,
+      },
+    ],
+    description:
+      "The first read of Documentation assistant returns a simulated 503. The page stays on Agent details so you can retry or go back to the list.",
+    steps: [
+      "Open Documentation assistant. Loading agent details is replaced by Could not load agent details; the page heading stays Agent details.",
+      "Choose Try again. Documentation assistant opens without a page reload, and Back returns to the list.",
+    ],
+  },
   navigationRetained: {
     group: "Pages/Navigation",
     name: "Return to loaded pages",
@@ -713,7 +748,9 @@ export const scenarios = {
     steps: [
       "Wait for Agents, then select Refresh. The list stays shown, inactive, for 250 ms, then Loading replaces it. When the list returns, focus is on Refresh.",
       "Open Namespaces and wait for it, then use browser Back. The Namespaces page stays shown, inactive; after 300 ms it dims with a progress cursor, without moving, and after 1 s Still checking… appears beside Refresh until the unchanged Agents list returns.",
-      "Switch to another window and back: the list stays shown, undimmed, and says Still checking… after 1 s.",
+      "Focus an Agent link, switch windows, then return. The list stays visible and inactive, says Still checking… after 1 s, then returns focus to the link. If you focus Namespaces while waiting, focus stays there.",
+      "Focus Refresh, the Namespace selector or a sidebar link, switch windows, then return. When the list returns, focus is back on that control.",
+      "Open the Agent. In the sidebar, focus Agents and press Enter. Focus waits on the page heading while the list loads, then returns to the Agent link; it does not drop to the page body.",
     ],
   },
   navigationAgentReturn: {
@@ -1602,11 +1639,41 @@ export const scenarios = {
       "Confirm Create Agent stays disabled and the same provisioning handle is polled.",
     ],
   },
+  createDeploymentNamedWait: {
+    group: "Pages/Create Agent",
+    name: "Initial deployment names its wait",
+    path: create,
+    actions: readyForm,
+    provisionedDeploymentStatus: "running",
+    provisionedDeploymentAttempt: {
+      code: "REVISION_INCOMPLETE",
+      message: "Waiting for the runtime to become ready.",
+    },
+    provisioningNamesDeploymentWait: true,
+    description:
+      "After handoff the provisioning job names its first deployment's wait. Create Agent adds that sentence, the one Deployment activity shows, to the provisioning line.",
+    steps: [
+      "Click Create Agent. The line moves from “Provisioning Agent…” to “Provisioning Agent… Waiting for the runtime to become ready.” and Create Agent stays disabled.",
+    ],
+  },
   createDeploymentPodQuotaFull: {
     group: "Pages/Create Agent",
     name: "Initial deployment waits on a full Pod quota",
     path: create,
     actions: readyForm,
+    // Each rule skips the first read so the quota message appears before the interruption.
+    rules: [
+      { pathIncludes: "/deployments/", skip: 1, hold: true, once: true },
+      {
+        pathIncludes: "/deployments/",
+        skip: 1,
+        status: 503,
+        code: "DEPENDENCY_UNAVAILABLE",
+        message: "A required platform dependency is unavailable.",
+        once: true,
+      },
+      { pathIncludes: "/deployments/", skip: 1, status: 404, code: "NOT_FOUND" },
+    ],
     provisionedDeploymentStatus: "running",
     provisionedDeploymentAttempt: {
       code: "NAMESPACE_POD_QUOTA_EXCEEDED",
@@ -1614,10 +1681,10 @@ export const scenarios = {
         "The Namespace's Pod quota is full. Stop or delete an Agent, or ask an administrator to raise the quota.",
     },
     description:
-      "The first deployment cannot create its Pods because the Namespace's Pod quota is full, so the provisioning line names the quota instead of a bare wait.",
+      "The first deployment read explains the full Pod quota. A stalled read and a temporary outage preserve that detail; a later not-found response clears it while provisioning continues.",
     steps: [
-      "Click Create Agent and wait for the provisioning line to name the full Pod quota.",
-      "Open the Agent's version; confirm the deployment record shows the same reason.",
+      "Click Create Agent. Watch the Pod quota message stay in place while the next read stalls and another gets a 503.",
+      "After the deployment read returns 404, the line changes to “Provisioning Agent…”. This does not say the quota cleared or the job stopped.",
     ],
   },
   createDeploymentFailed: {
@@ -1907,9 +1974,9 @@ export const scenarios = {
       { selector: ".launch-runtime summary", click: true },
     ],
     description:
-      "This simulated Installation selects a Sandbox Driver that cannot provision dedicated OpenClaw, so it admits no OpenClaw execution mode: the Sandbox Driver refuses Embedded and cannot run Dedicated. Both modes are disabled, an alert explains why, and Create Agent stays disabled before any Configuration or Agent is saved.",
+      "This Sandbox Driver refuses Embedded OpenClaw and cannot provision Dedicated OpenClaw. The form explains why neither mode is available, disables Create Agent, and does not promise to save a draft.",
     steps: [
-      "Confirm both execution modes are disabled for OpenClaw and Create Agent is disabled.",
+      "Look for “Execution mode unavailable” in Runtime details. Both modes and Create Agent are disabled; there is no “saved as drafts” message.",
       "Select Codex and confirm the alert clears and Dedicated remains available.",
     ],
   },
@@ -2025,6 +2092,38 @@ export const scenarios = {
     repositoryDescriptionsPending: true,
     description:
       "Repository choices are usable while descriptions load. Descriptions appear without changing selections or moving focus.",
+  },
+  createRepositoriesHiddenCharacters: {
+    group: "Pages/Create Agent",
+    name: "Repository descriptions with hidden characters",
+    path: create,
+    actions: repositoryForm,
+    repositoryOptions: [
+      {
+        repositoryRef: "application",
+        displayName: "example/application",
+        description: "Release notes \u202etxt.exe, zero\u200bwidth and \u2066isolate\u2069 end",
+        allowedProfiles: ["git-read", "git-write", "git-full"],
+      },
+      {
+        repositoryRef: "handbook",
+        displayName: "example/handbook",
+        description: "Guías del equipo · Ελληνικά · Русский · עברית",
+        allowedProfiles: ["git-read"],
+      },
+      {
+        repositoryRef: "team",
+        displayName: "example/team",
+        description:
+          "Team \u{1f468}\u200d\u{1f469}\u200d\u{1f467} \u{1f3f3}\ufe0f\u200d\u{1f308} " +
+          "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f} " +
+          "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 \u0915\u094d\u200d\u0937, " +
+          "joined A\u200dB, stray \u200d\u200djoiners",
+        allowedProfiles: ["git-read"],
+      },
+    ],
+    description:
+      "The picker shows bidi controls and stray joiners as escapes. It preserves a single joiner between letters, marks, or symbols, and the England, Scotland, and Wales flag sequences. In the Team row, the joiner between A and B is present even if it looks like plain AB.",
   },
   createRepositoriesContributor: {
     group: "Pages/Create Agent",
@@ -2905,13 +3004,20 @@ export const scenarios = {
     name: "Edit Configuration",
     path: draft,
     actions: [click("Edit Configuration")],
+    rules: [
+      {
+        method: "PATCH",
+        suffix: "/configurations/cfg_00000000-0000-4000-8000-000000000001",
+        delayMs: 1500,
+      },
+    ],
     description:
       "Save this draft without leaving the editor’s place on the page. Deployment is a separate action.",
     steps: [
       "Choose Edit Configuration with the keyboard. Focus moves to the Configuration JSON editor.",
-      "Change a draft setting, then choose Save Configuration.",
-      "Look for “Configuration saved.” Focus returns to Edit Configuration, with that confirmation as its description.",
-      "Open the editor again and choose Cancel. Focus returns to Edit Configuration without saving.",
+      "Change a draft setting. Focus Save Configuration and press Enter; “Checking Configuration…” takes focus while Save is disabled.",
+      "If you stay in the editor, focus returns to Edit Configuration with “Configuration saved.” as its description.",
+      "Edit and save once more. Move focus to the Agents link before the save finishes; focus stays on the link.",
     ],
   },
   gatewayPasswordAccess: {
@@ -3335,6 +3441,27 @@ export const scenarios = {
     description:
       "Deployment reads show loading beside the current pointer, then show the visible result.",
   },
+  agentsReturnWhileDeploymentsLoad: {
+    group: "Pages/Agents",
+    name: "Return while deployments load",
+    deployed: true,
+    rules: [
+      {
+        suffix: "/deployments/rev_00000000-0000-4000-8000-000000000001",
+        skip: 1,
+        delayMs: 2500,
+        status: 403,
+        code: "FORBIDDEN",
+      },
+    ],
+    description:
+      "Back reveals the rechecked Agents list before a slow deployment read finishes. The previous result does not stand in for the pending one.",
+    steps: [
+      "Wait for the Research assistant’s deployment, open Documentation assistant, then use browser Back.",
+      "The list is usable immediately. Latest deployment starts blank; after 250 ms it says “Reading deployment…”, never linking to the old result. When access is denied, the Agent stays visible.",
+      "After Back, focus the Research assistant link while its deployment still reads, switch windows, then return. The same list returns with focus on the link.",
+    ],
+  },
   agentsDeploymentError: {
     group: "Pages/Agents",
     name: "Latest deployment unavailable",
@@ -3407,6 +3534,24 @@ export const scenarios = {
       "Open v7 Logs and confirm the failed version, then go Back. Open Configuration goes to the draft without deploying, scrolls it into view and focuses its Configuration tab.",
       "At phone width, the failure, both recovery links, and selected version are still near the top.",
     ],
+  },
+  deploymentFailsWhileWatching: {
+    group: "Pages/Agent detail",
+    name: "Deployment fails while watching",
+    path: candidateVersion,
+    deployed: true,
+    candidateDeploymentStatus: "failed",
+    candidateModelProbeCause: { kind: "PROBE_STATUS", detail: "format" },
+    // Show the in-progress record on arrival, then let the next poll read the failed record.
+    rules: [
+      {
+        suffix: "/deployments/rev_00000000-0000-4000-8000-000000000007",
+        once: true,
+        data: { status: "running", progress: null, error: null, warnings: [] },
+      },
+    ],
+    description:
+      "Watch v7 change from running to failed. Recovery appears below Deployment activity instead of pushing the overview down. The status and details update in place. The deployment and failure are simulated.",
   },
   deploymentModelProbeRetried: {
     group: "Pages/Agent detail",
@@ -3535,9 +3680,15 @@ export const scenarios = {
     deployed: true,
     slack: true,
     candidateDeploymentStatus: "succeeded",
-    actions: [click("Run diagnostics for this version")],
+    rules: [{ suffix: "/diagnostics", method: "POST", delayMs: 3000 }],
+    steps: [
+      "Tab to Run diagnostics for this version, then press Enter or Space.",
+      "Focus moves to “Waiting for diagnostic results…” while the button is disabled. Leave focus there.",
+      "When the checks arrive, focus returns to Run diagnostics. Its description gives the Observed time.",
+      "Click Refresh record, which re-renders this panel as a deployment poll does, then press Tab. Run diagnostics still has that description.",
+    ],
     description:
-      "An on-demand observation for viewed v7 reports timestamped Slack configuration, authentication, and connectivity checks. It does not change v7's persisted deployment result.",
+      "Run diagnostics for v7. The panel shows it is waiting for results, then displays timestamped Slack configuration, authentication, and connectivity checks. The recorded deployment result stays the same.",
   },
   diagnosticsUnknown: {
     group: "Pages/Agent detail",
@@ -3562,10 +3713,16 @@ export const scenarios = {
         path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deployments/rev_00000000-0000-4000-8000-000000000007/diagnostics",
         method: "POST",
         status: 503,
+        delayMs: 3000,
         code: "DEPENDENCY_UNAVAILABLE",
       },
     ],
-    actions: [click("Run diagnostics for this version")],
+    steps: [
+      "Tab to Run diagnostics for this version and press Enter. Leave focus on “Waiting for diagnostic results…” until the response arrives.",
+      "Focus returns to Run diagnostics, described by the alert that current-runtime diagnostics are unavailable (a simulated 503).",
+      "Click Refresh record, which re-renders this panel as a deployment poll does, then press Tab. Run diagnostics is still described by the alert.",
+      "Press Enter to run it again. While waiting, press Shift+Tab to move to Refresh record. Focus should stay there when the same alert appears.",
+    ],
     description:
       "A failed on-demand check reports its own error. The viewed v7 deployment record remains succeeded.",
   },
@@ -3580,8 +3737,8 @@ export const scenarios = {
     steps: [
       "At 390px, open this direct Logs route and check its selected tab is visible. Visit Configuration, then use Back and Forward; selected tabs remain visible without resetting expanded panels.",
       "Inspect Source, Previous instance, and Include debug in the controls card; toggle the two options and check their selected states.",
-      "Expand the runtime.startup_phase row to inspect its fields. The timestamp, level, origin, and message remain aligned in the collapsed rows.",
-      "Select Follow, confirm it changes to Following, then select Following to stop. Resize the preview to 390px and check that controls remain usable and log metadata wraps without clipping messages.",
+      "Expand the runtime.startup_phase row to inspect its fields. Check the local date, time, and UTC offset in each timestamp. Wider than 520px, each timestamp stays on one line. When the Logs card is narrower than 662px (at 1000px and below, and from 1101px to about 1280px, where the card sits beside the version list), the message moves under the time, level, and origin instead of shrinking.",
+      "Select Follow, confirm it changes to Following, then select Following to stop. At 390px, check that the controls remain usable, each log level stays on one line, and long messages wrap without horizontal scrolling.",
     ],
     gap: "Runtime records and refreshes are simulated UI evidence; source reads, filtering, and following require real backend verification.",
   },
@@ -3639,6 +3796,18 @@ export const scenarios = {
       "Clear Filter and enable info to restore the loaded rows; the filter status and source retention notice stay visible.",
     ],
   },
+  runtimeLogsRateLimited: {
+    ...runtimeLogsPage,
+    name: "Rate-limited log reads with Follow off or on",
+    rules: [{ suffix: "/runtime/logs", skip: 1, status: 429, code: "RUNTIME_LOGS_RATE_LIMITED" }],
+    actions: [click("Refresh logs")],
+    description:
+      "The first page loads, then log requests are rate limited. This fixture omits Retry-After: Refresh logs asks you to try again, without another audited read.",
+    steps: [
+      "Select Follow. When its next read is rate limited, the message says the Console is waiting for the next read.",
+      "While Following is still selected, choose Download. That action asks you to try again; the Console will not repeat the download.",
+    ],
+  },
   runtimeLogsDenied: {
     group: "Pages/Agent detail",
     name: "Runtime logs without administer",
@@ -3656,6 +3825,59 @@ export const scenarios = {
       "An Agent operator sees Pod status and Events but no log text. The page names the missing grants and does not request the log view again.",
     steps: [
       "Check that the permission message is visible inside the Logs card and unavailable actions remain disabled.",
+    ],
+  },
+  runtimeLogAccessLost: {
+    ...runtimeLogsPage,
+    name: "Log access lost after output appears",
+    rules: [{ ...refuseLogRead, skip: 1, once: true }],
+    description:
+      "The first page loads. The next log read is refused, then the fixture restores access. The Console remembers the refusal until sign-out.",
+    steps: [
+      "With log rows visible, select Follow. At the next poll the rows and their source caption disappear, Follow stops, and Download is disabled. The Pod card stays: status access did not change.",
+      "Without resetting the story, log out and sign in with invented values. Open Research assistant, then Logs: the rows return. Reset the story to try Download instead of Follow.",
+    ],
+  },
+  runtimeLogDownloadRefused: {
+    ...runtimeLogsPage,
+    name: "Download refused while an earlier log page is in flight",
+    rules: [
+      { suffix: "/runtime/logs", queryParam: "cursor", delayMs: 8000, once: true },
+      { ...refuseLogRead, queryParam: "download" },
+    ],
+    description:
+      "A follow poll starts after two seconds. The fixture holds its successful response for eight more seconds; a Download during that interval is refused immediately.",
+    steps: [
+      "With rows visible, select Follow, wait about three seconds, then select Download. No file downloads; the rows clear and the controls become unavailable.",
+      "Wait for the earlier page to arrive. The access message stays, no rows come back, and Follow does not restart. Reset the story to repeat.",
+    ],
+  },
+  runtimeStatusAccessLost: {
+    ...runtimeLogsPage,
+    name: "Pod status access lost while logs remain readable",
+    rules: [{ suffix: "/runtime", skip: 1, status: 403, code: "FORBIDDEN" }],
+    description:
+      "The first status and log reads succeed. At the next status poll, about ten seconds later, the Pod and its observation time are replaced by the status access message.",
+    steps: [
+      "Leave Follow off until the Pod disappears. The log rows stay, and the Console does not read another log page just because the status request was refused.",
+      "Select Follow. Reading logs still works without the old Pod selection; it does not restore the Pod card.",
+    ],
+  },
+  runtimeStatusAccessRestored: {
+    ...runtimeLogsPage,
+    name: "Pod status access restored on Back",
+    rules: [
+      {
+        suffix: "/permissions",
+        once: true,
+        data: { update: true, deploy: true, operate: false, delete: true },
+      },
+      { suffix: "/runtime", once: true, status: 403, code: "FORBIDDEN" },
+    ],
+    description:
+      "At first the Agent permission response says operate is not granted: logs load, but status is refused. On the next visit the permission response grants operate.",
+    steps: [
+      "Wait for both the status access message and the log rows. Open Namespaces, then use browser Back; the Console asks for status once more and shows the Pod.",
     ],
   },
   runtimeLogsReaderDownload: {
@@ -3802,6 +4024,40 @@ export const scenarios = {
     description:
       "One “Deploying…” status covers the whole request and appears only if it outlasts 250 ms. It holds keyboard focus while the request runs.",
   },
+  deployRefusedBeforeAdmission: {
+    group: "Pages/Agent detail",
+    name: "Deployment refused before admission",
+    path: draft,
+    rules: [
+      {
+        method: "POST",
+        suffix: "/deploy",
+        delayMs: 1_000,
+        status: 503,
+        code: "DEPENDENCY_UNAVAILABLE",
+        message:
+          "The selected Secret Driver does not own a Secret the Configuration binds. Bind only Secrets stored through the selected driver: update the Configuration's secretBindings, or assign the Agent another Configuration.",
+      },
+    ],
+    description:
+      "The Controller refuses this deployment because the Configuration binds a Secret from a different Secret Driver.",
+    steps: [
+      "Focus Deploy new version and press Enter. Focus moves to “Deploying…” while the request is pending.",
+      "Read the refusal. Focus returns to Deploy new version, enabled and described by that message. No second request is sent.",
+    ],
+  },
+  deployOutcomeUnknown: {
+    group: "Pages/Agent detail",
+    name: "Deployment outcome unknown",
+    path: draft,
+    rules: [{ method: "POST", suffix: "/deploy", delayMs: 1_000, status: 503, once: true }],
+    description:
+      "The browser gets a 503 after submitting a deployment. It cannot tell whether the Controller accepted the request.",
+    steps: [
+      "Focus Deploy new version and press Enter. Focus moves to “Deploying…” while the request is pending.",
+      "When “Outcome unknown” takes focus, “Deploying…” is gone and Deploy is still disabled. Refresh and inspect the saved state before trying again.",
+    ],
+  },
   deployRefusedSetting: {
     group: "Pages/Agent detail",
     name: "Deployment refused by a Configuration setting",
@@ -3819,6 +4075,30 @@ export const scenarios = {
     actions: [click("Deploy new version")],
     description:
       "A typed conflict shows the API's sentence, which names the setting to change. No version is created.",
+  },
+  deployOpensVersion: {
+    group: "Pages/Agent detail",
+    name: "Deployment opens the new version",
+    path: draft,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deploy",
+        method: "POST",
+        delayMs: 600,
+      },
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001",
+        skip: 2,
+        once: true,
+        delayMs: 900,
+      },
+    ],
+    description:
+      "An admitted deployment opens the new version. The draft stays shown, inactive, while the version loads; keyboard focus moves from “Deploying…” to the page heading, then to the new version’s heading, never to the page itself.",
+    steps: [
+      "Use Tab to reach Deploy new version, then press Enter. “Deploying…” appears and holds focus during the 600 ms request.",
+      "Once the deployment is admitted, focus moves to the Agent heading while the draft stays shown, then to the Loading page heading after 250 ms, then to the new version’s heading when it opens.",
+    ],
   },
   deployAgentPrincipalDenied: {
     group: "Pages/Agent detail",
@@ -4340,19 +4620,10 @@ export const scenarios = {
     name: "Save refused during provisioning",
     path: `${draft}&tab=channels`,
     slack: true,
-    rules: [
-      {
-        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
-        method: "PATCH",
-        status: 409,
-        code: "RESOURCE_CONFLICT",
-        message:
-          "The Configuration is reserved for provisioning and is not available for this operation.",
-      },
-    ],
+    rules: [reservedConfigurationWrite],
     actions: [click("Edit Slack"), click("Save configuration")],
     description:
-      "The API refuses the write because the Configuration is reserved for provisioning. That 409 has no stale-generation detail, so the editor stays open with the refusal instead of offering a Reload draft that would meet it again.",
+      "Save keeps the editor open and explains that this Configuration is reserved for provisioning. There is no Reload draft action: reloading would not release the reservation.",
   },
   channelSaveRejected: {
     group: "Components/Channels",
@@ -4524,7 +4795,57 @@ export const scenarios = {
     slack: true,
     actions: [{ selector: "#runtime-slack-app-token", value: "sec_demo_slack_backup_token" }],
     description:
-      "The app token binding is staged to a different Secret while the bot token binding remains unchanged.",
+      "A different app Secret is selected but not saved. Deploy would use the saved Secret, not the one shown in the picker.",
+    steps: [
+      "Deploy new version is disabled. Choose the saved Slack app token again; Deploy becomes available without a save.",
+      "Choose the Slack backup token, then Save channel Secrets. Deploy becomes available when the save succeeds; do not deploy.",
+    ],
+  },
+  credentialsDiscardSecretChoice: {
+    group: "Components/Credentials",
+    name: "Discard an unsaved Secret choice",
+    path: `${draft}&tab=credentials`,
+    slack: true,
+    unreadableSecretId: "sec_demo_slack_bot_token",
+    description:
+      "The saved Slack bot token is not readable. After choosing a different Secret, you can discard that unsaved choice without finding the original in the picker.",
+    steps: [
+      "Slack bot token shows “Bound Secret”. Choose “Slack backup token (simulated)”; Deploy is disabled until you save or reload.",
+      "Choose Reset story to reopen the saved configuration, as a page reload would. The bot token again shows “Bound Secret” and Deploy is available. Do not deploy.",
+    ],
+  },
+  credentialsSaveProvisioningReserved: {
+    group: "Components/Credentials",
+    name: "Secret choices after a refused save",
+    path: `${draft}&tab=credentials`,
+    slack: true,
+    rules: [reservedConfigurationWrite],
+    actions: [{ selector: "#runtime-slack-app-token", value: "sec_demo_slack_backup_token" }],
+    description:
+      "Provisioning has reserved the Configuration. The app token selection is an unsaved choice, not a new binding.",
+    steps: [
+      "Press Save channel Secrets. The Console explains why the Configuration cannot be saved.",
+      "The unsaved choice stays selected and Deploy stays disabled. Choose the saved Slack app token again to make Deploy available; no retry or reload is needed.",
+    ],
+  },
+  credentialsSaveConflict: {
+    group: "Components/Credentials",
+    name: "Secret choices after a conflict",
+    path: `${draft}&tab=credentials`,
+    slack: true,
+    rules: [
+      {
+        ...reservedConfigurationWrite,
+        message: "The requested platform resource already exists.",
+      },
+    ],
+    actions: [{ selector: "#runtime-slack-app-token", value: "sec_demo_slack_backup_token" }],
+    description:
+      "A save meets a generic conflict. The Console explains that the Secret choices conflict with saved state, without claiming a duplicate or a stale generation.",
+    steps: [
+      "Press Save channel Secrets. The backup token stays selected, Deploy stays disabled, and no second save is sent. The message does not say the Secret already exists or offer Reload draft.",
+      "Choose the saved Slack app token again. Deploy becomes available; no deployment or second save is needed.",
+    ],
   },
   credentialsSlackCarried: {
     group: "Components/Credentials",
@@ -4581,17 +4902,18 @@ export const scenarios = {
     slack: true,
     rules: [
       {
-        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/secrets/sec_demo_slack_app_token",
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
         method: "PATCH",
         hold: true,
+        once: true,
       },
     ],
     actions: [
-      { selector: "#runtime-slack-app-token", value: "simulated-token" },
+      { selector: "#runtime-slack-app-token", value: "sec_demo_slack_backup_token" },
       click("Save channel Secrets"),
     ],
     description:
-      "A pending Secret save disables deployment. The real client times out after 15 seconds; reset the story to replay it.",
+      "Saving and deployment stay blocked while the channel Secret binding save is pending. After the 15-second timeout, select Reload draft and inspect the saved app token binding before retrying.",
   },
   credentialsSaveUnknown: {
     group: "Components/Credentials",
@@ -4600,15 +4922,15 @@ export const scenarios = {
     slack: true,
     rules: [
       {
-        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/secrets/sec_demo_slack_app_token",
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/configurations/cfg_00000000-0000-4000-8000-000000000001",
         method: "PATCH",
         status: 503,
         once: true,
       },
     ],
-    actions: [{ selector: "#runtime-slack-app-token", value: "simulated-token" }],
+    actions: [{ selector: "#runtime-slack-app-token", value: "sec_demo_slack_backup_token" }],
     description:
-      "Save the simulated replacement to see an uncertain Secret save. Reload the draft and inspect saved state before deploying or retrying.",
+      "Press Save channel Secrets to simulate an uncertain save. Select Reload draft and inspect the saved app token binding before deploying or retrying; the Console does not retry automatically.",
   },
   credentialsSlackPartial: {
     group: "Components/Credentials",

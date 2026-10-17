@@ -1,6 +1,7 @@
 import {
   ADMISSION_LIMIT_DETAILS,
   OpenShellAdmissionLimitError,
+  OpenShellDeletionUnconfirmedError,
   OpenShellGatewayFailure,
   OpenShellProviderAlreadyExistsError,
   OpenShellRequestReplayRefusedError,
@@ -36,6 +37,8 @@ import type {
 import type { PackageDefinition } from "@grpc/proto-loader";
 
 export {
+  confirmSandboxAbsent,
+  gatewayIdentityRefusal,
   OpenShellAdmissionLimitError,
   OpenShellProviderAlreadyExistsError,
   OpenShellRequestReplayRefusedError,
@@ -328,6 +331,24 @@ export interface OpenShellGatewayClient
     name: string,
     signal: AbortSignal,
   ): Promise<OpenShellServiceResponse | undefined>;
+  /**
+   * Removes one exposed service endpoint. Resolves only once OpenShell confirms the endpoint
+   * gone (COMPLETED or ALREADY_ABSENT); any other answer is a failure. NOT_FOUND is one too: it
+   * names a Sandbox that is gone or that this identity may not see (OpenShell answers both
+   * alike), so it confirms nothing about the endpoint.
+   */
+  deleteService(
+    workspace: string,
+    sandbox: string,
+    name: string,
+    signal: AbortSignal,
+  ): Promise<void>;
+  /**
+   * Removes one Sandbox. Resolves only once OpenShell confirms it gone; NOT_FOUND is a failure,
+   * since it names a Sandbox that is gone or that this identity may not see (OpenShell answers
+   * both alike), so it confirms nothing. Callers read first and confirm an absent Sandbox with
+   * `confirmSandboxAbsent`.
+   */
   deleteSandbox(request: OpenShellSandboxDeleteRequest, signal: AbortSignal): Promise<void>;
   /** Discards process output and returns its exit code only after the stream completes. */
   execSandbox(request: OpenShellSandboxExecRequest, signal: AbortSignal): Promise<number>;
@@ -452,6 +473,7 @@ type OpenShellMethod =
   | "CreateSandbox"
   | "GetSandbox"
   | "GetService"
+  | "DeleteService"
   | "DeleteSandbox"
   | "GetSandboxLogs"
   | "GetSandboxProviderStatus"
@@ -1420,13 +1442,55 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     });
   }
 
+  async deleteService(
+    workspace: string,
+    sandbox: string,
+    name: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let response: RecordValue;
+    try {
+      // No request_id: the delete is idempotent by itself, and a durable admission per call
+      // would count against the gateway identity's limit on every reconcile pass.
+      response = await this.unary(
+        "DeleteService",
+        {
+          sandbox: nonempty(sandbox, "OpenShell Sandbox name"),
+          name,
+          workspace_scope: { workspace },
+          allow_missing: true,
+        },
+        signal,
+      );
+    } catch (error) {
+      if (await this.isStatus(error, "NOT_FOUND")) {
+        // A Sandbox that is gone and one this identity is not allowed to see answer alike
+        // (finding 1670): neither confirms the endpoint gone, so the caller decides with a
+        // read it can trust.
+        throw new OpenShellDeletionUnconfirmedError(
+          "OpenShell DeleteService did not find the Sandbox, so the deletion is unconfirmed.",
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+    if (!deletionConfirmed(response)) {
+      throw new OpenShellGatewayFailure("OpenShell DeleteService did not confirm deletion.");
+    }
+  }
+
   /**
-   * Resolves only once OpenShell reports the Sandbox gone: COMPLETED, ALREADY_ABSENT or
-   * NOT_FOUND from DeleteSandbox, or, after ACCEPTED (or no outcome), GetSandbox no longer
-   * finding the targeted Sandbox. One deadline bounds the call and that wait (a GetSandbox in
-   * flight can overrun it by one request timeout); past it the deletion is reported as an
-   * unavailable dependency, so the caller retries the idempotent delete instead of treating
-   * the Sandbox as removed.
+   * Resolves only once OpenShell reports the Sandbox gone: COMPLETED or ALREADY_ABSENT from
+   * DeleteSandbox, or, after ACCEPTED (or no outcome), GetSandbox no longer finding the
+   * targeted Sandbox. NOT_FOUND from DeleteSandbox is a failure: OpenShell answers it alike
+   * for a Sandbox that is gone and for one this identity may not see (finding 1676), so it
+   * confirms nothing, and the caller decides with a read it can trust (`confirmSandboxAbsent`).
+   * After ACCEPTED, NOT_FOUND from GetSandbox does confirm: ACCEPTED proves this identity was
+   * allowed to delete the Sandbox, and OpenShell finishes an accepted deletion by itself or
+   * keeps the record in DELETING, which a member identity still reads.
+   * One deadline bounds the call and that wait (a GetSandbox in flight can overrun it by one
+   * request timeout); past it the deletion is reported as an unavailable dependency, so the
+   * caller retries the idempotent delete instead of treating the Sandbox as removed.
    */
   async deleteSandbox(request: OpenShellSandboxDeleteRequest, signal: AbortSignal): Promise<void> {
     const deadlineAt = Date.now() + this.sandboxDeleteTimeoutMs;
@@ -1441,7 +1505,10 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     } catch (error) {
       const { grpc } = await this.ensureClient();
       if (statusCode(error) === grpc.status.NOT_FOUND) {
-        return;
+        throw new OpenShellDeletionUnconfirmedError(
+          "OpenShell DeleteSandbox did not find the Sandbox, so the deletion is unconfirmed.",
+          { cause: error },
+        );
       }
       throw error;
     }

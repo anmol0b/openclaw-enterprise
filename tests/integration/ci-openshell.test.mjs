@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { delimiter, join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import {
   k3sImage,
   kubectlVersion,
@@ -288,6 +289,180 @@ test("OpenShell probe observes its command after the turn ends, or preserves the
       await assert.rejects(probe, /Codex command outcome is unknown/, event);
     }
     assert.deepEqual(attempts, [1], event);
+  }
+});
+
+test("OpenShell probe waits for a command that outlives its turn up to the fixture's bound", async (t) => {
+  // Finding 1630: Codex hands a long command back to the model, which can reply and end the
+  // turn while the command still runs. The in-Pod client waits for that command's completion
+  // event up to the fixture's bound, and reports the command's timing when the bound expires.
+  const controller = createRequire(new URL("../../apps/controller/package.json", import.meta.url));
+  const { WebSocketServer } = createRequire(controller.resolve("@kubernetes/client-node"))("ws");
+  const server = createServer();
+  const peer = new WebSocketServer({ server });
+  server.listen(0, "127.0.0.1");
+  t.after(() => server.close());
+  await once(server, "listening");
+  const directory = await fixture(t);
+  // Finding 1665: wakes the client's first command-deadline timer after 1 ms instead of its
+  // delay, as an early libuv wake would, and records that it did.
+  const earlyWake = join(directory, "early-wake.mjs");
+  const earlyWakeMarker = join(directory, "early-wake");
+  await writeFile(
+    earlyWake,
+    [
+      'import { writeFileSync } from "node:fs";',
+      "const grace = Number(process.env.EARLY_WAKE_GRACE_MS);",
+      "const setTimeoutOriginal = globalThis.setTimeout;",
+      "let woken = false;",
+      "globalThis.setTimeout = (callback, delay, ...rest) => {",
+      "  if (!woken && delay > grace - 50 && delay <= grace) {",
+      "    woken = true;",
+      `    writeFileSync(${JSON.stringify(earlyWakeMarker)}, String(delay));`,
+      "    delay = 1;",
+      "  }",
+      "  return setTimeoutOriginal(callback, delay, ...rest);",
+      "};",
+    ].join("\n"),
+  );
+  await writeFile(
+    join(directory, "kubectl"),
+    [
+      "#!/bin/sh",
+      'while [ "$1" != "--" ] && [ "$#" -gt 0 ]; do shift; done',
+      "shift",
+      `export APP_SERVER_URL=ws://127.0.0.1:${server.address().port}`,
+      `if [ -n "$EARLY_WAKE_GRACE_MS" ]; then export NODE_OPTIONS="\${NODE_OPTIONS:+$NODE_OPTIONS }--import=${pathToFileURL(earlyWake)}"; fi`,
+      'exec "$@"',
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const path = process.env.PATH;
+  process.env.PATH = directory + delimiter + path;
+  t.after(() => {
+    process.env.PATH = path;
+  });
+  const threadId = "probe-thread";
+  const turnId = "probe-turn";
+  const nonce = "probe-command";
+  // The command completes this long after the turn: past the former fixed 5 s wait would make
+  // the test slow, so the bounds below scale it down. The client sees only message order and time.
+  const lateMs = 800;
+  let turnCompletedAt;
+  peer.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      const { method, id } = JSON.parse(data);
+      const send = (message) => socket.send(JSON.stringify(message));
+      if (method === undefined || method === "initialized") {
+        return;
+      }
+      if (method === "initialize") {
+        return send({ id, result: {} });
+      }
+      if (method === "thread/start") {
+        return send({
+          id,
+          result: { thread: { id: threadId }, sandbox: { type: "dangerFullAccess" } },
+        });
+      }
+      const turn = { id: turnId, status: "inProgress" };
+      send({ id, result: { turn } });
+      const item = { id: "probe", type: "commandExecution", command: nonce, status: "inProgress" };
+      send({ method: "item/started", params: { threadId, turnId, item } });
+      send({
+        method: "item/commandExecution/outputDelta",
+        params: { threadId, turnId, itemId: item.id, delta: "TOOL_EXIT=" },
+      });
+      turnCompletedAt = performance.now();
+      send({
+        method: "turn/completed",
+        params: { threadId, turn: { ...turn, status: "completed" } },
+      });
+      setTimeout(() => {
+        const terminal = {
+          ...item,
+          status: "failed",
+          exitCode: 28,
+          aggregatedOutput: "TOOL_EXIT=28",
+        };
+        if (socket.readyState === socket.OPEN) {
+          send({ method: "item/completed", params: { threadId, turnId, item: terminal } });
+        }
+      }, lateMs);
+    });
+  });
+  const probe = (codexCommandGraceMs) => {
+    const { requestCodexTurnFromGatewayPod } = createOpenShellKubernetesFixture({
+      codexCommandGraceMs,
+    });
+    return observeSandboxProbe({
+      nonce,
+      traceSecrets: [],
+      requestTurn: () =>
+        requestCodexTurnFromGatewayPod({ namespace: "fixture", gatewayPod: "fixture" }),
+    });
+  };
+
+  // Within the bound, the late completion settles the probe with the command's own result.
+  const { run } = await probe(lateMs * 4);
+  assert.equal(run.exitCode, 28, "keep the late command's actual result");
+  // The grace starts when the turn ends; launching the client isn't part of that wait.
+  assert.ok(performance.now() - turnCompletedAt < lateMs * 4, "settle on the completion event");
+
+  // Past the bound, the outcome stays unknown and the failure says how long the command ran.
+  const error = await probe(lateMs / 4).then(
+    () => assert.fail("a command that outlives the bound must leave the outcome unknown"),
+    (failure) => failure,
+  );
+  assert.match(error.message, /Codex command outcome is unknown/);
+  // pendingCommands is the summary's last field, so the object ends at the first "]}".
+  const summary = JSON.parse(/Native execution summary: (\{.*?\]\})/s.exec(error.message)[1]);
+  assert.equal(summary.commandGraceMs, lateMs / 4);
+  assert.ok(summary.sinceTurnEndMs >= lateMs / 4);
+  assert.equal(summary.pendingCommands.length, 1);
+  assert.equal(summary.pendingCommands[0].outputDeltas, 1);
+  assert.equal(summary.pendingCommands[0].outputBytes, "TOOL_EXIT=".length);
+  assert.ok(summary.pendingCommands[0].startedBeforeTurnEndMs >= 0);
+  assert.ok(summary.pendingCommands[0].runningMs >= lateMs / 4);
+
+  // An early timer wake must not end the grace before turn completion plus the bound: the
+  // client re-arms for the remainder. A one-shot timer would report an unknown outcome here.
+  const probeWithEarlyWake = async (codexCommandGraceMs) => {
+    await rm(earlyWakeMarker, { force: true });
+    process.env.EARLY_WAKE_GRACE_MS = String(codexCommandGraceMs);
+    const outcome = await probe(codexCommandGraceMs).then(
+      (result) => ({ result }),
+      (error) => ({ error }),
+    );
+    delete process.env.EARLY_WAKE_GRACE_MS;
+    // The deadline was armed for the grace less the moment since the turn ended.
+    const woke = Number(await readFile(earlyWakeMarker, "utf8").catch(() => NaN));
+    assert.ok(
+      woke > codexCommandGraceMs - 50 && woke <= codexCommandGraceMs,
+      "the command-deadline timer must wake early",
+    );
+    if (outcome.error) {
+      throw outcome.error;
+    }
+    return outcome.result;
+  };
+  const early = await probeWithEarlyWake(lateMs * 4);
+  assert.equal(early.run.exitCode, 28, "an early wake keeps waiting for the late command");
+  const expired = await probeWithEarlyWake(lateMs / 4).then(
+    () => assert.fail("a command that outlives the bound must leave the outcome unknown"),
+    (failure) => failure,
+  );
+  assert.match(expired.message, /Codex command outcome is unknown/);
+  const expiredSummary = JSON.parse(
+    /Native execution summary: (\{.*?\]\})/s.exec(expired.message)[1],
+  );
+  assert.ok(expiredSummary.sinceTurnEndMs >= lateMs / 4, "never end the grace before its bound");
+
+  for (const codexCommandGraceMs of [0, 1.5, 60_001, "5000"]) {
+    assert.throws(
+      () => createOpenShellKubernetesFixture({ codexCommandGraceMs }),
+      /codexCommandGraceMs must be a positive number/,
+    );
   }
 });
 

@@ -3,7 +3,7 @@ import { isComputePreparationFailureEvidence } from "@openclaw-enterprise/contra
 import type { ComputePendingReason, RuntimeFailureEvidence } from "@openclaw-enterprise/contracts";
 
 import { ScopeViolationError } from "../errors.ts";
-import { runtimeFailureCause } from "../runtime-failure-cause.ts";
+import { recognizedRuntimeFailureValues, runtimeFailureCause } from "../runtime-failure-cause.ts";
 
 export { runtimeFailureCause };
 
@@ -51,10 +51,9 @@ export interface ControllerWorkAttempt {
   readonly pendingReason?: ProviderPendingReason;
 }
 
-const workspaceNodePendingMessage = "Waiting for the workspace node to connect to the Gateway.";
 const providerPendingMessages = {
   PROVIDER_HARNESS_POD_PENDING: "Waiting for one matching provider Harness Pod to be ready.",
-  PROVIDER_WORKSPACE_NODE_PENDING: workspaceNodePendingMessage,
+  PROVIDER_WORKSPACE_NODE_PENDING: "Waiting for the workspace node to connect to the Gateway.",
   CREDENTIAL_ATTACHMENT_PENDING: "Waiting for the Sandbox credential attachments to be ready.",
 } satisfies Partial<Record<ComputePendingReason, string>>;
 
@@ -100,7 +99,12 @@ export function deploymentProgressForWork(
       break;
     case "WORKSPACE_NODE_PENDING":
       code = attempt.code;
-      message = workspaceNodePendingMessage;
+      message = "Workloads are ready; waiting for the workspace node to connect to the Gateway.";
+      break;
+    case "WORKSPACE_SETUP_RETRYING":
+      code = attempt.code;
+      message =
+        "Workspace setup failed; Kubernetes is retrying it. If it keeps failing, ask an admin to check the Agent's workspace storage and runtime image.";
       break;
     case "WORKSPACE_NODE_BINDING_PENDING":
       code = attempt.code;
@@ -155,6 +159,11 @@ export function deploymentProgressForWork(
       code = attempt.code;
       message =
         "The Sandbox gateway refuses new requests from the controller until its request admissions free up. The controller will retry until the deployment deadline.";
+      break;
+    case "SANDBOX_GATEWAY_UNAVAILABLE":
+      code = attempt.code;
+      message =
+        "The Sandbox gateway did not answer the controller's read of the Harness status yet. The controller will retry until the deployment deadline.";
       break;
     case "ACTIVE_REVISION_CHANGED":
       code = attempt.code;
@@ -416,6 +425,11 @@ export function validateRuntimeFailureEvidence(value: unknown): RuntimeFailureEv
   });
 }
 
+/**
+ * Validates failure data before it is recorded, and again when it is read back. A runtime
+ * failure value outside the vocabulary in packages/contracts/src/runtime-failure.mjs is recorded,
+ * and read back, as UNRECOGNIZED rather than as served (findings 1660, 1674).
+ */
 export function validateFailureData(
   reasonCode: string,
   data: unknown,
@@ -466,7 +480,9 @@ export function validateFailureData(
     }
     return Object.freeze({
       timeoutMs,
-      ...(evidence === undefined ? {} : { runtimeFailure: evidence }),
+      ...(evidence === undefined
+        ? {}
+        : { runtimeFailure: recognizedRuntimeFailureValues(evidence) }),
     });
   }
   if (reasonCode === "RUNTIME_MODEL_PROBE_FAILED") {
@@ -486,7 +502,7 @@ export function validateFailureData(
     if (evidence.code !== "MODEL_PROBE_FAILED") {
       throw new ScopeViolationError("Model probe failure data requires its runtime failure.");
     }
-    return Object.freeze({ runtimeFailure: evidence });
+    return Object.freeze({ runtimeFailure: recognizedRuntimeFailureValues(evidence) });
   }
   throw new ScopeViolationError("Controller work failure data is not allowed for this code.");
 }
@@ -571,6 +587,15 @@ export function deploymentErrorForWork(
     message: deploymentErrorMessage(code),
     ...(data === undefined ? {} : { data }),
   });
+}
+
+/**
+ * The guidance for a refusal whose next step does not depend on the operation. A stop, deletion
+ * or credential withdrawal the Sandbox gateway refused has no status of its own, so the worker
+ * logs this with the failed work, as the deployment status shows it (finding 1694).
+ */
+export function operationRefusalHint(code: string): string | undefined {
+  return code === "SANDBOX_GATEWAY_UNAUTHORIZED" ? deploymentErrorMessage(code) : undefined;
 }
 
 export function deploymentWarningsForWork(
@@ -687,6 +712,8 @@ function deploymentErrorMessage(code: string): string {
       return "A Secret this revision binds is missing or no longer belongs to the selected Secret Driver. Bind available Secrets, then deploy again.";
     case "NAMESPACE_NOT_READY":
       return "The Agent's Namespace was not ready when the controller ran this deployment, for example while it is being deleted. Deploy again once the Namespace is ready.";
+    case "WORKSPACE_SETUP_REFUSED":
+      return "Initial workspace setup refused this version's workspace, and every retry would refuse it again: the workspace files or setup record, or the runtime's default files, do not match what the Agent was created with. Ask an admin to check the Agent's workspace storage and runtime image; do not delete the setup record to force a replay.";
     case "WORKSPACE_SETUP_UNSUPPORTED":
       return "The Agent was created with initial workspace files, which the Installation's Compute Driver cannot set up. Ask an admin to select a Compute Driver that supports them, then deploy again, or create the Agent without initial workspace files.";
     case "DEPENDENCY_UNAVAILABLE":
@@ -703,6 +730,8 @@ function deploymentErrorMessage(code: string): string {
       return "The Sandbox Driver cannot deliver Secret-backed environment variables to the Harness.";
     case "SANDBOX_HARNESS_UNSUPPORTED":
       return "The Sandbox Driver does not support this revision's Harness.";
+    case "SANDBOX_GATEWAY_UNAUTHORIZED":
+      return "The Sandbox gateway refused the controller's identity in this revision's Workspace, so the Driver could not confirm the revision's Sandbox removed, its Harness exposure withdrawn or its credentials detached. A Workspace removed outside the controller presents the same way. For an authentication failure, check the controller gateway identity's token file and the gateway's signing-key refresh; for a permission denial, restore that identity's Workspace role (or recreate the Workspace with a deploy). Then deploy, stop, delete or withdraw again.";
     case "CREDENTIAL_SOURCE_ENVIRONMENT_CONFLICT":
       return "Two credential sources the Agent binds use the same environment variable. Bind only one source per variable, for example one openai source and bearer-token sources with distinct env_var values, then deploy again.";
     case "CREDENTIAL_WITHDRAWN":
@@ -723,6 +752,8 @@ function deploymentErrorMessage(code: string): string {
       return "The ServiceAccount's Backend binding no longer matches the Agent's Backend, or its credential is no longer issued. Bind a ServiceAccount created and issued under the Agent's current Backend, then deploy again.";
     case "SANDBOX_ADMISSION_LIMIT_REACHED":
       return "The Sandbox gateway still refused new requests from the controller (request admission limit reached) at the deployment deadline.";
+    case "SANDBOX_GATEWAY_UNAVAILABLE":
+      return "The Sandbox gateway still did not answer the controller's read of the Harness status at the deployment deadline.";
     default:
       return "Deployment reconciliation failed.";
   }

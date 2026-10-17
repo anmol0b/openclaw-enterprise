@@ -36,8 +36,10 @@ import {
   openShellAgentName,
   openShellGatewayName,
   openshellHash as hash,
+  registerOpenShellInstallationCleanups,
 } from "../helpers/openshell-kubernetes-real.mjs";
 import {
+  boundedTeardown,
   diagnosticDeadlineMs,
   diagnosticDeadlinePassed,
   diagnosticRequestTimeout,
@@ -99,6 +101,14 @@ const modelBaseUrl = (
 ).replace(/\/$/u, "");
 const modelEndpoint = new URL(modelBaseUrl);
 const modelPort = Number(modelEndpoint.port || 443);
+// Codex hands a long command back to the model, which may reply and end the turn before the
+// command ends. The tool upstream probe bounds its curl, and every turn waits for a command
+// still running at turn end up to that bound plus a margin (finding 1630: a 20 s curl outlived
+// a fixed 5 s wait). The grace is sized for that probe only; longer commands elsewhere in this
+// suite can still outlive it and report an unknown outcome.
+const toolProbeCurlMaxSeconds = 8;
+const toolAEchoPath = "/echo-a";
+const codexCommandGraceMs = (toolProbeCurlMaxSeconds + 6) * 1_000;
 const selected =
   process.env.OCC_TEST_OPENSHELL_K3D_REAL === "1" ||
   [
@@ -170,6 +180,7 @@ const fixture = createOpenShellKubernetesFixture({
   openShellHelmChart,
   openShellWorkspaceHelmChart,
   openShellChartVersion,
+  codexCommandGraceMs,
 });
 const {
   kubectl,
@@ -344,6 +355,7 @@ async function createScopedController(context, identifier, platformNamespace, ku
     clusterRoleBinding: binding,
     context: `openshell-production-${suffix}`,
   });
+  const tokenMintedAt = new Date().toISOString();
   await kubectl(
     "create",
     "clusterrole",
@@ -367,7 +379,7 @@ async function createScopedController(context, identifier, platformNamespace, ku
     clusterRoleBinding: apiBinding,
     context: `openshell-secret-api-${suffix}`,
   });
-  return { ...identity, tenantRole, apiSecretRole, apiIdentity };
+  return { ...identity, tokenMintedAt, tenantRole, apiSecretRole, apiIdentity };
 }
 
 function nativeCodexConfiguration(gatewayAuth) {
@@ -1882,6 +1894,19 @@ function createIntegrationSandboxDriverFactory(
                 context,
               ).harnessStatus(context);
             },
+            // Compute drops a native worker's exposure once its node has enrolled (finding 1657).
+            async withdrawHarnessExposure(context) {
+              const endpoint = await endpointForNamespace(context, {
+                sandboxServiceAccountName: agentSandboxServiceAccount(context),
+                exact: context.requirements.workloadIdentity !== undefined,
+              });
+              await delegate(
+                context.requirements,
+                context.namespace.name,
+                endpoint,
+                context,
+              ).withdrawHarnessExposure(context);
+            },
             // Compute admits the workspace-node connection only from the revision's
             // supervisor Pod, which the real Driver labels from the gateway's Sandbox record.
             async workspaceNodePeerLabels(context) {
@@ -2007,6 +2032,41 @@ function withFirstPrepareRevisionFailureDiagnostic(computeDriver) {
                   ? "OpenShell integration: waiting for the Gateway node setup projection; Compute will retry."
                   : `OpenShell integration: initial Compute prepareRevision retry: ${error.message}`;
               process.stderr.write(`${message}\n`);
+            }
+            throw error;
+          }
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+// The Kubernetes client's rejection of a request the API server refused to authenticate.
+function isKubernetesUnauthorized(error) {
+  return error?.code === 401 || /^HTTP-Code: 401$/m.test(String(error?.message));
+}
+
+// Whether the test's bounded teardown has begun, for the 401 diagnostic below.
+let teardownStarted = () => false;
+
+// Finding 1711: a 401 on prepareRevision names no credential. On the first one, `tokenSources()`
+// names the credentials the call may have used, by name and kind, never a value.
+function withUnauthorizedTokenSourceDiagnostic(computeDriver, tokenSources) {
+  let reported = false;
+  return new Proxy(computeDriver, {
+    get(target, property) {
+      if (property === "prepareRevision") {
+        return async (...args) => {
+          try {
+            return await target.prepareRevision(...args);
+          } catch (error) {
+            if (!reported && isKubernetesUnauthorized(error)) {
+              reported = true;
+              process.stderr.write(
+                `OpenShell integration: Compute prepareRevision got HTTP 401; token sources: ${JSON.stringify(tokenSources())}\n`,
+              );
             }
             throw error;
           }
@@ -2200,6 +2260,17 @@ async function prepareProductionInstallation(
     createOpenShellBackend: createSandboxDriver.createBackend,
     createSandboxDriver,
   });
+  // Names and kinds only: no credential value reaches the log.
+  const tokenSources = () => ({
+    compute: {
+      kubeconfigContext: controller.authentication.context,
+      user: `system:serviceaccount:${platformNamespace}:${controller.account}`,
+      kind: "ServiceAccount token (kubectl create token, default lifetime)",
+      mintedAt: controller.tokenMintedAt,
+    },
+    sandboxOperator: { kubeconfigContext: kubernetesContext, kind: "test operator kubeconfig" },
+    teardownStarted: teardownStarted(),
+  });
   const loadWorkerDrivers = async () => {
     const loaded = await loadInstallationConfiguration({
       mode: "production",
@@ -2213,7 +2284,10 @@ async function prepareProductionInstallation(
       workerDrivers: loaded,
       diagnosticWorkerDrivers: {
         ...loaded,
-        computeDriver: withFirstPrepareRevisionFailureDiagnostic(loaded.computeDriver),
+        computeDriver: withUnauthorizedTokenSourceDiagnostic(
+          withFirstPrepareRevisionFailureDiagnostic(loaded.computeDriver),
+          tokenSources,
+        ),
       },
     };
   };
@@ -2243,35 +2317,22 @@ async function prepareProductionInstallation(
   let controllerUrl;
   let placement;
   let gatewayPlacement;
-  context.after(async () => {
-    const cleanupFailures = [];
-    const cleanupStep = async (description, operation) => {
-      try {
-        await operation();
-      } catch (error) {
-        cleanupFailures.push(new Error(`${description}: ${error.message}`, { cause: error }));
-      }
-    };
-
-    await cleanupStep("controller worker", async () => {
+  registerOpenShellInstallationCleanups(context, {
+    workerStop: async () => {
       if (worker !== undefined) {
         await worker.stop();
       } else if (workerPool !== undefined) {
         await workerPool.end();
       }
-    });
-    await cleanupStep("OpenShell management port-forwards", async () => {
-      await createSandboxDriver.disposeGatewayForwards();
-    });
-    await cleanupStep("production app", async () => {
+    },
+    portForwards: () => createSandboxDriver.disposeGatewayForwards(),
+    productionApp: async () => {
       if (productionApp !== undefined) {
         await productionApp.close();
       }
-    });
-    await cleanupStep("observer pool", async () => {
-      await observerPool.end();
-    });
-    await cleanupStep("Kubernetes namespace", async () => {
+    },
+    observerPool: () => observerPool.end(),
+    workloadNamespace: async () => {
       if (placement !== undefined) {
         await kubectl(
           "delete",
@@ -2282,16 +2343,8 @@ async function prepareProductionInstallation(
           "--timeout=120s",
         );
       }
-    });
-    await cleanupStep("temporary directory", async () => {
-      await rm(directory, { recursive: true, force: true });
-    });
-    if (cleanupFailures.length > 0) {
-      throw new AggregateError(
-        cleanupFailures,
-        `OpenShell integration cleanup reported ${cleanupFailures.length} failure(s).`,
-      );
-    }
+    },
+    temporaryDirectory: () => rm(directory, { recursive: true, force: true }),
   });
 
   const existing = await new PostgresPlatformState(observerPool).loadInstallation();
@@ -2449,7 +2502,7 @@ async function prepareProductionInstallation(
     tokenEcho === undefined
       ? undefined
       : [
-          await registerToolSource(request, namespaceId, tokenEcho, "TOOL_A_TOKEN", "/echo-a"),
+          await registerToolSource(request, namespaceId, tokenEcho, "TOOL_A_TOKEN", toolAEchoPath),
           await registerToolSource(request, namespaceId, tokenEcho, "TOOL_B_TOKEN", "/echo-b"),
         ];
   const untrustedTlsSource =
@@ -2797,8 +2850,13 @@ async function startTokenEcho(context, issuerJwks) {
   context.after(() =>
     kubectl("delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"),
   );
+  // Read the receiver's count through Pod loopback, even when its Service has no ready endpoint.
+  const receiptPort = 8081;
   const program = [
-    'const { createHash, createPublicKey, verify } = require("node:crypto");',
+    'const { createHash, createPublicKey, randomUUID, verify } = require("node:crypto");',
+    'const http = require("node:http");',
+    "const receipt = { instance: randomUUID(), requests: 0 };",
+    `http.createServer((_, res) => res.end(JSON.stringify(receipt))).listen(${receiptPort}, "127.0.0.1");`,
     "const keys = JSON.parse(process.env.OCE_ISSUER_JWKS ?? '{\"keys\":[]}').keys;",
     "const jwt = (authorization) => {",
     "  const match = /^Bearer ([\\w-]+)\\.([\\w-]+)\\.([\\w-]+)$/.exec(authorization);",
@@ -2817,7 +2875,8 @@ async function startTokenEcho(context, issuerJwks) {
     "    return { valid: false };",
     "  }",
     "};",
-    'require("node:http").createServer((request, response) => {',
+    "http.createServer((request, response) => {",
+    `  if (request.url === ${JSON.stringify(toolAEchoPath)}) receipt.requests++;`,
     '  const authorization = request.headers.authorization ?? "";',
     '  response.setHeader("content-type", "application/json");',
     "  response.end(JSON.stringify({",
@@ -2864,7 +2923,29 @@ async function startTokenEcho(context, issuerJwks) {
     "pod/token-echo",
     "--timeout=180s",
   );
-  return { namespace, host: `token-echo.${namespace}.svc.cluster.local`, port: 8080 };
+  async function readToolAReceipt() {
+    const output = await kubectl(
+      "exec",
+      "pod/token-echo",
+      "--namespace",
+      namespace,
+      "--",
+      "node",
+      "-e",
+      `fetch("http://127.0.0.1:${receiptPort}", { signal: AbortSignal.timeout(5000) })` +
+        ".then((response) => response.text()).then((text) => process.stdout.write(text))",
+    );
+    const { instance, requests } = JSON.parse(output);
+    assert.ok(typeof instance === "string" && instance.length > 0);
+    assert.ok(Number.isSafeInteger(requests) && requests >= 0);
+    return { instance, requests };
+  }
+  return {
+    namespace,
+    host: `token-echo.${namespace}.svc.cluster.local`,
+    port: 8080,
+    readToolAReceipt,
+  };
 }
 
 const untrustedCaName = "OCE untrusted upstream CA";
@@ -4667,9 +4748,7 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
       `(4) touch ${escapedPath}; ` +
       `(5) curl -fsSI --max-time 30 https://www.openclaw.org; ` +
       `(6) curl -fsSI --max-time 10 https://acme.com; ` +
-      (modelSourceType === "codex-pat" ? `(7) ${deniedConfigCommand}. ` : "") +
       `Commands 1, 2, and 5 must succeed; commands 3, 4, and 6 must fail. ` +
-      (modelSourceType === "codex-pat" ? "Command 7 must also fail. " : "") +
       `Reply with exactly ${nonce}, WORKSPACE_WRITABLE, APPROVED_PATH_READABLE, ` +
       `READONLY_DENIED, ESCAPE_DENIED, OPENCLAW_ALLOWED, and ACME_DENIED ` +
       `if and only if those outcomes occurred.`,
@@ -4683,9 +4762,6 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
   );
   const deniedCommand = completedCommands.find(({ command }) =>
     String(command).includes("acme.com"),
-  );
-  const deniedConfigRequest = completedCommands.find(({ command }) =>
-    String(command).includes(deniedBackend),
   );
   const workspaceCommand = completedCommands.find(({ command }) =>
     String(command).includes(writablePath),
@@ -4720,13 +4796,86 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
   assert.equal(approvedCommand.exitCode, 0, "OpenShell must allow the approved destination.");
   assert.notEqual(deniedCommand.exitCode, 0, "OpenShell must deny the unapproved destination.");
   if (modelSourceType === "codex-pat") {
+    // The backend probe gets its own turn: as a seventh command in the turn above, the model
+    // sometimes ended its turn after the sixth and never started it (finding 1682).
+    const backendNonce = `openshell-backend-${randomUUID()}`;
+    const requestBackendTurn = () =>
+      requestCodexTurnFromGatewayPod({
+        namespace: topology.gatewayPlacement,
+        gatewayPod: topology.gatewayPod.metadata.name,
+        providerModel,
+        prompt:
+          `Use the shell exec tool from ${providerWorkspace} to run exactly this one command, ` +
+          `which is expected to fail: ${deniedConfigCommand}. ` +
+          `Then reply with exactly ${backendNonce}.`,
+      });
+    const startedCommands = (turn) =>
+      turn.items.filter(
+        ({ method, params }) =>
+          method === "item/started" && params?.item?.type === "commandExecution",
+      ).length;
+    const hasCommandActivity = ({ items }) => {
+      // The collector validates turn/completed and can return command output without a start or
+      // completion. Ignore that output only if it explicitly belongs to another thread or turn.
+      const { threadId, turn } = items.find(({ method }) => method === "turn/completed").params;
+      const couldMatchId = (id, expected) => typeof id !== "string" || id === "" || id === expected;
+      return items.some(({ method, params }) => {
+        if (method === "item/commandExecution/outputDelta") {
+          return couldMatchId(params?.threadId, threadId) && couldMatchId(params?.turnId, turn.id);
+        }
+        return (
+          method === "item/commandExecution/requestApproval" ||
+          ((method === "item/started" || method === "item/completed") &&
+            params?.item?.type === "commandExecution")
+        );
+      });
+    };
+    let backendTurn = await requestBackendTurn();
+    const skippedTurns = [];
+    // Ask once more only when the turn showed no command activity at all. A rewritten,
+    // declined, approval-gated or unsettled command is still judged below.
+    if (!hasCommandActivity(backendTurn)) {
+      skippedTurns.push({
+        items: backendTurn.items.length,
+        replyHasNonce: new RegExp(backendNonce).test(backendTurn.assistant),
+      });
+      backendTurn = await requestBackendTurn();
+    }
+    const backendCommands = backendTurn.items
+      .filter(({ method }) => method === "item/completed")
+      .map(({ params }) => params?.item)
+      .filter(({ type }) => type === "commandExecution");
+    const deniedConfigRequest = backendCommands.find(({ command }) =>
+      String(command).includes(deniedBackend),
+    );
+    // How the turn went, by label only: a missing request then shows whether the model
+    // skipped it, rewrote it, or asked for approval instead.
+    const commandSummary = {
+      skippedTurns,
+      started: startedCommands(backendTurn),
+      completed: backendCommands.map((command) => ({
+        label:
+          command === deniedConfigRequest
+            ? "codex-backend"
+            : /chatgpt_base_url|features list|backend-api/.test(String(command.command))
+              ? "codex-rewritten"
+              : "other",
+        status: command.status,
+        exitCode: command.exitCode,
+        durationMs: command.durationMs ?? null,
+      })),
+      approvalRequests: backendTurn.items.filter(
+        ({ method }) => method === "item/commandExecution/requestApproval",
+      ).length,
+      replyHasNonce: new RegExp(backendNonce).test(backendTurn.assistant),
+    };
     assert.ok(
       deniedConfigRequest,
-      "the real Codex binary must attempt the unapproved backend path.",
+      `the real Codex binary must attempt the unapproved backend path: ${JSON.stringify(commandSummary)}.`,
     );
     assert.ok(
       Number.isSafeInteger(deniedConfigRequest.exitCode),
-      `the forbidden backend request must execute (status=${deniedConfigRequest.status}, approvalRequested=${result.items.some(
+      `the forbidden backend request must execute (status=${deniedConfigRequest.status}, approvalRequested=${backendTurn.items.some(
         ({ method, params }) =>
           method === "item/commandExecution/requestApproval" &&
           params?.itemId === deniedConfigRequest.id,
@@ -4767,6 +4916,7 @@ async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
       },
       30_000,
     );
+    assert.match(backendTurn.assistant, new RegExp(backendNonce));
   }
   assert.match(result.assistant, new RegExp(nonce));
   assert.match(result.assistant, /WORKSPACE_WRITABLE/);
@@ -4875,7 +5025,7 @@ async function runSandboxProbe(topology, nonce, script, harnessPod = topology.ha
     const code = value(`${name}_EXIT`);
     return code === null ? null : Number(code);
   };
-  return { result, value, exitCode };
+  return { result, run, value, exitCode };
 }
 
 /**
@@ -5514,8 +5664,8 @@ async function assertModelProviderOutageFailsClosed(topology) {
 
 /**
  * Takes a tool source's upstream away: its Service selects no Pod, so OpenShell's connection is
- * refused. The tool request must fail at the proxy, and the same running Harness must receive
- * the substituted token again once the upstream returns.
+ * refused or stalls. The echo must see no request during the outage, then see the recovered
+ * request with the substituted token from the same running Harness.
  */
 async function assertToolUpstreamOutageFailsClosed(topology) {
   const { request, namespaceId, toolSources, tokenEcho } = topology;
@@ -5533,22 +5683,25 @@ async function assertToolUpstreamOutageFailsClosed(topology) {
     const script = [
       "#!/bin/bash",
       ...sandboxProbeFunction,
-      `probe TOOL curl -sS -o ${body} -w '%{http_code}' --max-time 20 ` +
-        `-H "Authorization: Bearer $${toolA.environmentName}" ${toolA.url}`,
+      `probe TOOL curl -sS -o ${body} -w '%{http_code} %{time_total}' --connect-timeout 3 ` +
+        `--max-time ${toolProbeCurlMaxSeconds} -H "Authorization: Bearer $${toolA.environmentName}" ${toolA.url}`,
       `printf 'TOOL_PLACEHOLDER=%s\\n' "$(grep -o '"placeholder":[a-z]*' ${body} ` +
         `2>/dev/null | cut -d: -f2)"`,
       `printf 'TOOL_DIGEST=%s\\n' "$(grep -o '"digest":"[0-9a-f]*"' ${body} ` +
         `2>/dev/null | cut -d'"' -f4)"`,
       "",
     ].join("\n");
-    const { value, exitCode } = await runSandboxProbe(topology, nonce, script, harnessPod);
+    const { run, value, exitCode } = await runSandboxProbe(topology, nonce, script, harnessPod);
+    const [httpStatus = null, curlSeconds = null] = (value("TOOL_OUT") ?? "").split(" ");
     // The echo answers 200 even without an Authorization header, so delivery is proved by the
     // digest of what it received, compared here and never printed.
     return {
-      httpStatus: value("TOOL_OUT"),
+      httpStatus: httpStatus || null,
       exitCode: exitCode("TOOL"),
+      curlSeconds: curlSeconds === null ? null : Number(curlSeconds),
+      commandMs: Number.isSafeInteger(run.durationMs) ? run.durationMs : null,
       placeholder: value("TOOL_PLACEHOLDER") || null,
-      tokenDelivered: value("TOOL_DIGEST") === toolA.digest,
+      responseMatchedToken: value("TOOL_DIGEST") === toolA.digest,
     };
   };
   const selectPods = (app) =>
@@ -5572,16 +5725,21 @@ async function assertToolUpstreamOutageFailsClosed(topology) {
       );
       return serving === ready ? true : undefined;
     });
+  const receiptBefore = await tokenEcho.readToolAReceipt();
   let outage;
+  let receiptWhileDown;
   let failure;
   try {
     await selectPods("token-echo-outage");
     await waitForEndpoints(false);
     outage = await probe("outage");
+    receiptWhileDown = await tokenEcho.readToolAReceipt();
+    // Print it now: if the recovery fails, this is the only record of the outage probe.
+    process.stderr.write(`OpenShell integration: tool upstream down ${JSON.stringify(outage)}.\n`);
   } catch (error) {
     failure = error;
   }
-  // Restore the upstream before any assertion; keep the first error if both steps fail.
+  // Restore the upstream even if the probe or receipt read failed; keep the first error.
   try {
     await selectPods("token-echo");
     await waitForEndpoints(true);
@@ -5592,25 +5750,45 @@ async function assertToolUpstreamOutageFailsClosed(topology) {
     throw failure;
   }
   const recovered = await probe("recovered");
+  const receiptAfter = await tokenEcho.readToolAReceipt();
   const observed = { outage, recovered };
   process.stderr.write(
     `OpenShell integration: tool upstream outage ${JSON.stringify(observed)}.\n`,
   );
-  // OpenShell closes the client connection without a response when it cannot reach the
-  // upstream (curl exit 52), so the tool fails at once instead of waiting out its timeout.
-  assert.deepEqual(
-    { httpStatus: outage.httpStatus, exitCode: outage.exitCode },
-    { httpStatus: "000", exitCode: 52 },
-    "OpenShell must end a request to an unreachable upstream without a response.",
+  // OpenShell usually closes the client connection without a response when it cannot reach
+  // the upstream (curl exit 52). If it holds the connection instead, curl gives up at its own
+  // --max-time bound (exit 28). A timeout well before that bound, such as the 3 s connect
+  // timeout to the proxy itself, is not an upstream outage. Any other result, a response
+  // included, means the outage was not observed.
+  assert.equal(outage.httpStatus, "000", "a request to an unreachable upstream gets no response.");
+  const held = outage.exitCode === 28 && outage.curlSeconds >= toolProbeCurlMaxSeconds - 0.5;
+  assert.ok(
+    outage.exitCode === 52 || held,
+    "OpenShell must end or hold a request to an unreachable upstream, not answer it " +
+      `(curl exit ${outage.exitCode} after ${outage.curlSeconds} s).`,
   );
-  assert.equal(outage.tokenDelivered, false, "no token may arrive while the upstream is down.");
+  // Curl reports the response, not whether the request arrived. Compare the receiver's count
+  // before restoration, then require the same process to count exactly one request by recovery.
+  assert.deepEqual(
+    receiptWhileDown,
+    receiptBefore,
+    "the echo must see no request during the outage",
+  );
+  assert.equal(outage.responseMatchedToken, false);
+  if (held) {
+    process.stderr.write(
+      "OpenShell integration: OpenShell held the request to the unreachable upstream until " +
+        "curl's bound instead of closing it.\n",
+    );
+  }
   // Once the upstream is back, the same running Harness gets tool A's own token again.
   assert.deepEqual(
     { httpStatus: recovered.httpStatus, exitCode: recovered.exitCode },
     { httpStatus: "200", exitCode: 0 },
   );
   assert.equal(recovered.placeholder, "false", "the upstream must not receive the placeholder.");
-  assert.equal(recovered.tokenDelivered, true, "the upstream must receive tool A's token.");
+  assert.equal(recovered.responseMatchedToken, true, "the upstream must receive tool A's token.");
+  assert.deepEqual(receiptAfter, { ...receiptBefore, requests: receiptBefore.requests + 1 });
 }
 
 /**
@@ -6108,7 +6286,11 @@ test(
     ...requiresOpenShellK3d,
     ...(demoStatePath === undefined ? { timeout: 2_400_000 } : {}),
   },
-  async (context) => {
+  async (testContext) => {
+    // Finding 1711: every cleanup this test registers runs, last-registered first, each bounded.
+    const teardown = boundedTeardown(testContext, { label: "OpenShell integration teardown" });
+    teardownStarted = () => teardown.started;
+    const { context } = teardown;
     if (demoStatePath !== undefined) {
       context.after(() => {
         process.removeListener("SIGINT", resolveDemoStop);

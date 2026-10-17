@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { admitLoggingConfiguration } from "../../packages/contracts/src/index.ts";
-import { DependencyUnavailableError } from "../../packages/occ/src/index.ts";
+import {
+  DependencyUnavailableError,
+  TransientDependencyError,
+} from "../../packages/occ/src/index.ts";
 import { providerEndpointFixture } from "../fixtures/kubernetes-provider-endpoint.mjs";
 import { supervisorPeerLabels } from "../fixtures/kubernetes-provider-readiness.mjs";
 import {
@@ -589,8 +592,14 @@ for (const scenario of [
   ...transportScenarios,
 ]) {
   test(`provider Harness with a credential source: ${scenario.name}`, async () => {
+    let nodeChecks = 0;
     const fixture = await endpointWithGateway(
-      providerEndpointFixture({ isConnected: async () => !scenario.disconnected }),
+      providerEndpointFixture({
+        async isConnected() {
+          nodeChecks += 1;
+          return !scenario.disconnected;
+        },
+      }),
     );
     const { driver, revision } = fixture;
     fixture.observePods([fixture.pod("ready")]);
@@ -641,6 +650,7 @@ for (const scenario of [
       ...expectedRevision(fixture),
       ...scenario.outcome,
     });
+    assert.equal(nodeChecks, 1, "preparation reads the workspace connection once");
     assert.deepEqual(attachmentChecks, scenario.disconnected ? [] : [[toolSource.id]]);
     assert.deepEqual(
       harnessObservations.map(({ revision: observed }) => observed),
@@ -649,18 +659,28 @@ for (const scenario of [
   });
 }
 
-test("provider Harness unreachable transport is diagnosed as Sandbox provisioning failure", async () => {
+test("provider Harness unreachable transport is a transient Sandbox provisioning failure", async () => {
   const fixture = await endpointWithGateway();
   const { driver } = fixture;
   fixture.observePods([fixture.pod("ready")]);
-  // An unreachable Harness transport is a Sandbox provisioning failure in diagnostics.
+  // An unreachable Harness transport is no evidence about the Harness: the pass fails in the
+  // Sandbox provisioning stage as a transient dependency the worker rechecks until the
+  // deadline without spending attempts (finding 1658).
+  const transport = new DependencyUnavailableError("OpenShell service is unreachable.");
   fixture.sandbox.harnessStatus = async () => {
-    throw new DependencyUnavailableError("OpenShell service is unreachable.");
+    throw transport;
   };
   const unreachable = await fixture.prepare().then(
     () => assert.fail("an unreachable Harness must not prepare"),
     (error) => error,
   );
-  assert.ok(unreachable instanceof DependencyUnavailableError, String(unreachable));
-  assert.equal(driver.describePrepareRevisionFailure(unreachable).stage, "sandbox_provision");
+  assert.ok(unreachable instanceof TransientDependencyError, String(unreachable));
+  assert.equal(unreachable.dependency, "sandbox_gateway");
+  assert.equal(unreachable.cause, transport);
+  assert.deepEqual(driver.describePrepareRevisionFailure(unreachable), {
+    code: "SANDBOX_GATEWAY_UNAVAILABLE",
+    stage: "sandbox_provision",
+    errorClass: "TransientDependencyError",
+    message: "The Sandbox provider did not answer the Harness status read.",
+  });
 });

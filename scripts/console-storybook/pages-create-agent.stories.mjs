@@ -55,6 +55,7 @@ export const CreateProvisioningSecrets = {
   name: "Provisioning with saved Secrets",
 };
 export const CreateDeploymentPending = story("createDeploymentPending");
+export const CreateDeploymentNamedWait = story("createDeploymentNamedWait");
 export const CreateDeploymentPodQuotaFull = story("createDeploymentPodQuotaFull");
 export const CreateDeploymentFailed = story("createDeploymentFailed");
 export const CreateDeploymentStopped = story("createDeploymentStopped");
@@ -101,6 +102,7 @@ export const RepositorySelection = {
 };
 export const RepositoryDetails = story("createRepositoriesDetails");
 export const RepositoryDescriptionsPending = story("createRepositoriesDescriptionsPending");
+export const RepositoryHiddenCharacters = story("createRepositoriesHiddenCharacters");
 export const RepositoryLocaleSearch = story("createRepositoriesLocaleSearch");
 export const RepositoryContributor = {
   ...story("createRepositoriesContributor"),
