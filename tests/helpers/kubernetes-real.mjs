@@ -132,37 +132,56 @@ export async function withinDiagnosticDeadline(
 export const teardownStepLimitMs = 180_000;
 export const abandonedTeardownExitGraceMs = 2_000;
 
-// node:test publishes each test's start, and its end after its hooks, on this channel (Node
-// 24.16). Without it (an older Node), the exit waits out the grace alone.
+// node:test publishes, on this channel (Node 24.16), each test's start once its parent's before
+// hooks ran and its end after its own hooks, and the file root's start and end around its after
+// hooks, once every test has finished (even while a handle holds the process). Suites publish only
+// around their build, a test skipped by name publishes neither, and one whose parent's before hook
+// failed publishes only its end. Without the channel (an older Node), the exit waits out the grace
+// alone. Subscribing makes node:test call each test function with its internal Test as `this`.
 const runningTests = new Set();
-let testsStarted = 0;
+let testEventsSeen = false;
+let fileFinished = false;
+let lateCleanupsRunning = 0;
+let lastActivity = performance.now();
+const markActivity = () => {
+  lastActivity = performance.now();
+};
 tracingChannel("node.test").subscribe({
   start(test) {
+    testEventsSeen = true;
     runningTests.add(test);
-    testsStarted += 1;
+    markActivity();
   },
   end(test) {
     runningTests.delete(test);
+    if (test.name === "<root>") {
+      fileFinished = true;
+    }
+    markActivity();
   },
 });
 
-// Resolves once no test has run or started for `quietMs`. An abandoned cleanup then ends the
-// process after the file's last test, not under the next one (finding 1723). The poll is unref'd,
-// so it never holds the process itself.
+// Resolves once the file's tests, suite hooks and late cleanups have all finished and nothing has
+// run for `quietMs`. An abandoned cleanup then ends the process after the file's last test, not
+// under the next one (finding 1723); a later test that hangs holds the file to its own timeout,
+// or the runner's. The poll is unref'd, so it never holds the process itself.
 async function testsSettled(quietMs) {
   for (;;) {
-    const started = testsStarted;
-    await delay(quietMs, undefined, { ref: false });
-    if (runningTests.size === 0 && testsStarted === started) {
+    const idle =
+      runningTests.size === 0 && lateCleanupsRunning === 0 && (fileFinished || !testEventsSeen);
+    const quietFor = performance.now() - lastActivity;
+    if (idle && quietFor >= quietMs) {
       return;
     }
+    await delay(idle ? quietMs - quietFor : quietMs, undefined, { ref: false });
   }
 }
 
-// The contexts boundedTeardown returned, so a helper does not nest a second teardown inside one,
-// and the first one made for each node:test context, so two helpers given that context share it.
-const boundedContexts = new WeakSet();
+// The teardown boundedTeardown made first for each node:test context, so every caller and helper
+// given that context shares it, and the contexts it returned, so a helper does not nest a second
+// teardown inside one.
 const teardownFor = new WeakMap();
+const boundedContexts = new WeakSet();
 
 function registrationSite(stack) {
   // Frame 0 is the message, 1 is `after` here, 2 is its caller.
@@ -187,6 +206,12 @@ export function boundedTeardown(
     settled = testsSettled,
   } = {},
 ) {
+  // A second call for one context, in either order with withBoundedTeardown, shares the first
+  // teardown, so all their cleanups keep one newest-first order (finding 1725); its options apply.
+  const existing = teardownFor.get(testContext);
+  if (existing !== undefined) {
+    return existing;
+  }
   const cleanups = [];
   let started = false;
   let finished = false;
@@ -194,6 +219,7 @@ export function boundedTeardown(
   let late = Promise.resolve();
   const endProcess = (reason) => {
     log(`${label}: exiting once the file's tests settle for ${exitGraceMs} ms; ${reason}`);
+    markActivity();
     if (!exiting) {
       exiting = true;
       // node:test reports the test once its hook returns.
@@ -240,8 +266,14 @@ export function boundedTeardown(
     // bounded, fail the file and end the process: the test has been reported, and its setup may
     // still run.
     log(`${label}: cleanup ${step.site} came after the teardown ran; running it now`);
+    lateCleanupsRunning += 1;
     late = late.then(async () => {
-      await run(step);
+      try {
+        await run(step);
+      } finally {
+        lateCleanupsRunning -= 1;
+        markActivity();
+      }
       failFile();
       endProcess(`cleanup ${step.site} came after its test's teardown`);
     });
@@ -282,27 +314,24 @@ export function boundedTeardown(
     },
   });
   boundedContexts.add(context);
-  if (!teardownFor.has(testContext)) {
-    teardownFor.set(testContext, context);
-  }
-  return {
+  const teardown = {
     context,
     // Whether teardown has begun, for failure diagnostics.
     get started() {
       return started;
     },
   };
+  teardownFor.set(testContext, teardown);
+  return teardown;
 }
 
 // A helper that registers several cleanups gets them run newest-first and bounded whatever context
-// its caller passes: a raw node:test context gets one bounded teardown, shared by every helper and
-// caller given that context so their cleanups keep one newest-first order (finding 1725; the first
-// one's options apply), and one from boundedTeardown is used as is.
+// its caller passes: a raw node:test context gets its one bounded teardown, shared with every other
+// helper and caller given that context, and one from boundedTeardown is used as is.
 export function withBoundedTeardown(testContext, options) {
-  if (boundedContexts.has(testContext)) {
-    return testContext;
-  }
-  return teardownFor.get(testContext) ?? boundedTeardown(testContext, options).context;
+  return boundedContexts.has(testContext)
+    ? testContext
+    : boundedTeardown(testContext, options).context;
 }
 
 const alreadyCreated = /^Error from server \(AlreadyExists\): /m;

@@ -380,11 +380,16 @@ test("two helpers given one node:test context share its bounded teardown, newest
   second.after(() => ran.push("worker stop"));
   await testContext.hooks[0]();
   assert.deepEqual(ran, ["worker stop", "namespace delete"]);
-  // A helper given the context its caller already bounded joins the caller's teardown too.
+  // A helper given the context its caller already bounded joins the caller's teardown too, and a
+  // caller that bounds a context after a helper did gets the helper's.
   const callersContext = new RecordingContext();
   const { context } = boundedTeardown(callersContext);
   assert.equal(withBoundedTeardown(callersContext), context);
   assert.equal(callersContext.hooks.length, 1);
+  const helpersContext = new RecordingContext();
+  const helpers = withBoundedTeardown(helpersContext);
+  assert.equal(boundedTeardown(helpersContext).context, helpers);
+  assert.equal(helpersContext.hooks.length, 1);
 });
 
 test(
@@ -487,32 +492,49 @@ test(
 );
 
 test(
-  "an abandoned cleanup ends the file after its later tests, not under them",
+  "an abandoned cleanup ends the file after its later tests and hooks, not under them",
   { timeout: 20_000 },
   async () => {
     // Finding 1723: the exit fired its grace after the abandoning test's own teardown. The next
-    // test was killed mid-run, missing from the report, and its cleanups never ran.
+    // test was killed mid-run, missing from the report, and its cleanups never ran. A suite's
+    // hooks run outside any test, so the exit also waits for the file's root to finish.
     const exited = await runTestScript(`
-      import test from "node:test";
+      import { after, beforeEach, describe, it } from "node:test";
       import { setTimeout as delay } from "node:timers/promises";
       import { boundedTeardown } from ${JSON.stringify(kubernetesHelperUrl)};
-      test("first abandons a cleanup", (testContext) => {
-        const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
-        // Never settles, and its poll keeps the process alive.
-        context.after(() => new Promise(() => setInterval(() => {}, 50)));
-      });
-      test("second outlasts the grace", async (testContext) => {
-        const { context } = boundedTeardown(testContext);
-        context.after(() => process.stdout.write("attempted second cleanup\\n"));
-        await delay(1_000);
+      describe("suite", () => {
+        let tests = 0;
+        beforeEach(async () => {
+          tests += 1;
+          if (tests === 2) {
+            await delay(500);
+          }
+        });
+        after(async () => {
+          await delay(500);
+          process.stdout.write("attempted suite after\\n");
+        });
+        it("first abandons a cleanup", (testContext) => {
+          const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
+          // Never settles, and its poll keeps the process alive.
+          context.after(() => new Promise(() => setInterval(() => {}, 50)));
+        });
+        it("second outlasts the grace", async (testContext) => {
+          const { context } = boundedTeardown(testContext);
+          context.after(() => process.stdout.write("attempted second cleanup\\n"));
+          await delay(1_000);
+        });
       });
     `);
     assert.equal(exited.killed, false, "the file exited on its own");
     assert.ok(exited.elapsedMs < 10_000, "the file exited soon after its last test");
     assert.equal(exited.code, 1);
-    assert.match(exited.stdout, /^not ok 1 - first abandons a cleanup$/m);
-    assert.match(exited.stdout, /^attempted second cleanup$/m);
-    assert.match(exited.stdout, /^ok 2 - second outlasts the grace$/m);
+    assert.match(exited.stdout, /^\s*not ok 1 - first abandons a cleanup$/m);
+    assert.deepEqual(exited.stdout.match(/^attempted .+$/gm), [
+      "attempted second cleanup",
+      "attempted suite after",
+    ]);
+    assert.match(exited.stdout, /^\s*ok 2 - second outlasts the grace$/m);
   },
 );
 
