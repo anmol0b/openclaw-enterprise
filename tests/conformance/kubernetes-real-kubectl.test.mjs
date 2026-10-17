@@ -413,10 +413,15 @@ test(
     context.after(() => ran.push("early cleanup"));
     await testContext.hooks[0]();
     assert.deepEqual(events, [], "nothing was abandoned or late");
-    context.after(() => ran.push("worker stop"));
+    // Each late registration also stops the setup that made it, by throwing to it.
+    const stopsSetup =
+      /^teardown: setup outlived its test; cleanup registered at kubernetes-real-kubectl\.test\.mjs:\d+ runs now and setup stops here$/;
+    assert.throws(() => context.after(() => ran.push("worker stop")), { message: stopsSetup });
     // A late cleanup that never settles is abandoned like any other.
-    context.after(() => new Promise(() => {}));
-    context.after(() => ran.push("port-forward stop"));
+    assert.throws(() => context.after(() => new Promise(() => {})), { message: stopsSetup });
+    assert.throws(() => context.after(() => ran.push("port-forward stop")), {
+      message: stopsSetup,
+    });
     await delay(300);
     assert.deepEqual(ran, ["early cleanup", "worker stop", "port-forward stop"]);
     assert.equal(events.filter((event) => event === "fail").length, 3);
@@ -496,12 +501,23 @@ test(
   { timeout: 20_000 },
   async () => {
     // Finding 1723: the exit fired its grace after the abandoning test's own teardown. The next
-    // test was killed mid-run, missing from the report, and its cleanups never ran. A suite's
-    // hooks run outside any test, so the exit also waits for the file's root to finish.
+    // test was killed mid-run, missing from the report, and its cleanups never ran. Suite and file
+    // hooks run outside any test, so the exit also waits for the file's root to finish; a test
+    // named like the root is not it.
     const exited = await runTestScript(`
       import { after, beforeEach, describe, it } from "node:test";
       import { setTimeout as delay } from "node:timers/promises";
       import { boundedTeardown } from ${JSON.stringify(kubernetesHelperUrl)};
+      after(async () => {
+        await delay(500);
+        process.stdout.write("attempted file after\\n");
+      });
+      // Named like node:test's own root, which must not pass for the file's end.
+      it("<root>", (testContext) => {
+        const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
+        // Never settles, and its poll keeps the process alive.
+        context.after(() => new Promise(() => setInterval(() => {}, 50)));
+      });
       describe("suite", () => {
         let tests = 0;
         beforeEach(async () => {
@@ -514,11 +530,7 @@ test(
           await delay(500);
           process.stdout.write("attempted suite after\\n");
         });
-        it("first abandons a cleanup", (testContext) => {
-          const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
-          // Never settles, and its poll keeps the process alive.
-          context.after(() => new Promise(() => setInterval(() => {}, 50)));
-        });
+        it("first", () => {});
         it("second outlasts the grace", async (testContext) => {
           const { context } = boundedTeardown(testContext);
           context.after(() => process.stdout.write("attempted second cleanup\\n"));
@@ -529,12 +541,90 @@ test(
     assert.equal(exited.killed, false, "the file exited on its own");
     assert.ok(exited.elapsedMs < 10_000, "the file exited soon after its last test");
     assert.equal(exited.code, 1);
-    assert.match(exited.stdout, /^\s*not ok 1 - first abandons a cleanup$/m);
+    assert.match(exited.stdout, /^not ok 1 - <root>$/m);
     assert.deepEqual(exited.stdout.match(/^attempted .+$/gm), [
       "attempted second cleanup",
       "attempted suite after",
+      "attempted file after",
     ]);
     assert.match(exited.stdout, /^\s*ok 2 - second outlasts the grace$/m);
+  },
+);
+
+test(
+  "a pending exit waits for timed-out setup to register what it holds, then stops that setup",
+  { timeout: 20_000 },
+  async (t) => {
+    // Review of finding 1722: two quiet seconds do not mean a timed-out setup stopped acquiring.
+    // The first test's abandoned cleanup arms the exit. The second times out mid-setup; its setup
+    // then acquires a resource, waits past the grace for it, and registers its release. The exit
+    // must wait for that release, and the setup must not go on to its second acquisition.
+    const directory = await mkdtemp(join(tmpdir(), "occ-teardown-acquisitions-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const first = join(directory, "first-resource");
+    const second = join(directory, "second-resource");
+    const exited = await runTestScript(
+      `
+      import test from "node:test";
+      import { rm, writeFile } from "node:fs/promises";
+      import { setTimeout as delay } from "node:timers/promises";
+      import { boundedTeardown } from ${JSON.stringify(kubernetesHelperUrl)};
+      const acquire = async (path) => {
+        await writeFile(path, "held");
+        process.stdout.write("acquired " + path + "\\n");
+      };
+      test("first abandons a cleanup", (testContext) => {
+        const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
+        context.after(() => new Promise(() => setInterval(() => {}, 50)));
+      });
+      test("second outlives its timeout", { timeout: 200 }, async (testContext) => {
+        const { context } = boundedTeardown(testContext, { stepLimitMs: 10_000, exitGraceMs: 200 });
+        await delay(400);
+        await acquire(process.env.FIRST_RESOURCE);
+        await delay(1_500);
+        context.after(() => rm(process.env.FIRST_RESOURCE));
+        await acquire(process.env.SECOND_RESOURCE);
+        await delay(1_500);
+        context.after(() => rm(process.env.SECOND_RESOURCE));
+      });
+    `,
+      { env: { FIRST_RESOURCE: first, SECOND_RESOURCE: second } },
+    );
+    assert.equal(exited.killed, false, "the file exited on its own");
+    assert.ok(exited.elapsedMs < 10_000, "the file exited soon after the setup stopped");
+    assert.equal(exited.code, 1);
+    assert.deepEqual(exited.stdout.match(/^acquired .+$/gm), [`acquired ${first}`]);
+    assert.match(exited.stderr, /cleanup registered at \[eval1\]:\d+ came after the teardown ran/);
+    await assert.rejects(readFile(first), { code: "ENOENT" }, "the first resource was released");
+    await assert.rejects(readFile(second), { code: "ENOENT" }, "the second was never acquired");
+  },
+);
+
+test(
+  "a pending exit stops waiting for timed-out setup at its limit",
+  { timeout: 20_000 },
+  async () => {
+    // Setup that never reaches another cleanup registration holds the exit only for its limit.
+    const exited = await runTestScript(`
+      import test from "node:test";
+      import { setTimeout as delay } from "node:timers/promises";
+      import { boundedTeardown } from ${JSON.stringify(kubernetesHelperUrl)};
+      test("first abandons a cleanup", (testContext) => {
+        const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
+        context.after(() => new Promise(() => setInterval(() => {}, 50)));
+      });
+      test("second never stops", { timeout: 200 }, async (testContext) => {
+        boundedTeardown(testContext, { label: "second", stepLimitMs: 1_000 });
+        await new Promise(() => setInterval(() => {}, 50));
+      });
+    `);
+    assert.equal(exited.killed, false, "the file exited on its own");
+    assert.ok(exited.elapsedMs < 10_000, "the file exited soon after the setup's limit");
+    assert.equal(exited.code, 1);
+    assert.match(
+      exited.stderr,
+      /^second: setup still ran 1000 ms after its test ended; exiting without it$/m,
+    );
   },
 );
 
@@ -572,12 +662,12 @@ test(
             (error) => error.message.split("\\n")[0],
           );
           await Promise.all(hooks.map((hook) => hook()));
-          process.stdout.write(JSON.stringify({ failure, hooks: hooks.length }));
+          process.stdout.write("result " + JSON.stringify({ failure, hooks: hooks.length }) + "\\n");
         `,
       ],
       { env, timeout: 15_000 },
     );
-    const result = JSON.parse(stdout);
+    const result = JSON.parse(/^result (.+)$/m.exec(stdout)[1]);
     assert.match(result.failure, /Dedicated storage requires the imported controller image/);
     assert.equal(result.hooks, 1, "one bounded teardown hook, registered before the first check");
   },

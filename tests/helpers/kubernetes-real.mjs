@@ -1,12 +1,13 @@
 import { sha256Hex } from "../../packages/utils/src/index.ts";
 import assert from "node:assert/strict";
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { tracingChannel } from "node:diagnostics_channel";
 import { once } from "node:events";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { after as afterFile } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { createInstallationDriverConfiguration } from "./installation-driver-configuration.mjs";
@@ -133,11 +134,16 @@ export const teardownStepLimitMs = 180_000;
 export const abandonedTeardownExitGraceMs = 2_000;
 
 // node:test publishes, on this channel (Node 24.16), each test's start once its parent's before
-// hooks ran and its end after its own hooks, and the file root's start and end around its after
-// hooks, once every test has finished (even while a handle holds the process). Suites publish only
-// around their build, a test skipped by name publishes neither, and one whose parent's before hook
-// failed publishes only its end. Without the channel (an older Node), the exit waits out the grace
-// alone. Subscribing makes node:test call each test function with its internal Test as `this`.
+// hooks ran and its end after its own hooks, and the file root's start and end around the root's
+// after hooks, once every test has finished (even while a handle holds the process). Suites
+// publish only around their build, a test skipped by name publishes neither, and one whose
+// parent's before hook failed publishes only its end. Without the channel (an older Node), the
+// exit waits out the grace alone. Subscribing makes node:test call each test function with its
+// internal Test as `this`.
+const testChannel = tracingChannel("node.test");
+// The test whose body (or anything it started) is running, if any.
+const currentTest = new AsyncLocalStorage();
+testChannel.start.bindStore(currentTest);
 const runningTests = new Set();
 let testEventsSeen = false;
 let fileFinished = false;
@@ -146,7 +152,28 @@ let lastActivity = performance.now();
 const markActivity = () => {
   lastActivity = performance.now();
 };
-tracingChannel("node.test").subscribe({
+// The file root's after hooks run once every test has finished, so the first end after this hook
+// starts is the root's own. It is added from this module's own async scope, made at import, so
+// it lands on the root even when the first teardown is made inside a test, and only once a test
+// runs, so a program that is no test file (scripts/k3d-demo.mjs) never starts node:test.
+// Imported from inside a test, the hook would land on that test, so the exit then does without
+// the root's end.
+const importScope = new AsyncResource("kubernetes-real-import");
+const fileEndObservable = currentTest.getStore() === undefined;
+let fileHookAdded = false;
+let fileHooksStarted = false;
+function observeFileEnd() {
+  if (fileHookAdded || !fileEndObservable || currentTest.getStore() === undefined) {
+    return;
+  }
+  fileHookAdded = true;
+  importScope.runInAsyncScope(() =>
+    afterFile(() => {
+      fileHooksStarted = true;
+    }),
+  );
+}
+testChannel.subscribe({
   start(test) {
     testEventsSeen = true;
     runningTests.add(test);
@@ -154,26 +181,47 @@ tracingChannel("node.test").subscribe({
   },
   end(test) {
     runningTests.delete(test);
-    if (test.name === "<root>") {
+    if (fileHooksStarted) {
       fileFinished = true;
     }
     markActivity();
   },
 });
 
-// Resolves once the file's tests, suite hooks and late cleanups have all finished and nothing has
-// run for `quietMs`. An abandoned cleanup then ends the process after the file's last test, not
-// under the next one (finding 1723); a later test that hangs holds the file to its own timeout,
-// or the runner's. The poll is unref'd, so it never holds the process itself.
+// Setup that may still run after its test's teardown, because a node:test timeout or
+// cancellation does not stop a test's body: the label it is logged by, and when the exit stops
+// waiting for it.
+const unsettledSetups = new Map();
+
+function setupsSettled(now) {
+  for (const [setup, { label, limitMs, deadline, log }] of unsettledSetups) {
+    if (now < deadline) {
+      return false;
+    }
+    log(`${label}: setup still ran ${limitMs} ms after its test ended; exiting without it`);
+    unsettledSetups.delete(setup);
+  }
+  return true;
+}
+
+// Resolves once the file's tests, root hooks, late cleanups and timed-out setups have all finished
+// (a setup within its limit) and nothing has run for `quietMs`. An abandoned cleanup then ends the
+// process after the file's last test, not under the next one (finding 1723), and not under setup
+// that has yet to register a cleanup for what it holds. A later test that hangs holds the file to
+// its own timeout, or the runner's. The poll is unref'd, so it never holds the process itself.
 async function testsSettled(quietMs) {
   for (;;) {
+    const now = performance.now();
     const idle =
-      runningTests.size === 0 && lateCleanupsRunning === 0 && (fileFinished || !testEventsSeen);
-    const quietFor = performance.now() - lastActivity;
+      runningTests.size === 0 &&
+      lateCleanupsRunning === 0 &&
+      (fileFinished || !testEventsSeen || !fileHookAdded) &&
+      setupsSettled(now);
+    const quietFor = now - lastActivity;
     if (idle && quietFor >= quietMs) {
       return;
     }
-    await delay(idle ? quietMs - quietFor : quietMs, undefined, { ref: false });
+    await delay(idle ? quietMs - quietFor : Math.min(quietMs, 1_000), undefined, { ref: false });
   }
 }
 
@@ -212,6 +260,7 @@ export function boundedTeardown(
   if (existing !== undefined) {
     return existing;
   }
+  observeFileEnd();
   const cleanups = [];
   let started = false;
   let finished = false;
@@ -263,10 +312,11 @@ export function boundedTeardown(
     }
     // A node:test timeout fails the test and runs its hooks but does not stop its body, so setup
     // can register a cleanup (a worker stop) after the teardown ran (finding 1722). Run it now,
-    // bounded, fail the file and end the process: the test has been reported, and its setup may
-    // still run.
+    // bounded, fail the file and end the process: the test has been reported. Then stop the setup
+    // by throwing to it, so it starts nothing more that no cleanup would undo.
     log(`${label}: cleanup ${step.site} came after the teardown ran; running it now`);
     lateCleanupsRunning += 1;
+    unsettledSetups.delete(after);
     late = late.then(async () => {
       try {
         await run(step);
@@ -277,6 +327,9 @@ export function boundedTeardown(
       failFile();
       endProcess(`cleanup ${step.site} came after its test's teardown`);
     });
+    throw new Error(
+      `${label}: setup outlived its test; cleanup ${step.site} runs now and setup stops here`,
+    );
   };
   testContext.after(async () => {
     started = true;
@@ -294,6 +347,12 @@ export function boundedTeardown(
       }
     }
     finished = true;
+    // A timed-out or cancelled test's signal aborts before its hooks run; its setup may still run.
+    // An exit waits for it to reach its next cleanup registration, where it stops, within the limit.
+    if (testContext.signal?.aborted === true) {
+      const deadline = performance.now() + stepLimitMs;
+      unsettledSetups.set(after, { label, limitMs: stepLimitMs, deadline, log });
+    }
     if (abandoned.length > 0) {
       endProcess(`abandoned cleanups ${abandoned.join(", ")}`);
     }
