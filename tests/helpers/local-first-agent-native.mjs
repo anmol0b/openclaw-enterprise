@@ -176,11 +176,17 @@ async function observeDeployment(observation, deployment, revision, request, sig
   }
 }
 
+// The CI reporter keeps a failure message's first 600 characters
+// (scripts/ci/failure-redaction.mjs), so the model check, whose error code can be
+// up to 48 characters, prints first.
+const observationText = (observation) =>
+  JSON.stringify({ modelProbe: observation.modelProbe, ...observation });
+
 export async function assertNativeWorkNotFailed(response, expectation, diagnostics = {}) {
   if (response.status === "failed") {
     const observation = await observeNativeFailure(diagnostics);
     assert.fail(
-      `${expectation}: ${failureCategory(response.error?.code)} ${JSON.stringify(observation)}`,
+      `${expectation}: ${failureCategory(response.error?.code)} ${observationText(observation)}`,
     );
   }
 }
@@ -215,7 +221,7 @@ async function assertNativeRedeployNotFailed(
     // Diagnostic failures cannot replace the terminal failure or reveal peer errors.
   }
   assert.fail(
-    `${expectation}: ${failureCategory(deployment.error?.code)} ${JSON.stringify(observation)}`,
+    `${expectation}: ${failureCategory(deployment.error?.code)} ${observationText(observation)}`,
   );
 }
 

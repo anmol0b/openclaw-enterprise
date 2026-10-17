@@ -405,6 +405,17 @@ test("the first-Agent model check discovers the gateway in the tenant namespace"
   assert.equal(execCall?.[execCall.indexOf("--namespace") + 1], "tenant-runtime");
 });
 
+// The CI reporter keeps a failure message's first 600 characters
+// (failureMessageLimit in scripts/ci/failure-redaction.mjs). A model check prints
+// first, so it survives the cut whole.
+function assertProbeFirst(message, observation) {
+  if (observation.modelProbe !== undefined) {
+    const probe = JSON.stringify(observation.modelProbe);
+    const at = message.indexOf(`{"modelProbe":${probe}`);
+    assert.ok(at >= 0 && at + probe.length < 600, message);
+  }
+}
+
 test("native terminal failures report only fixed failure codes", async (t) => {
   const namespaceId = `ns_${randomUUID()}`;
   const agentId = `agt_${randomUUID()}`;
@@ -480,6 +491,7 @@ test("native terminal failures report only fixed failure codes", async (t) => {
     const [, category, json] =
       message.match(/^Guided native provisioning must succeed: (\S+) (.*)$/) ?? [];
     assert.ok(json);
+    assertProbeFirst(message, JSON.parse(json));
     return { category, ...JSON.parse(json) };
   }
 
@@ -520,6 +532,29 @@ test("native terminal failures report only fixed failure codes", async (t) => {
         lastAttemptCode: "none",
       },
       modelProbe: { probes: 1, code: "AUTHENTICATION_FAILED", ...provider },
+    });
+  });
+
+  await t.test("print the longest error code and type within the CI message limit", async () => {
+    const longest = "abcdefghij_abcdefghij_abcdefghij_abcdefghij_abcd";
+    const provider = {
+      providerStatus: 401,
+      providerCode: "insufficient_permissions",
+      responseHeaderMarker: "openshell-policy",
+      bodyShape: "json-error-no-code",
+      providerErrorCode: longest,
+      providerErrorType: longest.replace("a", "b"),
+    };
+    const observed = await observe(
+      handoff,
+      handoff,
+      [deployment, page(probeLog({ code: "MODEL_PROBE_CPU_STARVED", ...provider }))],
+      [deploymentPath, logPath],
+    );
+    assert.deepEqual(observed.modelProbe, {
+      probes: 1,
+      code: "MODEL_PROBE_CPU_STARVED",
+      ...provider,
     });
   });
 
@@ -741,6 +776,7 @@ test("native terminal failures report only fixed failure codes", async (t) => {
           /^Redeployment with the retained native workspace must succeed: (\S+) (.*)$/,
         ) ?? [];
       assert.ok(json, message);
+      assertProbeFirst(message, JSON.parse(json));
       return { category, ...JSON.parse(json) };
     }
 
