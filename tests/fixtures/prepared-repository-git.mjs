@@ -30,7 +30,13 @@ import { ensurePostgresAgentBootstrap } from "../helpers/postgres-agent-app.mjs"
 // HTTPS GitHub App issuer. It does not prove a Git subprocess or live GitHub push.
 export async function fixture(
   t,
-  { openBroker, draftPull = false, draftResponse, sessionLifetimeMs = 3_600_000 } = {},
+  {
+    openBroker,
+    draftPull = false,
+    draftResponse,
+    dnsIssuer = false,
+    sessionLifetimeMs = 3_600_000,
+  } = {},
 ) {
   const directory = await socketDirectory(t, "prepared-git-");
   const privateKeyPath = join(directory, "app.pem");
@@ -173,7 +179,7 @@ export async function fixture(
     registry,
     privateKeyPath,
     custodyKeyPath,
-    apiOrigin: gh.origin,
+    apiOrigin: dnsIssuer ? gh.origin.replace("127.0.0.1", "localhost") : gh.origin,
     ca: gh.tls.ca,
     startWorker: false,
   });

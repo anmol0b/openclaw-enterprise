@@ -72,6 +72,14 @@ test(
     for (const [config, valid] of [
       [binding, true],
       [{ fields: {} }, false],
+      [
+        {
+          fields: {
+            binding_id: { stringValue: "binding_0123456789abcdefghijklmn", numberValue: 1 },
+          },
+        },
+        false,
+      ],
     ]) {
       const input = { middleware_name: registrationName, config };
       assert.equal((await invoke(client, "ValidateConfig", input, gateway)).valid, valid);
@@ -122,6 +130,13 @@ test(
     for (const changed of [
       { body: Buffer.from("payload") },
       { target: { ...request.target, query: "scope=other" } },
+      {
+        target: {
+          ...request.target,
+          path: "/example/project.git/info/refs",
+          query: "service=git-upload-pack",
+        },
+      },
       { target: { ...request.target, method: "POST" } },
       { target: { ...request.target, scheme: "http" } },
     ]) {

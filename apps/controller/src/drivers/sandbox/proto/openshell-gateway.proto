@@ -495,6 +495,8 @@ message ProviderProfileCredential {
   string auth_style = 5;
   string header_name = 6;
   ProviderCredentialRefresh refresh = 8;
+  // v0.1.4: identity-bound placeholder retained across static value rotations.
+  bool stable_placeholder = 12;
 }
 
 enum ProviderCredentialRefreshStrategy {

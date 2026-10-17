@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
+import { PreparedRepositoryGitStore } from "../../apps/controller/src/drivers/repo/github/credentials/prepared-repository-git.ts";
 import { requiresPostgres } from "../helpers/postgres-database.mjs";
 import { fixture, prepare } from "../fixtures/prepared-repository-git.mjs";
 
@@ -143,7 +145,12 @@ for (const change of ["repository binding withdrawn", "revision superseded", "se
     async (t) => {
       const f = await fixture(t, change === "session expired" ? { sessionLifetimeMs: 4200 } : {});
       await prepare(f);
-      await f.owner.use(f.request());
+      const installed = await f.owner.use(f.request());
+      const { store } = await openShellStore(f);
+      assert.equal(
+        await store.authorizeOpenShellRequest(f.request(), installed, new AbortController().signal),
+        true,
+      );
       const { agent, revision, sessionId } = f;
       if (change === "session expired") {
         await new Promise((resolve) =>
@@ -181,6 +188,15 @@ for (const change of ["repository binding withdrawn", "revision superseded", "se
         });
       }
       await assertUseGuarded(f);
+      assert.equal(
+        await store.authorizeOpenShellRequest(f.request(), installed, new AbortController().signal),
+        false,
+      );
+      assert.equal(
+        await f.providerStatus(installed.value),
+        200,
+        "the online denial precedes provider retirement",
+      );
       const receipt = await f.pool.query(
         "SELECT state FROM occ.repository_broker_receipts WHERE session_id=$1",
         [sessionId],
@@ -196,6 +212,254 @@ for (const change of ["repository binding withdrawn", "revision superseded", "se
         family.rows[0].enabled,
         false,
         "withdrawal must fence the old family, not re-arm it",
+      );
+    },
+  );
+}
+
+// Storage-boundary proof: use the production owner's admitted source, with an exact
+// immutable session match. This does not establish supervisor authentication or sending.
+async function openShellStore(f, pool = f.pool) {
+  const {
+    rows: [family],
+  } = await f.pool.query(
+    "SELECT source, admission FROM occ.prepared_github_families WHERE source_id=$1",
+    [f.familyId],
+  );
+  const source = family.source;
+  return {
+    source,
+    // An unrelated custody key makes accidental unsealing fail; authorization needs no key bytes.
+    store: new PreparedRepositoryGitStore(
+      pool,
+      Buffer.alloc(32),
+      family.admission.issuerAuthority,
+      (session) => (isDeepStrictEqual(session, source.session) ? source : undefined),
+    ),
+  };
+}
+
+test(
+  "OpenShell prepared Git authorization pins installed material before recording and denies withdrawal while the token is valid",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (t) => {
+    const f = await fixture(t);
+    await prepare(f);
+    const installed = await f.owner.use(f.request());
+    const { store } = await openShellStore(f);
+    const signal = new AbortController().signal;
+    const request = f.request({ operation: "receive-pack" });
+    const receipts = () =>
+      f.pool.query(
+        "SELECT attempt_id, material_version, request_digest_sha256 FROM occ.prepared_repository_git_uses WHERE exchange_id=$1",
+        [request.exchangeId],
+      );
+    const before = f.gh.trace.length;
+    for (const wrong of [
+      { ...installed, materialVersion: randomUUID() },
+      { ...installed, preparationAttemptId: randomUUID() },
+    ]) {
+      assert.equal(await store.authorizeOpenShellRequest(request, wrong, signal), false);
+      assert.deepEqual(
+        (await receipts()).rows,
+        [],
+        "a mismatched installation must not consume an exchange",
+      );
+    }
+    for (const changes of [
+      { sessionId: `session-${randomUUID()}` },
+      { pushRef: "refs/heads/forbidden" },
+      { repositoryId: "other-repository" },
+      { providerInstanceId: "other-provider" },
+      { grantId: "other-grant" },
+      { deadlineAt: new Date(Date.now() - 1).toISOString() },
+      { deadlineAt: new Date(Date.now() + 60_000).toISOString() },
+    ]) {
+      assert.equal(
+        await store.authorizeOpenShellRequest(f.request(changes), installed, signal),
+        false,
+      );
+    }
+    assert.equal(
+      await store.authorizeOpenShellRequest(request, installed, AbortSignal.abort()),
+      false,
+    );
+    assert.equal(await store.authorizeOpenShellRequest(request, installed, signal), true);
+    assert.deepEqual((await receipts()).rows, [
+      {
+        attempt_id: installed.preparationAttemptId,
+        material_version: installed.materialVersion,
+        request_digest_sha256: request.requestDigestSha256,
+      },
+    ]);
+    assert.equal(await store.authorizeOpenShellRequest(request, installed, signal), false);
+    assert.equal(
+      f.gh.trace.length,
+      before,
+      "authorization must not contact the issuer or provider",
+    );
+    await f.withdraw();
+    assert.equal(await store.authorizeOpenShellRequest(f.request(), installed, signal), false);
+    assert.equal(
+      await f.providerStatus(installed.value),
+      200,
+      "withdrawing OCE authority does not depend on revocation",
+    );
+    assert.equal(f.gh.issuesOfTokens.length, 1);
+  },
+);
+
+test(
+  "OpenShell prepared Git rejects expired and superseded material while renewal keeps the old provider token valid",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (t) => {
+    const f = await fixture(t);
+    await prepare(f);
+    const installed = await f.owner.use(f.request());
+    const { store } = await openShellStore(f);
+    const signal = new AbortController().signal;
+    // Move current material into the renewal window while it remains usable.
+    // This distinguishes supersession from expiry and provider retirement.
+    await f.pool.query(
+      "UPDATE occ.prepared_github_attempts SET usable_until=clock_timestamp()+interval '5 minutes' WHERE id=$1",
+      [installed.preparationAttemptId],
+    );
+    assert.equal(await store.authorizeOpenShellRequest(f.request(), installed, signal), true);
+    await f.pool.query(
+      "UPDATE occ.prepared_github_families SET next_check_at=clock_timestamp() WHERE source_id=$1",
+      [f.familyId],
+    );
+    await f.owner.maintain();
+    const replacement = await f.owner.use(f.request());
+    assert.notEqual(replacement.preparationAttemptId, installed.preparationAttemptId);
+    assert.notEqual(replacement.materialVersion, installed.materialVersion);
+    assert.equal(await store.authorizeOpenShellRequest(f.request(), installed, signal), false);
+    assert.equal(await store.authorizeOpenShellRequest(f.request(), replacement, signal), true);
+    assert.equal(
+      await f.providerStatus(installed.value),
+      200,
+      "supersession is enforced before provider retirement",
+    );
+    assert.equal(f.gh.issuesOfTokens.length, 2);
+    // Expiry independently denies the newly current material with no worker pass.
+    await f.pool.query(
+      "UPDATE occ.prepared_github_attempts SET usable_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+      [replacement.preparationAttemptId],
+    );
+    assert.equal(await store.authorizeOpenShellRequest(f.request(), replacement, signal), false);
+  },
+);
+
+for (const loseCommitAcknowledgment of [false, true]) {
+  test(
+    `OpenShell draft authorization preserves one unknown receipt${loseCommitAcknowledgment ? " after a lost commit acknowledgment" : ""}`,
+    { ...requiresPostgres, timeout: 60_000 },
+    async (t) => {
+      const f = await fixture(t, { draftPull: true });
+      await prepare(f);
+      const installed = await f.owner.use(f.request());
+      // Commit on real PostgreSQL, then fault only the client's acknowledgment. This
+      // proves durable uncertainty handling, not a genuine PostgreSQL network outage.
+      let lose = loseCommitAcknowledgment;
+      const pool = loseCommitAcknowledgment
+        ? {
+            async connect() {
+              const client = await f.pool.connect();
+              return {
+                async query(...args) {
+                  const result = await client.query(...args);
+                  if (args[0] === "COMMIT" && lose) {
+                    lose = false;
+                    throw Object.assign(new Error("commit acknowledgment lost"), { code: "08007" });
+                  }
+                  return result;
+                },
+                release: (discard) => client.release(discard),
+              };
+            },
+          }
+        : f.pool;
+      const { store, source } = await openShellStore(f, pool);
+      const request = f.request({
+        operation: "create-draft-pull",
+        pull: {
+          operationId: randomUUID(),
+          apiOrigin: f.gh.origin,
+          repository: source.grant.repository,
+          head: source.grant.pushRef.slice("refs/heads/".length),
+          base: source.grant.pullRequestBase,
+        },
+      });
+      const signal = new AbortController().signal;
+      assert.equal(
+        await store.authorizeOpenShellRequest(
+          request,
+          { ...installed, materialVersion: randomUUID() },
+          signal,
+        ),
+        false,
+      );
+      assert.deepEqual(
+        (
+          await f.pool.query(
+            "SELECT receipt_id FROM occ.prepared_repository_draft_pulls WHERE grant_id=$1",
+            [request.grantId],
+          )
+        ).rows,
+        [],
+      );
+      assert.equal(
+        await store.authorizeOpenShellRequest(request, installed, signal),
+        !loseCommitAcknowledgment,
+      );
+      const receipt = (
+        await f.pool.query(
+          "SELECT receipt_id, attempt_id, material_version, outcome, settled_at, projection FROM occ.prepared_repository_draft_pulls WHERE grant_id=$1",
+          [request.grantId],
+        )
+      ).rows;
+      assert.deepEqual(receipt, [
+        {
+          receipt_id: request.exchangeId,
+          attempt_id: installed.preparationAttemptId,
+          material_version: installed.materialVersion,
+          outcome: "outcome_unknown",
+          settled_at: null,
+          projection: null,
+        },
+      ]);
+      // A repeated decision, a new request ID, or a new operation cannot cause a second create.
+      for (const retry of [
+        request,
+        { ...request, exchangeId: randomUUID() },
+        {
+          ...request,
+          exchangeId: randomUUID(),
+          pull: { ...request.pull, operationId: randomUUID() },
+        },
+      ]) {
+        assert.equal(await store.authorizeOpenShellRequest(retry, installed, signal), false);
+      }
+      const native = await f.owner.use(request);
+      assert.equal(native.kind, "recorded");
+      assert.equal(native.body.error, "outcome_unknown");
+      await store.finishPull(request.exchangeId, "not-submitted");
+      assert.equal(
+        await store.authorizeOpenShellRequest(
+          { ...request, exchangeId: randomUUID() },
+          installed,
+          signal,
+        ),
+        false,
+      );
+      assert.equal(
+        (
+          await f.pool.query(
+            "SELECT count(*)::integer AS count FROM occ.prepared_repository_draft_pulls WHERE grant_id=$1",
+            [request.grantId],
+          )
+        ).rows[0].count,
+        1,
       );
     },
   );

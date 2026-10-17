@@ -240,6 +240,18 @@ export async function startPreparedGitHubGitOwner(options: Options) {
   }
   return {
     use,
+    // Internal authority callback only. Never expose it as a workload or token-disclosure RPC.
+    authorizeOpenShellRequest(
+      request: PreparedGitHubUseRequest,
+      installed: { preparationAttemptId: string; materialVersion: string },
+      signal: AbortSignal,
+    ) {
+      return store.authorizeOpenShellRequest(
+        useRequest(request),
+        installed,
+        AbortSignal.any([signal, stop.signal]),
+      );
+    },
     maintain,
     async close() {
       stop.abort();

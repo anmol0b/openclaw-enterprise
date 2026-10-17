@@ -166,6 +166,7 @@ export interface OpenShellProviderProfile {
     readonly required: boolean;
     readonly authStyle: string;
     readonly headerName: string;
+    readonly stablePlaceholder?: boolean;
     readonly refresh?: OpenShellProfileCredentialRefresh;
   }[];
   readonly files?: readonly {
@@ -180,6 +181,8 @@ export interface OpenShellProviderProfile {
 }
 
 export interface OpenShellStoredProviderProfile {
+  /** Non-secret profile definition for operator binding verification. */
+  readonly definition?: Readonly<Record<string, unknown>>;
   readonly id: string;
   readonly resourceVersion: string;
   readonly annotations: Readonly<Record<string, string>>;
@@ -198,6 +201,9 @@ export interface OpenShellProviderCreateRequest {
 }
 
 export interface OpenShellProviderResponse {
+  readonly id?: string;
+  readonly workspace?: string;
+  readonly profileWorkspace?: string;
   readonly name: string;
   readonly type: string;
   readonly labels: Readonly<Record<string, string>>;
@@ -397,6 +403,12 @@ export interface OpenShellGatewayClient
     signal: AbortSignal,
     credentialExpirationTimes?: Readonly<Record<string, string>>,
   ): Promise<void>;
+  /** Static credential rotation, conditional on the previously observed provider version. */
+  updateProviderCredentialsConditionally?(
+    request: OpenShellProviderCreateRequest,
+    expectedResourceVersion: string,
+    signal: AbortSignal,
+  ): Promise<OpenShellProviderResponse>;
   /** Merges nonempty configuration into an existing provider with optimistic concurrency. */
   updateProviderConfig(
     workspace: string,
@@ -627,6 +639,11 @@ function providerResponse(value: unknown, operation: string): OpenShellProviderR
   // Credential values are never copied out of gateway responses.
   return Object.freeze({
     name,
+    ...(typeof metadata?.id === "string" ? { id: metadata.id } : {}),
+    ...(typeof metadata?.workspace === "string" ? { workspace: metadata.workspace } : {}),
+    ...(typeof provider.profile_workspace === "string"
+      ? { profileWorkspace: provider.profile_workspace }
+      : {}),
     type: provider.type,
     labels: stringMap(metadata?.labels, "provider labels"),
     config: stringMap(provider?.config, "provider config"),
@@ -645,6 +662,9 @@ function profileMessage(profile: OpenShellProviderProfile): RecordValue {
       required: credential.required,
       auth_style: credential.authStyle,
       header_name: credential.headerName,
+      ...(credential.stablePlaceholder === undefined
+        ? {}
+        : { stable_placeholder: credential.stablePlaceholder }),
       ...(credential.refresh === undefined
         ? {}
         : {
@@ -1595,6 +1615,7 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
     }
     return Object.freeze({
       id: profile.id,
+      definition: Object.freeze({ ...profile }),
       resourceVersion: String(profile.resource_version ?? "0"),
       annotations: stringMap(profile.annotations, "profile annotations"),
     });
@@ -1785,6 +1806,46 @@ export class GrpcOpenShellGatewayClient implements OpenShellGatewayClient {
       },
       signal,
     );
+  }
+
+  async updateProviderCredentialsConditionally(
+    request: OpenShellProviderCreateRequest,
+    expectedResourceVersion: string,
+    signal: AbortSignal,
+  ): Promise<OpenShellProviderResponse> {
+    if (
+      !/^[1-9]\d*$/u.test(expectedResourceVersion) ||
+      Object.keys(request.credentials).length === 0 ||
+      Object.values(request.credentials).some((value) => !isNonEmptyString(value))
+    ) {
+      throw new OpenShellGatewayFailure(
+        "OpenShell credential rotation requires values and a positive resource version.",
+      );
+    }
+    const response = await this.unary(
+      "UpdateProvider",
+      {
+        provider: {
+          metadata: {
+            name: nonempty(request.name, "OpenShell provider name"),
+            resource_version: expectedResourceVersion,
+          },
+          type: request.type,
+          profile_workspace: request.workspace,
+          credentials: { ...request.credentials },
+        },
+        workspace_scope: { workspace: request.workspace },
+        credential_expiration_times: Object.fromEntries(
+          Object.entries(request.credentialExpirationTimes ?? {}).map(([key, value]) => [
+            key,
+            timestampMessage(value),
+          ]),
+        ),
+        request_id: randomUUID(),
+      },
+      signal,
+    );
+    return providerResponse(response.provider, "UpdateProvider");
   }
 
   async updateProviderConfig(

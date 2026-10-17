@@ -6,7 +6,7 @@ import type {
   PreparedGitHubUseResponse,
   RepositoryRevisionState,
 } from "@openclaw-enterprise/contracts";
-import type { PostgresPool } from "@openclaw-enterprise/occ";
+import type { PostgresClient, PostgresPool } from "@openclaw-enterprise/occ";
 import type { OperationReceipt } from "../../credentials/backend-contracts.ts";
 import { draftOperationId, validateDraftProjection } from "./prepared-draft-pull.ts";
 import { isDeepStrictEqual } from "node:util";
@@ -155,12 +155,65 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     });
   }
 
+  /** Authorizes a validated request from an authenticated OpenShell session mapping.
+   * The sender already holds this exact material. No secret is read or released here.
+   * The durable receipt records possible use, never delivery or a provider outcome. */
+  async authorizeOpenShellRequest(
+    q: PreparedGitHubUseRequest,
+    installed: { preparationAttemptId: string; materialVersion: string },
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (!installed?.preparationAttemptId || !installed.materialVersion) {
+      return false;
+    }
+    try {
+      const result = await this.transaction((c) => this.recordUse(c, q, signal, installed));
+      return !("kind" in result) && !signal.aborted && Date.now() < Date.parse(result.sendStartBy);
+    } catch {
+      // A lost commit acknowledgment may leave a receipt. Never retry or turn it into an allow.
+      return false;
+    }
+  }
+
   /** Lock against admission withdrawal and material rotation. If commit is uncertain the copy is
    * discarded, but its non-secret use receipt may have committed. Never retry an exchange. */
   async use(
     q: PreparedGitHubUseRequest,
     signal: AbortSignal,
   ): Promise<PreparedGitHubUseResponse | OperationReceipt> {
+    let bytes: Buffer | undefined;
+    try {
+      const result = await this.transaction(async (c) => {
+        const decision = await this.recordUse(c, q, signal);
+        if ("kind" in decision) {
+          return decision;
+        }
+        const { admission, sealed, ...receipt } = decision;
+        if (!sealed || signal.aborted || Date.now() >= Date.parse(receipt.sendStartBy)) {
+          throw new Error("PREPARED_REPOSITORY_GIT_UNAVAILABLE");
+        }
+        // Under the same material lock, with no await between this check and open.
+        bytes = this.open(sealed, admission, decision.preparationAttemptId);
+        return receipt;
+      });
+      if ("kind" in result) {
+        return result;
+      }
+      if (!bytes || signal.aborted || Date.now() >= Date.parse(result.sendStartBy)) {
+        throw new Error("PREPARED_REPOSITORY_GIT_UNAVAILABLE");
+      }
+      return { ...result, value: bytes.toString("utf8") };
+    } finally {
+      bytes?.fill(0);
+    }
+  }
+
+  private async recordUse(
+    c: PostgresClient,
+    q: PreparedGitHubUseRequest,
+    signal: AbortSignal,
+    installed?: { preparationAttemptId: string; materialVersion: string },
+  ) {
     const deadline = Date.parse(q.deadlineAt);
     const valid = (until: number) => !signal.aborted && Date.now() < until;
     const fail = (): never => {
@@ -169,157 +222,152 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     if (!valid(deadline) || deadline > Date.now() + 30_000) {
       return fail();
     }
-    let bytes: Buffer | undefined;
-    try {
-      const result = await this.transaction(async (c) => {
-        // Locks on the mutable session, receipt and Agent serialize withdrawal with this decision.
-        // The admitted revision is immutable; the Agent row owns its current selection. The caller can never substitute its own Agent or repository policy.
-        const { rows } = await c.query(
-          `SELECT session,end_ms FROM
-          (${sessions} AND b.session_id=$1 FOR SHARE OF s,b,g) l`,
-          [q.sessionId],
-        );
-        const current = rows[0] as
-          { session: PreparedRepositorySession; end_ms: string } | undefined;
-        const source = current && this.policy(current.session);
-        if (
-          !source ||
-          !current ||
-          source.grant.pushRef !== q.pushRef ||
-          !isDeepStrictEqual(current.session.binding.grant, {
-            providerInstanceId: q.providerInstanceId,
-            repositoryId: q.repositoryId,
-            grantId: q.grantId,
-          })
-        ) {
-          return fail();
-        }
-        // Authority and live-session locks above apply equally to reads of an existing receipt.
-        const grant = source.grant;
-        let scope: PullRow["scope"] | undefined;
-        if (q.operation === "create-draft-pull") {
-          const pull = q.pull;
-          if (
-            !pull ||
-            grant.profile !== "git-ref-draft-pr" ||
-            !draftOperationId.test(pull.operationId) ||
-            pull.repository !== grant.repository ||
-            "refs/heads/" + pull.head !== grant.pushRef ||
-            pull.head === pull.base ||
-            pull.base !== grant.pullRequestBase ||
-            !pull.apiOrigin ||
-            pull.apiOrigin !== this.authority.split("#")[0]
-          ) {
-            return fail();
-          }
-          const { operationId, apiOrigin, repository, head, base } = pull;
-          scope = { operationId, apiOrigin, repository, head, base, repositoryId: q.repositoryId };
-          const {
-            rows: [prior],
-          } = await c.query(`SELECT * FROM ${pulls} WHERE grant_id=$1`, [q.grantId]);
-          if (prior) {
-            const row = prior as PullRow;
-            return pullReceipt(
-              row,
-              row.admission_id !== current.session.admissionId ||
-                row.operation_id !== pull.operationId ||
-                row.request_digest_sha256 !== q.requestDigestSha256 ||
-                !isDeepStrictEqual(row.scope, scope),
-            );
-          }
-        } else if (q.pull) {
-          return fail();
-        }
-        const { rows: found } = await c.query(
-          `SELECT a.id,a.admission,a.material_version, a.usable_until, a.sealed
-          FROM ${families} f JOIN ${attempts} a USING(source_id)
-          WHERE f.source_id=$1 AND f.source=$2::jsonb AND f.enabled AND f.admission->>'issuerAuthority'=$3
-          AND a.custody='current' AND a.state='committed' AND a.admission=f.admission
-          AND a.usable_until BETWEEN clock_timestamp() AND clock_timestamp() + interval '61 minutes'
-          AND a.provider_expires_at >= a.usable_until FOR SHARE OF f,a`,
-          [source.key.source.id, source, this.authority],
-        );
-        const m = found[0] as
-          | {
-              id: string;
-              admission: GitHubPreparationAdmission;
-              material_version: string;
-              usable_until: Date;
-              sealed: Buffer;
-            }
-          | undefined;
-        if (!m || !isDeepStrictEqual(m.admission.grant, source.grant)) {
-          return fail();
-        }
-        const until = Math.min(
-          Date.now() + 5000,
-          deadline,
-          Number(current.end_ms),
-          m.usable_until.getTime(),
-        );
-        if (!valid(until)) {
-          return fail();
-        }
-        const sendStartBy = new Date(until).toISOString();
-        if (scope) {
-          // The primary key admits only ONE create for this repository/ref/base grant,
-          // across process or session replacement. Unknown/expired permits are never reissued.
-          const claim = await c.query(
-            `INSERT INTO ${pulls}
-             (grant_id,operation_id,receipt_id,admission_id,attempt_id,material_version,request_digest_sha256,scope,send_start_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (grant_id) DO NOTHING RETURNING receipt_id`,
-            [
-              q.grantId,
-              scope.operationId,
-              q.exchangeId,
-              current.session.admissionId,
-              m.id,
-              m.material_version,
-              q.requestDigestSha256,
-              scope,
-              sendStartBy,
-            ],
-          );
-          if (!claim.rowCount) {
-            return fail();
-          }
-        } else {
-          await c.query(
-            `INSERT INTO occ.prepared_repository_git_uses
-          (exchange_id,admission_id,attempt_id,material_version,operation,request_digest_sha256,send_start_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7)`,
-            [
-              q.exchangeId,
-              current.session.admissionId,
-              m.id,
-              m.material_version,
-              q.operation,
-              q.requestDigestSha256,
-              sendStartBy,
-            ],
-          );
-        }
-        if (!valid(until)) {
-          return fail();
-        }
-        bytes = this.open(m.sealed, m.admission, m.id);
-        return {
-          sendStartBy,
-          exchangeId: q.exchangeId,
-          preparationAttemptId: m.id,
-          materialVersion: m.material_version,
-        };
-      });
-      if ("kind" in result) {
-        return result;
-      }
-      if (!bytes || !valid(Date.parse(result.sendStartBy))) {
+    // Locks on the mutable session, receipt and Agent serialize withdrawal with this decision.
+    // The admitted revision is immutable; the Agent row owns its current selection. The caller can never substitute its own Agent or repository policy.
+    const { rows } = await c.query(
+      `SELECT session,end_ms FROM
+      (${sessions} AND b.session_id=$1 FOR SHARE OF s,b,g) l`,
+      [q.sessionId],
+    );
+    const current = rows[0] as { session: PreparedRepositorySession; end_ms: string } | undefined;
+    const source = current && this.policy(current.session);
+    if (
+      !source ||
+      !current ||
+      source.grant.pushRef !== q.pushRef ||
+      !isDeepStrictEqual(current.session.binding.grant, {
+        providerInstanceId: q.providerInstanceId,
+        repositoryId: q.repositoryId,
+        grantId: q.grantId,
+      })
+    ) {
+      return fail();
+    }
+    // Authority and live-session locks above apply equally to reads of an existing receipt.
+    const grant = source.grant;
+    let scope: PullRow["scope"] | undefined;
+    if (q.operation === "create-draft-pull") {
+      const pull = q.pull;
+      if (
+        !pull ||
+        grant.profile !== "git-ref-draft-pr" ||
+        !draftOperationId.test(pull.operationId) ||
+        pull.repository !== grant.repository ||
+        "refs/heads/" + pull.head !== grant.pushRef ||
+        pull.head === pull.base ||
+        pull.base !== grant.pullRequestBase ||
+        !pull.apiOrigin ||
+        pull.apiOrigin !== this.authority.split("#")[0]
+      ) {
         return fail();
       }
-      return { ...result, value: bytes.toString("utf8") };
-    } finally {
-      bytes?.fill(0);
+      const { operationId, apiOrigin, repository, head, base } = pull;
+      scope = { operationId, apiOrigin, repository, head, base, repositoryId: q.repositoryId };
+      const {
+        rows: [prior],
+      } = await c.query(`SELECT * FROM ${pulls} WHERE grant_id=$1`, [q.grantId]);
+      if (prior) {
+        if (installed) {
+          return fail();
+        }
+        const row = prior as PullRow;
+        return pullReceipt(
+          row,
+          row.admission_id !== current.session.admissionId ||
+            row.operation_id !== pull.operationId ||
+            row.request_digest_sha256 !== q.requestDigestSha256 ||
+            !isDeepStrictEqual(row.scope, scope),
+        );
+      }
+    } else if (q.pull) {
+      return fail();
     }
+    const { rows: found } = await c.query(
+      `SELECT a.id,a.admission,a.material_version, a.usable_until${installed ? "" : ", a.sealed"}
+      FROM ${families} f JOIN ${attempts} a USING(source_id)
+      WHERE f.source_id=$1 AND f.source=$2::jsonb AND f.enabled AND f.admission->>'issuerAuthority'=$3
+      AND a.custody='current' AND a.state='committed' AND a.admission=f.admission
+      AND a.usable_until BETWEEN clock_timestamp() AND clock_timestamp() + interval '61 minutes'
+      AND a.provider_expires_at >= a.usable_until FOR SHARE OF f,a`,
+      [source.key.source.id, source, this.authority],
+    );
+    const m = found[0] as
+      | {
+          id: string;
+          admission: GitHubPreparationAdmission;
+          material_version: string;
+          usable_until: Date;
+          sealed?: Buffer;
+        }
+      | undefined;
+    if (
+      !m ||
+      !isDeepStrictEqual(m.admission.grant, source.grant) ||
+      (installed &&
+        (m.id !== installed.preparationAttemptId ||
+          m.material_version !== installed.materialVersion))
+    ) {
+      return fail();
+    }
+    const until = Math.min(
+      Date.now() + 5000,
+      deadline,
+      Number(current.end_ms),
+      m.usable_until.getTime(),
+    );
+    if (!valid(until)) {
+      return fail();
+    }
+    const sendStartBy = new Date(until).toISOString();
+    if (scope) {
+      // The primary key admits only ONE create for this repository/ref/base grant,
+      // across process or session replacement. Unknown/expired permits are never reissued.
+      const claim = await c.query(
+        `INSERT INTO ${pulls}
+         (grant_id,operation_id,receipt_id,admission_id,attempt_id,material_version,request_digest_sha256,scope,send_start_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (grant_id) DO NOTHING RETURNING receipt_id`,
+        [
+          q.grantId,
+          scope.operationId,
+          q.exchangeId,
+          current.session.admissionId,
+          m.id,
+          m.material_version,
+          q.requestDigestSha256,
+          scope,
+          sendStartBy,
+        ],
+      );
+      if (!claim.rowCount) {
+        return fail();
+      }
+    } else {
+      await c.query(
+        `INSERT INTO occ.prepared_repository_git_uses
+      (exchange_id,admission_id,attempt_id,material_version,operation,request_digest_sha256,send_start_by)
+      VALUES($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          q.exchangeId,
+          current.session.admissionId,
+          m.id,
+          m.material_version,
+          q.operation,
+          q.requestDigestSha256,
+          sendStartBy,
+        ],
+      );
+    }
+    if (!valid(until)) {
+      return fail();
+    }
+    return {
+      sendStartBy,
+      exchangeId: q.exchangeId,
+      preparationAttemptId: m.id,
+      materialVersion: m.material_version,
+      admission: m.admission,
+      sealed: m.sealed,
+    };
   }
 
   /** The original sender may settle once, including after withdrawal; no authority is released here. */

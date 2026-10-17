@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { hasControlCharacter } from "@openclaw-enterprise/utils";
 import { Server, status, type ServerUnaryCall, type sendUnaryData } from "@grpc/grpc-js";
 import {
   describeOpenShellMiddleware,
@@ -56,10 +57,130 @@ export interface OpenShellOnlineAuthorityOptions {
   readonly budgetMs?: number;
 }
 
+/** Stock v0.1.4's normalized pre-credential view. Omitted headers and original framing
+ * cannot be authorized here. Workspace is checked against the owner's mapping, never proof. */
+export interface OpenShellOnlineHttpRequest {
+  readonly sandboxId: string;
+  readonly bindingId: string;
+  readonly requestId: string;
+  readonly workspace: string;
+  readonly target: {
+    readonly reportedScheme: "https";
+    readonly host: string;
+    readonly port: number;
+    readonly method: "GET" | "POST";
+    readonly path: string;
+    readonly query: string;
+  };
+  readonly headers: readonly (readonly [string, string])[];
+  readonly body: Uint8Array;
+  readonly deadlineAt: string;
+}
+
+export interface OpenShellOnlineHttpAuthorityOptions extends Omit<
+  OpenShellOnlineAuthorityOptions,
+  "authorize"
+> {
+  readonly authorize: (
+    request: OpenShellOnlineHttpRequest,
+    signal: AbortSignal,
+  ) => Promise<"allow" | "deny">;
+}
+
+function httpRequestView(
+  request: Wire,
+  sandboxId: string,
+  deadlineAt: string,
+): OpenShellOnlineHttpRequest | undefined {
+  const context = record(request.context);
+  const target = record(request.target);
+  const id = bindingId(request.config);
+  const body = request.body ?? new Uint8Array();
+  const rawHeaders = request.headers ?? [];
+  const query = target.query ?? "";
+  if (
+    request.phase !== 1 ||
+    context.sandbox_id !== sandboxId ||
+    !id ||
+    typeof context.request_id !== "string" ||
+    !/^[\x21-\x7e]{1,256}$/.test(context.request_id) ||
+    typeof context.workspace !== "string" ||
+    !/^[\x21-\x7e]{1,256}$/.test(context.workspace) ||
+    target.scheme !== "https" ||
+    !Number.isInteger(target.port) ||
+    Number(target.port) < 1 ||
+    Number(target.port) > 65535 ||
+    typeof target.host !== "string" ||
+    target.host.length > 253 ||
+    !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/.test(
+      target.host,
+    ) ||
+    isIP(target.host) !== 0 ||
+    (target.method !== "GET" && target.method !== "POST") ||
+    typeof target.path !== "string" ||
+    !/^\/[\x21-\x7e]{0,4095}$/.test(target.path) ||
+    /[?#]/.test(target.path) ||
+    typeof query !== "string" ||
+    !/^[\x21-\x7e]{0,4096}$/.test(query) ||
+    !(body instanceof Uint8Array) ||
+    body.byteLength > 4 * 1024 * 1024 ||
+    !Array.isArray(rawHeaders) ||
+    rawHeaders.length > 128
+  ) {
+    return undefined;
+  }
+  const headers: [string, string][] = [];
+  let headerBytes = 0;
+  for (const raw of rawHeaders) {
+    const { name, value } = record(raw);
+    if (
+      typeof name !== "string" ||
+      !/^[a-z0-9!#$%&'*+.^_`|~-]+$/.test(name) ||
+      typeof value !== "string" ||
+      hasControlCharacter(value) ||
+      value.trim() !== value
+    ) {
+      return undefined;
+    }
+    headerBytes += Buffer.byteLength(name) + Buffer.byteLength(value);
+    if (headerBytes > 64 * 1024) {
+      return undefined;
+    }
+    headers.push([name, value]);
+  }
+  return {
+    sandboxId,
+    bindingId: id,
+    requestId: context.request_id,
+    workspace: context.workspace,
+    target: {
+      reportedScheme: "https",
+      host: target.host,
+      port: Number(target.port),
+      method: target.method,
+      path: target.path,
+      query,
+    },
+    headers,
+    body,
+    deadlineAt,
+  };
+}
+
+/** Private composition seam: only a trusted operation owner may opt into body inspection. */
+export function createOpenShellOnlineHttpAuthority(
+  options: OpenShellOnlineHttpAuthorityOptions,
+): Server {
+  return createAuthority(options, httpRequestView);
+}
+
 function bindingId(config: unknown): string | undefined {
   const fields = record(record(config).fields);
   const value = record(fields.binding_id);
-  return Object.keys(fields).length === 1 && boundedId(value.stringValue)
+  return Object.keys(fields).length === 1 &&
+    Object.keys(value).every((key) => key === "stringValue" || key === "kind") &&
+    value.kind === "stringValue" &&
+    boundedId(value.stringValue)
     ? value.stringValue
     : undefined;
 }
@@ -122,6 +243,15 @@ function requestView(request: Wire, sandboxId: string): OpenShellOnlineRequest |
 
 /** Unregistered stock protocol adapter; it has no material, send, or exact-exchange authority. */
 export function createOpenShellOnlineAuthority(options: OpenShellOnlineAuthorityOptions): Server {
+  return createAuthority(options, requestView);
+}
+
+function createAuthority<T>(
+  options: Omit<OpenShellOnlineAuthorityOptions, "authorize"> & {
+    readonly authorize: (request: T, signal: AbortSignal) => Promise<"allow" | "deny">;
+  },
+  view: (request: Wire, sandboxId: string, deadlineAt: string) => T | undefined,
+): Server {
   const verifier = new OpenShellExtensionJwtVerifier(options.identity);
   const budgetMs = options.budgetMs ?? 400;
   if (
@@ -172,7 +302,14 @@ export function createOpenShellOnlineAuthority(options: OpenShellOnlineAuthority
       const expiresAt = startedAt + Math.min(budgetMs, Number(call.getDeadline()) - Date.now());
       const expired = () => !(performance.now() < expiresAt);
       const sandboxId = supervisor(claims(call));
-      const request = sandboxId && requestView(call.request, sandboxId);
+      const request =
+        sandboxId &&
+        !expired() &&
+        view(
+          call.request,
+          sandboxId,
+          new Date(Date.now() + Math.max(0, expiresAt - performance.now())).toISOString(),
+        );
       if (
         !request ||
         call.request.middleware_name !== options.registrationName ||

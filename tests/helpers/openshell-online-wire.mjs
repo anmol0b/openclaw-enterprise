@@ -42,10 +42,16 @@ export function invoke(client, method, request, bearer) {
   });
 }
 
-export async function openShellOnlineWire(t, registrationName, options) {
+export async function openShellOnlineWire(
+  t,
+  registrationName,
+  options,
+  createAuthority = createOpenShellOnlineAuthority,
+) {
   const { key, cert, caBundle, rootCertificatePath } = await harnessTlsFixture(t);
   const keys = generateKeyPairSync("ed25519");
-  const server = createOpenShellOnlineAuthority({
+  const server = createAuthority({
+    ...options,
     identity: {
       issuer: "https://gateway.example.test",
       audience: "online-authorizer",
@@ -53,8 +59,6 @@ export async function openShellOnlineWire(t, registrationName, options) {
       publicKey: keys.publicKey.export({ type: "spki", format: "pem" }),
     },
     registrationName,
-    budgetMs: options.budgetMs,
-    authorize: options.authorize,
   });
   const port = await new Promise((resolve, reject) =>
     server.bindAsync(
