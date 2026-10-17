@@ -41,6 +41,7 @@ import {
   agentProvisionPostRequests,
   routeInstallationProvisioning,
   routeInstallationWithoutProvisioning,
+  nativeSandboxDriver,
   agentPostRequests,
   optionValues,
   createRepositoryLaunchFixture,
@@ -1840,7 +1841,8 @@ test("Dedicated Agent creation reuses separately saved Secret references after p
         body: JSON.stringify({
           error: {
             code: "DEPENDENCY_UNAVAILABLE",
-            message: "masked provisioning response",
+            // The catch-all outage text names no reason, so the outcome stays unknown.
+            message: "A required platform dependency is unavailable.",
           },
           meta: { requestId: "req_00000000-0000-4000-8000-000000000503" },
         }),
@@ -2035,8 +2037,10 @@ test("Agent creation withholds Dedicated OpenClaw unless the Installation report
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Pinned runtime", { ready: true });
+  // The pinned runtime supports native workers, but no Sandbox Driver can provision them, so
+  // the Installation cannot admit dedicated OpenClaw and does not report it (finding 1608).
   const installation = await fixture.request("GET", "/installation");
-  assert.deepEqual(installation.data.capabilities?.nativeWorkers, { support: "pinned-runtime" });
+  assert.equal(installation.data.capabilities?.nativeWorkers, undefined);
   const { page } = await newPage(t, fixture);
   // An older server without the capability still disables Dedicated in the client.
   await routeInstallationWithoutProvisioning(page, fixture);
@@ -2051,14 +2055,16 @@ test("Agent creation withholds Dedicated OpenClaw unless the Installation report
   assert.equal(await mode.locator('option[value="dedicated"]').isDisabled(), true);
   // The disabled option explains itself instead of claiming Dedicated is supported.
   const harnessHint = page.locator("#agent-harness-hint");
-  assert.match(await harnessHint.textContent(), /Embedded execution only; choose Codex/);
+  assert.match(await harnessHint.textContent(), /Embedded execution works only without a Sandbox/);
   assert.doesNotMatch(await harnessHint.textContent(), /supports Dedicated/);
   const modeHint = page.locator("#execution-mode-hint");
   assert.match(await modeHint.textContent(), /Dedicated OpenClaw is unavailable/);
   assert.doesNotMatch(await modeHint.textContent(), /supports Dedicated/);
   // The blocking alert is reserved for a Dedicated selection; Embedded remains creatable.
   assert.equal(
-    await page.getByText(/Dedicated OpenClaw is unavailable: this installation/).isHidden(),
+    await page
+      .getByText(/Dedicated OpenClaw is unavailable: this installation has no Sandbox/)
+      .isHidden(),
     true,
   );
   // Status and the collapsed Runtime details name the Embedded draft path.
@@ -2088,7 +2094,7 @@ test("Agent creation withholds Dedicated OpenClaw unless the Installation report
   );
 
   // Bootstrap, the only Installation write, cannot declare the capability either.
-  const other = await createConsoleAppFixture(t);
+  const other = await createConsoleAppFixture(t, { sandboxDriver: nativeSandboxDriver() });
   const declared = await other.request("POST", "/installation/bootstrap", {
     body: {
       name: "Declared runtime",
@@ -2103,10 +2109,19 @@ test("Agent creation withholds Dedicated OpenClaw unless the Installation report
 });
 
 test("Agent creation preserves unrelated edited JSON across model changes and resets to the selected template", async (t) => {
-  const fixture = await createConsoleAppFixture(t, { nativeWorkerSupport: "custom-image" });
+  const fixture = await createConsoleAppFixture(t, {
+    nativeWorkerSupport: "custom-image",
+    sandboxDriver: nativeSandboxDriver(),
+  });
   await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Template edits", { ready: true });
   const { page, artifacts } = await newPage(t, fixture);
+  // This Installation admits only Dedicated OpenClaw (#2670). A server that reports native worker
+  // support but not the OpenClaw execution modes leaves both modes selectable, which is how this
+  // test reaches both templates.
+  await routeInstallationWithoutProvisioning(page, fixture, {
+    nativeWorkers: { support: "custom-image" },
+  });
 
   await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
   await page.getByRole("heading", { name: "Create Agent" }).waitFor();

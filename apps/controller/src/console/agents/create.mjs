@@ -130,6 +130,31 @@ function provisioningStatusText(status) {
   }
 }
 
+// The API's 503 answers that name no reason: the catch-all outage, and a commit whose outcome
+// the API itself could not confirm.
+const UNNAMED_DEPENDENCY_FAILURES = new Set([
+  "A required platform dependency is unavailable.",
+  "The operation outcome is unknown. Do not retry automatically; inspect current state before a deliberate new action.",
+]);
+
+// The server's own sentence for a refused request, unless it is a catch-all answer (finding
+// 1609). Among 5xx answers only a named 503 DEPENDENCY_UNAVAILABLE refuses the request; any
+// other 5xx leaves its outcome unknown.
+function namedRefusal(error) {
+  const message = error.serverMessage;
+  if (message === undefined) {
+    return undefined;
+  }
+  if (error.status === 409) {
+    return message === GENERIC_CONFLICT ? undefined : message;
+  }
+  return error.status === 503 &&
+    error.code === "DEPENDENCY_UNAVAILABLE" &&
+    !UNNAMED_DEPENDENCY_FAILURES.has(message)
+    ? message
+    : undefined;
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -169,6 +194,35 @@ async function cancelledAgentState(request, namespaceId, agentId) {
   }
 }
 
+// First-deployment waits that someone must act on (finding 1617): the deployment's own fixed
+// sentence replaces the bare provisioning line. The deployment read needs read access to the
+// Agent; a reader without it, or any other wait, keeps the bare line.
+const NAMED_DEPLOYMENT_WAITS = new Set(["NAMESPACE_POD_QUOTA_EXCEEDED"]);
+
+async function namedDeploymentWait(request, namespaceId, job) {
+  if (
+    typeof job.agentId !== "string" ||
+    !job.agentId ||
+    typeof job.revisionId !== "string" ||
+    !job.revisionId
+  ) {
+    return undefined;
+  }
+  try {
+    const deployment = await request(
+      `${namespacePath(namespaceId)}/agents/${encodeURIComponent(job.agentId)}/deployments/${encodeURIComponent(job.revisionId)}`,
+    );
+    const attempt = deployment?.progress?.lastAttempt;
+    return NAMED_DEPLOYMENT_WAITS.has(attempt?.code) &&
+      typeof attempt.message === "string" &&
+      attempt.message
+      ? attempt.message
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function waitForProvisioning({ request, status, first, namespaceId }) {
   let current = first.provisioning ?? first;
   const jobUrl = current?.url;
@@ -177,7 +231,11 @@ async function waitForProvisioning({ request, status, first, namespaceId }) {
   let started = false;
   while (current?.status === "queued" || current?.status === "running") {
     started ||= current.status === "running";
-    setText(status, provisioningStatusText(started ? "running" : current.status));
+    setText(
+      status,
+      (await namedDeploymentWait(request, namespaceId, current)) ??
+        provisioningStatusText(started ? "running" : current.status),
+    );
     if (typeof current.url !== "string" || !current.url) {
       throw new Error("Provisioning status URL is unavailable.");
     }
@@ -454,12 +512,22 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     { className: "notice", role: "status", hidden: true },
     "Experimental: Dedicated OpenClaw requires a runtime build with native worker-inference support. Released OpenClaw images may not include it yet.",
   );
-  // Admission refuses dedicated OpenClaw unless the Installation reports native worker support.
+  // The Installation reports native worker support only when it can admit dedicated OpenClaw:
+  // the runtime supports native workers and a Sandbox Driver can provision them (finding 1608).
+  // Its absence does not say whether Embedded remains: any selected Sandbox Driver refuses
+  // Embedded execution, so the copy names Codex and the condition (finding 1612).
   const nativeWorkersUnavailable = element(
     "p",
     { className: "error", role: "alert", hidden: true },
-    "Dedicated OpenClaw is unavailable: this installation's OpenClaw runtime lacks native worker support. Choose Embedded execution or the Codex harness.",
+    "Dedicated OpenClaw is unavailable: this installation has no Sandbox Driver that can provision it, or its OpenClaw runtime lacks native worker support. Choose the Codex harness, or Embedded execution if the installation selects no Sandbox Driver. Otherwise an administrator must select a Sandbox Driver that can provision dedicated OpenClaw, or a runtime with native worker support.",
   );
+  // The Installation lists the OpenClaw execution modes admission accepts (#2670). When the
+  // selected mode is not one of them, say so here and keep Create disabled, before any write.
+  const openclawModeUnavailable = element("p", {
+    className: "error",
+    role: "alert",
+    hidden: true,
+  });
   const configuration = element("textarea", {
     id: "configuration-json",
     name: "configuration",
@@ -629,6 +697,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     harnessHint,
     nativeHarnessWarning,
     nativeWorkersUnavailable,
+    openclawModeUnavailable,
     binding
       ? element("p", {}, `Preset authentication: ${harnessAuthDescription(binding)}`)
       : authMethodField,
@@ -838,8 +907,10 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   model.addEventListener("change", () => updateModelConfiguration());
   harness.addEventListener("change", () => {
     // Embedded is OpenClaw's default because dedicated OpenClaw needs a provisioning
-    // Sandbox Driver; operators opt into it through Execution mode.
-    mode.value = harness.value === "codex" ? "dedicated" : "embedded";
+    // Sandbox Driver; operators opt into it through Execution mode. An Installation that
+    // refuses Embedded preselects Dedicated when it accepts that (#2670).
+    mode.value = harness.value === "codex" ? "dedicated" : defaultOpenClawMode();
+    modeDefaulted = true;
     // Service account tokens cannot authenticate OpenClaw; require a new API key.
     if (
       !binding &&
@@ -855,6 +926,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     updateControls();
   });
   mode.addEventListener("change", () => {
+    modeDefaulted = false;
     const previousHarness = harness.value;
     if (mode.value === "embedded") {
       harness.value = "openclaw";
@@ -1059,6 +1131,21 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   let capabilityDiscoveryDenied = false;
   const provisionableExecutionModes = new Set();
   let nativeWorkersAvailable = false;
+  // The OpenClaw execution modes the Installation admits, or undefined from a server that does
+  // not report them; that keeps the earlier check, Dedicated from nativeWorkers only (#2670).
+  let openclawExecutionModes;
+  // Whether the form chose the execution mode, rather than the Preset, the draft or the user.
+  let modeDefaulted =
+    agent.executionMode === undefined && !Object.hasOwn(draft.inputs ?? {}, "mode");
+  const openclawModeUsable = (value) =>
+    openclawExecutionModes?.has(value) ?? (value === "embedded" || nativeWorkersAvailable);
+  const defaultOpenClawMode = () =>
+    capabilityDiscoveryDone && !openclawModeUsable("embedded") && openclawModeUsable("dedicated")
+      ? "dedicated"
+      : "embedded";
+  // Anthropic and operator-managed Preset credentials fix OpenClaw to Embedded.
+  const embeddedRequired = () =>
+    nativeProvider.value === "anthropic" || binding?.method === "runtime";
   let credentialSourceTypes;
   let savedCredentialSource;
   let credentialRegistration;
@@ -1586,16 +1673,41 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       binding?.method === "runtime";
     harness.disabled ||=
       binding?.method === "runtime" || (usesPat && Boolean(binding || savedSecret));
-    const nativeRefused =
-      capabilityDiscoveryDone && !nativeWorkersAvailable && harness.value === "openclaw";
+    const dedicatedRefused = capabilityDiscoveryDone && !openclawModeUsable("dedicated");
+    const nativeRefused = dedicatedRefused && harness.value === "openclaw";
+    const embeddedRefused = capabilityDiscoveryDone && !openclawModeUsable("embedded");
+    const openclawEmbeddedRefused = embeddedRefused && harness.value === "openclaw";
+    const noOpenClawMode = nativeRefused && openclawEmbeddedRefused;
     mode.querySelector('[value="dedicated"]').disabled = nativeRefused;
-    nativeWorkersUnavailable.hidden = !nativeRefused || mode.value !== "dedicated";
+    mode.querySelector('[value="embedded"]').disabled = embeddedRefused;
+    nativeWorkersUnavailable.hidden =
+      !nativeRefused || noOpenClawMode || mode.value !== "dedicated";
+    const modeRefusal = noOpenClawMode
+      ? binding?.method === "runtime"
+        ? "OpenClaw is unavailable on this installation: its selected Sandbox Driver refuses Embedded execution, and it cannot run Dedicated OpenClaw. This Preset's operator-managed credentials require OpenClaw. Ask an administrator, or start without a Preset."
+        : "OpenClaw is unavailable on this installation: its selected Sandbox Driver refuses Embedded execution, and it cannot run Dedicated OpenClaw. Choose OpenAI with the Codex harness, or ask an administrator to select a Sandbox Driver that can provision dedicated OpenClaw, with a runtime that has native worker support."
+      : openclawEmbeddedRefused && mode.value === "embedded"
+        ? binding?.method === "runtime"
+          ? "This Preset's operator-managed credentials require Embedded OpenClaw, which this installation refuses because it selects a Sandbox Driver. Ask an administrator, or start without a Preset."
+          : nativeProvider.value === "anthropic"
+            ? "Anthropic uses Embedded OpenClaw, which this installation refuses because it selects a Sandbox Driver. Choose OpenAI to use Dedicated execution."
+            : "Embedded OpenClaw is unavailable: this installation selects a Sandbox Driver, which requires Dedicated execution. Select Dedicated under Runtime details."
+        : "";
+    if (openclawModeUnavailable.textContent !== modeRefusal) {
+      openclawModeUnavailable.textContent = modeRefusal;
+    }
+    openclawModeUnavailable.hidden = !modeRefusal;
     runtimeModeSummary.textContent = ` · ${mode.value === "dedicated" ? "Dedicated" : "Embedded"}`;
     const modeHint = form.querySelector("#execution-mode-hint");
     if (modeHint) {
-      modeHint.textContent = nativeRefused
-        ? "Codex uses Dedicated execution. Dedicated OpenClaw is unavailable because this installation's OpenClaw runtime lacks native worker support, so OpenClaw uses Embedded execution. Slack requires Codex."
-        : "Codex uses Dedicated execution. OpenClaw supports Dedicated or Embedded execution. Slack requires Dedicated execution.";
+      modeHint.textContent =
+        embeddedRefused && dedicatedRefused
+          ? "Codex uses Dedicated execution. OpenClaw is unavailable on this installation. Slack requires Codex."
+          : nativeRefused
+            ? "Codex uses Dedicated execution. Dedicated OpenClaw is unavailable because this installation has no Sandbox Driver that can provision it, or its OpenClaw runtime lacks native worker support. Embedded OpenClaw works only when the installation selects no Sandbox Driver. Slack requires Codex."
+            : embeddedRefused
+              ? "Codex uses Dedicated execution. This installation selects a Sandbox Driver, so OpenClaw uses Dedicated execution too. Slack requires Dedicated execution."
+              : "Codex uses Dedicated execution. OpenClaw supports Dedicated or Embedded execution. Slack requires Dedicated execution.";
     }
     if (capabilityDiscoveryDone) {
       const nextStatus = shouldProvision()
@@ -1615,9 +1727,15 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     harnessHint.textContent =
       harness.disabled && usesPat
         ? "This saved service account token requires Codex. Create a new draft without a Preset to use OpenClaw with an API key."
-        : nativeRefused
-          ? "OpenClaw is available for both providers. This installation runs OpenClaw with Embedded execution only; choose Codex for Dedicated execution."
-          : "OpenClaw is available for both providers. With OpenAI it supports Dedicated or Embedded execution; Anthropic uses Embedded OpenClaw.";
+        : embeddedRefused && dedicatedRefused
+          ? "OpenClaw is unavailable on this installation: its selected Sandbox Driver refuses Embedded execution, and it cannot run Dedicated OpenClaw."
+          : nativeRefused && nativeProvider.value === "anthropic"
+            ? "OpenClaw is available for both providers. Anthropic uses Embedded OpenClaw, which works only when the installation selects no Sandbox Driver."
+            : nativeRefused
+              ? "OpenClaw is available for both providers. This installation cannot run Dedicated OpenClaw, and Embedded execution works only without a Sandbox Driver; choose Codex for Dedicated execution."
+              : embeddedRefused
+                ? "OpenClaw is available for OpenAI with Dedicated execution. Anthropic uses Embedded OpenClaw, which this installation refuses because it selects a Sandbox Driver."
+                : "OpenClaw is available for both providers. With OpenAI it supports Dedicated or Embedded execution; Anthropic uses Embedded OpenClaw.";
     if (binding?.method === "runtime") {
       harnessHint.textContent =
         "This Preset's operator-managed credentials require the OpenClaw harness.";
@@ -1731,6 +1849,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       outcomeUnknown ||
       !capabilityDiscoveryDone ||
       !nativeWorkersUnavailable.hidden ||
+      !openclawModeUnavailable.hidden ||
       credentialSourceRefused() ||
       Boolean(provisioningAttempt);
     checkCredentialRegistration.hidden = !credentialRegistration;
@@ -1798,6 +1917,8 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         defaultApprovers.refreshNames();
       }
       nativeWorkersAvailable = installation.capabilities?.nativeWorkers !== undefined;
+      const openclawModes = installation.capabilities?.openclaw?.executionModes;
+      openclawExecutionModes = Array.isArray(openclawModes) ? new Set(openclawModes) : undefined;
       credentialSourceTypes = installation.capabilities?.credentialSources?.types;
       provisionableExecutionModes.clear();
       for (const executionMode of installation.capabilities?.agentProvisioning?.executionModes ??
@@ -1805,6 +1926,19 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         provisionableExecutionModes.add(executionMode);
       }
       capabilityDiscoveryDone = true;
+      // A mode the form chose but the Installation refuses becomes the usable one, if any.
+      if (
+        openclawExecutionModes !== undefined &&
+        modeDefaulted &&
+        harness.value === "openclaw" &&
+        !embeddedRequired() &&
+        !savedConfiguration &&
+        !openclawModeUsable(mode.value) &&
+        openclawModeUsable(defaultOpenClawMode())
+      ) {
+        mode.value = defaultOpenClawMode();
+        renderChannelEditor();
+      }
     } catch (error) {
       if (!context.isCurrent()) {
         return;
@@ -1867,6 +2001,10 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         mutationStarted &&
         !error.provisioningTerminal &&
         ![400, 403, 404, 409, 429].includes(error.status);
+      // A refused request that names its reason is shown as sent. An outage keeps Retry, since
+      // the same request ID cannot duplicate the job, but leads with the reason instead of
+      // "Outcome unknown" (finding 1609).
+      const reason = namedRefusal(error);
       // The API refuses to retry a job whose Namespace or Agent lifecycle changed, that was
       // cancelled or handed off, or whose Secret was deleted; that job can never finish. A
       // refusal that names its reason is shown as sent; a race in the store can still
@@ -1881,7 +2019,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         detail =
           "Outcome unknown after provisioning admission. Retry resumes the accepted provisioning job, or retries it if it failed. If the API refuses because the job finished, select Create Agent to resend the same request ID.";
       } else if (outcomeUnknown) {
-        detail = "Outcome unknown. Retry resubmits the same request ID and saved references.";
+        detail = `${reason ?? "Outcome unknown."} Retry resubmits the same request ID and saved references.`;
       } else if (error.provisioningTerminal && error.canRetryProvisioning) {
         detail = `${error.message} Retry uses the accepted provisioning job.`;
       } else if (error.provisioningStopped) {
@@ -1901,6 +2039,8 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       } else if (recovering && error.status === 409) {
         detail =
           "The provisioning job can no longer be retried; it may have finished. Select Create Agent to resend the same request ID and open its result.";
+      } else if (reason !== undefined && error.code !== "NAMESPACE_NOT_READY") {
+        detail = reason;
       } else {
         detail = rejectionMessage(error, mutationStarted);
       }
@@ -1971,6 +2111,8 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       provisioningAttempt ||
       (!savedAgent && repositoryRetryLocked()) ||
       !capabilityDiscoveryDone ||
+      !nativeWorkersUnavailable.hidden ||
+      !openclawModeUnavailable.hidden ||
       credentialSourceRefused() ||
       !form.reportValidity()
     ) {

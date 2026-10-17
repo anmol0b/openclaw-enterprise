@@ -689,9 +689,10 @@ test("OCC Fastify serves singleton, Namespace, Configuration, and Agent resource
 
   const singleton = await controller.request("GET", "/installation");
   assert.equal(singleton.status, 200);
+  // No Sandbox Driver is selected: Embedded OpenClaw is the one mode admission accepts (#2670).
   assert.deepEqual(singleton.data, {
     ...installation,
-    capabilities: { nativeWorkers: { support: "pinned-runtime" } },
+    capabilities: { openclaw: { executionModes: ["embedded"] } },
   });
   const bootstrappedDefault = await defaultNamespace(controller);
 
@@ -828,10 +829,7 @@ test("OCC Fastify serves singleton, Namespace, Configuration, and Agent resource
   assert.equal(auditEndpoint.status, 404);
 
   const unchanged = await controller.request("GET", "/installation");
-  assert.deepEqual(unchanged.data, {
-    ...installation,
-    capabilities: { nativeWorkers: { support: "pinned-runtime" } },
-  });
+  assert.deepEqual(unchanged.data, { ...installation, capabilities: singleton.data.capabilities });
 });
 
 test("Namespace IAM routes manage exact Role and AccessBinding policy through the selected Driver", async () => {
@@ -2832,9 +2830,11 @@ test("Installation API exposes Agent provisioning capabilities without configure
 
   const installation = await controller.request("GET", "/installation");
   assert.equal(installation.status, 200);
+  // Without a provisioning Sandbox Driver, dedicated OpenClaw cannot be admitted (finding 1608);
+  // without any Sandbox Driver, Embedded OpenClaw can (#2670). Bootstrap reports neither.
   assert.deepEqual(installation.data.capabilities, {
     ...bootstrapped.capabilities,
-    nativeWorkers: { support: "pinned-runtime" },
+    openclaw: { executionModes: ["embedded"] },
   });
 
   const backends = await controller.request("GET", "/backends");

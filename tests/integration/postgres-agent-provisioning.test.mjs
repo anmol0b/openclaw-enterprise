@@ -510,7 +510,7 @@ async function createFixture(context, options = {}) {
     if (options.beforeWorkerStatement !== undefined) {
       holdWorkerStatements(workerPool, options.beforeWorkerStatement);
     }
-    worker = createControllerWorker({
+    const started = createControllerWorker({
       pool: workerPool,
       drivers,
       pollIntervalMs: 15,
@@ -518,12 +518,19 @@ async function createFixture(context, options = {}) {
       maxAttempts: 3,
       emit: (event) => {
         options.onWorkerEvent?.(event);
-        // This persistence case ends at durable handoff, before credential service dispatch.
-        if (options.stopAfterProvisioning && event.code === "PROVISIONING_DEPLOYMENT_PENDING") {
-          workerCompletion = worker.stop();
+        // stopAfterProvisioning: this persistence case ends at durable handoff, before
+        // credential service dispatch. stopWorkerAfter: the run ends inside the pass that
+        // emitted the event, so a retry whose jittered backoff is already due cannot be claimed
+        // before the test stops the worker (finding 1610).
+        if (
+          (options.stopAfterProvisioning && event.code === "PROVISIONING_DEPLOYMENT_PENDING") ||
+          options.stopWorkerAfter?.(event)
+        ) {
+          workerCompletion ??= started.stop();
         }
       },
     });
+    worker = started;
     await worker.start();
   }
 
@@ -1945,6 +1952,8 @@ test(
     assert.equal(replay.status, 503, JSON.stringify(replay.body));
     const retry = await switched.request("POST", `${admitted.data.provisioning.url}/retry`);
     assert.equal(retry.status, 503, JSON.stringify(retry.body));
+    const { workId } = admitted.data.provisioning;
+    const ended = (event) => event.event === "worker.completed" && event.workId === workId;
     const events = [];
     const worker = await createFixture(context, {
       ...drivers,
@@ -1953,15 +1962,16 @@ test(
         id: "credential-gateway-replacement",
       },
       onWorkerEvent: (event) => events.push(event),
+      // Stop in the pass that ends the first attempt: its retry can be due at once (finding 1610).
+      stopWorkerAfter: ended,
     });
     await worker.startWorker();
-    await waitFor("the worker to revalidate the source owner", async () =>
-      events.find(
-        ({ event, workId }) =>
-          event === "worker.completed" && workId === admitted.data.provisioning.workId,
-      ),
-    );
+    await waitFor("the worker to revalidate the source owner", async () => events.find(ended));
     await worker.stopWorker();
+    assert.deepEqual(
+      events.filter(ended).map(({ attempt, outcome, code }) => ({ attempt, outcome, code })),
+      [{ attempt: 1, outcome: "retry", code: "PROVISIONING_DEPENDENCY_UNAVAILABLE" }],
+    );
     const row = await provisioningRow(fixture.pool, namespace.id, body.requestId);
     assert.equal(row.completed_phase, "admitted");
     assert.equal(row.agent_id, null);
@@ -2909,6 +2919,54 @@ test(
 );
 
 test(
+  "a new dedicated OpenClaw request without a provisioning Sandbox Driver is refused with a 409 naming it",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (context) => {
+    const fixture = await createFixture(context, {
+      computeDriver: createRuntimeComputeDriver(),
+      configurationDriver: createProvisioningConfigurationDriver({
+        id: "configuration-provisioning-no-sandbox",
+      }),
+      secretDriver: createTestSecretDriver({ id: "secret-provisioning" }),
+    });
+    const namespace = await fixture.bootstrapNamespace();
+    // The Installation cannot admit dedicated OpenClaw, so it does not report native workers.
+    const installation = await fixture.request("GET", "/installation");
+    assert.equal(installation.status, 200, JSON.stringify(installation.body));
+    assert.equal(installation.data.capabilities?.nativeWorkers, undefined);
+    const secrets = await createProvisioningSecrets(fixture, namespace.id);
+    const body = provisioningBody(namespace.id, secrets);
+    body.configuration.values.agents.defaults = {
+      model: "openai/gpt-5",
+      models: { "openai/gpt-5": { agentRuntime: { id: "openclaw" } } },
+    };
+    // A fixed Installation shape refuses every attempt the same way: a 409 with the reason,
+    // not a 503 the Console reads as an unknown outcome (finding 1609).
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const refused = await fixture.request(
+        "POST",
+        `/namespaces/${namespace.id}/agents/provision`,
+        { body },
+      );
+      assert.equal(refused.status, 409, JSON.stringify(refused.body));
+      assert.deepEqual(refused.body.error, {
+        code: "RESOURCE_CONFLICT",
+        message:
+          "Dedicated OpenClaw requires a provisioning SandboxDriver with networking, filesystem, and process containment.",
+      });
+    }
+    // The refusal stored nothing: no provisioning job or Agent.
+    const stored = await fixture.pool.query(
+      `SELECT
+       (SELECT count(*)::integer FROM occ.agent_provisioning_work WHERE namespace_id = $1) AS jobs,
+       (SELECT count(*)::integer FROM occ.agents WHERE namespace_id = $1) AS agents`,
+      [namespace.id],
+    );
+    assert.deepEqual(stored.rows[0], { jobs: 0, agents: 0 });
+  },
+);
+
+test(
   "losing native Sandbox containment before the worker runs leaves provisioning retryable without effects",
   { ...requiresPostgres, timeout: 60_000 },
   async (context) => {
@@ -2944,6 +3002,9 @@ test(
 
     // The selected Driver has lost process containment since admission. The worker must
     // revalidate the complete Sandbox contract before creating any provisioning resources.
+    // The retry's jittered backoff can be due at once, so the worker stops in the pass that
+    // ends this work's first attempt rather than after the test reads the event (finding 1610).
+    const { workId } = admitted.data.provisioning;
     const completed = [];
     const switched = await createFixture(context, {
       ...drivers,
@@ -2953,15 +3014,18 @@ test(
           completed.push(event);
         }
       },
+      stopWorkerAfter: (event) => event.event === "worker.completed" && event.workId === workId,
     });
     await switched.startWorker();
-    const first = await waitFor("the worker to finish its first provisioning attempt", async () =>
-      completed.find(({ workId }) => workId === admitted.data.provisioning.workId),
+    await waitFor("the worker to finish its first provisioning attempt", async () =>
+      completed.find((event) => event.workId === workId),
     );
     await switched.stopWorker();
     assert.deepEqual(
-      { attempt: first.attempt, outcome: first.outcome, code: first.code },
-      { attempt: 1, outcome: "retry", code: "PROVISIONING_DEPENDENCY_UNAVAILABLE" },
+      completed
+        .filter((event) => event.workId === workId)
+        .map(({ attempt, outcome, code }) => ({ attempt, outcome, code })),
+      [{ attempt: 1, outcome: "retry", code: "PROVISIONING_DEPENDENCY_UNAVAILABLE" }],
     );
     const row = await provisioningRow(switched.pool, namespace.id, body.requestId);
     assert.equal(row.status, "running");
@@ -2997,6 +3061,12 @@ test(
     const retried = await switched.request("POST", `${admitted.data.provisioning.url}/retry`);
     assert.equal(retried.status, 503, JSON.stringify(retried.body));
     assert.equal(retried.body.error.message, message);
+    // Replaying the accepted request ID reads the stored work too: the same retryable 503, not
+    // the 409 a new request gets for the fixed Installation shape (finding 1614).
+    const provisionPath = `/namespaces/${namespace.id}/agents/provision`;
+    const replayed = await switched.request("POST", provisionPath, { body });
+    assert.equal(replayed.status, 503, JSON.stringify(replayed.body));
+    assert.equal(replayed.body.error.message, message);
     const restoredStatus = await fixture.request("GET", admitted.data.provisioning.url);
     assert.equal(restoredStatus.status, 200, JSON.stringify(restoredStatus.body));
     assert.equal(restoredStatus.data.status, "queued");
@@ -3103,6 +3173,7 @@ test(
     const secretDriver = createTestSecretDriver({ id: "secret-provisioning" });
     const implementation = secretDriver.implementation;
     let breakSecretDriver = false;
+    let workId;
     const completed = [];
     const fixture = await createFixture(context, {
       configurationDriver: createProvisioningConfigurationDriver({
@@ -3119,6 +3190,10 @@ test(
           completed.push(event);
         }
       },
+      // Stop in the pass that ends the first attempt: its retry can be due at once (finding 1610).
+      // workId is unset while bootstrapNamespace runs the worker.
+      stopWorkerAfter: (event) =>
+        workId !== undefined && event.event === "worker.completed" && event.workId === workId,
     });
     context.after(() => {
       secretDriver.implementation = implementation;
@@ -3134,20 +3209,39 @@ test(
     // No usable Secret Driver is an outage, not an ownership refusal: the worker keeps the
     // generic message and retries the work.
     breakSecretDriver = true;
+    workId = admitted.data.provisioning.workId;
     await fixture.startWorker();
-    const first = await waitFor("the worker to finish its first provisioning attempt", async () =>
-      completed.find(({ workId }) => workId === admitted.data.provisioning.workId),
+    await waitFor("the worker to finish its first provisioning attempt", async () =>
+      completed.find((event) => event.workId === workId),
     );
     await fixture.stopWorker();
     assert.deepEqual(
-      { attempt: first.attempt, outcome: first.outcome, code: first.code },
-      { attempt: 1, outcome: "retry", code: "PROVISIONING_DEPENDENCY_UNAVAILABLE" },
+      completed
+        .filter((event) => event.workId === workId)
+        .map(({ attempt, outcome, code }) => ({ attempt, outcome, code })),
+      [{ attempt: 1, outcome: "retry", code: "PROVISIONING_DEPENDENCY_UNAVAILABLE" }],
     );
+    const work = await fixture.pool.query(
+      "SELECT state, reason_code, attempt_count FROM occ.controller_work WHERE idempotency_key = $1",
+      [workId],
+    );
+    assert.deepEqual(work.rows, [{ state: "queued", reason_code: null, attempt_count: 1 }]);
     const row = await provisioningRow(fixture.pool, namespace.id, body.requestId);
     assert.deepEqual(row.progress.error, {
       code: "PROVISIONING_DEPENDENCY_UNAVAILABLE",
       message: "Agent provisioning could not complete.",
     });
+
+    // The retry stays queued in the database the file's later tests share; cancel it so no
+    // later worker picks it up (finding 1616).
+    const cleanupClaim = await claimProvisioningWork(fixture.pool, workId);
+    const cancelled = await fixture.state.transact((unit) =>
+      unit.provisioning.cancel(cleanupClaim, {
+        code: "PROVISIONING_CANCELLED",
+        message: "Secret Driver outage test completed after its first attempt",
+      }),
+    );
+    assert.equal(cancelled.status, "cancelled");
   },
 );
 
