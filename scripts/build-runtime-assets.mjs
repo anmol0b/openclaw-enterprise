@@ -298,7 +298,7 @@ if (command === "inputs") {
       {
         source: "https://github.com/openclaw/openclaw",
         commit: process.env.GIT_COMMIT,
-        sourceArchiveSha256: "4e17da309a6493881c941f4be650b2aca299bcf5900997f4049fc517809682ad",
+        sourceArchiveSha256: "a1eab6e37697cd4a50aeae2cd710ce5f0aee0a275dee3aac3ed8a9ade483197a",
         openclawBridgePatchSha256:
           "1d8b670e7029872262375a21da7222768c2fe2390ff7a159ed1616ee9c9de1ca",
         openclawConnectPatchSha256:
