@@ -34,6 +34,7 @@ import {
   createNativePluginAssertions,
 } from "../helpers/plugin-driver-real.mjs";
 import {
+  assertExposedCodexInitializes,
   createOpenShellInstallationConfiguration,
   createOpenShellKubernetesFixture,
   createOpenShellServiceLoopbackLookup,
@@ -7004,8 +7005,10 @@ test(
           `Codex must reject ${token === undefined ? "missing" : "incorrect"} bearer authentication.`,
         );
       }
+      // Retry only endpoint availability above. Preserve the first protocol failure on this route.
+      await assertExposedCodexInitializes(topology.harnessServiceUrl, topology.appServerToken);
       process.stderr.write(
-        "OpenShell integration: create-time route reached protected Harness; starting real shell turns through the Agent Gateway.\n",
+        "OpenShell integration: exposed Codex initialized; starting real shell turns through the Agent Gateway.\n",
       );
       await requestGatewayTurns(context, topology, "codex");
       process.stderr.write(

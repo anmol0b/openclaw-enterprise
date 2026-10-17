@@ -3138,7 +3138,7 @@ export const scenarios = {
     deployed: true,
     candidateDeploymentStatus: "queued",
     description:
-      "v7 is admitted and queued without a live worker claim. v6 remains selected; serving is unverified.",
+      "v7 is admitted and queued without a live worker claim. v6 remains selected; serving is unverified. Deployment details keep Last recorded result, Reason and Since rows (not recorded yet), so the first result fills them in place.",
   },
   deploymentRunning: {
     group: "Pages/Agent detail",
@@ -3309,9 +3309,23 @@ export const scenarios = {
     description:
       "Recovery comes first: v7 failed its startup model check, while selected v6 may have stopped. The detailed record preserves the reported cause without assuming a credential problem.",
     steps: [
-      "Open v7 Logs and confirm the failed version, then go Back. Open Configuration goes to the draft without deploying.",
+      "Open v7 Logs and confirm the failed version, then go Back. Open Configuration goes to the draft without deploying, scrolls it into view and focuses its Configuration tab.",
       "At phone width, the failure, both recovery links, and selected version are still near the top.",
     ],
+  },
+  deploymentModelProbeRetried: {
+    group: "Pages/Agent detail",
+    name: "New version failed its model check after a retry",
+    path: candidateVersion,
+    deployed: true,
+    candidateDeploymentStatus: "failed",
+    candidateModelProbeCause: { kind: "PROBE_STATUS", detail: "rate_limit-attempt2" },
+    description:
+      "The startup model check was retried once. On the second attempt, the provider reported a rate limit.",
+    steps: [
+      "In the failed deployment, confirm the Cause gives the rate or usage limit advice and says the check was retried once and failed again.",
+    ],
+    gap: "The failure is simulated; it does not prove the runtime's retry or the provider's limit.",
   },
   deploymentModelProbeFailedReadOnly: {
     group: "Pages/Agent detail",
@@ -3338,7 +3352,9 @@ export const scenarios = {
     agentPermissionSummary: { update: false, deploy: true, operate: false, delete: false },
     description:
       "Recovery offers Open version draft when the viewer may deploy but cannot update the Agent. Configuration access is separate.",
-    steps: ["Select Open version draft and confirm the Configuration tab opens without deploying."],
+    steps: [
+      "Select Open version draft and confirm the Configuration tab opens in view, focused, without deploying.",
+    ],
     gap: "The failure and permissions are simulated; this story does not verify API authorization or deployment.",
   },
   deploymentFailedAfterSelection: {
