@@ -1830,12 +1830,18 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
     const call = structuredClone(dispatchedCall);
     call.content[0].arguments.args = { action: "run", jobId: "fixture-job" };
     const result = { ...rows[6], toolCallId: "dispatched-call", toolName: "dispatch_action" };
-    replaceTranscript(dispatchedMessages(call, result));
     const options = { ...denial, turnMarker: "dispatched-fixture" };
-    assert.equal(
-      (await native.assertSessionToolPolicyDeniedEvidence({}, options)).targetId,
-      "openclaw:core:automations",
-    );
+    for (const details of [
+      undefined,
+      { status: "error", tool: "dispatch_action", error: "Automation not found: fixture-job" },
+    ]) {
+      result.details = details;
+      replaceTranscript(dispatchedMessages(call, result));
+      assert.equal(
+        (await native.assertSessionToolPolicyDeniedEvidence({}, options)).targetId,
+        "openclaw:core:automations",
+      );
+    }
     await assert.rejects(
       native.assertSessionToolPolicyDeniedEvidence(
         {},
@@ -1845,6 +1851,15 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
         },
       ),
       /exact requested action and target/,
+    );
+    result.details = {
+      tool: { ...envelope.tool, name: "nodes" },
+      result: { content: result.content },
+    };
+    replaceTranscript(dispatchedMessages(call, result));
+    await assert.rejects(
+      native.assertSessionToolPolicyDeniedEvidence({}, options),
+      /the refusal must belong to the attempted target/,
     );
   });
 

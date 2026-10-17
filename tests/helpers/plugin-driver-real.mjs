@@ -628,7 +628,9 @@ const sessionEvidenceScript = String.raw`
         if (resultPrefix !== undefined) turn(resultPrefix).toolResultMirrorSeen = true;
         const call = calls.find((call) => call.id === message.toolCallId);
         const envelope = call.targetId ? message.details : undefined;
-        const hasEnvelope = envelope?.tool !== undefined || envelope?.result !== undefined;
+        // Thrown errors name the dispatcher as a string; canonical results carry tool metadata.
+        const hasEnvelope = (envelope?.tool !== null && typeof envelope?.tool === "object") ||
+          envelope?.result !== undefined;
         const matchesTarget = !call.targetId || (message.toolName === call.name && (hasEnvelope
           ? envelope.tool?.name === toolName && envelope.tool?.source === "openclaw" &&
             envelope.tool?.id === (call.targetId === toolName ? "openclaw:core:" + toolName : call.targetId) &&
