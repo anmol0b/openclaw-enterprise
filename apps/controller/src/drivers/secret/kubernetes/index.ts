@@ -22,7 +22,10 @@ import {
   ResourceConflictError,
   ScopeViolationError,
 } from "@openclaw-enterprise/occ";
-import { resolveKubernetesControlNamespace } from "../../compute/kubernetes/index.ts";
+import {
+  type PreprovisionedKubernetesNamespace,
+  resolveKubernetesControlNamespace,
+} from "../../compute/kubernetes/index.ts";
 import { withComputeOperationDeadline } from "../../compute/operation-context.ts";
 import { createKubernetesClientConfiguration } from "../../kubernetes/client.ts";
 import { kubernetesRequest } from "../../kubernetes/request.ts";
@@ -39,6 +42,7 @@ export interface KubernetesSecretDriverOptions {
 }
 
 interface KubernetesSecretDriverSelection {
+  readonly preprovisionedNamespace?: PreprovisionedKubernetesNamespace | undefined;
   readonly id?: string;
   readonly implementation?: string;
 }
@@ -182,6 +186,7 @@ export class KubernetesSecretDriver implements SecretDriver {
   readonly id: string;
   readonly capability = "secret" as const;
   readonly implementation: string;
+  private readonly preprovisionedNamespace: PreprovisionedKubernetesNamespace | undefined;
   private readonly options: KubernetesSecretDriverOptions;
   private client: Promise<CoreV1Api> | undefined;
 
@@ -195,6 +200,7 @@ export class KubernetesSecretDriver implements SecretDriver {
     if (this.implementation !== IMPLEMENTATION) {
       throw new SecretValidationError("Unsupported Kubernetes Secret implementation.");
     }
+    this.preprovisionedNamespace = selection.preprovisionedNamespace;
     this.options = Object.freeze({ authentication: Object.freeze({ ...options.authentication }) });
   }
 
@@ -576,7 +582,9 @@ export class KubernetesSecretDriver implements SecretDriver {
   private async readyNamespace(client: CoreV1Api, namespaceId: string): Promise<string> {
     try {
       const placement = await this.request(
-        () => resolveKubernetesControlNamespace(client, namespaceId),
+        () =>
+          this.preprovisionedNamespace?.read(client, namespaceId) ??
+          resolveKubernetesControlNamespace(client, namespaceId),
         "namespace verification",
       );
       return placement.name;

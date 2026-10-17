@@ -354,3 +354,7 @@ preparedGitHub:
   issuerPort: 443
   # Optional public ca.crt for an explicitly configured private HTTPS issuer.
   issuerCaConfigMapName: ""
+
+# Closed OpenShell canary only: operator-owned Namespace, no initialization Job.
+# Bind the existing OCE Namespace ID and independently observed Kubernetes UID.
+preprovisionedNamespace: {}

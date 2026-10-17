@@ -1,3 +1,4 @@
+import { networkPolicySpecToJson } from "../kubernetes/network-policy.ts";
 import {
   openShellEgressConfiguration,
   type OpenShellProxyOptions,
@@ -7,6 +8,7 @@ import {
   KubernetesObjectApi,
   type KubernetesObject,
   type V1Deployment,
+  type V1NetworkPolicySpec,
   PatchStrategy,
 } from "@kubernetes/client-node";
 import {
@@ -150,6 +152,7 @@ export interface OpenShellSandboxDriverOptions {
 }
 
 export interface OpenShellSandboxDriverSelection {
+  readonly operatorOwnedKubernetesResources?: boolean;
   readonly id?: string;
   readonly implementation?: string;
   readonly backend: Backend<OpenShellGateway>;
@@ -2449,6 +2452,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   readonly harnessHome = OPENSHELL_HOME;
   private readonly options: OpenShellSandboxDriverOptions;
   private readonly backend: Backend<OpenShellGateway>;
+  private readonly operatorOwnedKubernetesResources: boolean;
 
   static validateConfiguration(configuration: unknown): void {
     validateConfiguration(configuration);
@@ -2473,6 +2477,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     this.options = options;
     this.backend = selection.backend;
+    this.operatorOwnedKubernetesResources = selection.operatorOwnedKubernetesResources === true;
   }
 
   configureAgent(
@@ -2580,9 +2585,80 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   private async ensureNamespaceWorkspace(context: SandboxNamespaceContext): Promise<void> {
     this.requireOperatorWorkspaceMode("ensure a Namespace");
     const namespace = namespaceName(context.namespace);
-    await applyOperatorNamespaceLabels(context, this.options.gateway.operatorNamespaceLabels);
-    await applyResources(context, this.options.gateway.operatorWorkspaceResources);
-    await applyResources(context, this.options.gateway.networkPolicyResources);
+    if (this.operatorOwnedKubernetesResources) {
+      const api = kubernetes(context);
+      const observed = await api.read({
+        apiVersion: "v1",
+        kind: "Namespace",
+        metadata: { name: namespace },
+      });
+      for (const [key, value] of Object.entries(
+        this.options.gateway.operatorNamespaceLabels ?? {},
+      )) {
+        if (observed.metadata?.labels?.[key] !== value) {
+          throw new OpenShellSandboxConfigurationFailure(
+            "Operator Namespace labels do not match the OpenShell configuration.",
+          );
+        }
+      }
+      for (const resource of [
+        ...(this.options.gateway.operatorWorkspaceResources ?? []),
+        ...(this.options.gateway.networkPolicyResources ?? []),
+      ]) {
+        const expected = withNamespace(resource, context);
+        const actual = await api.read(resourceReference(resource, namespace));
+        const authorityFields = (value: KubernetesObject) =>
+          Object.fromEntries(
+            Object.entries(value).filter(
+              ([key, field]) => key !== "metadata" && key !== "status" && field !== undefined,
+            ),
+          );
+        const observedFields = authorityFields(actual);
+        if (actual.kind === "NetworkPolicy" && Object.hasOwn(observedFields, "spec")) {
+          observedFields.spec = networkPolicySpecToJson(observedFields.spec as V1NetworkPolicySpec);
+        }
+        if (
+          // SDK models carry prototypes; compare their full JSON content with the wire manifest.
+          !isDeepStrictEqual(
+            JSON.parse(JSON.stringify(observedFields)),
+            authorityFields(expected),
+          ) ||
+          actual.metadata?.name !== expected.metadata?.name ||
+          actual.metadata?.namespace !== namespace
+        ) {
+          throw new OpenShellSandboxConfigurationFailure(
+            "Operator workspace resource does not match the OpenShell configuration.",
+          );
+        }
+        for (const key of ["labels", "annotations"] as const) {
+          for (const [name, value] of Object.entries(expected.metadata?.[key] ?? {})) {
+            if (actual.metadata?.[key]?.[name] !== value) {
+              throw new OpenShellSandboxConfigurationFailure(
+                "Operator workspace resource ownership does not match.",
+              );
+            }
+          }
+        }
+        if (
+          actual.metadata?.deletionTimestamp ||
+          (actual.kind === "ServiceAccount" &&
+            Object.keys(actual.metadata?.annotations ?? {}).some(
+              (key) =>
+                !Object.hasOwn(expected.metadata?.annotations ?? {}, key) &&
+                key !== "meta.helm.sh/release-name" &&
+                key !== "meta.helm.sh/release-namespace",
+            ))
+        ) {
+          throw new OpenShellSandboxConfigurationFailure(
+            "Operator workspace resource is terminating or has unexpected credential configuration.",
+          );
+        }
+      }
+    } else {
+      await applyOperatorNamespaceLabels(context, this.options.gateway.operatorNamespaceLabels);
+      await applyResources(context, this.options.gateway.operatorWorkspaceResources);
+      await applyResources(context, this.options.gateway.networkPolicyResources);
+    }
     if (this.options.gateway.readiness !== undefined) {
       await waitForGatewayReadiness(context, this.options.gateway.readiness);
     }
@@ -3124,6 +3200,9 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         await this.deleteRuntimeProfileIfUnused(client, workspace.name, profileId, context.signal);
       }
       await client.deleteWorkspace(workspace.name, context.signal);
+    }
+    if (this.operatorOwnedKubernetesResources) {
+      return;
     }
     const resources = [
       ...(this.options.gateway.operatorWorkspaceResources ?? []),

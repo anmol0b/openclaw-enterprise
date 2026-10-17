@@ -338,6 +338,10 @@ spec:
             {{- end }}
             - name: OCC_CONFIG_PATH
               value: /etc/openclaw/installation/installation.yaml
+            {{- with $.Values.preprovisionedNamespace }}
+            - name: OCC_PREPROVISIONED_NAMESPACE
+              value: {{ . | toJson | quote }}
+            {{- end }}
             {{- include "openclaw.secretEnv" (dict "name" "OCC_DATABASE_URL" "secretName" $.Values.database.secretName "key" $.Values.database.appUrlKey) | nindent 12 }}
             {{- if $.Values.gatewayRouting.enabled }}
             - name: OCC_GATEWAY_API_KEY_PATH

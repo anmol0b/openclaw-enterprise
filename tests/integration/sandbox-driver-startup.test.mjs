@@ -4215,3 +4215,240 @@ test("OpenShell preparer cleanup preserves retryable work on cancellation and tr
     });
   }
 });
+
+test("OpenShell verifies operator NetworkPolicy from actual KubernetesObjectApi deserialization", async () => {
+  const configuration = sandboxInstallation().drivers.sandbox.configuration;
+  const policy = {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "NetworkPolicy",
+    metadata: { name: "operator-ingress" },
+    spec: {
+      podSelector: { matchLabels: { app: "sandbox" } },
+      policyTypes: ["Ingress"],
+      ingress: [
+        {
+          from: [{ podSelector: { matchLabels: { app: "worker" } } }],
+          ports: [{ protocol: "TCP", port: 8080 }],
+        },
+      ],
+    },
+  };
+  configuration.gateway.networkPolicyResources = [policy];
+  const gatewayClient = workspaceGatewayClient();
+  const driver = new OpenShellSandboxDriver(configuration, {
+    id: "openshell-sandbox",
+    implementation: "openshell",
+    backend: backendFor(gatewayClient),
+    operatorOwnedKubernetesResources: true,
+  });
+  const context = namespaceContext();
+  const api = new KubernetesObjectApi();
+  const metadata = {
+    ...policy.metadata,
+    namespace: context.namespace.name,
+    labels: {
+      "app.kubernetes.io/managed-by": "openclaw-enterprise",
+      "openclaw.dev/namespace": context.namespace.id,
+    },
+    annotations: { "openclaw.dev/namespace-id": context.namespace.id },
+  };
+  let wire = { ...structuredClone(policy), metadata };
+  // Replace transport only: read() still resolves the resource and processes the SDK response.
+  api.apiVersionResourceCache = {
+    v1: { resources: [{ name: "namespaces", kind: "Namespace", namespaced: false }] },
+    "networking.k8s.io/v1": {
+      resources: [{ name: "networkpolicies", kind: "NetworkPolicy", namespaced: true }],
+    },
+  };
+  const { createConfiguration, ServerConfiguration } = controllerRequire("@kubernetes/client-node");
+  api.configuration = createConfiguration({
+    baseServer: new ServerConfiguration("http://127.0.0.1:9", {}),
+  });
+  api.requestPromise = async (request) => {
+    const value = request.getUrl().includes("/networkpolicies/")
+      ? wire
+      : { apiVersion: "v1", kind: "Namespace", metadata: { name: context.namespace.name } };
+    return api.processResponse({
+      httpStatusCode: 200,
+      headers: { "content-type": "application/json" },
+      body: { text: async () => JSON.stringify(value) },
+    });
+  };
+  context.kubernetes = api;
+  const observed = await api.read(wire);
+  assert.ok(observed.spec.ingress[0]._from);
+  assert.equal(observed.spec.ingress[0].from, undefined);
+  await driver.ensureNamespace(context);
+  assert.equal(callCount(gatewayClient, "createWorkspace"), 1);
+  for (const mutate of [
+    (value) => {
+      value.spec.ingress[0].from = [{}];
+    },
+    (value) => {
+      value.spec.ingress[0].ports[0].port = 9090;
+    },
+  ]) {
+    wire = { ...structuredClone(policy), metadata };
+    mutate(wire);
+    await assert.rejects(
+      driver.ensureNamespace(context),
+      /Operator workspace resource does not match/,
+    );
+  }
+
+  // Configuration is a wire manifest: an SDK-only alias must not be repaired into a match.
+  wire = { ...structuredClone(policy), metadata };
+  const malformed = structuredClone(configuration);
+  const rule = malformed.gateway.networkPolicyResources[0].spec.ingress[0];
+  rule._from = rule.from;
+  delete rule.from;
+  const malformedDriver = new OpenShellSandboxDriver(malformed, {
+    id: "openshell-sandbox",
+    implementation: "openshell",
+    backend: backendFor(gatewayClient),
+    operatorOwnedKubernetesResources: true,
+  });
+  await assert.rejects(
+    malformedDriver.ensureNamespace(context),
+    /Operator workspace resource does not match/,
+  );
+});
+
+for (const kind of ["Role", "RoleBinding"]) {
+  test(`OpenShell verifies operator ${kind} from actual KubernetesObjectApi deserialization`, async () => {
+    const context = namespaceContext();
+    const role = {
+      apiVersion: "rbac.authorization.k8s.io/v1",
+      kind: "Role",
+      metadata: { name: "workspace-reader" },
+      rules: [{ apiGroups: [""], resources: ["pods"], verbs: ["get"] }],
+    };
+    const binding = {
+      apiVersion: "rbac.authorization.k8s.io/v1",
+      kind: "RoleBinding",
+      metadata: { name: "workspace-reader" },
+      roleRef: { apiGroup: "rbac.authorization.k8s.io", kind: "Role", name: role.metadata.name },
+      subjects: [
+        { kind: "ServiceAccount", name: "openshell-sandbox", namespace: context.namespace.name },
+      ],
+    };
+    const resource = kind === "Role" ? role : binding;
+    const configuration = sandboxInstallation().drivers.sandbox.configuration;
+    configuration.gateway.operatorWorkspaceResources = [resource];
+    const gatewayClient = workspaceGatewayClient();
+    const driver = new OpenShellSandboxDriver(configuration, {
+      id: "openshell-sandbox",
+      implementation: "openshell",
+      backend: backendFor(gatewayClient),
+      operatorOwnedKubernetesResources: true,
+    });
+    const metadata = {
+      ...resource.metadata,
+      namespace: context.namespace.name,
+      labels: {
+        "app.kubernetes.io/managed-by": "openclaw-enterprise",
+        "openclaw.dev/namespace": context.namespace.id,
+      },
+      annotations: { "openclaw.dev/namespace-id": context.namespace.id },
+    };
+    let wire = { ...structuredClone(resource), metadata };
+    let addUnknown = false;
+    const { createConfiguration, ServerConfiguration, V1PolicyRule, RbacV1Subject } =
+      controllerRequire("@kubernetes/client-node");
+    const api = new KubernetesObjectApi(
+      createConfiguration({
+        baseServer: new ServerConfiguration("http://127.0.0.1:9", {}),
+      }),
+    );
+    api.apiVersionResourceCache = {
+      v1: { resources: [{ name: "namespaces", kind: "Namespace", namespaced: false }] },
+      "rbac.authorization.k8s.io/v1": {
+        resources: [
+          { name: "roles", kind: "Role", namespaced: true },
+          { name: "rolebindings", kind: "RoleBinding", namespaced: true },
+        ],
+      },
+    };
+    // Keep read() and SDK deserialization real; only replace the HTTP transport.
+    api.requestPromise = async (request) => {
+      const isResource = request.getUrl().includes("/rbac.authorization.k8s.io/");
+      const observed = await api.processResponse({
+        httpStatusCode: 200,
+        headers: { "content-type": "application/json" },
+        body: {
+          text: async () =>
+            JSON.stringify(
+              isResource
+                ? wire
+                : {
+                    apiVersion: "v1",
+                    kind: "Namespace",
+                    metadata: { name: context.namespace.name },
+                  },
+            ),
+        },
+      });
+      if (isResource && addUnknown) {
+        // Preserve future/extension fields that reach the comparison boundary.
+        (kind === "Role" ? observed.rules[0] : observed.subjects[0]).unexpected = true;
+      }
+      return observed;
+    };
+    context.kubernetes = api;
+    const observed = await api.read(wire);
+    assert.ok(
+      kind === "Role"
+        ? observed.rules[0] instanceof V1PolicyRule
+        : observed.subjects[0] instanceof RbacV1Subject,
+    );
+    await driver.ensureNamespace(context);
+    assert.equal(callCount(gatewayClient, "createWorkspace"), 1);
+
+    // Every increase or change in RBAC authority must fail before Gateway access.
+    const mutations =
+      kind === "Role"
+        ? [
+            (value) => {
+              value.rules[0].verbs.push("delete");
+            },
+            (value) => {
+              value.rules[0].resources.push("secrets");
+            },
+            (value) => {
+              value.rules.push({ apiGroups: [""], resources: ["secrets"], verbs: ["get"] });
+            },
+          ]
+        : [
+            (value) => {
+              value.subjects[0].name = "different-account";
+            },
+            (value) => {
+              value.subjects.push({
+                kind: "ServiceAccount",
+                name: "extra-account",
+                namespace: context.namespace.name,
+              });
+            },
+            (value) => {
+              value.roleRef.name = "different-role";
+            },
+          ];
+    const callsBeforeRefusals = gatewayClient.calls.length;
+    for (const mutate of mutations) {
+      wire = { ...structuredClone(resource), metadata };
+      mutate(wire);
+      await assert.rejects(
+        driver.ensureNamespace(context),
+        /Operator workspace resource does not match/,
+      );
+    }
+    wire = { ...structuredClone(resource), metadata };
+    addUnknown = true;
+    await assert.rejects(
+      driver.ensureNamespace(context),
+      /Operator workspace resource does not match/,
+    );
+    assert.equal(gatewayClient.calls.length, callsBeforeRefusals);
+    assert.deepEqual(configuration.gateway.operatorWorkspaceResources, [resource]);
+  });
+}

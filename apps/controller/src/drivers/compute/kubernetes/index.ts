@@ -1,3 +1,4 @@
+import { networkPolicySpecToJson } from "../../kubernetes/network-policy.ts";
 import {
   assertExecutionAdmission,
   preparedGitHubSourceFromRoute,
@@ -55,6 +56,7 @@ import type {
   V1ConfigMap,
   V1EnvVar,
   V1NetworkPolicyPeer,
+  V1NetworkPolicySpec,
   V1ObjectMeta,
   V1DeleteOptions,
   V1ResourceRequirements,
@@ -2106,6 +2108,93 @@ export function kubernetesGatewayNamespaceName(namespaceId: string): string {
   return `oce-gateways-${sha256Hex(required(namespaceId, "Platform Namespace ID"), 24)}`;
 }
 
+/**
+ * A single operator-provisioned Namespace, pinned after bootstrap by its server UID.
+ * This is installation input, never a tenant-selected placement or an adoption path.
+ */
+export class PreprovisionedKubernetesNamespace {
+  readonly namespaceId: string;
+  readonly name: string;
+  private readonly uid: string;
+  private readonly gateway: string;
+
+  readonly operatorPolicies: readonly { readonly name: string; readonly spec: unknown }[];
+
+  constructor(
+    binding: string,
+    routing: KubernetesGatewayRoutingOptions,
+    policies: readonly Readonly<Record<string, unknown>>[] = [],
+  ) {
+    const { namespaceId, uid } = JSON.parse(binding);
+    if (
+      typeof namespaceId !== "string" ||
+      !/^ns_[a-zA-Z0-9_-]{1,60}$/.test(namespaceId) ||
+      typeof uid !== "string" ||
+      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(uid)
+    ) {
+      throw new ConfigurationFailure(
+        "A preprovisioned Namespace requires its exact OCE ID and Kubernetes UID.",
+      );
+    }
+    this.namespaceId = namespaceId;
+    this.name = kubernetesNamespaceName(namespaceId);
+    this.uid = uid;
+    this.operatorPolicies = Object.freeze(
+      policies.map((policy) => {
+        const metadata = asRecord(policy.metadata);
+        if (
+          policy.apiVersion !== "networking.k8s.io/v1" ||
+          !isNonEmptyString(metadata?.name) ||
+          (metadata.namespace !== undefined && metadata.namespace !== this.name) ||
+          !asRecord(policy.spec)
+        ) {
+          throw new ConfigurationFailure(
+            "Operator network policy must target this bound Namespace and declare its spec.",
+          );
+        }
+        return Object.freeze({ name: metadata.name, spec: structuredClone(policy.spec) });
+      }),
+    );
+    this.gateway = sha256Hex(`${routing.gatewayNamespace}/${routing.gatewayName}`, 12);
+    Object.freeze(this);
+  }
+
+  async read(client: CoreV1Api, namespaceId: string): Promise<{ readonly name: string }> {
+    if (namespaceId !== this.namespaceId) {
+      throw new OwnershipFailure(
+        "This Installation is bound to a different preprovisioned Namespace.",
+      );
+    }
+    const observed = await client.readNamespace({ name: this.name });
+    this.verify(observed);
+    return { name: this.name };
+  }
+
+  verify(observed: { metadata?: V1ObjectMeta; status?: { phase?: unknown } }): void {
+    const { metadata: m, status } = observed;
+    const labels = m?.labels ?? {};
+    if (
+      m?.name !== this.name ||
+      m.uid !== this.uid ||
+      m.deletionTimestamp !== undefined ||
+      status?.phase !== "Active" ||
+      m.annotations?.["openclaw.dev/namespace-lifecycle"] !== "preprovisioned" ||
+      m.annotations["openclaw.dev/namespace-id"] !== this.namespaceId ||
+      labels["app.kubernetes.io/managed-by"] !== MANAGER ||
+      labels["openclaw.dev/namespace"] !== this.namespaceId ||
+      labels["openclaw.dev/gateway-namespace"] !== this.namespaceId ||
+      labels[GATEWAY_MEMBERSHIP_LABEL] !== this.gateway ||
+      ["enforce", "audit", "warn"].some(
+        (mode) => labels[`pod-security.kubernetes.io/${mode}`] !== "restricted",
+      )
+    ) {
+      throw new OwnershipFailure(
+        "Preprovisioned Kubernetes Namespace identity, ownership, gateway membership, Pod Security or lifecycle does not match the Installation.",
+      );
+    }
+  }
+}
+
 /** Resolve the exact-owned storage target: shared tenant or two-cluster control namespace. */
 export async function resolveKubernetesControlNamespace(
   client: CoreV1Api,
@@ -2156,6 +2245,11 @@ function verifiedKubernetesNamespace(
   ) {
     throw new OwnershipFailure(
       `Refusing an unowned Kubernetes namespace for tenant ${namespaceId}.`,
+    );
+  }
+  if (annotations["openclaw.dev/namespace-lifecycle"] === "preprovisioned") {
+    throw new OwnershipFailure(
+      "This preprovisioned Namespace requires an explicit Installation binding.",
     );
   }
   const external = annotations["openclaw.dev/namespace-lifecycle"] === "external";
@@ -3091,6 +3185,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   });
   private readonly options: KubernetesComputeDriverOptions;
   private readonly sandboxDriver: SandboxDriver | undefined;
+  private readonly preprovisionedNamespace: PreprovisionedKubernetesNamespace | undefined;
   private readonly preparedRepositoryIngress: boolean;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
   private readonly proxyDriver: CredentialProxyDriver | undefined;
@@ -3467,6 +3562,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
       readonly lifecycleDrivers?: readonly Driver[];
       readonly sandboxDriver?: SandboxDriver;
       readonly preparedRepositoryIngress?: true;
+      readonly preprovisionedNamespace?: PreprovisionedKubernetesNamespace | undefined;
       readonly credentialGatewayDriver?: CredentialGatewayDriver;
       readonly proxyDriver?: CredentialProxyDriver;
       readonly nodeEnrollment?: GatewayNodeEnrollment;
@@ -3484,6 +3580,12 @@ export class KubernetesComputeDriver implements ComputeDriver {
       this.requiresAgentRuntimeCredentials = true;
     }
     this.sandboxDriver = selection.sandboxDriver;
+    this.preprovisionedNamespace = selection.preprovisionedNamespace;
+    if (this.preprovisionedNamespace && options.executionCluster) {
+      throw new ConfigurationFailure(
+        "A preprovisioned Namespace requires single-cluster Kubernetes execution.",
+      );
+    }
     this.preparedRepositoryIngress = selection.preparedRepositoryIngress === true;
     if (selection.credentialGatewayDriver !== undefined && selection.sandboxDriver === undefined) {
       throw new ConfigurationFailure(
@@ -3535,46 +3637,51 @@ export class KubernetesComputeDriver implements ComputeDriver {
       const observedVersion = kubernetesVersion(
         (await reachable(() => clients.version.getCode())).gitVersion,
       );
-      let continuation: string | undefined;
-      do {
-        const namespaces = await reachable(() =>
-          clients.core.listNamespace({
-            limit: this.options.executionCluster === undefined ? 100 : 1,
-            ...(continuation === undefined ? {} : { _continue: continuation }),
-            ...(this.options.executionCluster === undefined
-              ? { labelSelector: "openclaw.dev/gateway-namespace" }
-              : {}),
-            timeoutSeconds: Math.ceil(REQUEST_TIMEOUT_MS / 1000),
-          }),
-        );
-        if (!Array.isArray(namespaces.items)) {
-          throw new Error(
-            "The authenticated Kubernetes Namespace preflight returned invalid data.",
+      if (this.preprovisionedNamespace) {
+        const binding = this.preprovisionedNamespace;
+        await this.request(() => binding.read(clients.core, binding.namespaceId));
+      } else {
+        let continuation: string | undefined;
+        do {
+          const namespaces = await reachable(() =>
+            clients.core.listNamespace({
+              limit: this.options.executionCluster === undefined ? 100 : 1,
+              ...(continuation === undefined ? {} : { _continue: continuation }),
+              ...(this.options.executionCluster === undefined
+                ? { labelSelector: "openclaw.dev/gateway-namespace" }
+                : {}),
+              timeoutSeconds: Math.ceil(REQUEST_TIMEOUT_MS / 1000),
+            }),
           );
-        }
-        if (this.options.executionCluster === undefined) {
-          for (const namespace of namespaces.items) {
-            const metadata = namespace.metadata;
-            const namespaceId = metadata?.labels?.["openclaw.dev/gateway-namespace"];
-            if (
-              isNonEmptyString(namespaceId) &&
-              metadata?.name === kubernetesGatewayNamespaceName(namespaceId) &&
-              metadata.labels?.["openclaw.dev/namespace"] === undefined
-            ) {
-              throw new ConfigurationFailure(
-                "Existing split-layout Gateway storage prevents this single-cluster upgrade. " +
-                  "Keep the previous controller version and adopt each storage namespace as " +
-                  "its tenant namespace first (scripts/split-layout-adopt.mjs). See the " +
-                  "Kubernetes Compute upgrade requirements.",
-              );
+          if (!Array.isArray(namespaces.items)) {
+            throw new Error(
+              "The authenticated Kubernetes Namespace preflight returned invalid data.",
+            );
+          }
+          if (this.options.executionCluster === undefined) {
+            for (const namespace of namespaces.items) {
+              const metadata = namespace.metadata;
+              const namespaceId = metadata?.labels?.["openclaw.dev/gateway-namespace"];
+              if (
+                isNonEmptyString(namespaceId) &&
+                metadata?.name === kubernetesGatewayNamespaceName(namespaceId) &&
+                metadata.labels?.["openclaw.dev/namespace"] === undefined
+              ) {
+                throw new ConfigurationFailure(
+                  "Existing split-layout Gateway storage prevents this single-cluster upgrade. " +
+                    "Keep the previous controller version and adopt each storage namespace as " +
+                    "its tenant namespace first (scripts/split-layout-adopt.mjs). See the " +
+                    "Kubernetes Compute upgrade requirements.",
+                );
+              }
             }
           }
-        }
-        continuation =
-          this.options.executionCluster === undefined
-            ? namespaces.metadata?._continue || undefined
-            : undefined;
-      } while (continuation !== undefined);
+          continuation =
+            this.options.executionCluster === undefined
+              ? namespaces.metadata?._continue || undefined
+              : undefined;
+        } while (continuation !== undefined);
+      }
       if (versionIsOlder(observedVersion.parts, MINIMUM_KUBERNETES_VERSION_PARTS)) {
         warnings.push({
           code: "KUBERNETES_VERSION_BELOW_MINIMUM",
@@ -4864,17 +4971,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
     try {
       const ownership = { namespaceId: namespace.id };
       const selection = namespace.existingNamespace;
-      const placement =
-        selection === undefined
-          ? await this.resolveNamespace(namespace.id)
-          : { name: { name: selection, plane: "execution" as const }, external: true };
+      const placement = await this.resolveNamespace(namespace.id, selection);
       const { name, external: externallyManaged } = placement;
       if (externallyManaged && selection === undefined) {
         throw new OwnershipFailure(
           `Existing Kubernetes namespace ${name.name} was not explicitly selected.`,
         );
       }
-      if (!externallyManaged) {
+      if (!externallyManaged && !this.preprovisionedNamespace) {
         const desired = this.manifest("v1", "Namespace", name.name, ownership);
         desired.metadata.labels = {
           ...desired.metadata.labels,
@@ -4911,6 +5015,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
       if (externallyManaged) {
         await this.verifyExistingNetworkPolicies(name, ownership);
         await this.claimExistingNamespace(observed, ownership);
+      } else if (this.preprovisionedNamespace) {
+        await this.verifyExistingNetworkPolicies(name, ownership);
       }
       await this.prepareNamespaceInfrastructure(ownership, name);
       if (!(await this.ensureGatewayNamespace(ownership))) {
@@ -5116,13 +5222,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const result = { namespaceId: namespace.id, namespaceDeleted: false };
     try {
       const clients = await this.clients("execution");
-      const { name, external } =
-        namespace.existingNamespace === undefined
-          ? await this.resolveNamespace(namespace.id)
-          : {
-              name: { name: namespace.existingNamespace, plane: "execution" as const },
-              external: true,
-            };
+      if (this.preprovisionedNamespace) {
+        throw new OwnershipFailure(
+          "The operator retains the preprovisioned Namespace and owns its teardown.",
+        );
+      }
+      const { name, external } = await this.resolveNamespace(
+        namespace.id,
+        namespace.existingNamespace,
+      );
       const ownership = { namespaceId: namespace.id };
       const existing = await this.getNamespace(name);
       if (
@@ -8306,11 +8414,21 @@ export class KubernetesComputeDriver implements ComputeDriver {
 
   private async resolveNamespace(
     namespaceId: string,
+    selection?: string,
   ): Promise<{ readonly name: KubernetesNamespaceAddress; readonly external: boolean }> {
+    const binding = this.preprovisionedNamespace;
+    if (selection !== undefined) {
+      if (binding) {
+        throw new OwnershipFailure(
+          "Tenant-selected placement is disabled for a preprovisioned Namespace.",
+        );
+      }
+      return { name: { name: selection, plane: "execution" }, external: true };
+    }
     const clients = await this.clients("execution");
-    const resolved = await this.request(() =>
-      resolveKubernetesNamespace(clients.core, namespaceId),
-    );
+    const resolved = binding
+      ? { ...(await this.request(() => binding.read(clients.core, namespaceId))), external: false }
+      : await this.request(() => resolveKubernetesNamespace(clients.core, namespaceId));
     return { ...resolved, name: { name: resolved.name, plane: "execution" } };
   }
 
@@ -8872,6 +8990,20 @@ export class KubernetesComputeDriver implements ComputeDriver {
         `The existing Kubernetes namespace ${namespace.name} returned invalid NetworkPolicies.`,
       );
     }
+    // This is the sealed Namespace initialization gate. If later reconciliation sees
+    // Agent-specific policies, stop rather than infer their authority from labels.
+    const approved = new Map<string, unknown>();
+    if (this.preprovisionedNamespace) {
+      for (const policy of this.networkPolicies(ownership, namespace)) {
+        approved.set(policy.metadata.name, policy.spec);
+      }
+      for (const policy of this.preprovisionedNamespace.operatorPolicies) {
+        if (approved.has(policy.name)) {
+          throw new OwnershipFailure("Operator NetworkPolicy name duplicates an admitted policy.");
+        }
+        approved.set(policy.name, policy.spec);
+      }
+    }
     for (const item of observed.items) {
       const policy = asRecord(item);
       const metadata = asRecord(policy?.metadata);
@@ -8885,6 +9017,18 @@ export class KubernetesComputeDriver implements ComputeDriver {
       ) {
         throw new OwnershipFailure(
           `The existing Kubernetes namespace ${namespace.name} returned an invalid NetworkPolicy.`,
+        );
+      }
+      if (
+        this.preprovisionedNamespace &&
+        (!approved.has(metadata.name) ||
+          !isDeepStrictEqual(
+            networkPolicySpecToJson(policy.spec as V1NetworkPolicySpec | undefined),
+            approved.get(metadata.name),
+          ))
+      ) {
+        throw new OwnershipFailure(
+          "The sealed Namespace contains an undeclared or changed NetworkPolicy.",
         );
       }
       try {
@@ -9068,13 +9212,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   }
 
   async resolveSandboxNamespace(namespace: Readonly<Namespace>): Promise<Readonly<Namespace>> {
-    const placement =
-      namespace.existingNamespace === undefined
-        ? await this.resolveNamespace(namespace.id)
-        : {
-            name: { name: namespace.existingNamespace, plane: "execution" as const },
-            external: true,
-          };
+    const placement = await this.resolveNamespace(namespace.id, namespace.existingNamespace);
     if (placement.external && namespace.existingNamespace === undefined) {
       throw new OwnershipFailure(
         `Existing Kubernetes namespace ${placement.name.name} was not explicitly selected.`,
@@ -11219,6 +11357,13 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     ownership: Ownership,
     external: boolean,
   ): void {
+    if (this.preprovisionedNamespace) {
+      if (external || ownership.namespaceId !== this.preprovisionedNamespace.namespaceId) {
+        throw new OwnershipFailure("The preprovisioned Namespace is not bound to this tenant.");
+      }
+      this.preprovisionedNamespace.verify(namespace);
+      return;
+    }
     const observed = verifiedKubernetesNamespace(namespace.metadata, ownership.namespaceId);
     if (observed.external !== external) {
       throw new OwnershipFailure(

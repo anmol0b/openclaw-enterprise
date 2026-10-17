@@ -150,6 +150,14 @@ an allowlist without its provider is refused: the API treats it as a startup err
 {{- end -}}
 {{- if gt (add (len (default list $githubLists.allowedOrgs)) (len (default list $githubLists.allowedTeams))) 10 -}}{{- fail "auth.github.allowedOrgs and auth.github.allowedTeams list at most 10 entries together" -}}{{- end -}}
 {{- if and (not (and $github $github.enabled)) (or (default list $githubLists.allowedOrgs) (default list $githubLists.allowedTeams)) -}}{{- fail "auth.github.allowedOrgs and auth.github.allowedTeams require auth.github.enabled: true; they limit GitHub sign-in only" -}}{{- end -}}
+{{- with $binding := .Values.preprovisionedNamespace -}}
+{{- if or (ne (len $binding) 2) (not (regexMatch "^ns_[a-zA-Z0-9_-]{1,60}$" (toString $binding.namespaceId))) (not (regexMatch "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$" (toString $binding.uid))) -}}
+{{- fail "preprovisionedNamespace requires exactly namespaceId and Kubernetes uid" -}}
+{{- end -}}
+{{- if or $.Values.executionCluster.enabled (not $.Values.gatewayRouting.enabled) (ne $.Values.gatewayRouting.serviceType "ClusterIP") (not $.Values.egressAuthority.enabled) $.Values.auth.github.enabled $.Values.auth.google.enabled $.Values.auth.oidc.enabled (ne $.Values.auth.passwordSignIn "all") $.Values.agentNativeAdmin.enabled -}}
+{{- fail "preprovisionedNamespace requires the closed single-cluster OpenShell canary: private gateway routing, egress authority, disposable password operator and no external login or native admin" -}}
+{{- end -}}
+{{- end -}}
 {{- if not (or (kindIs "invalid" $googleLists.allowedDomains) (kindIs "slice" $googleLists.allowedDomains)) -}}{{- fail "auth.google.allowedDomains must be a list of DNS domain names" -}}{{- end -}}
 {{- range $domain := $googleLists.allowedDomains -}}
 {{- $name := lower (regexReplaceAll "\\x{0130}" (regexReplaceAll $jsTrim (toString $domain) "") "i\u0307") -}}

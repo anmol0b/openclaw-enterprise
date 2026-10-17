@@ -47,7 +47,7 @@ async function fixture(t, configuration = installation()) {
   return path;
 }
 
-test("Credential Proxy startup preserves the selection and refuses retired keys", async (t) => {
+function credentialProxyInstallation() {
   const configuration = installation();
   configuration.backend = [
     {
@@ -110,6 +110,11 @@ test("Credential Proxy startup preserves the selection and refuses retired keys"
       },
     },
   };
+  return configuration;
+}
+
+test("Credential Proxy startup preserves the selection and refuses retired keys", async (t) => {
+  const configuration = credentialProxyInstallation();
   const path = await fixture(t, configuration);
   const load = () =>
     loadInstallationConfiguration({
@@ -1683,4 +1688,209 @@ test("API and worker name a Preset file failure in their startup error code", as
     assert.equal(workerDiagnostic.message, undefined);
     assert.ok(!worker.stderr.includes(dirname(path)), worker.stderr);
   }
+});
+
+test("closed Installation observes only its operator-bound Namespace, including Secret and Configuration custody", async (t) => {
+  const { gatewayRouting, digest } = await import("../helpers/kubernetes-routed-scenarios.mjs");
+  const { KubernetesObjectApi } = await import("@kubernetes/client-node");
+  const configuration = credentialProxyInstallation();
+  configuration.drivers.sandbox.configuration.gateway.operatorNamespaceLabels = {
+    "openshell.ai/openclaw-workspace": "true",
+  };
+  configuration.drivers.sandbox.configuration.gateway.operatorWorkspaceResources = [
+    {
+      apiVersion: "v1",
+      kind: "ServiceAccount",
+      metadata: { name: "sandbox" },
+      automountServiceAccountToken: false,
+    },
+  ];
+  const approvedWorkspacePolicy = {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "NetworkPolicy",
+    metadata: { name: "workspace-deny" },
+    spec: { podSelector: {}, policyTypes: ["Ingress"] },
+  };
+  configuration.drivers.sandbox.configuration.gateway.networkPolicyResources = [
+    approvedWorkspacePolicy,
+  ];
+  const compute = configuration.drivers.compute.configuration;
+  const id = "ns_closed_binding_test";
+  const name = kubernetesNamespaceName(id);
+  const uid = "19fc773a-b474-499e-9406-ba18ee701689";
+  compute.gatewayRouting = gatewayRouting;
+  delete compute.network.gatewayClients;
+  const environment = {
+    OCC_CONFIG_PATH: await fixture(t, configuration),
+    OCC_PREPROVISIONED_NAMESPACE: JSON.stringify({ namespaceId: id, uid }),
+  };
+  const drivers = await loadInstallationConfiguration({
+    mode: "production",
+    environment,
+    createOpenShellBackend: (definition) => ({
+      id: definition.id,
+      drivers: definition.drivers,
+      client: {
+        clientForNamespace: () => ({
+          health: async () => {},
+          getWorkspace: async () => ({
+            name,
+            phase: 1,
+            labels: {
+              "app.kubernetes.io/managed-by": "openclaw-enterprise",
+              "openclaw.dev/namespace-id": id,
+            },
+          }),
+        }),
+      },
+    }),
+  });
+  const { computeDriver: driver, configurationDriver, secretDriver } = drivers;
+  const ns = {
+    apiVersion: "v1",
+    kind: "Namespace",
+    status: { phase: "Active" },
+    metadata: {
+      name,
+      uid,
+      labels: {
+        "app.kubernetes.io/managed-by": "openclaw-enterprise",
+        "openshell.ai/openclaw-workspace": "true",
+        "openclaw.dev/namespace": id,
+        "openclaw.dev/gateway-namespace": id,
+        "openclaw-enterprise.io/gateway": digest(
+          gatewayRouting.gatewayNamespace + "/" + gatewayRouting.gatewayName,
+        ),
+        ...Object.fromEntries(
+          ["enforce", "audit", "warn"].map((x) => [
+            "pod-security.kubernetes.io/" + x,
+            "restricted",
+          ]),
+        ),
+      },
+      annotations: {
+        "openclaw.dev/namespace-id": id,
+        "openclaw.dev/namespace-lifecycle": "preprovisioned",
+      },
+    },
+  };
+  let observed = structuredClone(ns);
+  const reads = [];
+  const writes = [];
+  const readNamespace = async (query) => {
+    assert.deepEqual(query, { name });
+    reads.push(name);
+    return observed;
+  };
+  const absent = async (q) => {
+    assert.equal(q.namespace, name);
+    throw Object.assign(new Error("not found"), { code: 404 });
+  };
+  const write = async (q) => {
+    assert.equal(q.namespace, name);
+    assert.equal(q.body.metadata.annotations["openclaw.dev/namespace-id"], id);
+    writes.push(q.body.kind + "/" + q.name);
+    return q.body;
+  };
+  // Namespace API is GET of this name only. A list, adoption, or delete has no implementation.
+  const core = {
+    readNamespace,
+    readNamespacedResourceQuota: absent,
+    patchNamespacedResourceQuota: write,
+    readNamespacedLimitRange: absent,
+    patchNamespacedLimitRange: write,
+  };
+  const account = {
+    apiVersion: "v1",
+    kind: "ServiceAccount",
+    automountServiceAccountToken: false,
+    metadata: {
+      name: "sandbox",
+      namespace: name,
+      labels: {
+        "app.kubernetes.io/managed-by": "openclaw-enterprise",
+        "openclaw.dev/namespace": id,
+      },
+      annotations: { "openclaw.dev/namespace-id": id },
+    },
+  };
+  const workspacePolicy = {
+    ...approvedWorkspacePolicy,
+    metadata: { ...account.metadata, name: "workspace-deny" },
+  };
+  let policies = [workspacePolicy];
+  const objects = Object.create(KubernetesObjectApi.prototype);
+  objects.read = async (ref) =>
+    ref.kind === "Namespace" ? observed : ref.kind === "NetworkPolicy" ? workspacePolicy : account;
+  objects.patch = async () => {
+    throw Error("unexpected OpenShell Kubernetes write");
+  };
+  driver.apiClients = Promise.resolve({
+    objects,
+    version: { getCode: async () => ({ gitVersion: "v1.35.0" }) },
+    core,
+    networking: {
+      listNamespacedNetworkPolicy: async (q) => (
+        assert.equal(q.namespace, name),
+        { items: policies }
+      ),
+      readNamespacedNetworkPolicy: absent,
+      patchNamespacedNetworkPolicy: write,
+    },
+  });
+  await driver.preflight();
+  await configurationDriver.controlNamespace(core, id);
+  await secretDriver.readyNamespace(core, id);
+  assert.equal(reads.length, 3);
+
+  const tenant = { id };
+  assert.equal((await driver.ensureNamespace(tenant)).namespaceReady, true);
+  assert.ok(writes.includes("ResourceQuota/openclaw-quota"));
+  assert.ok(writes.includes("NetworkPolicy/default-deny"));
+
+  const ownedPolicy = {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "NetworkPolicy",
+    metadata: { ...account.metadata, name: "unexpected-allow" },
+    spec: { podSelector: {}, policyTypes: ["Egress"], egress: [{}] },
+  };
+  writes.length = 0;
+  policies = [ownedPolicy];
+  assert.equal((await driver.ensureNamespace(tenant)).namespaceReady, false);
+  assert.deepEqual(writes, []);
+  policies = [{ ...ownedPolicy, metadata: { ...ownedPolicy.metadata, name: "default-deny" } }];
+  assert.equal((await driver.ensureNamespace(tenant)).namespaceReady, false);
+  assert.deepEqual(writes, []);
+  policies = [workspacePolicy];
+
+  account.automountServiceAccountToken = true;
+  assert.equal((await driver.ensureNamespace(tenant)).namespaceReady, false);
+  account.automountServiceAccountToken = false;
+  writes.length = 0;
+  const before = reads.length;
+  for (const request of [{ id: id + "_other" }, { id, existingNamespace: name }]) {
+    const result = await driver.ensureNamespace(request);
+    assert.equal(result.failure, "permanent");
+    assert.equal(result.namespaceReady, false);
+  }
+  assert.equal((await driver.deleteNamespace(tenant)).namespaceDeleted, false);
+  assert.equal(reads.length, before);
+  for (const corrupt of [
+    (x) => (x.metadata.uid = uid + "replaced"),
+    (x) => (x.metadata.annotations["openclaw.dev/namespace-id"] += "_foreign"),
+    (x) => delete x.metadata.annotations["openclaw.dev/namespace-lifecycle"],
+    (x) => (x.metadata.labels["pod-security.kubernetes.io/enforce"] = "privileged"),
+    (x) => delete x.metadata.labels["openclaw-enterprise.io/gateway"],
+    (x) => delete x.metadata.labels["openclaw.dev/gateway-namespace"],
+    (x) => (x.metadata.deletionTimestamp = new Date().toISOString()),
+  ]) {
+    observed = structuredClone(ns);
+    corrupt(observed);
+    const result = await driver.ensureNamespace(tenant);
+    assert.equal(result.failure, "permanent");
+    assert.equal(result.namespaceReady, false);
+  }
+  await assert.rejects(configurationDriver.controlNamespace(core, id));
+  await assert.rejects(secretDriver.readyNamespace(core, id));
+  assert.deepEqual(writes, []);
 });

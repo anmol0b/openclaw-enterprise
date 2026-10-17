@@ -1,3 +1,4 @@
+import type { OpenShellSandboxDriverOptions } from "../drivers/sandbox/openshell.ts";
 import type { CredentialProxyDriver } from "@openclaw-enterprise/contracts";
 import {
   OpenShellCredentialProxyDriver,
@@ -44,6 +45,7 @@ import {
 import { Check, Errors } from "typebox/value";
 import {
   KubernetesComputeDriver,
+  PreprovisionedKubernetesNamespace,
   type KubernetesComputeDriverOptions,
 } from "../drivers/compute/kubernetes/index.ts";
 import { refuseRewrittenIpv4Host, refuseWrittenUserinfo } from "../auth/configuration.ts";
@@ -254,6 +256,7 @@ interface BundledOpenShellSandboxDriverModule extends DriverImplementation {
       readonly id: string;
       readonly implementation: string;
       readonly backend: Backend<OpenShellGateway>;
+      readonly operatorOwnedKubernetesResources?: boolean;
     },
   ) => SandboxDriver;
 }
@@ -798,6 +801,35 @@ export async function loadInstallationConfiguration(options: {
     "occ/kubernetes-secret",
     KubernetesSecretDriver,
   );
+  const namespaceBinding = environment.OCC_PREPROVISIONED_NAMESPACE;
+  let preprovisionedNamespace: PreprovisionedKubernetesNamespace | undefined;
+  if (namespaceBinding !== undefined) {
+    const k = compute.configuration as unknown as KubernetesComputeDriverOptions;
+    if (
+      !kubernetesCompute ||
+      configurationPackage !== undefined ||
+      !k.gatewayRouting ||
+      k.executionCluster !== undefined ||
+      !openShellBackend ||
+      !sandboxSelection ||
+      sandboxPackage !== undefined ||
+      proxySelection === undefined
+    ) {
+      throw new Error(
+        "A preprovisioned Namespace requires single-cluster bundled Kubernetes and OpenShell Drivers with Credential Proxy and gateway routing.",
+      );
+    }
+    const workspace = (sandboxSelection.configuration as unknown as OpenShellSandboxDriverOptions)
+      .gateway;
+    preprovisionedNamespace = new PreprovisionedKubernetesNamespace(
+      namespaceBinding,
+      k.gatewayRouting,
+      [
+        ...(workspace.operatorWorkspaceResources ?? []),
+        ...(workspace.networkPolicyResources ?? []),
+      ].filter((resource) => resource.kind === "NetworkPolicy"),
+    );
+  }
   if (repoSelection !== undefined) {
     const kubernetes = compute.configuration as unknown as KubernetesComputeDriverOptions;
     if (kubernetes.network.repositoryCredentials?.port !== 8443) {
@@ -872,7 +904,7 @@ export async function loadInstallationConfiguration(options: {
     configurationPackage === undefined
       ? new KubernetesConfigurationDriver(
           configured.configuration as unknown as KubernetesConfigurationDriverOptions,
-          { id: configured.id, implementation: configured.implementation },
+          { id: configured.id, implementation: configured.implementation, preprovisionedNamespace },
         )
       : (createExternalDriver(
           configurationPackage.module,
@@ -900,6 +932,7 @@ export async function loadInstallationConfiguration(options: {
                 id: sandbox.id,
                 implementation: sandbox.implementation,
                 backend: openShell!,
+                operatorOwnedKubernetesResources: preprovisionedNamespace !== undefined,
               },
             )
           : (createExternalDriver(sandboxPackage.module, sandbox, "sandbox") as SandboxDriver);
@@ -930,7 +963,7 @@ export async function loadInstallationConfiguration(options: {
   }
   const secretDriver = new KubernetesSecretDriver(
     secret.configuration as unknown as KubernetesSecretDriverOptions,
-    { id: secret.id, implementation: secret.implementation },
+    { id: secret.id, implementation: secret.implementation, preprovisionedNamespace },
   );
   const preparedGitHub =
     preparedGitHubKeyPath === undefined
@@ -988,6 +1021,7 @@ export async function loadInstallationConfiguration(options: {
         ...(credentialGatewayDriver === undefined ? {} : { credentialGatewayDriver }),
         ...(proxyDriver === undefined ? {} : { proxyDriver }),
         ...(preparedRepositoryGit === undefined ? {} : { preparedRepositoryIngress: true }),
+        preprovisionedNamespace,
         nodeEnrollment: createGatewayNodeEnrollment(() =>
           readWorkspaceFilesApiKey(
             nonempty(environment.OCC_GATEWAY_API_KEY_PATH, "OCC_GATEWAY_API_KEY_PATH"),
