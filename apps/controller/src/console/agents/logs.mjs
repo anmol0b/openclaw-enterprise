@@ -334,6 +334,7 @@ export function renderAgentLogs(
     restartPending = false;
     cursor = null;
     pane.replaceChildren();
+    policyTester.dismissObservedLog();
     rows = 0;
     logStatus.textContent = "";
     applyFilters();

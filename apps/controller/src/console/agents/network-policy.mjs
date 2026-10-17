@@ -228,6 +228,7 @@ export function createPolicyTester(context, { base }) {
     className: "policy-open",
     hidden: true,
   });
+  let dismissObserved;
 
   function open(record, trigger = openButton) {
     const requests = new AbortController();
@@ -780,26 +781,34 @@ export function createPolicyTester(context, { base }) {
         nativePanel,
       ].filter((node) => node !== null),
     );
-    dialog.addEventListener(
-      "close",
-      () => {
-        requests.abort();
-        dialog.remove();
-        if (trigger.isConnected) {
-          trigger.focus();
-        } else if (openButton.isConnected) {
-          openButton.focus();
-        }
-      },
-      { once: true },
-    );
+    function dismiss() {
+      dialog.removeEventListener("close", dismiss);
+      if (dismissObserved === dismiss) {
+        dismissObserved = undefined;
+      }
+      requests.abort();
+      // A log refusal dismisses synchronously; ordinary dismissal arrives here after close.
+      if (dialog.open) {
+        dialog.close();
+      }
+      dialog.remove();
+      if (trigger.isConnected) {
+        trigger.focus();
+      } else if (openButton.isConnected) {
+        openButton.focus();
+      }
+    }
+    if (record) {
+      dismissObserved = dismiss;
+    }
+    dialog.addEventListener("close", dismiss);
     host.append(dialog);
     dialog.showModal();
     updateControls();
     kind.input.focus();
     void load();
   }
-  return { host, openButton, open };
+  return { host, openButton, open, dismissObservedLog: () => dismissObserved?.() };
 }
 
 export function renderAgentPolicyTester(context, { agent, revisionId }) {

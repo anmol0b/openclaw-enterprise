@@ -343,6 +343,63 @@ test("policy simulation and log reads retain independent IAM grants", async (t) 
   assert.equal(state.reads, 0);
 });
 
+test("a refused log follow closes its observed decision but leaves the manual policy tester available", async (t) => {
+  const { fixture, page, namespace, agent, revision } = await policyFixture(t);
+  let role;
+  const { credentials } = await fixture.createAccountWithPolicy(
+    "policy-log-revoked",
+    (principal) => {
+      ({ role } = grantRole(fixture.policy, principal.id, {
+        id: "policy-log-revoked",
+        namespaceId: namespace.id,
+        permissions: {
+          namespace: ["read"],
+          agent: ["read", "operate", "read_logs"],
+          configuration: ["read"],
+          agent_revision: ["read"],
+        },
+      }));
+    },
+  );
+  await login(
+    page,
+    fixture,
+    detailUrl(fixture, namespace.id, agent.id, revision.id, "logs"),
+    credentials,
+  );
+  await page.locator("#runtime-log-source").selectOption("sandbox");
+  const inspect = page.getByRole("button", { name: "Inspect / test action" });
+  await inspect.waitFor();
+  await page.getByRole("button", { name: "Follow", exact: true }).click();
+  await inspect.click();
+  const dialog = page.getByRole("dialog");
+  const destination = dialog.getByLabel("Destination host");
+  assert.equal(await destination.inputValue(), "blocked.example.com");
+
+  const refused = page.waitForResponse(
+    (response) => response.url().includes("/runtime/logs?") && response.status() === 403,
+  );
+  role.permissions = role.permissions.filter(({ action }) => action !== "read_logs");
+  await refused;
+  await page.getByText(/Log text requires Agent read_logs/).waitFor();
+  assert.equal(await inspect.count(), 0);
+  assert.equal(
+    await page.locator(".network-policy-dialog").count(),
+    0,
+    "the observed decision must be removed too",
+  );
+
+  const manual = page.getByRole("button", { name: "Open policy tester" });
+  assert.equal(
+    await manual.evaluate((button) => button === globalThis.document.activeElement),
+    true,
+  );
+  await manual.click();
+  await dialog.getByText("OCE intended policy loaded. Enter an action to simulate.").waitFor();
+  assert.equal(await destination.inputValue(), "");
+  assert.equal(await dialog.getByRole("heading", { name: "Observed log decision" }).count(), 0);
+});
+
 test("a plugin action is reachable without Sandbox or log access and uses the admitted tool policy", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();

@@ -80,8 +80,10 @@ approval defaults, missing annotations, opaque Driver policy and unsupported
 review modes retain explicit uncertainty.
 
 `simulateAgentPolicy` rejects stale intent hashes. The console module
-`apps/controller/src/console/agents/network-policy.mjs:createNetworkPolicyTester`
+`apps/controller/src/console/agents/network-policy.mjs:createPolicyTester`
 shows simulation separately from historical decisions and native provider evidence.
+If a subsequent log read is refused, the Console clears the log and closes any
+tester opened from it. An operator with policy access can still open an empty tester.
 
 Existing native `describeAgentNetworkPolicy` and `evaluateAgentNetworkPolicy`
 remain Sandbox-owned. The OpenShell adapter reads effective policy and exact Ready
