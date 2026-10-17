@@ -2091,7 +2091,8 @@ function probeOpenClawAuthenticationFailure() {
 // body could not be read); "providerErrorCode" and
 // "providerErrorType" carry error.code and error.type verbatim only when they are
 // identifiers (UPFRONT_ERROR_TOKEN: lowercase letters and underscores, at most 48
-// characters, so no key, token, URL, email or id fits), else "other". The child
+// characters, so no key, token, URL, email or id fits; never a part of the request's
+// key), else "other". The child
 // alone reads the body and writes only those tokens to stdout; the parent keeps a
 // token only if it passes the same checks, so message text, header values and the
 // body never leave the child.
@@ -2120,7 +2121,7 @@ function credentialRejectedUpfront(provider, fragment, key, stage) {
   // The exit status is a 401's header marker (0, 10, 20 or 30) plus its class (3:
   // unclassified, 4-6: the codes above); anything else proves nothing.
   const { status, stdout } = require("node:child_process").spawnSync(process.execPath, ["-e",
-    'fetch(process.env.U,{method:"POST",headers:JSON.parse(process.env.H),body:"{}",signal:AbortSignal.timeout(8000)}).then(async(r)=>{if(r.status!==401)process.exit(0);const n=[...r.headers.keys()],p=(r.headers.has("x-request-id")&&n.some((k)=>/^(x-)?openai-/.test(k)))||(r.headers.has("request-id")&&r.headers.has("x-should-retry")),o=r.headers.has("x-openshell-policy"),s=o?(p?30:20):p?10:0;let t,e,b="";try{t=await r.text()}catch{}if(typeof t==="string")if(!t.trim())b="empty";else try{const j=JSON.parse(t);b="json-no-error";if(j?.error&&typeof j.error==="object"&&!Array.isArray(j.error)){e=j.error;b=e.code==null?"json-error-no-code":"json-error-code"}}catch{b="non-json"}const c=e?.code,m=typeof e?.message==="string"?e.message:"",R=new RegExp(process.env.R),k=(x)=>x==null?"":typeof x==="string"&&x.length<=48&&R.test(x)?x:"other";try{require("node:fs").writeSync(1,JSON.stringify([b,k(c),k(e?.type)]))}catch{}process.exit(s+(c==="invalid_api_key"||/invalid x-api-key/i.test(m)?4:/didn.t provide an api key|no api key provided|x-api-key header is required|missing bearer or basic authentication/i.test(m)?5:c==="insufficient_permissions"||/insufficient permissions|missing scopes/i.test(m)?6:3))},()=>process.exit(0))',
+    'fetch(process.env.U,{method:"POST",headers:JSON.parse(process.env.H),body:"{}",signal:AbortSignal.timeout(8000)}).then(async(r)=>{if(r.status!==401)process.exit(0);const n=[...r.headers.keys()],p=(r.headers.has("x-request-id")&&n.some((k)=>/^(x-)?openai-/.test(k)))||(r.headers.has("request-id")&&r.headers.has("x-should-retry")),o=r.headers.has("x-openshell-policy"),s=o?(p?30:20):p?10:0;let t,e,b="";try{t=await r.text()}catch{}if(typeof t==="string")if(!t.trim())b="empty";else try{const j=JSON.parse(t);b="json-no-error";if(j?.error&&typeof j.error==="object"&&!Array.isArray(j.error)){e=j.error;b=e.code==null?"json-error-no-code":"json-error-code"}}catch{b="non-json"}const c=e?.code,m=typeof e?.message==="string"?e.message:"",R=RegExp(process.env.R||"(?!)"),k=(x)=>x==null?"":typeof x==="string"&&x.length<=48&&R.test(x)?x:"other";try{require("node:fs").writeSync(1,JSON.stringify([b,k(c),k(e?.type)]))}catch{}process.exit(s+(c==="invalid_api_key"||/invalid x-api-key/i.test(m)?4:/didn.t provide an api key|no api key provided|x-api-key header is required|missing bearer or basic authentication/i.test(m)?5:c==="insufficient_permissions"||/insufficient permissions|missing scopes/i.test(m)?6:3))},()=>process.exit(0))',
   ], {
     env: { U: base + path, H: JSON.stringify({ ...headers, "content-type": "application/json" }), R: UPFRONT_ERROR_TOKEN.source, NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS, SSL_CERT_FILE: process.env.SSL_CERT_FILE },
     stdio: ["ignore", "pipe", "ignore"], encoding: "utf8", maxBuffer: 1024, timeout: 10000, killSignal: "SIGKILL",
@@ -2131,7 +2132,7 @@ function credentialRejectedUpfront(provider, fragment, key, stage) {
   if (!(rejection >= 3 && rejection <= 6) || marker === undefined) return false;
   let tokens;
   try { tokens = JSON.parse(stdout); } catch {}
-  const [bodyShape, errorCode, errorType] = Array.isArray(tokens) ? tokens : [];
+  const [bodyShape, errorCode, errorType] = (Array.isArray(tokens) ? tokens : []).map((token) => (upfrontIdentifier(token) && token !== "other" && key.includes(token) ? "other" : token));
   return { providerStatus: 401, responseHeaderMarker: marker, ...(UPFRONT_REJECTION_CODES[rejection] === undefined ? {} : { providerCode: UPFRONT_REJECTION_CODES[rejection] }),
     ...upfrontToken("bodyShape", bodyShape, (shape) => UPFRONT_BODY_SHAPES.includes(shape)), ...upfrontToken("providerErrorCode", errorCode, upfrontIdentifier), ...upfrontToken("providerErrorType", errorType, upfrontIdentifier) };
 }

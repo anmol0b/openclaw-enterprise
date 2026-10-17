@@ -493,7 +493,7 @@ test("a failed model probe keeps its closed-vocabulary cause, never other cause 
   ]);
 });
 
-test("the upfront probe's provider fields keep only values of their fixed shape", () => {
+test("the model probes' provider fields keep only values of their fixed shape", () => {
   const event = (fields) =>
     JSON.stringify({ event: "openclaw.model_probe", code: "AUTHENTICATION_FAILED", ...fields });
   // Codes and types are lowercase identifiers (letters and underscores, at most 48
@@ -548,7 +548,17 @@ test("the upfront probe's provider fields keep only values of their fixed shape"
   for (const value of ["other", "constructor", "Mixed", "provider_like", "empty "]) {
     dropped.push({ responseHeaderMarker: value, bodyShape: value });
   }
-  const { records, withheld } = sanitize(gatewayStream, [...kept, ...dropped].map(event));
+  // The Codex probe's provider code has the same rule; other wrapper events keep
+  // their fields unchecked.
+  const others = [
+    { event: "codex.model_probe", code: "MODEL_PROBE_FAILED", providerCode: "usage_limit_reached" },
+    { event: "codex.model_probe", code: "MODEL_PROBE_FAILED", providerCode: "usage-limit" },
+    { event: "runtime.startup_phase", phase: "plugin-install", code: "Plugin-Not-In-Catalog" },
+  ].map((fields) => JSON.stringify(fields));
+  const { records, withheld } = sanitize(gatewayStream, [
+    ...[...kept, ...dropped].map(event),
+    ...others,
+  ]);
   assert.equal(withheld, 0);
   const line = (fields) => ({
     kind: "wrapper",
@@ -556,7 +566,28 @@ test("the upfront probe's provider fields keep only values of their fixed shape"
     message: "openclaw.model_probe",
     fields: { code: "AUTHENTICATION_FAILED", ...fields },
   });
-  assert.deepEqual(pick(records, wrapperKeys), [...kept.map(line), ...dropped.map(() => line({}))]);
+  assert.deepEqual(pick(records, wrapperKeys), [
+    ...kept.map(line),
+    ...dropped.map(() => line({})),
+    {
+      kind: "wrapper",
+      level: "error",
+      message: "codex.model_probe",
+      fields: { code: "MODEL_PROBE_FAILED", providerCode: "usage_limit_reached" },
+    },
+    {
+      kind: "wrapper",
+      level: "error",
+      message: "codex.model_probe",
+      fields: { code: "MODEL_PROBE_FAILED" },
+    },
+    {
+      kind: "wrapper",
+      level: "info",
+      message: "runtime.startup_phase",
+      fields: { phase: "plugin-install", code: "Plugin-Not-In-Catalog" },
+    },
+  ]);
   const text = JSON.stringify(records);
   for (const value of hostile.filter((value) => typeof value === "string" && value.length > 3)) {
     assert.ok(!text.includes(value), value);

@@ -528,6 +528,26 @@ test("the upfront check keeps only identifier-shaped body tokens from its child"
       value,
     );
   }
+  // An identifier that is part of the request's key, such as a lowercase passphrase
+  // echoed back, becomes "other".
+  for (const [key, echoed] of [
+    ["my_secret_passphrase", "my_secret_passphrase"],
+    ["sk-proj-abc_def_ghi0123", "abc_def_ghi"],
+  ]) {
+    assert.deepEqual(
+      upfrontCheck("openai", undefined, key, {
+        status: 13,
+        stdout: JSON.stringify(["json-error-code", echoed, echoed]),
+      }).rejected,
+      {
+        ...base,
+        bodyShape: "json-error-code",
+        providerErrorCode: "other",
+        providerErrorType: "other",
+      },
+      key,
+    );
+  }
   assert.deepEqual(
     rejected(JSON.stringify(["json-error-code", "Invalid_API_Key", "authentication_error "])),
     { ...base, bodyShape: "json-error-code" },
@@ -698,13 +718,13 @@ test("the upfront child names a 401 body's shape and identifier code and type, n
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const url = `http://127.0.0.1:${server.address().port}/v1/responses`;
-  const run = (body) => {
+  const run = (body, rule = env.R) => {
     answerBody = body;
     return execute(process.execPath, ["-e", source], {
       env: {
         U: url,
         H: JSON.stringify({ authorization: "Bearer fixture-key" }),
-        R: env.R,
+        ...(rule !== null && { R: rule }),
       },
     }).then(
       ({ stdout, stderr }) => ({ status: 0, stdout, stderr }),
@@ -887,6 +907,14 @@ test("the upfront child names a 401 body's shape and identifier code and type, n
     for (const text of [child.stdout, child.stderr, JSON.stringify(rejected)]) {
       assert.ok(!text.includes(value) && !/Hostile|fixture-key/.test(text), value);
     }
+  }
+  // Without the rule the child names no code or type: it fails closed.
+  for (const rule of [null, ""]) {
+    const child = await run(
+      '{"error":{"code":"invalid_api_key","type":"invalid_request_error"}}',
+      rule,
+    );
+    assert.deepEqual(JSON.parse(child.stdout), ["json-error-code", "other", "other"], String(rule));
   }
   // A body that breaks off mid-read names no shape: it was neither empty nor parsed.
   breakOff = true;

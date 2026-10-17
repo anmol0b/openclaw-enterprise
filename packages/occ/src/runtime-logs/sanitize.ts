@@ -61,9 +61,9 @@ const WRAPPER_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freez
 });
 
 // Allowlisted wrapper fields whose values must also have a fixed shape; a value of
-// another shape is dropped. The upfront model probe's provider fields
-// (runtime-entrypoints.ts) are fixed tokens or lowercase identifiers (letters and
-// underscores, at most 48 characters), so no key, token, URL, email or id passes.
+// another shape is dropped. The model probes' provider fields (runtime-entrypoints.ts)
+// are fixed tokens or lowercase identifiers (letters and underscores, at most 48
+// characters), so no key, token, URL, email or id passes.
 const PROVIDER_IDENTIFIER = /^[a-z]+(?:_[a-z]+){0,7}$/;
 const providerIdentifier = (value: unknown) =>
   typeof value === "string" && value.length <= 48 && PROVIDER_IDENTIFIER.test(value);
@@ -81,6 +81,7 @@ const WRAPPER_FIELD_VALUES: Readonly<
     providerErrorCode: providerIdentifier,
     providerErrorType: providerIdentifier,
   }),
+  "codex.model_probe": Object.freeze({ providerCode: providerIdentifier }),
 });
 
 // `runtime.gateway_settings_overridden` names (never values) the owner settings a
