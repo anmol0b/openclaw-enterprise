@@ -1492,13 +1492,15 @@ export function createNativePluginAssertions({
       false,
       `${options.sessionKey} assistant turn must succeed.`,
     );
-    const matched = evidence.calls.find((call) =>
-      evidence.results.some(
-        (result) =>
-          result.toolCallId === call.id &&
-          result.isError === false &&
-          result.matchesResult === true,
-      ),
+    const matched = evidence.calls.find(
+      (call) =>
+        (options.expectedArguments === undefined || call.matchesArguments === true) &&
+        evidence.results.some(
+          (result) =>
+            result.toolCallId === call.id &&
+            result.isError === false &&
+            result.matchesResult === true,
+        ),
     );
     assert.ok(
       matched,

@@ -6303,26 +6303,20 @@ test(
         timeoutMs,
       );
     };
-    const turn = async (prompt, marker) => {
-      const deadline = Date.now() + 600_000;
-      const sent = await client.request("chat.send", {
-        sessionKey,
-        idempotencyKey: randomUUID(),
-        message: `${prompt} End your reply with exactly ${marker}.`,
-      });
-      assert.ok(typeof sent.runId === "string" && sent.runId.length > 0);
-      // A transcript terminal can precede accounting. The chat-owned wait closes
+    const waitForRunCompletion = async (runId, deadline) => {
+      assert.ok(typeof runId === "string" && runId.length > 0);
+      // A transcript terminal can precede accounting. The RPC-owned wait closes
       // only after dispatch publishes its completed result, including accounting.
-      await waitFor(
-        `Gateway policy run ${sent.runId}`,
+      return waitFor(
+        `Gateway policy run ${runId}`,
         async () => {
           const remaining = Math.max(0, deadline - Date.now());
           const outcome = await client.request(
             "agent.wait",
-            { runId: sent.runId, timeoutMs: Math.min(3_000, remaining) },
+            { runId, timeoutMs: Math.min(3_000, remaining) },
             { timeoutMs: Math.max(1, remaining) },
           );
-          assert.equal(outcome.runId, sent.runId);
+          assert.equal(outcome.runId, runId);
           if (
             ["pending", "timeout"].includes(outcome.status) &&
             outcome.endedAt === undefined &&
@@ -6330,11 +6324,20 @@ test(
           ) {
             return undefined;
           }
-          assert.equal(outcome.status, "ok", `Gateway policy run ${sent.runId} must succeed`);
+          assert.equal(outcome.status, "ok", `Gateway policy run ${runId} must succeed`);
           return outcome;
         },
         Math.max(0, deadline - Date.now()),
       );
+    };
+    const turn = async (prompt, marker) => {
+      const deadline = Date.now() + 600_000;
+      const sent = await client.request("chat.send", {
+        sessionKey,
+        idempotencyKey: randomUUID(),
+        message: `${prompt} End your reply with exactly ${marker}.`,
+      });
+      await waitForRunCompletion(sent.runId, deadline);
       return waitForTurn(sessionKey, marker, Math.max(0, deadline - Date.now()));
     };
     const exists = async (pod, namespace, path) =>
@@ -6570,27 +6573,60 @@ test(
         queries: [...present, ...absent].map((query) => ({ query, limit: 1 })),
       }));
       const childTask = `Use exec to run node -e 'console.log(6*7, "${childResult}")'. Use tool_search once for each of these exact requests: ${JSON.stringify(searchRequests)}. Inspect the actual returned catalog; do not infer availability from direct schemas. If agents_list is available, call it once. If automations is available, try action=update, jobId=${foreignJob.id}, job={"name":"child-must-not-set-this"} once. Otherwise report those tools are unavailable. Do not use another interface. End your reply with exactly ${childMarker}.`;
-      await turn(
-        `Use sessions_spawn exactly once with runtime=subagent, mode=run, cleanup=keep, label=${childLabel}, and task=${JSON.stringify(childTask)}. Wait for its completion. Do not perform its task yourself.`,
+      const spawnHistory = await turn(
+        `Use sessions_spawn exactly once with label=${childLabel} and task=${JSON.stringify(childTask)}. Do not perform its task yourself.`,
         spawnMarker,
       );
-      await native.assertSessionToolCallEvidence(topology.agent, {
+      const spawnEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
         sessionKey,
         turnMarker: spawnMarker,
         toolName: "sessions_spawn",
+        expectedArguments: { label: childLabel, task: childTask },
         resultPattern: "accepted",
       });
-      const child = await waitFor("the labeled child of the tested parent", async () => {
-        const listed = await client.request("sessions.list", {
-          spawnedBy: sessionKey,
-          label: childLabel,
-        });
-        const matches = listed.sessions?.filter((entry) => entry.label === childLabel) ?? [];
-        assert.ok(matches.length <= 1, "the parent must create exactly one labeled child");
-        return matches[0];
-      });
+      const spawnResultMessage = spawnHistory.messages.find(
+        (message) =>
+          message.role === "toolResult" && message.toolCallId === spawnEvidence.toolCallId,
+      );
+      assert.ok(spawnResultMessage, "history must retain the successful spawn result");
+      assert.notEqual(spawnResultMessage.__openclaw?.truncated, true);
+      const spawnEnvelope = JSON.parse(
+        spawnResultMessage.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n"),
+      );
+      // History retains tool JSON content but projects away arbitrary result details.
+      const accepted = spawnEvidence.targetName
+        ? JSON.parse(
+            spawnEnvelope.result.content
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join("\n"),
+          )
+        : spawnEnvelope;
+      assert.equal(accepted.status, "accepted");
+      assert.ok(
+        typeof accepted.childSessionKey === "string" && accepted.childSessionKey.length > 0,
+      );
+      const childDeadline = Date.now() + 600_000;
+      await waitForRunCompletion(accepted.runId, childDeadline);
+      const child = await waitFor(
+        "the labeled child of the tested parent",
+        async () => {
+          const listed = await client.request("sessions.list", {
+            spawnedBy: sessionKey,
+            label: childLabel,
+          });
+          const matches = listed.sessions?.filter((entry) => entry.label === childLabel) ?? [];
+          assert.ok(matches.length <= 1, "the parent must create exactly one labeled child");
+          return matches[0];
+        },
+        Math.max(0, childDeadline - Date.now()),
+      );
       assert.notEqual(child.key, sessionKey);
-      await waitForTurn(child.key, childMarker);
+      assert.equal(child.key, accepted.childSessionKey);
+      await waitForTurn(child.key, childMarker, Math.max(0, childDeadline - Date.now()));
       const allowed = await native.assertSessionToolCallEvidence(topology.agent, {
         sessionKey: child.key,
         turnMarker: childMarker,
@@ -6624,6 +6660,8 @@ test(
         kind: "child-capability-withholding",
         parentSessionKey: sessionKey,
         childSessionKey: child.key,
+        childRunId: accepted.runId,
+        spawnEvidence,
         allowed,
         intrinsicChildExclusions,
         administrativeCatalogWithholding,

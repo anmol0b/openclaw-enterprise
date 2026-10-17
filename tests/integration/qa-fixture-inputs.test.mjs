@@ -1490,7 +1490,14 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
     { role: "user", content: "allowed-fixture" },
     {
       role: "assistant",
-      content: [{ type: "toolCall", id: "allowed-call", name: "exec", arguments: {} }],
+      content: [
+        {
+          type: "toolCall",
+          id: "allowed-call",
+          name: "exec",
+          arguments: { command: "printf TOOL-SUCCESS" },
+        },
+      ],
     },
     {
       role: "toolResult",
@@ -1584,6 +1591,24 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
   assert.equal(allowed.exitCode, 0);
   assert.equal(allowed.promptReport.source, "run");
   assert.deepEqual(allowed.promptReport.toolNames, ["exec", "automations"]);
+  await t.test("positive direct evidence matches the requested arguments", async () => {
+    assert.equal(
+      (
+        await native.assertSessionToolCallEvidence(
+          {},
+          { ...shellEvidence, expectedArguments: { command: "printf TOOL-SUCCESS" } },
+        )
+      ).toolCallId,
+      "allowed-call",
+    );
+    await assert.rejects(
+      native.assertSessionToolCallEvidence(
+        {},
+        { ...shellEvidence, expectedArguments: { command: "a different task" } },
+      ),
+      /matching successful result/,
+    );
+  });
   for (const [report, expectedShape] of [
     [
       undefined,
@@ -1763,6 +1788,7 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
     sessionKey,
     turnMarker: "dispatched-fixture",
     toolName: "automations",
+    expectedArguments: { action: "list" },
     resultPattern: "jobs",
   };
   await t.test(
@@ -1794,6 +1820,12 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
       "wrong call target",
       (call) => {
         call.content[0].arguments.id = "openclaw:core:nodes";
+      },
+    ],
+    [
+      "wrong target arguments",
+      (call) => {
+        call.content[0].arguments.args.action = "run";
       },
     ],
     [
