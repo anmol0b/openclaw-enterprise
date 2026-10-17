@@ -690,6 +690,17 @@ const sessionEvidenceScript = String.raw`
       sessionId: session.current_session_id,
       exists: true,
       promptReportSource: promptReport?.source,
+      promptReportShape: {
+        present: promptReport !== undefined,
+        valueType: promptReport === null ? "null" : typeof promptReport,
+        source: promptReport?.source,
+        entriesType: Array.isArray(promptReport?.tools?.entries)
+          ? "array"
+          : promptReport?.tools?.entries === null ? "null" : typeof promptReport?.tools?.entries,
+        entriesCount: Array.isArray(promptReport?.tools?.entries)
+          ? promptReport.tools.entries.length
+          : null,
+      },
       promptToolNames: promptTools,
       messageCount: messages.length,
       userMarkerSeen: messages.some((message) => message.role === "user" && message.hasMarker),
@@ -1504,7 +1515,13 @@ export function createNativePluginAssertions({
     if (proofMode === "openclaw") {
       assert.ok(
         Array.isArray(evidence.promptToolNames),
-        `${options.sessionKey} must have a run-sourced systemPromptReport.tools.entries snapshot.`,
+        `${options.sessionKey} must have a run-sourced systemPromptReport.tools.entries snapshot: ${JSON.stringify(
+          {
+            runtime: evidence.runtime,
+            sessionId: evidence.sessionId,
+            promptReport: evidence.promptReportShape,
+          },
+        )}`,
       );
       assert.ok(
         evidence.promptToolNames.includes(matched.name),
@@ -1572,6 +1589,9 @@ export function createNativePluginAssertions({
       ...(matched.targetId ? { targetId: matched.targetId, targetName: matched.targetName } : {}),
       ...(options.expectedCatalog ? { catalog: result.catalog } : {}),
       promptAdvertised: proofMode === "openclaw",
+      ...(proofMode === "openclaw"
+        ? { promptReport: { ...evidence.promptReportShape, toolNames: evidence.promptToolNames } }
+        : {}),
       ...(proofMode === "codex" ? { codexMirrorTurnVerified: true } : {}),
       resultMatched: true,
       ...(options.expectedExitCode === undefined ? {} : { exitCode: result.exitCode }),

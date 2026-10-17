@@ -6270,7 +6270,7 @@ test(
       waitFor,
       proofMode: selectedHarness,
     });
-    const waitForTurn = async (targetSessionKey, marker) => {
+    const waitForTurn = async (targetSessionKey, marker, timeoutMs = 600_000) => {
       return await waitFor(
         `Gateway policy turn ${marker}`,
         async () => {
@@ -6300,16 +6300,42 @@ test(
             ? history
             : undefined;
         },
-        600_000,
+        timeoutMs,
       );
     };
     const turn = async (prompt, marker) => {
-      await client.request("chat.send", {
+      const deadline = Date.now() + 600_000;
+      const sent = await client.request("chat.send", {
         sessionKey,
         idempotencyKey: randomUUID(),
         message: `${prompt} End your reply with exactly ${marker}.`,
       });
-      return waitForTurn(sessionKey, marker);
+      assert.ok(typeof sent.runId === "string" && sent.runId.length > 0);
+      // A transcript terminal can precede accounting. The chat-owned wait closes
+      // only after dispatch publishes its completed result, including accounting.
+      await waitFor(
+        `Gateway policy run ${sent.runId}`,
+        async () => {
+          const remaining = Math.max(0, deadline - Date.now());
+          const outcome = await client.request(
+            "agent.wait",
+            { runId: sent.runId, timeoutMs: Math.min(3_000, remaining) },
+            { timeoutMs: Math.max(1, remaining) },
+          );
+          assert.equal(outcome.runId, sent.runId);
+          if (
+            ["pending", "timeout"].includes(outcome.status) &&
+            outcome.endedAt === undefined &&
+            outcome.stopReason === undefined
+          ) {
+            return undefined;
+          }
+          assert.equal(outcome.status, "ok", `Gateway policy run ${sent.runId} must succeed`);
+          return outcome;
+        },
+        Math.max(0, deadline - Date.now()),
+      );
+      return waitForTurn(sessionKey, marker, Math.max(0, deadline - Date.now()));
     };
     const exists = async (pod, namespace, path) =>
       JSON.parse(

@@ -1582,6 +1582,70 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
   assert.equal(allowed.toolCallId, "allowed-call");
   assert.equal(allowed.promptAdvertised, true);
   assert.equal(allowed.exitCode, 0);
+  assert.equal(allowed.promptReport.source, "run");
+  assert.deepEqual(allowed.promptReport.toolNames, ["exec", "automations"]);
+  for (const [report, expectedShape] of [
+    [
+      undefined,
+      { present: false, valueType: "undefined", entriesType: "undefined", entriesCount: null },
+    ],
+    [
+      { source: "estimate", tools: { entries: [{ name: "exec" }] } },
+      {
+        present: true,
+        valueType: "object",
+        source: "estimate",
+        entriesType: "array",
+        entriesCount: 1,
+      },
+    ],
+    [
+      { source: "run", tools: { entries: {} } },
+      {
+        present: true,
+        valueType: "object",
+        source: "run",
+        entriesType: "object",
+        entriesCount: null,
+      },
+    ],
+  ]) {
+    const update = new DatabaseSync(databasePath);
+    try {
+      update.exec("DELETE FROM session_entry_snapshots");
+      if (report !== undefined) {
+        update
+          .prepare("INSERT INTO session_entry_snapshots VALUES (?, ?, ?)")
+          .run(sessionKey, "systemPromptReport", JSON.stringify(report));
+      }
+    } finally {
+      update.close();
+    }
+    await assert.rejects(native.assertSessionToolCallEvidence({}, shellEvidence), (error) => {
+      const diagnostic = JSON.parse(error.message.split("tools.entries snapshot: ")[1]);
+      assert.equal(diagnostic.sessionId, "session-fixture");
+      assert.deepEqual(diagnostic.promptReport, expectedShape);
+      return true;
+    });
+  }
+  const restore = new DatabaseSync(databasePath);
+  try {
+    restore
+      .prepare("UPDATE session_entry_snapshots SET value_json = ?")
+      .run(JSON.stringify({ source: "run", tools: { entries: [] } }));
+    await assert.rejects(
+      native.assertSessionToolCallEvidence({}, shellEvidence),
+      /prompt tools must advertise exec: .*"promptToolNames":\[\]/,
+    );
+    restore.prepare("UPDATE session_entry_snapshots SET value_json = ?").run(
+      JSON.stringify({
+        source: "run",
+        tools: { entries: [{ name: "exec" }, { name: "automations" }] },
+      }),
+    );
+  } finally {
+    restore.close();
+  }
   for (const details of [{ exitCode: 1 }, undefined]) {
     const text = JSON.stringify({ type: "message", message: { ...rows[2], details } });
     const update = new DatabaseSync(databasePath);
