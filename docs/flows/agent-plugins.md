@@ -1,6 +1,6 @@
 ---
 created: 2026-09-08
-updated: 2026-10-16
+updated: 2026-10-17
 last_updated_session: 01a13683-3916-7880-b1a6-27175b853600
 ---
 
@@ -98,6 +98,12 @@ unsupported releases stay unavailable. Curated catalogs verify neither tools nor
 Bounded hosted reads forbid redirects. Responses are `no-store`, reject credential
 echoes, and omit upstream errors/artifacts and Driver links/setup guidance.
 Connections stay unverified. HTTPS logos omit referrers; initials are the default.
+
+Optional `CodexPluginDriver.listCatalog` uses
+[`NativeCodexPluginCatalogReader`](../../apps/controller/src/drivers/plugin/stdio-catalog-reader.ts)
+with a configured executable and Codex home. It reads app-server JSON-RPC stdout.
+Invalid JSON or non-object envelopes reject with `NotImplementedError`;
+bounded teardown stops the child. HTTP discovery does not call this reader.
 
 ### 1. Validate desired state under exact-Agent authority
 
@@ -353,7 +359,12 @@ deadline.
 
 ## Changelog
 
+- 2026-10-17 06:05: Preserve OAuth discovery changes while integrating the native reader fix. (authoring-run/629826fb-b521-49bb-865a-dbc1b5c975a5 - 23965d64cc2824f0c5a2b5d704f767fead13f11b)
+
+- 2026-10-17 00:10: Contain non-object native catalog envelopes in the discovery error path. (authoring-run/3d8efdc8-6da6-4cf9-99f7-adebd5e5649d - 42fb0a90337209e28318765c1b537bc4f3623506)
+
 - 2026-10-16 19:14: Apply the dedicated Gateway tool ceiling after plugin grants and recheck it before native startup or peer respawn. (01a13683-3916-7880-b1a6-27175b853600 - b768af1b24c6d9130e46eb0bb470fa761ade2bfb)
+
 - 2026-10-15 22:26: Reconcile main and OpenShell OAuth in the accompanying merge. (authoring-run/41e4bb7a-c8eb-4332-b1f9-07fb8e234f63 - b747cf5b6402ad36ce9f1ae6dbed08928ddcf3dc)
 
 - 2026-10-15 04:39: Grant read-only access to bundled Codex system skills. (authoring-run/97a67c3a-0aaa-4d59-bccf-19183079b169 - 00bbc7cd976ab7be317ce1e0a9d36ad72ce10567)
@@ -373,11 +384,5 @@ deadline.
 - 2026-10-10 04:00: Hold an unusable writable-configuration peer bridge record unready with its file and remedy named. (fix-994-995)
 
 - 2026-10-10 00:30: Keep the earlier Codex `config.toml` of revisions prepared before an upgrade. (fix-982)
-
-- 2026-10-09 15:02: Preserve the configured Codex session approval policy during startup. (authoring-run/72c276e8-6db5-44e5-aac1-f9e3fdc34ff2 - 504bf89a0707b66e1612d26e3d67ed6f6b16232f)
-
-- 2026-10-09 17:01: Clarify that CredentialGateway retrieval may refresh before authorized plugin discovery in the accompanying change. (01a11d95-ebef-76e1-b9b9-9d3d2e88e99e - 4f902e2ab7738568fc8bb278296e54255355b8b7)
-
-- 2026-10-08 22:00: Integrate validated plugin default-off grants before native install, with final app-policy verification and skill-only selections. (authoring-run/74dc7eaf-a67b-47ef-91bd-2ecd0463fb10 - 65911984b3f6d9ee398aed913a0b8dd08e2ae094)
 
 [Agent plugin deployment documentation history](agent-plugins/history.md) preserves the older dated entries.
