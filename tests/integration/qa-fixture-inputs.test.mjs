@@ -1704,14 +1704,23 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
   await t.test(
     "correlates the real dispatcher and target without a direct target schema",
     async () => {
-      for (const id of ["openclaw:core:automations", "automations"]) {
+      for (const id of [
+        "openclaw:core:automations",
+        "automations",
+        " openclaw:core:automations ",
+        "\tautomations\n",
+      ]) {
         const call = structuredClone(dispatchedCall);
         call.content[0].arguments.id = id;
         replaceTranscript(dispatchedMessages(call));
+        await assert.rejects(
+          native.assertNoSessionToolCallEvidence({}, dispatchedEvidence),
+          /still invoked automations/,
+        );
         const proof = await native.assertSessionToolCallEvidence({}, dispatchedEvidence);
         assert.equal(proof.toolName, "dispatch_action");
         assert.equal(proof.targetName, "automations");
-        assert.equal(proof.targetId, id);
+        assert.equal(proof.targetId, id.trim());
         assert.equal(proof.toolCallId, "dispatched-call");
       }
     },

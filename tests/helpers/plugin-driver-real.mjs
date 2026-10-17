@@ -593,9 +593,11 @@ const sessionEvidenceScript = String.raw`
           contentBlockTypeCounts[blockType] = (contentBlockTypeCounts[blockType] ?? 0) + 1;
           if (typeof block?.name === "string") observedToolNames.add(block.name);
           // Preserve the actual dispatcher call; do not invent an inner transcript event.
+          const id = block?.arguments?.id;
+          const selectedId = typeof id === "string" ? id.trim() : undefined;
           const targetId = block?.name === "dispatch_action" && toolName &&
-            (block.arguments?.id === toolName || block.arguments?.id === "openclaw:core:" + toolName)
-              ? block.arguments.id : undefined;
+            (selectedId === toolName || selectedId === "openclaw:core:" + toolName)
+              ? selectedId : undefined;
           if (block?.type === "toolCall" && (matchesToolName(block.name) || targetId)) {
             const input = targetId ? block.arguments.args : block.arguments;
             const toolPrefix = prefixForToolMirrorIdentity(mirrorIdentity, ":call");
