@@ -65,14 +65,16 @@ composition and generated connectivity rules. It preserves default audit mode.
 capability constraints and verified tool identities. Bundled OpenClaw uses its
 pinned catalog; Codex inventory remains unknown without verified native ownership.
 The core validates and bounds descriptors, hashes them with OCE semantics version
-`oce-policy-simulation-v1`, and returns each supported kind independently.
+`oce-policy-simulation-v2`, and returns each supported kind independently. If the Sandbox policy cannot be read, the
+description can still show saved plugin policy. Simulating a plugin action never reads Sandbox placement.
 
 ### 3. Simulate and optionally inspect enforcement
 
 `packages/occ/src/policy-simulation.ts:simulatePolicy` implements OCE selector,
 method-preset and plugin precedence semantics. Network selectors support simple
 segment wildcards and ancestor paths, excluding spoofable command-line paths.
-Unmodeled HTTP canonicalization and unsupported syntax return unknown. Plugin
+Unmodeled HTTP canonicalization, unsupported syntax, and overlapping HTTP presets that
+would give different answers return unknown. The simulator does not guess the provider’s precedence. Plugin
 selection disablement is terminal; tool overrides precede defaults. Provider
 approval defaults, missing annotations, opaque Driver policy and unsupported
 review modes retain explicit uncertainty.

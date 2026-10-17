@@ -136,21 +136,29 @@ function network(
         unevaluatedChecks: [...policy.unevaluatedChecks, "HTTP application policy"],
       };
     }
-    const allowed = endpoints.some(
-      (endpoint) =>
-        endpoint.http!.methods.includes("*") ||
-        endpoint.http!.methods.includes(action.http!.method),
+    // The portable policy describes each endpoint, not which overlapping endpoint a provider
+    // selects. Report a decision only if every matching endpoint would give the same answer.
+    const method = action.http.method;
+    const decisions = new Set<PolicySimulationDecision>(
+      endpoints.map(({ http }) => {
+        const { methods, enforcement } = http!;
+        return methods.includes("*") || methods.includes(method)
+          ? "allow"
+          : enforcement === "enforce"
+            ? "deny"
+            : "audit";
+      }),
     );
-    const decision: PolicySimulationDecision = allowed
-      ? "allow"
-      : endpoints.some((endpoint) => endpoint.http!.enforcement === "enforce")
-        ? "deny"
-        : "audit";
-    const reason = allowed
-      ? "The HTTP method is allowed by the authored access preset."
-      : decision === "audit"
-        ? "The HTTP method is outside the access preset; the policy audits it."
-        : "The HTTP method is outside the authored access preset.";
+    const [first] = decisions;
+    const decision = decisions.size === 1 && first ? first : "unknown";
+    const reason =
+      decision === "unknown"
+        ? "Overlapping HTTP access presets disagree. OCE cannot tell which one the provider will use."
+        : decision === "allow"
+          ? "The HTTP method is allowed by the authored access preset."
+          : decision === "audit"
+            ? "The HTTP method is outside the access preset; the policy audits it."
+            : "The HTTP method is outside the authored access preset.";
     rules.push({
       id: "http:access-preset",
       name: "HTTP access preset",

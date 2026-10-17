@@ -5,6 +5,7 @@ import {
   createRuntimeLogFixture,
   operateGrants,
 } from "../helpers/runtime-logs.mjs";
+import { CodexPluginDriver } from "../../apps/controller/src/drivers/plugin/index.ts";
 import { InMemoryAuditSink } from "../../packages/audit/src/index.ts";
 
 // The Driver describes authored facts only. Verdicts come from the production OCE simulator.
@@ -150,4 +151,58 @@ test("OCE simulation audits access before reading authored policy", async () => 
   const unavailable = await app.request("GET", app.path);
   assert.equal(unavailable.status, 503, unavailable.text);
   assert.equal(app.calls.length, 0);
+});
+
+test("saved plugin policy remains usable when Sandbox placement is unavailable", async () => {
+  const { controller, computeDriver, request, target } = await fixture();
+  const driver = new CodexPluginDriver({ catalogSource: "openai-curated" });
+  controller.registerDriver(driver);
+  controller.selectDriver("plugin", driver.id);
+  const agent = `/namespaces/${target.namespace.id}/agents/${target.agent.id}`;
+  const pluginId = "codex-plugin:notion@openai-curated-remote";
+  const edited = await request("PATCH", agent, {
+    body: {
+      configurationId: target.agent.configurationId,
+      plugins: { [pluginId]: { enabled: false } },
+    },
+  });
+  assert.equal(edited.status, 200, edited.text);
+  const deployed = await request("POST", `${agent}/deploy`);
+  assert.equal(deployed.status, 202, deployed.text);
+  const path = `${agent}/deployments/${deployed.data.id}/runtime/policy-simulation`;
+  let placementReads = 0;
+  computeDriver.resolveSandboxNamespace = async () => {
+    placementReads += 1;
+    throw new Error("private placement details");
+  };
+
+  const snapshot = await request("GET", path);
+  assert.equal(snapshot.status, 200, snapshot.text);
+  assert.equal(snapshot.data.network, undefined);
+  assert.deepEqual(
+    snapshot.data.unsupported.map(({ kind }) => kind),
+    ["network"],
+  );
+  assert.doesNotMatch(snapshot.text, /private placement details/);
+  assert.equal(placementReads, 1);
+
+  const expectedSimulationHash = snapshot.data.plugins.simulationHash;
+  const plugin = await request("POST", path, {
+    body: { kind: "plugin", pluginId, toolId: "tool", expectedSimulationHash },
+  });
+  assert.equal(plugin.status, 200, plugin.text);
+  assert.equal(plugin.data.decision, "deny");
+  assert.equal(placementReads, 1, "simulating saved plugin policy must not read Sandbox placement");
+
+  const network = await request("POST", path, {
+    body: {
+      kind: "network",
+      host: "api.example.test",
+      port: 443,
+      binaryPath: "/usr/bin/curl",
+      expectedSimulationHash,
+    },
+  });
+  assert.equal(network.status, 503, network.text);
+  assert.doesNotMatch(network.text, /private placement details/);
 });

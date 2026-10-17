@@ -3033,6 +3033,25 @@ export class OpenClawController {
     signal?: AbortSignal,
     admitRead: RuntimeLogReadAdmission = (read) => read(),
   ): Promise<PolicySimulationDescription> {
+    return this.readAgentPolicySimulation(
+      principalId,
+      namespaceId,
+      agentId,
+      revisionId,
+      signal,
+      admitRead,
+    );
+  }
+
+  private async readAgentPolicySimulation(
+    principalId: string,
+    namespaceId: string,
+    agentId: string,
+    revisionId: string,
+    signal: AbortSignal | undefined,
+    admitRead: RuntimeLogReadAdmission,
+    requestedKind?: PolicySimulationRequest["kind"],
+  ): Promise<PolicySimulationDescription> {
     const { binding, driver } = await this.agentRuntimeTarget(
       principalId,
       namespaceId,
@@ -3051,65 +3070,88 @@ export class OpenClawController {
         } = { revisionId: binding.revision.id, unsupported };
         const snapshot = <T extends PolicySimulationPolicy>(policy: T) => ({
           simulationHash: createHash("sha256")
-            .update("oce-policy-simulation-v1\n")
+            .update("oce-policy-simulation-v2\n")
             .update(JSON.stringify(policy))
             .digest("hex"),
           policy,
         });
-        try {
-          const sandbox = this.revisionSandboxDriver(driver, binding.revision);
-          if (sandbox?.describePolicySimulation) {
-            const namespace = await driver.resolveSandboxNamespace!(binding.namespace);
-            const policy = await sandbox.describePolicySimulation({
-              namespace,
-              revision: binding.revision,
-              signal: deadline,
-            });
-            if (!isNetworkSimulationPolicy(policy) || JSON.stringify(policy).length > 512 * 1024) {
-              throw new Error("Invalid network simulation policy");
-            }
-            description.network = snapshot(policy);
-          } else {
-            unsupported.push({
-              kind: "network",
-              reason: "The version's Sandbox Driver does not describe OCE simulation policy.",
-            });
-          }
-          if (binding.revision.plugins) {
-            const plugin = this.pluginDriver();
-            if (
-              plugin.id !== binding.revision.plugins.driver.id ||
-              plugin.implementation !== binding.revision.plugins.driver.implementation
-            ) {
-              throw new Error("Plugin Driver identity changed");
-            }
-            if (plugin.describePolicySimulation) {
-              const policy = await plugin.describePolicySimulation(binding.revision, deadline);
-              if (!isPluginSimulationPolicy(policy) || JSON.stringify(policy).length > 512 * 1024) {
-                throw new Error("Invalid plugin simulation policy");
-              }
-              description.plugins = snapshot(policy);
-            } else {
-              unsupported.push({
-                kind: "plugin",
-                reason: "The Plugin Driver does not describe OCE simulation policy.",
-              });
-            }
-          } else {
-            unsupported.push({
-              kind: "plugin",
-              reason: "This version has no recorded Plugin Driver.",
-            });
-          }
-          return immutableCopy(description);
-        } catch {
+        // A description can include the other kind when one Driver is unavailable. A simulation
+        // reads only its requested kind and preserves the difference between unavailable and unsupported.
+        let readFailure: string | undefined;
+        const unavailable = (kind: PolicySimulationRequest["kind"]) => {
           if (deadline.aborted) {
             throw new RuntimeLogsError("RUNTIME_LOGS_TIMEOUT");
           }
-          throw new DependencyUnavailableError(
-            "OCE policy simulation is unavailable for the selected version.",
-          );
+          const reason = `Could not read the ${kind} policy for this version. Reload to try again.`;
+          readFailure = reason;
+          unsupported.push({ kind, reason });
+        };
+        if (!requestedKind || requestedKind === "network") {
+          try {
+            const sandbox = this.revisionSandboxDriver(driver, binding.revision);
+            if (sandbox?.describePolicySimulation) {
+              const namespace = await driver.resolveSandboxNamespace!(binding.namespace);
+              const policy = await sandbox.describePolicySimulation({
+                namespace,
+                revision: binding.revision,
+                signal: deadline,
+              });
+              if (
+                !isNetworkSimulationPolicy(policy) ||
+                JSON.stringify(policy).length > 512 * 1024
+              ) {
+                throw new Error("Invalid network simulation policy");
+              }
+              description.network = snapshot(policy);
+            } else {
+              unsupported.push({
+                kind: "network",
+                reason: "The version's Sandbox Driver does not describe OCE simulation policy.",
+              });
+            }
+          } catch {
+            unavailable("network");
+          }
         }
+        if (!requestedKind || requestedKind === "plugin") {
+          try {
+            if (binding.revision.plugins) {
+              const plugin = this.pluginDriver();
+              if (
+                plugin.id !== binding.revision.plugins.driver.id ||
+                plugin.implementation !== binding.revision.plugins.driver.implementation
+              ) {
+                throw new Error("Plugin Driver identity changed");
+              }
+              if (plugin.describePolicySimulation) {
+                const policy = await plugin.describePolicySimulation(binding.revision, deadline);
+                if (
+                  !isPluginSimulationPolicy(policy) ||
+                  JSON.stringify(policy).length > 512 * 1024
+                ) {
+                  throw new Error("Invalid plugin simulation policy");
+                }
+                description.plugins = snapshot(policy);
+              } else {
+                unsupported.push({
+                  kind: "plugin",
+                  reason: "The Plugin Driver does not describe OCE simulation policy.",
+                });
+              }
+            } else {
+              unsupported.push({
+                kind: "plugin",
+                reason: "This version has no recorded Plugin Driver.",
+              });
+            }
+          } catch {
+            unavailable("plugin");
+          }
+        }
+        if (readFailure && !description.network && !description.plugins) {
+          throw new DependencyUnavailableError(readFailure);
+        }
+        return immutableCopy(description);
       }),
     );
   }
@@ -3132,13 +3174,14 @@ export class OpenClawController {
     if (!isPolicySimulationRequest(request)) {
       throw new ScopeViolationError("The policy simulation request is invalid.");
     }
-    const description = await this.describeAgentPolicySimulation(
+    const description = await this.readAgentPolicySimulation(
       principalId,
       namespaceId,
       agentId,
       revisionId,
       signal,
       admitRead,
+      request.kind,
     );
     const snapshot = request.kind === "network" ? description.network : description.plugins;
     if (!snapshot) {

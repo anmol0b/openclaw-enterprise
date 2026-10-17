@@ -807,6 +807,12 @@ test("OpenShell authored simulation conforms to the real provisioning translatio
     },
     { name: "binary glob", binary: "/usr/bin/*", expected: "allow" },
     { name: "REST read", action: { http: { method: "GET", path: "/public" } }, expected: "allow" },
+    {
+      name: "overlapping REST enforce and audit do not imply a denial",
+      secondEndpoint: { enforcement: "audit" },
+      action: { http: { method: "POST", path: "/public" } },
+      expected: "unknown",
+    },
     { name: "REST HEAD", action: { http: { method: "HEAD", path: "/public" } }, expected: "allow" },
     {
       name: "REST write denied",
@@ -877,6 +883,10 @@ test("OpenShell authored simulation conforms to the real provisioning translatio
         },
       ];
       const gatewayClient = workspaceGatewayClient();
+      if (scenario.secondEndpoint) {
+        const { endpoints } = options.policy.networkPolicies[0];
+        endpoints.push({ ...endpoints[0], ...scenario.secondEndpoint });
+      }
       let captured;
       // This fixture only captures transport. It does not return policy decisions
       // or replace the provisioning translator or the native matcher.
@@ -940,6 +950,15 @@ test("OpenShell authored simulation conforms to the real provisioning translatio
         assert.ok(
           policy.rules[0].unsupportedReason ?? policy.rules[0].destinations[0].unsupportedReason,
         );
+        return;
+      }
+      if (scenario.secondEndpoint) {
+        assert.equal(policy.rules[0].destinations.length, 2);
+        // The portable policy does not specify which overlapping endpoint the provider selects.
+        // An unknown prediction is intentional, not a claim of parity with a native verdict.
+        assert.equal(simulated.rules.at(-1).decision, "unknown");
+        const read = simulatePolicy(policy, { ...action, http: { ...action.http, method: "GET" } });
+        assert.equal(read.decision, "allow", "both endpoints allow GET");
         return;
       }
       nativeCases.push({
