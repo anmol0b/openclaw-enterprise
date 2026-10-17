@@ -268,6 +268,8 @@ test(
       exitGraceMs: 10,
       log: (message) => logs.push(message),
       exit: () => exits.push("exit"),
+      // This file's own test is still running; the stand-in waits the grace alone.
+      settled: (quietMs) => delay(quietMs),
     });
     const ran = [];
     context.after(() => ran.push("namespace delete"));
@@ -278,7 +280,7 @@ test(
     assert.deepEqual(ran, ["port-forward stop", "namespace delete"]);
     assert.match(
       logs.at(-1),
-      /^teardown: exiting in 10 ms; abandoned cleanups registered at kubernetes-real-kubectl\.test\.mjs:\d+$/,
+      /^teardown: exiting once the file's tests settle for 10 ms; abandoned cleanups registered at kubernetes-real-kubectl\.test\.mjs:\d+$/,
     );
     await delay(100);
     assert.deepEqual(exits, ["exit"]);
@@ -350,7 +352,7 @@ test(
     );
     assert.match(
       exited.stderr,
-      /teardown: exiting in 50 ms; abandoned cleanups workerStop registered at openshell-kubernetes-real\.mjs:\d+/,
+      /teardown: exiting once the file's tests settle for 50 ms; abandoned cleanups workerStop registered at openshell-kubernetes-real\.mjs:\d+/,
     );
   },
 );
@@ -364,6 +366,200 @@ test("a helper's bounded teardown reuses its caller's and never nests a second o
   assert.equal(withBoundedTeardown(callers), callers);
   assert.equal(testContext.hooks.length, 1);
 });
+
+test("two helpers given one node:test context share its bounded teardown, newest first", async () => {
+  // Finding 1725: each helper got a teardown of its own, and node:test ran the two oldest-first,
+  // so the first helper's Namespace delete ran before the second helper's worker stop.
+  const testContext = new RecordingContext();
+  const first = withBoundedTeardown(testContext, { label: "first helper", log: () => {} });
+  const second = withBoundedTeardown(testContext, { label: "second helper" });
+  assert.equal(second, first);
+  assert.equal(testContext.hooks.length, 1);
+  const ran = [];
+  first.after(() => ran.push("namespace delete"));
+  second.after(() => ran.push("worker stop"));
+  await testContext.hooks[0]();
+  assert.deepEqual(ran, ["worker stop", "namespace delete"]);
+  // A helper given the context its caller already bounded joins the caller's teardown too.
+  const callersContext = new RecordingContext();
+  const { context } = boundedTeardown(callersContext);
+  assert.equal(withBoundedTeardown(callersContext), context);
+  assert.equal(callersContext.hooks.length, 1);
+});
+
+test(
+  "a cleanup registered after the teardown ran runs at once, bounded, and fails the file",
+  { timeout: 5_000 },
+  async () => {
+    // Finding 1722: such a cleanup was kept for a teardown that had already run, so it never ran.
+    const testContext = new RecordingContext();
+    const logs = [];
+    const events = [];
+    const { context } = boundedTeardown(testContext, {
+      stepLimitMs: 50,
+      exitGraceMs: 10,
+      log: (message) => logs.push(message),
+      exit: () => events.push("exit"),
+      failFile: () => events.push("fail"),
+      // This file's own test is still running; the stand-in waits the grace alone.
+      settled: (quietMs) => delay(quietMs),
+    });
+    const ran = [];
+    context.after(() => ran.push("early cleanup"));
+    await testContext.hooks[0]();
+    assert.deepEqual(events, [], "nothing was abandoned or late");
+    context.after(() => ran.push("worker stop"));
+    // A late cleanup that never settles is abandoned like any other.
+    context.after(() => new Promise(() => {}));
+    context.after(() => ran.push("port-forward stop"));
+    await delay(300);
+    assert.deepEqual(ran, ["early cleanup", "worker stop", "port-forward stop"]);
+    assert.equal(events.filter((event) => event === "fail").length, 3);
+    assert.equal(events.filter((event) => event === "exit").length, 1);
+    assert.equal(
+      logs.filter((line) => / came after the teardown ran; running it now$/.test(line)).length,
+      3,
+    );
+    assert.ok(
+      logs.some((line) =>
+        /^teardown: cleanup registered at kubernetes-real-kubectl\.test\.mjs:\d+ failed: did not finish within 50 ms$/.test(
+          line,
+        ),
+      ),
+    );
+  },
+);
+
+const kubernetesHelperUrl = new URL("../helpers/kubernetes-real.mjs", import.meta.url).href;
+
+// Runs a script as its own node:test root, not as a child reporting to this runner, with a TAP
+// report, and returns how it ended.
+async function runTestScript(script, { env: overrides = {}, timeout = 15_000 } = {}) {
+  const env = { ...process.env, ...overrides };
+  delete env.NODE_TEST_CONTEXT;
+  const started = Date.now();
+  const exited = await execute(
+    process.execPath,
+    ["--test-reporter=tap", "--input-type=module", "-e", script],
+    { env, timeout },
+  ).then(
+    ({ stdout, stderr }) => ({ code: 0, killed: false, stdout, stderr }),
+    (error) => error,
+  );
+  return { ...exited, elapsedMs: Date.now() - started };
+}
+
+test(
+  "setup that outlives its test's timeout has its late worker stop run, and the file ends",
+  { timeout: 20_000 },
+  async () => {
+    // Finding 1722: a node:test timeout runs the test's hooks but does not stop its body. Setup
+    // that started a worker after that registered its stop too late: the stop never ran, and the
+    // worker's poll held the file until the runner's 5,400 s file timeout.
+    const exited = await runTestScript(`
+      import test from "node:test";
+      import { setTimeout as delay } from "node:timers/promises";
+      import { boundedTeardown } from ${JSON.stringify(kubernetesHelperUrl)};
+      test("setup outlives its timeout", { timeout: 200 }, async (testContext) => {
+        const { context } = boundedTeardown(testContext, { stepLimitMs: 1000, exitGraceMs: 100 });
+        context.after(() => process.stdout.write("attempted early cleanup\\n"));
+        await delay(600);
+        const poll = setInterval(() => {}, 50);
+        context.after(() => {
+          process.stdout.write("attempted worker stop\\n");
+          clearInterval(poll);
+        });
+      });
+    `);
+    assert.equal(exited.killed, false, "the file exited on its own");
+    assert.ok(exited.elapsedMs < 10_000, "the file exited soon after the late cleanup");
+    assert.equal(exited.code, 1);
+    assert.deepEqual(exited.stdout.match(/^attempted .+$/gm), [
+      "attempted early cleanup",
+      "attempted worker stop",
+    ]);
+    assert.match(exited.stdout, /^not ok 1 - setup outlives its timeout$/m);
+    assert.match(
+      exited.stderr,
+      /^teardown: cleanup registered at \[eval1\]:\d+ came after the teardown ran; running it now$/m,
+    );
+  },
+);
+
+test(
+  "an abandoned cleanup ends the file after its later tests, not under them",
+  { timeout: 20_000 },
+  async () => {
+    // Finding 1723: the exit fired its grace after the abandoning test's own teardown. The next
+    // test was killed mid-run, missing from the report, and its cleanups never ran.
+    const exited = await runTestScript(`
+      import test from "node:test";
+      import { setTimeout as delay } from "node:timers/promises";
+      import { boundedTeardown } from ${JSON.stringify(kubernetesHelperUrl)};
+      test("first abandons a cleanup", (testContext) => {
+        const { context } = boundedTeardown(testContext, { stepLimitMs: 100, exitGraceMs: 200 });
+        // Never settles, and its poll keeps the process alive.
+        context.after(() => new Promise(() => setInterval(() => {}, 50)));
+      });
+      test("second outlasts the grace", async (testContext) => {
+        const { context } = boundedTeardown(testContext);
+        context.after(() => process.stdout.write("attempted second cleanup\\n"));
+        await delay(1_000);
+      });
+    `);
+    assert.equal(exited.killed, false, "the file exited on its own");
+    assert.ok(exited.elapsedMs < 10_000, "the file exited soon after its last test");
+    assert.equal(exited.code, 1);
+    assert.match(exited.stdout, /^not ok 1 - first abandons a cleanup$/m);
+    assert.match(exited.stdout, /^attempted second cleanup$/m);
+    assert.match(exited.stdout, /^ok 2 - second outlasts the grace$/m);
+  },
+);
+
+test(
+  "the production topology bounds the raw node:test context it is given",
+  { timeout: 20_000 },
+  async () => {
+    // Finding 1724: the routing and native admin tests hand arrangeProductionTopology their own
+    // node:test context and rely on its withBoundedTeardown call; the stand-in test replaces the
+    // whole helper, so nothing else fails if that call goes. Without a controller image, a
+    // dedicated topology stops at its first check, before any cluster call.
+    const topologyHelper = new URL("../helpers/harness-topology-k3d-real.mjs", import.meta.url)
+      .href;
+    const env = { ...process.env };
+    for (const name of [
+      "OCC_TEST_PRODUCTION_CONTROLLER_IMAGE",
+      "OCC_TEST_KUBERNETES_KUBECONFIG",
+      "OCC_TEST_KUBERNETES_CONTEXT",
+      "OPENAI_API_KEY",
+    ]) {
+      delete env[name];
+    }
+    delete env.NODE_TEST_CONTEXT;
+    const { stdout } = await execute(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+          import { arrangeProductionTopology } from ${JSON.stringify(topologyHelper)};
+          const hooks = [];
+          const testContext = { name: "topology", after: (hook) => hooks.push(hook) };
+          const failure = await arrangeProductionTopology(testContext, "dedicated").then(
+            () => "none",
+            (error) => error.message.split("\\n")[0],
+          );
+          await Promise.all(hooks.map((hook) => hook()));
+          process.stdout.write(JSON.stringify({ failure, hooks: hooks.length }));
+        `,
+      ],
+      { env, timeout: 15_000 },
+    );
+    const result = JSON.parse(stdout);
+    assert.match(result.failure, /Dedicated storage requires the imported controller image/);
+    assert.equal(result.hooks, 1, "one bounded teardown hook, registered before the first check");
+  },
+);
 
 test(
   "the production topology's cleanups all run when its worker stop rejects",

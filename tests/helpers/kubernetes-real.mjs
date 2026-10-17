@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
+import { tracingChannel } from "node:diagnostics_channel";
 import { once } from "node:events";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -125,13 +126,43 @@ export async function withinDiagnosticDeadline(
 // A bounded teardown runs the cleanups registered through its `context.after` last-registered
 // first, each within `stepLimitMs`, and runs every one after a failure. It logs each cleanup by
 // the line that registered it. A cleanup past its limit is left running and fails the teardown,
-// and the process exits `exitGraceMs` after the teardown so what it holds cannot keep the file
-// alive (the revision fixture's rule, finding 1223). The limit covers the 120 s Namespace deletes.
+// and the process exits once the file's tests have settled for `exitGraceMs`, so what it holds
+// cannot keep the file alive (the revision fixture's rule, finding 1223). The limit covers the
+// 120 s Namespace deletes.
 export const teardownStepLimitMs = 180_000;
 export const abandonedTeardownExitGraceMs = 2_000;
 
-// The contexts boundedTeardown returned, so a helper does not nest a second teardown inside one.
+// node:test publishes each test's start, and its end after its hooks, on this channel (Node
+// 24.16). Without it (an older Node), the exit waits out the grace alone.
+const runningTests = new Set();
+let testsStarted = 0;
+tracingChannel("node.test").subscribe({
+  start(test) {
+    runningTests.add(test);
+    testsStarted += 1;
+  },
+  end(test) {
+    runningTests.delete(test);
+  },
+});
+
+// Resolves once no test has run or started for `quietMs`. An abandoned cleanup then ends the
+// process after the file's last test, not under the next one (finding 1723). The poll is unref'd,
+// so it never holds the process itself.
+async function testsSettled(quietMs) {
+  for (;;) {
+    const started = testsStarted;
+    await delay(quietMs, undefined, { ref: false });
+    if (runningTests.size === 0 && testsStarted === started) {
+      return;
+    }
+  }
+}
+
+// The contexts boundedTeardown returned, so a helper does not nest a second teardown inside one,
+// and the first one made for each node:test context, so two helpers given that context share it.
 const boundedContexts = new WeakSet();
+const teardownFor = new WeakMap();
 
 function registrationSite(stack) {
   // Frame 0 is the message, 1 is `after` here, 2 is its caller.
@@ -147,16 +178,73 @@ export function boundedTeardown(
     stepLimitMs = teardownStepLimitMs,
     exitGraceMs = abandonedTeardownExitGraceMs,
     log = (message) => process.stderr.write(`${message}\n`),
-    // A teardown that abandons a cleanup also fails, so the exit code is a failure's.
-    exit = () => process.exit(process.exitCode ?? 1),
+    // The exit follows a failure, so its code is a failure's.
+    exit = () => process.exit(process.exitCode || 1),
+    // Fails the file once its test has been reported, should the process still end by itself.
+    failFile = () => {
+      process.exitCode ||= 1;
+    },
+    settled = testsSettled,
   } = {},
 ) {
   const cleanups = [];
   let started = false;
+  let finished = false;
+  let exiting = false;
+  let late = Promise.resolve();
+  const endProcess = (reason) => {
+    log(`${label}: exiting once the file's tests settle for ${exitGraceMs} ms; ${reason}`);
+    if (!exiting) {
+      exiting = true;
+      // node:test reports the test once its hook returns.
+      settled(exitGraceMs).then(exit);
+    }
+  };
+  // Runs one cleanup within the limit. Resolves to its error, if any, and whether it was left
+  // running.
+  const run = async ({ cleanup, site }) => {
+    log(`${label}: cleanup ${site}`);
+    let timer;
+    let abandoned = false;
+    try {
+      await Promise.race([
+        Promise.resolve().then(cleanup),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            abandoned = true;
+            reject(new Error(`did not finish within ${stepLimitMs} ms`));
+          }, stepLimitMs);
+        }),
+      ]);
+      return { abandoned };
+    } catch (error) {
+      log(`${label}: cleanup ${site} failed: ${error?.message ?? error}`);
+      return {
+        abandoned,
+        error: new Error(`cleanup ${site}: ${error?.message ?? error}`, { cause: error }),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   const after = (cleanup) => {
     // A named cleanup is logged by its name too.
     const site = `registered at ${registrationSite(new Error().stack)}`;
-    cleanups.push({ cleanup, site: cleanup?.name ? `${cleanup.name} ${site}` : site });
+    const step = { cleanup, site: cleanup?.name ? `${cleanup.name} ${site}` : site };
+    if (!finished) {
+      cleanups.push(step);
+      return;
+    }
+    // A node:test timeout fails the test and runs its hooks but does not stop its body, so setup
+    // can register a cleanup (a worker stop) after the teardown ran (finding 1722). Run it now,
+    // bounded, fail the file and end the process: the test has been reported, and its setup may
+    // still run.
+    log(`${label}: cleanup ${step.site} came after the teardown ran; running it now`);
+    late = late.then(async () => {
+      await run(step);
+      failFile();
+      endProcess(`cleanup ${step.site} came after its test's teardown`);
+    });
   };
   testContext.after(async () => {
     started = true;
@@ -164,30 +252,18 @@ export function boundedTeardown(
     const abandoned = [];
     // A cleanup may register another; it runs next.
     while (cleanups.length > 0) {
-      const { cleanup, site } = cleanups.pop();
-      log(`${label}: cleanup ${site}`);
-      let timer;
-      try {
-        await Promise.race([
-          Promise.resolve().then(cleanup),
-          new Promise((_, reject) => {
-            timer = setTimeout(() => {
-              abandoned.push(site);
-              reject(new Error(`did not finish within ${stepLimitMs} ms`));
-            }, stepLimitMs);
-          }),
-        ]);
-      } catch (error) {
-        log(`${label}: cleanup ${site} failed: ${error?.message ?? error}`);
-        failures.push(new Error(`cleanup ${site}: ${error?.message ?? error}`, { cause: error }));
-      } finally {
-        clearTimeout(timer);
+      const step = cleanups.pop();
+      const result = await run(step);
+      if (result.abandoned) {
+        abandoned.push(step.site);
+      }
+      if (result.error !== undefined) {
+        failures.push(result.error);
       }
     }
+    finished = true;
     if (abandoned.length > 0) {
-      log(`${label}: exiting in ${exitGraceMs} ms; abandoned cleanups ${abandoned.join(", ")}`);
-      // node:test reports the test once this hook returns.
-      setTimeout(exit, exitGraceMs).unref();
+      endProcess(`abandoned cleanups ${abandoned.join(", ")}`);
     }
     if (failures.length === 1) {
       throw failures[0];
@@ -206,6 +282,9 @@ export function boundedTeardown(
     },
   });
   boundedContexts.add(context);
+  if (!teardownFor.has(testContext)) {
+    teardownFor.set(testContext, context);
+  }
   return {
     context,
     // Whether teardown has begun, for failure diagnostics.
@@ -216,12 +295,14 @@ export function boundedTeardown(
 }
 
 // A helper that registers several cleanups gets them run newest-first and bounded whatever context
-// its caller passes: a raw node:test context gets its own bounded teardown, and one from
-// boundedTeardown is used as is.
+// its caller passes: a raw node:test context gets one bounded teardown, shared by every helper and
+// caller given that context so their cleanups keep one newest-first order (finding 1725; the first
+// one's options apply), and one from boundedTeardown is used as is.
 export function withBoundedTeardown(testContext, options) {
-  return boundedContexts.has(testContext)
-    ? testContext
-    : boundedTeardown(testContext, options).context;
+  if (boundedContexts.has(testContext)) {
+    return testContext;
+  }
+  return teardownFor.get(testContext) ?? boundedTeardown(testContext, options).context;
 }
 
 const alreadyCreated = /^Error from server \(AlreadyExists\): /m;
