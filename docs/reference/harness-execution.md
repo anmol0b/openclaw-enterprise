@@ -179,8 +179,8 @@ request to a default OpenAI or Anthropic endpoint, or a Codex `turn.failed`
 event or access-token login error reporting 401 or 403. The upfront 401 adds closed-set
 `providerCode`, `responseHeaderMarker` (header names), `bodyShape`
 (`json-error-code`, `json-error-no-code`, `json-no-error`, `non-json`, `empty`),
-`providerErrorCode` and `providerErrorType` (`error.code`, `error.type`: `other` off-set,
-omitted when missing). A CPU-starved OpenClaw
+`providerErrorCode` and `providerErrorType` (`error.code`, `error.type`: verbatim if
+lowercase identifiers, else `other`; omitted when missing). A CPU-starved OpenClaw
 probe reports `MODEL_PROBE_CPU_STARVED`. Timeouts, provider server errors,
 and transport failures report `MODEL_PROBE_TIMEOUT`, `MODEL_PROBE_FAILED`, or
 `LOGIN_FAILED`. The worker fails deployment at once on each held

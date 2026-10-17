@@ -489,7 +489,7 @@ test("native terminal failures report only fixed failure codes", async (t) => {
       providerCode: "invalid_api_key",
       responseHeaderMarker: "provider-like",
       bodyShape: "json-error-code",
-      providerErrorCode: "invalid_api_key",
+      providerErrorCode: "invalid_bearer_token",
       providerErrorType: "invalid_request_error",
     };
     const records = probeLog({ code: "AUTHENTICATION_FAILED", ...provider });
@@ -524,20 +524,27 @@ test("native terminal failures report only fixed failure codes", async (t) => {
   });
 
   await t.test("print other for values outside the fixed vocabularies", async () => {
-    const records = probeLog({
+    const sentinels = {
       code: "PRIVATE_SENTINEL",
       providerStatus: 200,
       providerCode: "private-sentinel",
       responseHeaderMarker: "private-sentinel-source",
       bodyShape: "private-sentinel-shape",
       providerErrorCode: "private-sentinel-code",
-      providerErrorType: "private-sentinel-type",
-    });
-    assert.equal(records[0]?.fields?.providerCode, "private-sentinel");
-    assert.equal(records[0]?.fields?.responseHeaderMarker, "private-sentinel-source");
-    assert.equal(records[0]?.fields?.bodyShape, "private-sentinel-shape");
-    assert.equal(records[0]?.fields?.providerErrorCode, "private-sentinel-code");
-    assert.equal(records[0]?.fields?.providerErrorType, "private-sentinel-type");
+      providerErrorType: "Private_sentinel_type",
+    };
+    const records = probeLog({ ...sentinels, providerCode: "private_sentinel" });
+    // The production sanitizer keeps an identifier-shaped provider code and drops
+    // provider values of any other shape.
+    assert.equal(records[0]?.fields?.providerCode, "private_sentinel");
+    for (const name of [
+      "responseHeaderMarker",
+      "bodyShape",
+      "providerErrorCode",
+      "providerErrorType",
+    ]) {
+      assert.equal(records[0]?.fields?.[name], undefined, name);
+    }
     const failed = { ...deployment, error: failure("RUNTIME_MODEL_PROBE_FAILED") };
     const observed = await observe(
       failed,
@@ -564,6 +571,29 @@ test("native terminal failures report only fixed failure codes", async (t) => {
       [deploymentPath, logPath],
     );
     assert.deepEqual(single.modelProbe, {
+      probes: 1,
+      code: "other",
+      providerStatus: "other",
+      providerCode: "other",
+      responseHeaderMarker: "absent",
+      bodyShape: "absent",
+      providerErrorCode: "absent",
+      providerErrorType: "absent",
+    });
+    // The helper prints "other" for any value outside its vocabularies, even one
+    // the sanitizer would drop.
+    const unsanitized = await observe(
+      failed,
+      handoff,
+      [
+        failed,
+        page([
+          { type: "line", kind: "wrapper", message: "openclaw.model_probe", fields: sentinels },
+        ]),
+      ],
+      [deploymentPath, logPath],
+    );
+    assert.deepEqual(unsanitized.modelProbe, {
       probes: 1,
       code: "other",
       providerStatus: "other",
