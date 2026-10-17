@@ -1,4 +1,4 @@
-ARG OPENCLAW_COMMIT=ba531dfcf4ce1c116a02207e10e2e4745be461f6
+ARG OPENCLAW_COMMIT=c2976c807b70f3d47db84493f1d00e68eb44e914
 ARG NODE_BASE_IMAGE=docker.io/library/node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
 ARG NODE_RUNTIME_BASE_IMAGE=docker.io/library/node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
@@ -95,7 +95,7 @@ RUN --mount=type=secret,id=build-ca,required=false \
     if [ -f /run/secrets/build-ca ]; then export CURL_CA_BUNDLE=/run/secrets/build-ca; fi; \
     curl --fail --location --silent --show-error \
       "https://codeload.github.com/openclaw/openclaw/tar.gz/${GIT_COMMIT}" -o /tmp/openclaw-source.tar.gz; \
-    echo 'fe60e35c3ca689707dd74ecf77437dba2e2e2976cd5273d32a8b9316e6ae91a3  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
+    echo '83a1691f9bf223807ce62109ce96cdc563856dbf8980fae800cf16061807627f  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
     tar -xzf /tmp/openclaw-source.tar.gz --strip-components=1; \
     rm /tmp/openclaw-source.tar.gz
 # TODO: Remove this bridge patch when OpenClaw supports networkProxy.readOnlyPaths.

@@ -82,8 +82,8 @@ enrollment, containment, workspace access, or model execution.
 | Input                                        | Selection                                                                                                    |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | Build base                                   | `docker.io/library/node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0` |
-| OpenClaw source commit                       | `ba531dfcf4ce1c116a02207e10e2e4745be461f6`                                                                   |
-| Source archive SHA-256                       | `fe60e35c3ca689707dd74ecf77437dba2e2e2976cd5273d32a8b9316e6ae91a3`                                           |
+| OpenClaw source commit                       | `c2976c807b70f3d47db84493f1d00e68eb44e914`                                                                   |
+| Source archive SHA-256                       | `83a1691f9bf223807ce62109ce96cdc563856dbf8980fae800cf16061807627f`                                           |
 | Dedicated Codex CLI (`OPENAI_CODEX_VERSION`) | `0.163.0-alpha.2`                                                                                            |
 | Matrix crypto native library                 | `@matrix-org/matrix-sdk-crypto-nodejs` `v0.6.6`, SHA-256 per architecture                                    |
 
@@ -142,7 +142,7 @@ checksum-verifying download helper, and both installs read it from a loopback se
 instead of GitHub. When an OpenClaw update changes the locked
 `@matrix-org/matrix-sdk-crypto-nodejs` version, update that stage's version, URL and
 both SHA-256 values. Until then the install fails with a "no pinned file" message.
-Follow the [pinned upstream Docker assembly](https://github.com/openclaw/openclaw/blob/ba531dfcf4ce1c116a02207e10e2e4745be461f6/Dockerfile)
+Follow the [pinned upstream Docker assembly](https://github.com/openclaw/openclaw/blob/c2976c807b70f3d47db84493f1d00e68eb44e914/Dockerfile)
 to keep plugin dependencies and runtime assets consistent. Its plugin-local
 dependency layout preserves dependencies that differ from core versions.
 Plugin chunks emitted directly under `dist` also need package-root resolution.
