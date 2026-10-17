@@ -447,6 +447,7 @@ const sessionEvidenceScript = String.raw`
   const toolName = process.argv[3];
   const resultPattern = process.argv[4];
   const expectedArguments = JSON.parse(process.argv[5] || "null");
+  const expectedCatalog = JSON.parse(process.argv[6] || "null");
   const databasePath = "/home/node/.openclaw/agents/main/agent/openclaw-agent.sqlite";
   const db = new DatabaseSync(databasePath, { readOnly: true });
   function contains(value, needle) {
@@ -591,12 +592,24 @@ const sessionEvidenceScript = String.raw`
           const blockType = block?.type ?? "unknown";
           contentBlockTypeCounts[blockType] = (contentBlockTypeCounts[blockType] ?? 0) + 1;
           if (typeof block?.name === "string") observedToolNames.add(block.name);
-          if (block?.type === "toolCall" && matchesToolName(block.name)) {
+          // Preserve the actual dispatcher call; do not invent an inner transcript event.
+          const targetId = block?.name === "dispatch_action" && toolName &&
+            (block.arguments?.id === toolName || block.arguments?.id === "openclaw:core:" + toolName)
+              ? block.arguments.id : undefined;
+          if (block?.type === "toolCall" && (matchesToolName(block.name) || targetId)) {
+            const input = targetId ? block.arguments.args : block.arguments;
             const toolPrefix = prefixForToolMirrorIdentity(mirrorIdentity, ":call");
             if (toolPrefix !== undefined) turn(toolPrefix).toolCallMirrorSeen = true;
             calls.push({ seq: row.seq, id: block.id, name: block.name, mirrorIdentity,
+              ...(targetId ? { targetId, targetName: toolName } : {}),
               matchesArguments: expectedArguments === null || Object.entries(expectedArguments)
-                .every(([key, value]) => block.arguments?.[key] === value),
+                .every(([key, value]) => input?.[key] === value),
+              ...(expectedCatalog ? {
+                matchesSearchArguments: block.name === "tool_search" && Array.isArray(input?.queries) &&
+                  input.queries.length === expectedCatalog.present.length + expectedCatalog.absent.length &&
+                  [...expectedCatalog.present, ...expectedCatalog.absent].every((name) =>
+                    input.queries.filter((query) => query.query === name && query.limit === 1).length === 1),
+              } : {}),
             });
           }
         }
@@ -611,18 +624,53 @@ const sessionEvidenceScript = String.raw`
       if (message.role === "toolResult" && calls.some((call) => call.id === message.toolCallId)) {
         const resultPrefix = prefixForToolMirrorIdentity(mirrorIdentity, ":result");
         if (resultPrefix !== undefined) turn(resultPrefix).toolResultMirrorSeen = true;
+        const call = calls.find((call) => call.id === message.toolCallId);
+        const envelope = call.targetId ? message.details : undefined;
+        const hasEnvelope = envelope?.tool !== undefined || envelope?.result !== undefined;
+        const matchesTarget = !call.targetId || (message.toolName === call.name && (hasEnvelope
+          ? envelope.tool?.name === toolName && envelope.tool?.source === "openclaw" &&
+            envelope.tool?.id === (call.targetId === toolName ? "openclaw:core:" + toolName : call.targetId) &&
+            Array.isArray(envelope.result?.content)
+          : message.isError === true));
+        const targetResult = call.targetId && hasEnvelope ? envelope.result : message;
+        // The dispatcher writes its canonical target failure to the outer details.status.
+        const isError = message.isError === true || (call.targetId && typeof envelope?.status === "string");
+        const groups = expectedCatalog && Array.isArray(message.details?.results)
+          ? message.details.results : undefined;
+        const matchesCatalog = expectedCatalog === null || (
+          call.matchesSearchArguments === true && message.details?.truncated !== true &&
+          groups?.length === expectedCatalog.present.length + expectedCatalog.absent.length &&
+          [...expectedCatalog.present, ...expectedCatalog.absent].every((name) => {
+            const matched = groups.filter((group) => group.query === name);
+            if (matched.length !== 1 || matched[0].truncated === true ||
+                !Array.isArray(matched[0].candidates) || matched[0].candidates.length > 1) return false;
+            const candidates = matched[0].candidates;
+            if (candidates.some((candidate) => typeof candidate?.name !== "string" ||
+                typeof candidate.id !== "string" || typeof candidate.source !== "string")) return false;
+            const exact = candidates.filter((candidate) => candidate.name?.toLowerCase() === name.toLowerCase());
+            return expectedCatalog.present.includes(name)
+              ? exact.length === 1 && exact[0].source === "openclaw" && exact[0].id === "openclaw:core:" + name
+              : exact.length === 0;
+          })
+        );
         results.push({
           seq: row.seq,
           toolCallId: message.toolCallId,
           toolName: message.toolName,
-          isError: message.isError === true,
-          exitCode: Number.isInteger(message.details?.exitCode) ? message.details.exitCode : undefined,
-          errorText: message.isError === true ? textOf(message.content) : undefined,
+          isError: Boolean(isError),
+          matchesTarget,
+          exitCode: Number.isInteger(targetResult?.details?.exitCode) ? targetResult.details.exitCode : undefined,
+          errorText: isError ? textOf(targetResult?.content) : undefined,
           // Native Codex emits this terminal reason when MCP approval is denied.
           deniedByUser: textOf(message.content).includes("user rejected MCP tool call"),
-          matchesResult: resultPattern
-            ? contains(message, resultPattern) || textOf(message.content).includes(resultPattern)
-            : hasStructuredResult(message.content),
+          matchesResult: matchesTarget && matchesCatalog && (resultPattern
+            ? contains(targetResult, resultPattern) || textOf(targetResult?.content).includes(resultPattern)
+            : hasStructuredResult(targetResult?.content)),
+          ...(expectedCatalog ? { matchesCatalog, catalog: groups?.map((group) => ({
+            query: group.query,
+            names: group.candidates?.map((candidate) => candidate.name),
+            truncated: group.truncated === true,
+          })), catalogTruncated: message.details?.truncated === true } : {}),
           mirrorIdentity,
           approvalReviews: (message.details?.approvalReviews ?? []).map((review) => ({
             id: review.id,
@@ -1332,7 +1380,7 @@ export function createNativePluginAssertions({
 
   async function sessionEvidence(
     agent,
-    { sessionKey, turnMarker, toolName, resultPattern, expectedArguments },
+    { sessionKey, turnMarker, toolName, resultPattern, expectedArguments, expectedCatalog },
   ) {
     const execution = await execGateway(agent, [
       "node",
@@ -1343,6 +1391,7 @@ export function createNativePluginAssertions({
       toolName ?? "",
       resultPattern ?? "",
       JSON.stringify(expectedArguments ?? null),
+      JSON.stringify(expectedCatalog ?? null),
     ]);
     const evidence = JSON.parse(execution.stdout);
     for (const result of evidence.results ?? []) {
@@ -1428,21 +1477,6 @@ export function createNativePluginAssertions({
       false,
       `${options.sessionKey} assistant turn must succeed.`,
     );
-    if (proofMode === "openclaw") {
-      assert.ok(
-        Array.isArray(evidence.promptToolNames),
-        `${options.sessionKey} must have a run-sourced systemPromptReport.tools.entries snapshot.`,
-      );
-      assert.ok(
-        evidence.promptToolNames.includes(options.toolName),
-        `${options.sessionKey} prompt tools must advertise ${options.toolName}: ${JSON.stringify({
-          runtime: evidence.runtime,
-          sessionId: evidence.sessionId,
-          promptReportSource: evidence.promptReportSource,
-          promptToolNames: evidence.promptToolNames,
-        })}`,
-      );
-    }
     const matched = evidence.calls.find((call) =>
       evidence.results.some(
         (result) =>
@@ -1457,12 +1491,29 @@ export function createNativePluginAssertions({
         {
           runtime: evidence.runtime,
           sessionId: evidence.sessionId,
+          promptReportSource: evidence.promptReportSource,
+          promptToolNames: evidence.promptToolNames,
           calls: evidence.calls,
           results: evidence.results,
           diagnostics: evidence.diagnostics,
         },
       )}`,
     );
+    if (proofMode === "openclaw") {
+      assert.ok(
+        Array.isArray(evidence.promptToolNames),
+        `${options.sessionKey} must have a run-sourced systemPromptReport.tools.entries snapshot.`,
+      );
+      assert.ok(
+        evidence.promptToolNames.includes(matched.name),
+        `${options.sessionKey} prompt tools must advertise ${matched.name}: ${JSON.stringify({
+          runtime: evidence.runtime,
+          sessionId: evidence.sessionId,
+          promptReportSource: evidence.promptReportSource,
+          promptToolNames: evidence.promptToolNames,
+        })}`,
+      );
+    }
     const result = evidence.results.find(
       (candidate) =>
         candidate.toolCallId === matched.id &&
@@ -1516,6 +1567,8 @@ export function createNativePluginAssertions({
       sessionId: evidence.sessionId,
       toolName: matched.name,
       toolCallId: matched.id,
+      ...(matched.targetId ? { targetId: matched.targetId, targetName: matched.targetName } : {}),
+      ...(options.expectedCatalog ? { catalog: result.catalog } : {}),
       promptAdvertised: proofMode === "openclaw",
       ...(proofMode === "codex" ? { codexMirrorTurnVerified: true } : {}),
       resultMatched: true,
@@ -1535,6 +1588,17 @@ export function createNativePluginAssertions({
     );
     assert.equal(evidence.results.length, 1, "the denied call must have a terminal result");
     assert.equal(evidence.results[0].toolCallId, evidence.calls[0].id);
+    assert.equal(
+      evidence.results[0].matchesTarget,
+      true,
+      "the refusal must belong to the attempted target",
+    );
+    if (proofMode === "openclaw") {
+      assert.ok(
+        evidence.promptToolNames?.includes(evidence.calls[0].name),
+        "the run must advertise the actual attempted tool or dispatcher",
+      );
+    }
     if (proofMode === "codex") {
       const prefix = codexToolTurnPrefix(evidence.calls[0].mirrorIdentity, ":call");
       assert.ok(
@@ -1585,6 +1649,12 @@ export function createNativePluginAssertions({
       sessionId: evidence.sessionId,
       toolCallId: evidence.calls[0].id,
       toolName: evidence.calls[0].name,
+      ...(evidence.calls[0].targetId
+        ? {
+            targetId: evidence.calls[0].targetId,
+            targetName: evidence.calls[0].targetName,
+          }
+        : {}),
     };
   }
 
@@ -1614,12 +1684,14 @@ export function createNativePluginAssertions({
       assert.equal(
         evidence.promptToolNames.includes(options.toolName),
         false,
-        `${options.sessionKey} prompt tools still advertised ${options.toolName}: ${JSON.stringify({
-          runtime: evidence.runtime,
-          sessionId: evidence.sessionId,
-          promptReportSource: evidence.promptReportSource,
-          promptToolNames: evidence.promptToolNames,
-        })}`,
+        `${options.sessionKey} direct prompt schemas still advertised ${options.toolName}: ${JSON.stringify(
+          {
+            runtime: evidence.runtime,
+            sessionId: evidence.sessionId,
+            promptReportSource: evidence.promptReportSource,
+            promptToolNames: evidence.promptToolNames,
+          },
+        )}`,
       );
     } else {
       // The gateway prompt report does not include native Codex tools. Require

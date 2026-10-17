@@ -6507,7 +6507,29 @@ test(
     if (selectedHarness === "openclaw") {
       const childLabel = `policy-child-${randomUUID()}`;
       const childResult = `OC-CHILD-${randomUUID()}`;
-      const childTask = `Use exec to run node -e 'console.log(6*7, "${childResult}")'. If agents_list is available, call it once. If automations is available, try action=update, jobId=${foreignJob.id}, job={"name":"child-must-not-set-this"} once. Otherwise report those tools are unavailable. Do not use another interface. End your reply with exactly ${childMarker}.`;
+      // Child exclusions and Gateway policy must also remove deferred catalog entries.
+      const intrinsicChildExclusions = ["agents_list", "automations"];
+      const administrativeCatalogWithholding = [
+        "gateway",
+        "plugins",
+        "openclaw",
+        "nodes",
+        "terminal",
+        "secrets",
+        "gateway_exec",
+        "gateway_process",
+      ];
+      const childExclusions = [...intrinsicChildExclusions, ...administrativeCatalogWithholding];
+      const searchBatches = [childExclusions.slice(0, 5), childExclusions.slice(5)].map(
+        (absent) => ({
+          present: ["read"],
+          absent,
+        }),
+      );
+      const searchRequests = searchBatches.map(({ present, absent }) => ({
+        queries: [...present, ...absent].map((query) => ({ query, limit: 1 })),
+      }));
+      const childTask = `Use exec to run node -e 'console.log(6*7, "${childResult}")'. Use tool_search once for each of these exact requests: ${JSON.stringify(searchRequests)}. Inspect the actual returned catalog; do not infer availability from direct schemas. If agents_list is available, call it once. If automations is available, try action=update, jobId=${foreignJob.id}, job={"name":"child-must-not-set-this"} once. Otherwise report those tools are unavailable. Do not use another interface. End your reply with exactly ${childMarker}.`;
       await turn(
         `Use sessions_spawn exactly once with runtime=subagent, mode=run, cleanup=keep, label=${childLabel}, and task=${JSON.stringify(childTask)}. Wait for its completion. Do not perform its task yourself.`,
         spawnMarker,
@@ -6534,22 +6556,23 @@ test(
         turnMarker: childMarker,
         toolName: "exec",
         resultPattern: `42 ${childResult}`,
+        expectedExitCode: 0,
       });
       // OC intrinsically denies these task tools to children. Also verify the baseline's
       // administrative catalog, including tools without an intrinsic child exclusion.
       // These are withholding checks; the parent above proves an actual foreign-job refusal.
-      const intrinsicChildExclusions = ["agents_list", "automations"];
-      const administrativeCatalogWithholding = [
-        "gateway",
-        "plugins",
-        "openclaw",
-        "nodes",
-        "terminal",
-        "secrets",
-        "gateway_exec",
-        "gateway_process",
-      ];
-      for (const toolName of [...intrinsicChildExclusions, ...administrativeCatalogWithholding]) {
+      const catalogSearches = [];
+      for (const expectedCatalog of searchBatches) {
+        catalogSearches.push(
+          await native.assertSessionToolCallEvidence(topology.agent, {
+            sessionKey: child.key,
+            turnMarker: childMarker,
+            toolName: "tool_search",
+            expectedCatalog,
+          }),
+        );
+      }
+      for (const toolName of childExclusions) {
         await native.assertNoSessionToolCallEvidence(topology.agent, {
           sessionKey: child.key,
           turnMarker: childMarker,
@@ -6564,6 +6587,7 @@ test(
         allowed,
         intrinsicChildExclusions,
         administrativeCatalogWithholding,
+        catalogSearches,
         foreignJobUnchanged: true,
       });
     } else {
@@ -6799,8 +6823,14 @@ test(
       "the original conversation history must survive redeployment",
     );
     const afterMarker = `AFTER-REDEPLOY-${randomUUID()}`;
+    const afterCatalog = { present: ["read"], absent: ["agents_list"] };
+    const discoveryPrompt =
+      selectedHarness === "openclaw"
+        ? `First call tool_search with ${JSON.stringify({ queries: ["read", "agents_list"].map((query) => ({ query, limit: 1 })) })}. Inspect its actual results to determine whether agents_list remains available. `
+        : "";
     const afterHistory = await turn(
-      "If your tool interface still exposes agents_list, invoke it exactly once and report its refusal. Do not use another interface or substitute tool. Then call automations with action=list exactly once.",
+      discoveryPrompt +
+        "If your tool interface still exposes agents_list, invoke it exactly once and report its refusal. Do not use another interface or substitute tool. Then call automations with action=list exactly once.",
       afterMarker,
     );
     assert.equal(afterHistory.sessionId, beforeHistory.sessionId);
@@ -6810,6 +6840,15 @@ test(
       toolName: "automations",
       resultPattern: "jobs",
     });
+    const afterSearch =
+      selectedHarness === "openclaw"
+        ? await native.assertSessionToolCallEvidence(topology.agent, {
+            sessionKey,
+            turnMarker: afterMarker,
+            toolName: "tool_search",
+            expectedCatalog: afterCatalog,
+          })
+        : undefined;
     let afterBinding;
     let retainedDeclaration = false;
     if (selectedHarness === "codex") {
@@ -6872,7 +6911,10 @@ test(
           }),
       removedToolEvidence: retainedDeclaration
         ? "actual callback denied"
-        : "catalog omitted; no model call",
+        : afterSearch
+          ? "direct schema absent; exact deferred discovery withheld; no model call"
+          : "catalog omitted; no model call",
+      ...(afterSearch ? { catalogSearch: afterSearch } : {}),
       allowedGatewayOperationSucceeded: true,
     };
     context.diagnostic(JSON.stringify(proof));

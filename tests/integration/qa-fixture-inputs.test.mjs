@@ -1546,7 +1546,7 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
   db.close();
   // Run the real evidence program against disposable SQLite storage. This tests
   // evidence decoding/correlation, not a live model or deployment policy.
-  const native = createNativePluginAssertions({
+  const assertionOptions = {
     gatewayUrl: async () => {
       throw new Error("no Gateway connection in this fixture");
     },
@@ -1564,7 +1564,8 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
     },
     waitFor: async (_description, check) => check(),
     proofMode: "openclaw",
-  });
+  };
+  const native = createNativePluginAssertions(assertionOptions);
   const shellEvidence = {
     sessionKey,
     turnMarker: "allowed-fixture",
@@ -1631,6 +1632,329 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
     assert.ok(result.errorLines.every((line) => line.length <= 900 + "... [truncated]".length));
     assert.match(result.errorLines[2], /\[truncated\]$/);
     return true;
+  });
+
+  function replaceTranscript(messages, promptNames = ["exec", "dispatch_action", "tool_search"]) {
+    const update = new DatabaseSync(databasePath);
+    try {
+      update.exec("DELETE FROM transcript_events");
+      update.prepare("UPDATE session_entry_snapshots SET value_json = ?").run(
+        JSON.stringify({
+          source: "run",
+          tools: { entries: promptNames.map((name) => ({ name })) },
+        }),
+      );
+      for (const [seq, message] of messages.entries()) {
+        const text = JSON.stringify({ type: "message", message });
+        const compressed = seq % 2 === 0;
+        update
+          .prepare("INSERT INTO transcript_events VALUES (?, ?, ?, ?, ?)")
+          .run(
+            "session-fixture",
+            seq,
+            compressed ? null : text,
+            compressed ? zstdCompressSync(text) : null,
+            Buffer.byteLength(text),
+          );
+      }
+    } finally {
+      update.close();
+    }
+  }
+  const dispatchedCall = {
+    role: "assistant",
+    content: [
+      {
+        type: "toolCall",
+        id: "dispatched-call",
+        name: "dispatch_action",
+        arguments: { id: "openclaw:core:automations", args: { action: "list" } },
+      },
+    ],
+  };
+  const targetResult = { content: [{ type: "text", text: '{"jobs":[]}' }], details: { jobs: [] } };
+  const envelope = {
+    tool: { id: "openclaw:core:automations", name: "automations", source: "openclaw" },
+    result: targetResult,
+  };
+  const dispatchedResult = {
+    role: "toolResult",
+    toolCallId: "dispatched-call",
+    toolName: "dispatch_action",
+    isError: false,
+    content: [{ type: "text", text: JSON.stringify(envelope) }],
+    details: envelope,
+  };
+  const dispatchedMessages = (call = dispatchedCall, result = dispatchedResult) => [
+    { role: "user", content: "dispatched-fixture" },
+    call,
+    result,
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "dispatched-fixture" }],
+      stopReason: "stop",
+    },
+  ];
+  const dispatchedEvidence = {
+    sessionKey,
+    turnMarker: "dispatched-fixture",
+    toolName: "automations",
+    resultPattern: "jobs",
+  };
+  await t.test(
+    "correlates the real dispatcher and target without a direct target schema",
+    async () => {
+      for (const id of ["openclaw:core:automations", "automations"]) {
+        const call = structuredClone(dispatchedCall);
+        call.content[0].arguments.id = id;
+        replaceTranscript(dispatchedMessages(call));
+        const proof = await native.assertSessionToolCallEvidence({}, dispatchedEvidence);
+        assert.equal(proof.toolName, "dispatch_action");
+        assert.equal(proof.targetName, "automations");
+        assert.equal(proof.targetId, id);
+        assert.equal(proof.toolCallId, "dispatched-call");
+      }
+    },
+  );
+  for (const [name, change] of [
+    [
+      "wrong call target",
+      (call) => {
+        call.content[0].arguments.id = "openclaw:core:nodes";
+      },
+    ],
+    [
+      "wrong result identity",
+      (_call, result) => {
+        result.toolCallId = "different-call";
+      },
+    ],
+    [
+      "wrong envelope target",
+      (_call, result) => {
+        result.details.tool.name = "nodes";
+      },
+    ],
+    [
+      "target failure behind an ordinary outer result",
+      (_call, result) => {
+        result.details.status = "failed";
+      },
+    ],
+  ]) {
+    await t.test(`rejects dispatched ${name}`, async () => {
+      const call = structuredClone(dispatchedCall);
+      const result = structuredClone(dispatchedResult);
+      change(call, result);
+      replaceTranscript(dispatchedMessages(call, result));
+      await assert.rejects(
+        native.assertSessionToolCallEvidence({}, dispatchedEvidence),
+        /matching successful result/,
+      );
+    });
+  }
+  await t.test("correlates a thrown dispatcher refusal to its exact target arguments", async () => {
+    const call = structuredClone(dispatchedCall);
+    call.content[0].arguments.args = { action: "run", jobId: "fixture-job" };
+    const result = { ...rows[6], toolCallId: "dispatched-call", toolName: "dispatch_action" };
+    replaceTranscript(dispatchedMessages(call, result));
+    const options = { ...denial, turnMarker: "dispatched-fixture" };
+    assert.equal(
+      (await native.assertSessionToolPolicyDeniedEvidence({}, options)).targetId,
+      "openclaw:core:automations",
+    );
+    await assert.rejects(
+      native.assertSessionToolPolicyDeniedEvidence(
+        {},
+        {
+          ...options,
+          expectedArguments: { action: "run", jobId: "wrong-target" },
+        },
+      ),
+      /exact requested action and target/,
+    );
+  });
+
+  const expectedCatalog = { present: ["read"], absent: ["agents_list", "gateway"] };
+  const searchCall = {
+    role: "assistant",
+    content: [
+      {
+        type: "toolCall",
+        id: "search-call",
+        name: "tool_search",
+        arguments: {
+          queries: ["read", "agents_list", "gateway"].map((query) => ({ query, limit: 1 })),
+        },
+      },
+    ],
+  };
+  const readCandidate = { id: "openclaw:core:read", name: "read", source: "openclaw" };
+  const searchPayload = {
+    results: [
+      { query: "read", candidates: [readCandidate] },
+      // Exact-name search may return a fuzzy alternative when the exact tool is absent.
+      { query: "agents_list", candidates: [readCandidate] },
+      { query: "gateway", candidates: [] },
+    ],
+  };
+  const searchResult = {
+    role: "toolResult",
+    toolCallId: "search-call",
+    toolName: "tool_search",
+    isError: false,
+    content: [{ type: "text", text: JSON.stringify(searchPayload) }],
+    details: searchPayload,
+  };
+  const searchEvidence = {
+    sessionKey,
+    turnMarker: "search-fixture",
+    toolName: "tool_search",
+    expectedCatalog,
+  };
+  function replaceSearch(call = searchCall, result = searchResult) {
+    replaceTranscript([
+      { role: "user", content: "search-fixture" },
+      call,
+      result,
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "search-fixture" }],
+        stopReason: "stop",
+      },
+    ]);
+  }
+  await t.test("proves complete exact discovery with an allowed positive control", async () => {
+    replaceSearch();
+    const proof = await native.assertSessionToolCallEvidence({}, searchEvidence);
+    assert.equal(proof.toolCallId, "search-call");
+    assert.deepEqual(proof.catalog, [
+      { query: "read", names: ["read"], truncated: false },
+      { query: "agents_list", names: ["read"], truncated: false },
+      { query: "gateway", names: [], truncated: false },
+    ]);
+  });
+  for (const [name, change] of [
+    [
+      "nonexact request",
+      (call) => {
+        call.content[0].arguments.queries[1].query = "agents";
+      },
+    ],
+    [
+      "different request limit",
+      (call) => {
+        call.content[0].arguments.queries[1].limit = 2;
+      },
+    ],
+    [
+      "wrong result identity",
+      (_call, result) => {
+        result.toolCallId = "other-search";
+      },
+    ],
+    [
+      "missing result group",
+      (_call, result) => {
+        result.details.results.pop();
+      },
+    ],
+    [
+      "duplicate result group",
+      (_call, result) => {
+        result.details.results[2] = result.details.results[0];
+      },
+    ],
+    [
+      "truncated response",
+      (_call, result) => {
+        result.details.truncated = true;
+      },
+    ],
+    [
+      "truncated group",
+      (_call, result) => {
+        result.details.results[1].truncated = true;
+      },
+    ],
+    [
+      "missing allowed control",
+      (_call, result) => {
+        result.details.results[0].candidates = [];
+      },
+    ],
+    [
+      "forbidden exact match",
+      (_call, result) => {
+        result.details.results[1].candidates = [
+          { id: "openclaw:core:agents_list", name: "agents_list", source: "openclaw" },
+        ];
+      },
+    ],
+  ]) {
+    await t.test(`rejects catalog proof with ${name}`, async () => {
+      const call = structuredClone(searchCall);
+      const result = structuredClone(searchResult);
+      change(call, result);
+      replaceSearch(call, result);
+      await assert.rejects(
+        native.assertSessionToolCallEvidence({}, searchEvidence),
+        /matching successful result/,
+      );
+    });
+  }
+  await t.test("retains direct native Codex call and mirror correlation", async () => {
+    const prefix = "codex:thread-fixture:turn-fixture";
+    const messages = [
+      {
+        role: "user",
+        content: "codex-fixture",
+        __openclaw: { mirrorIdentity: `${prefix}:prompt` },
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "codex-call",
+            name: "automations",
+            arguments: { action: "list" },
+          },
+        ],
+        __openclaw: { mirrorIdentity: `${prefix}:tool:codex-call:call` },
+      },
+      {
+        role: "toolResult",
+        toolCallId: "codex-call",
+        toolName: "automations",
+        isError: false,
+        content: targetResult.content,
+        __openclaw: { mirrorIdentity: `${prefix}:tool:codex-call:result` },
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "codex-fixture" }],
+        stopReason: "stop",
+        __openclaw: { mirrorIdentity: `${prefix}:assistant` },
+      },
+    ];
+    replaceTranscript(messages, []);
+    const codex = createNativePluginAssertions({ ...assertionOptions, proofMode: "codex" });
+    const proof = await codex.assertSessionToolCallEvidence(
+      {},
+      { ...dispatchedEvidence, turnMarker: "codex-fixture" },
+    );
+    assert.equal(proof.toolName, "automations");
+    assert.equal(proof.codexMirrorTurnVerified, true);
+    messages[2].__openclaw.mirrorIdentity = "codex:other:turn:tool:codex-call:result";
+    replaceTranscript(messages, []);
+    await assert.rejects(
+      codex.assertSessionToolCallEvidence(
+        {},
+        { ...dispatchedEvidence, turnMarker: "codex-fixture" },
+      ),
+      /share one mirrored turn/,
+    );
   });
 });
 
