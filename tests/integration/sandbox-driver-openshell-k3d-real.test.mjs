@@ -295,6 +295,8 @@ async function createScopedController(context, identifier, platformNamespace, ku
             ],
             verbs: ["get", "list", "create", "patch", "delete"],
           },
+          // This fixture identity also serves the Configuration Driver, which replaces ConfigMaps.
+          { apiGroups: [""], resources: ["configmaps"], verbs: ["update"] },
           // As the chart's tenant worker role: a Pod annotation syncs a running Gateway's
           // workspace node at once, and its private status port answers through the Pod proxy.
           { apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "watch", "patch"] },
