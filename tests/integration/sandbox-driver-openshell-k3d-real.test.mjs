@@ -6478,17 +6478,30 @@ test(
       600_000,
     );
     assert.ok(run.sessionKey, "scheduled execution must retain its actual session identity");
-    await native.assertSessionToolCallEvidence(topology.agent, {
-      sessionKey: run.sessionKey,
+    const runKeyParts = run.sessionKey.split(":");
+    assert.deepEqual(runKeyParts.slice(0, -1), ["agent", "main", "cron", job.id, "run"]);
+    assert.ok(runKeyParts.at(-1), "the cron run key must retain its initial session identity");
+    assert.ok(typeof run.sessionId === "string" && run.sessionId.length > 0);
+    // Cron removes the run alias after persisting the stable row. Its final session ID may rotate.
+    const scheduledSessionKey = `agent:main:cron:${job.id}`;
+    const scheduledEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey: scheduledSessionKey,
       turnMarker: scheduledMarker,
       toolName: "agents_list",
       resultPattern: "main",
     });
+    assert.equal(
+      scheduledEvidence.sessionId,
+      run.sessionId,
+      "the persisted transcript must belong to this completed cron run",
+    );
     proof.modelTurns.push({
       kind: "scoped-schedule",
       sessionKey,
       jobId: job.id,
       scheduledSessionKey: run.sessionKey,
+      persistedSessionKey: scheduledSessionKey,
+      scheduledEvidence,
     });
 
     const foreignJob = await client.request("cron.add", {
