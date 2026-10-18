@@ -5,6 +5,7 @@ import { OCCPluginDriver } from "../../apps/controller/src/drivers/plugin/index.
 import { InMemoryAuditSink } from "../../packages/audit/src/index.ts";
 import { WORKSPACE_DEFAULTS_ID } from "../../packages/contracts/src/index.ts";
 import { authenticatedHeaders } from "../helpers/auth-session.mjs";
+import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { grantRole } from "../helpers/iam-grants.mjs";
 import {
@@ -248,7 +249,12 @@ test("Agent create preflight runs the Configuration Driver's check as Configurat
     [
       "URL user name and password",
       provider({
-        baseUrl: "https://user:pw@api.openai.com/v1",
+        baseUrl: syntheticCredentialUrl({
+          username: "preflight-user",
+          password: "preflight-password",
+          host: "api.openai.com",
+          pathname: "/v1",
+        }),
         apiKey: "${OPENAI_API_KEY}",
       }),
     ],

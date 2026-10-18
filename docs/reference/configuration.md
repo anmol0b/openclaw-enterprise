@@ -24,11 +24,7 @@ must serialize to less than 1 MiB; a save over that is refused with
 `400 INVALID_REQUEST` and a message naming the limit. Configuration POST/PATCH
 bodies allow six times 1 MiB plus 32 KiB (6.2 MiB), room for the values and the
 envelope in six-byte JSON escapes; a caller without the create or update grant
-is refused before the body is read. Create Agent's check,
-`POST /namespaces/{namespaceId}/agents/validate`, carries an unsaved
-Configuration, so it allows that limit plus Agent create's 448 KiB and refuses a
-caller without `agent:create` before the body is read. Values there may also nest
-one level deeper than the 24-level body bound, matching Configuration create. Reviewed
+is refused before the body is read. Reviewed
 bundled and installed Configuration Drivers are available in development and
 production.
 
@@ -191,6 +187,19 @@ exact parent Namespace. Reads, updates, and deletes require the corresponding
 permission for the exact Configuration. Authentication failures return `401`,
 malformed inputs `400`, denied operations `403`, missing resources `404`,
 dependency conflicts `409`, and unavailable authorization or storage `503`.
+
+### Checking a Configuration before Create Agent saves
+
+`POST /namespaces/:namespaceId/agents/validate` takes an unsaved
+`configuration: {kind, values}` with the Agent create fields it checks, and
+saves nothing. Its body may be as large as a Configuration write plus Agent
+create's 448 KiB, and its values may nest as deep as Configuration create's.
+The `agent:create` grant is checked before the body is read, then again with
+the checks, in this order: Namespace state, Configuration create's size and
+content rules, the Configuration Driver's `validate` (credential references),
+then Agent create's plugin, execution-mode and initial-workspace-files rules.
+Secret bindings, model authentication, credential sources and repository policy
+are checked only when Create Agent saves.
 
 ## Credentials and channels
 

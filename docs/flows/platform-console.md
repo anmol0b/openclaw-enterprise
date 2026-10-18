@@ -233,8 +233,8 @@ access, and Secret references to [provisioning](agent-provisioning.md), even aft
 that outage. The worker reauthorizes, creates resources and exact Secret grants,
 and deploys; Console polls, then opens the revision.
 
-Ordinary drafts first check values and plugins with
-`POST /namespaces/:namespaceId/agents/validate`, then post
+Ordinary drafts first [check](../reference/configuration.md#checking-a-configuration-before-create-agent-saves)
+values, plugins and workspace files with `.../agents/validate`, then post
 `{kind: "agent", values, secretBindings}` to `.../configurations` and submit its ID,
 plugins, `initialWorkspaceFiles`, and `workspaceDefaultsId` to `.../agents`.
 Success opens `revision=draft`.
