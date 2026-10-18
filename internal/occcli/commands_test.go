@@ -71,32 +71,17 @@ func (fake *fakeOCC) ServeHTTP(writer http.ResponseWriter, request *http.Request
 
 func runOCC(t *testing.T, responses map[string]string, args ...string) (string, []string, error) {
 	t.Helper()
-	fake := &fakeOCC{responses: responses}
-	server := httptest.NewServer(fake)
-	defer server.Close()
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	command := New(&out, &bytes.Buffer{})
-	command.SetArgs(append([]string{"--url", server.URL, "--service-key-file", keyFile}, args...))
-	err := command.Execute()
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	return out.String(), append([]string(nil), fake.requested...), err
+	out, _, requested, err := runOCCWithNotices(t, responses, args...)
+	return out, requested, err
 }
 
-// runOCCWithNotices is runOCC that also returns what the command wrote to stderr.
+// runOCCWithNotices returns stdout, stderr, and the request trace.
 func runOCCWithNotices(t *testing.T, responses map[string]string, args ...string) (string, string, []string, error) {
 	t.Helper()
 	fake := &fakeOCC{responses: responses}
 	server := httptest.NewServer(fake)
 	defer server.Close()
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	var out, errOut bytes.Buffer
 	command := New(&out, &errOut)
 	command.SetArgs(append([]string{"--url", server.URL, "--service-key-file", keyFile}, args...))
@@ -271,27 +256,17 @@ func TestServiceAccountDeleteForceReportsTheUnrevokedToken(t *testing.T) {
 	unrevoked := map[string]string{
 		"DELETE " + path: `{"id":"` + accountID + `","namespaceId":"` + testNamespaceID + `","revocation":"skipped","backendId":"chatgpt"}`,
 	}
-	var warnings bytes.Buffer
-	fake := &fakeOCC{responses: unrevoked}
-	server := httptest.NewServer(fake)
-	defer server.Close()
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
+	out, warnings, _, err := runOCCWithNotices(t, unrevoked,
+		"--namespace", testNamespaceID, "service-account", "delete", "--force", accountID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var stdout bytes.Buffer
-	command := New(&stdout, &warnings)
-	command.SetArgs([]string{"--url", server.URL, "--service-key-file", keyFile,
-		"--namespace", testNamespaceID, "service-account", "delete", "--force", accountID})
-	if err := command.Execute(); err != nil {
-		t.Fatal(err)
+	if out != "Deleted service account "+accountID+"; its access token was not revoked.\n" {
+		t.Fatalf("unexpected table output %q", out)
 	}
-	if stdout.String() != "Deleted service account "+accountID+"; its access token was not revoked.\n" {
-		t.Fatalf("unexpected table output %q", stdout.String())
-	}
-	if !strings.Contains(warnings.String(), "revoke it at the provider") ||
-		!strings.Contains(warnings.String(), `ChatGPT Backend "chatgpt"`) {
-		t.Fatalf("expected a revocation warning, got %q", warnings.String())
+	if !strings.Contains(warnings, "revoke it at the provider") ||
+		!strings.Contains(warnings, `ChatGPT Backend "chatgpt"`) {
+		t.Fatalf("expected a revocation warning, got %q", warnings)
 	}
 
 	out, _, err = runOCC(t, unrevoked,
@@ -317,10 +292,7 @@ func TestServiceAccountDeleteForceReportsTheUnrevokedToken(t *testing.T) {
 
 func TestServiceAccountForceDeleteRejectsAMalformedSuccess(t *testing.T) {
 	const accountID = "sa_66666666-6666-4666-8666-666666666666"
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	// A forced delete succeeds only with a bodyless 204 or a full 200 envelope.
 	for _, test := range []struct {
 		respond func(http.ResponseWriter)
@@ -497,6 +469,11 @@ func TestDeploymentStatusNamesTheRevisionItChose(t *testing.T) {
 			"GET " + agentPath + "/revisions":                      olderOnly,
 			"GET " + agentPath + "/deployments/" + testRevision1ID: `{"deploymentId":"` + testRevision1ID + `","status":"failed"}`,
 		}, "notice: showing revision " + testRevision1ID + ", the latest revision you can read\n"},
+		{"Agent without an active revision", map[string]string{
+			"GET " + agentPath:                                     `{"id":"` + testAgentID + `"}`,
+			"GET " + agentPath + "/revisions":                      olderOnly,
+			"GET " + agentPath + "/deployments/" + testRevision1ID: `{"deploymentId":"` + testRevision1ID + `","status":"failed"}`,
+		}, "notice: showing revision " + testRevision1ID + ", the latest revision you can read; agent " + testAgentID + " has no active revision\n"},
 		{"the active revision", map[string]string{
 			"GET " + agentPath:                                     `{"id":"` + testAgentID + `","activeRevisionId":"` + testRevision2ID + `"}`,
 			"GET " + agentPath + "/revisions":                      agentRevisionsResponse(),
@@ -580,6 +557,80 @@ func TestDeploymentStatusTableShowsStartupWarnings(t *testing.T) {
 	}
 	if !strings.Contains(out, `"pluginId": "linear@openai-curated-remote"`) {
 		t.Fatalf("expected structured warnings unchanged:\n%s", out)
+	}
+}
+
+func TestDeploymentStatusTableShowsErrorAsCodeAndMessage(t *testing.T) {
+	// D608: the ERROR cell read as raw {code,message} JSON, with any diagnostic data inline.
+	agentPath := "/namespaces/" + testNamespaceID + "/agents/" + testAgentID
+	route := "GET " + agentPath + "/deployments/" + testRevision2ID
+	deployment := func(deploymentError string) string {
+		return `{"deploymentId":"` + testRevision2ID + `","agentId":"` + testAgentID + `","namespaceId":"` +
+			testNamespaceID + `","status":"failed","error":` + deploymentError + `}`
+	}
+	preparation := `{"code":"DEPLOYMENT_PREPARATION_FAILED","message":"Deployment preparation failed.\n\tCheck its Pods.",` +
+		`"data":{"preparation":{"reason":"retry_limit","observedAt":"2026-10-16T08:00:00.000Z","startedAt":null,` +
+		`"finishedAt":null,"workload":{"kind":"Job","name":"prep","namespace":"ns","uid":"u1"},"pods":[]}}}`
+	for _, test := range []struct {
+		name, error, want string
+	}{
+		{
+			name:  "code and message",
+			error: `{"code":"RUNTIME_AUTHENTICATION_FAILED","message":"The model provider rejected this version's credential. Update the credential, then deploy a new version."}`,
+			want:  "RUNTIME_AUTHENTICATION_FAILED: The model provider rejected this version's credential. Update the credential, then deploy a new version.",
+		},
+		{
+			name:  "diagnostic data is replaced by a pointer",
+			error: preparation,
+			want:  "DEPLOYMENT_PREPARATION_FAILED: Deployment preparation failed. Check its Pods. (details: -o json)",
+		},
+		{
+			name: "model check cause",
+			error: `{"code":"RUNTIME_MODEL_PROBE_FAILED","message":"Deployment runtime startup model check failed.","data":{"runtimeFailure":` +
+				`{"component":"gateway","check":"model-probe","checkedAt":"2026-10-03T08:00:00.000Z","code":"MODEL_PROBE_FAILED",` +
+				`"cause":{"kind":"PROBE_STATUS","detail":"rate_limit"}}}}`,
+			want: "RUNTIME_MODEL_PROBE_FAILED: Deployment runtime startup model check failed. (cause: PROBE_STATUS rate_limit)",
+		},
+		{
+			// The cause's detail token is optional; its kind alone is still the cause.
+			name: "model check cause without detail",
+			error: `{"code":"RUNTIME_MODEL_PROBE_FAILED","message":"Deployment runtime startup model check failed.","data":{"runtimeFailure":` +
+				`{"component":"gateway","check":"model-probe","checkedAt":"2026-10-03T08:00:00.000Z","code":"MODEL_PROBE_FAILED",` +
+				`"cause":{"kind":"PROCESS_EXIT"}}}}`,
+			want: "RUNTIME_MODEL_PROBE_FAILED: Deployment runtime startup model check failed. (cause: PROCESS_EXIT)",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out, _, err := runOCC(t, map[string]string{route: deployment(test.error)}, "--namespace", testNamespaceID, "agent", "deployment-status", testAgentID, testRevision2ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			if len(lines) != 2 || !strings.HasSuffix(lines[1], "  "+test.want+"  -") {
+				t.Fatalf("expected ERROR cell %q:\n%s", test.want, out)
+			}
+		})
+	}
+
+	// Structured output keeps the whole error, the message's line break included.
+	for _, output := range []string{"json", "yaml"} {
+		out, _, err := runOCC(t, map[string]string{route: deployment(preparation)}, "--namespace", testNamespaceID, "--output", output, "agent", "deployment-status", testAgentID, testRevision2ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded struct {
+			Error struct {
+				Message string         `yaml:"message"`
+				Data    map[string]any `yaml:"data"`
+			} `yaml:"error"`
+		}
+		if err := yaml.Unmarshal([]byte(out), &decoded); err != nil {
+			t.Fatalf("%s output: %v\n%s", output, err, out)
+		}
+		prepared, _ := decoded.Error.Data["preparation"].(map[string]any)
+		if decoded.Error.Message != "Deployment preparation failed.\n\tCheck its Pods." || prepared["reason"] != "retry_limit" {
+			t.Fatalf("%s output must keep the whole error:\n%s", output, out)
+		}
 	}
 }
 
@@ -901,6 +952,45 @@ func TestAgentRevisionsPagesWithCursor(t *testing.T) {
 	for _, limit := range []string{"0", "101"} {
 		if _, _, err := runOCC(t, responses, "--namespace", testNamespaceID, "agent", "revisions", testAgentID, "--limit", limit); err == nil {
 			t.Fatalf("--limit %s must be refused locally", limit)
+		}
+	}
+}
+
+// Subject IDs are opaque and can match across identities and groups. Tables
+// must preserve the discriminator that decides whether the grant is direct.
+func TestIAMAccessBindingTablesDistinguishIdentityAndGroupSubjects(t *testing.T) {
+	const identity = `{"id":"binding_direct","namespaceId":"` + testNamespaceID + `","subjectKind":"identity","subjectId":"operators","roleId":"role_read","resourceKind":"agent","resourceId":"` + testAgentID + `"}`
+	const group = `{"id":"binding_group","namespaceId":"` + testNamespaceID + `","subjectKind":"group","subjectId":"operators","roleId":"role_read","resourceKind":"agent","resourceId":"` + testAgentID + `"}`
+	path := "GET /namespaces/" + testNamespaceID + "/iam/access-bindings"
+	responses := map[string]string{path: "[" + identity + "," + group + "]", path + "/binding_direct": identity, path + "/binding_group": group}
+	for _, args := range [][]string{{"list"}, {"get", "binding_direct"}, {"get", "binding_group"}} {
+		out, _, err := runOCC(t, responses, append([]string{"--namespace", testNamespaceID, "iam", "access-binding"}, args...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "SUBJECT KIND") {
+			t.Fatalf("table must identify the subject kind:\n%s", out)
+		}
+		lines := strings.Split(strings.TrimSpace(out), "\n")[1:]
+		wantRows := 1
+		if args[0] == "list" {
+			wantRows = 2
+		}
+		if len(lines) != wantRows {
+			t.Fatalf("expected %d binding rows: %s", wantRows, out)
+		}
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) != 6 {
+				t.Fatalf("expected the binding columns: %s", line)
+			}
+			want := "identity"
+			if fields[0] == "binding_group" {
+				want = "group"
+			}
+			if len(fields) != 6 || fields[1] != want || fields[2] != "operators" {
+				t.Fatalf("table must keep %s subject beside its opaque ID: %s", want, line)
+			}
 		}
 	}
 }

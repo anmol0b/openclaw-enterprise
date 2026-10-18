@@ -60,9 +60,6 @@ type runtimeLogRecord struct {
 }
 
 func (app *application) printRuntimeLogPage(page *occclient.RuntimeLogPage, notices io.Writer) error {
-	if string(page.Stream) == "null" || len(page.Stream) == 0 {
-		noticef(notices, "notice: revision %s has no running Pod for source %s", page.RevisionID, page.Source)
-	}
 	for _, raw := range page.Records {
 		var record runtimeLogRecord
 		if err := json.Unmarshal(raw, &record); err != nil {
@@ -217,6 +214,9 @@ func (app *application) printRuntime(description any) error {
 			}
 			row["restarts"] = container["restartCount"]
 			row["state"] = container["state"]
+			if reason, ok := container["reason"].(string); ok && reason != "" {
+				row["state"] = displayValue(container["state"]) + " (" + reason + ")"
+			}
 			if termination, ok := container["lastTermination"].(map[string]any); ok {
 				parts := []string{}
 				if reason, ok := termination["reason"].(string); ok {

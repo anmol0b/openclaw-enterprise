@@ -53,10 +53,7 @@ func TestResourceRequestStopsWhenCommandContextIsCanceled(t *testing.T) {
 			defer server.Close()
 			defer close(release)
 
-			keyFile := filepath.Join(t.TempDir(), "service-key.json")
-			if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -279,10 +276,7 @@ func runLogsCommandTo(t *testing.T, ctx context.Context, stub *runtimeLogStub, o
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(stub.serve))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	command := New(out, errOut)
 	command.SetArgs(append(args, "--url", server.URL, "--service-key-file", keyFile, "--namespace", "ns_1"))
 	return command.ExecuteContext(ctx)
@@ -550,6 +544,55 @@ func TestAgentLogsNameTheOrderOfAnUnprobedOtherRevision(t *testing.T) {
 	}
 }
 
+// Keep a Pod-bearing candidate when its order is unknown, so a member can
+// inspect a failed replacement without read permission on active metadata.
+func TestAgentLogsNameTheOrderOfAnOtherRevisionWithPods(t *testing.T) {
+	for _, test := range []struct{ name, metadata, notice string }{
+		{"active metadata refused", "forbidden", "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+		{"active number missing", `{"id":"rev_2"}`, "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+		{"active identity mismatched", `{"id":"rev_other","revision":2}`, "notice: reading revision rev_1, another readable revision that still has Pods, not the active revision rev_2; pass --revision rev_2 for the active revision"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &runtimeLogStub{t: t, activeID: "rev_2", activeRevision: test.metadata, revisions: `[{"id":"rev_1","revision":1}]`, pages: []func(http.ResponseWriter, url.Values){
+				logPage("", logLine(1, "info", "ready")),
+			}}
+			_, errOut, err := runLogsCommand(t, context.Background(), stub, "agent", "logs", "agt_1", "--source", "gateway")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if errOut != test.notice+"\n" {
+				t.Fatalf("notice = %q, want %q", errOut, test.notice)
+			}
+			if got := stub.paths[len(stub.paths)-1]; got != "/namespaces/ns_1/agents/agt_1/deployments/rev_1/runtime/logs" {
+				t.Fatalf("final request = %s", got)
+			}
+		})
+	}
+}
+
+// Selection reads the active revision's metadata once, and the notice uses that
+// same observation: a second read that failed would misname a Podless Harness
+// revision as "another readable revision that still has Pods".
+func TestAgentRuntimeNamesHarnessSelectionFromOneMetadataRead(t *testing.T) {
+	stub := &runtimeLogStub{t: t, activeID: "rev_1", revisions: `[{"id":"rev_2","revision":2},{"id":"rev_1","revision":1}]`, podless: []string{"rev_2"}, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
+	_, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "notice: reading revision rev_2, newer than the active revision rev_1 and not yet active; pass --revision rev_1 for the active revision\n"; notices != want {
+		t.Fatalf("notice = %q, want %q", notices, want)
+	}
+	reads := 0
+	for _, path := range stub.paths {
+		if path == "/namespaces/ns_1/agents/agt_1/revisions/rev_1" {
+			reads++
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("active revision metadata read %d times, want 1 (requests %v)", reads, stub.paths)
+	}
+}
+
 func TestAgentCommandsSelectNewerPodlessHarnessStatus(t *testing.T) {
 	for _, state := range []string{"running", "starting", "lost", "unknown"} {
 		for _, action := range []string{"runtime", "logs"} {
@@ -602,19 +645,20 @@ func TestAgentCommandsSelectNewerPodlessHarnessStatus(t *testing.T) {
 	}
 }
 
-func TestAgentRuntimeRetainsActiveWhenPodlessCandidateIsNotProvablyNewer(t *testing.T) {
-	for _, test := range []struct{ name, activeID, revisions, metadata string }{
-		{"older-only readable list", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`},
-		{"active metadata denied", "rev_1", `[{"id":"rev_2","revision":2}]`, "forbidden"},
-		{"active number missing", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_1"}`},
-		{"active identity mismatched", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_other","revision":1}`},
+func TestAgentRuntimeRetainsActiveWhenCandidateIsNotProvablyNewer(t *testing.T) {
+	for _, test := range []struct {
+		name, activeID, revisions, metadata string
+		podless                             []string
+	}{
+		{"older-only readable list/podless=true", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`, []string{"rev_1"}},
+		// Pod candidates retain the active revision only when proven older.
+		{"older-only readable list/podless=false", "rev_2", `[{"id":"rev_1","revision":1}]`, `{"id":"rev_2","revision":2}`, nil},
+		{"active metadata denied/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, "forbidden", []string{"rev_2"}},
+		{"active number missing/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_1"}`, []string{"rev_2"}},
+		{"active identity mismatched/podless=true", "rev_1", `[{"id":"rev_2","revision":2}]`, `{"id":"rev_other","revision":1}`, []string{"rev_2"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			candidate := "rev_2"
-			if test.activeID == "rev_2" {
-				candidate = "rev_1"
-			}
-			stub := &runtimeLogStub{t: t, activeID: test.activeID, activeRevision: test.metadata, revisions: test.revisions, podless: []string{candidate}, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
+			stub := &runtimeLogStub{t: t, activeID: test.activeID, activeRevision: test.metadata, revisions: test.revisions, podless: test.podless, harness: map[string]any{"state": "lost", "code": "SANDBOX_FAILED"}}
 			out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "runtime", "agt_1", "-o", "json")
 			if err != nil {
 				t.Fatal(err)
@@ -628,6 +672,25 @@ func TestAgentRuntimeRetainsActiveWhenPodlessCandidateIsNotProvablyNewer(t *test
 				t.Fatalf("notice=%q", notices)
 			}
 		})
+	}
+}
+
+// A readable older revision can retain Pods while the active revision is hidden
+// from revision lists. Log selection must retain the active revision as well.
+func TestAgentLogsRetainActiveWhenOnlyOlderRevisionHasPods(t *testing.T) {
+	page := func(response http.ResponseWriter, _ url.Values) {
+		fmt.Fprint(response, `{"data":{"revisionId":"rev_2","source":"gateway","stream":{"source":"gateway","pod":"gw-0","container":"gateway","restartCount":0},"observedAt":"2026-09-30T12:00:00.000Z","records":[{"type":"line","time":"2026-09-30T12:00:00Z","stream":{"source":"gateway","pod":"gw-0","container":"gateway","restartCount":0},"contentClass":"operational","kind":"openclaw","level":"info","message":"active revision output"}],"withheld":0,"truncated":false,"cursor":null},"meta":{}}`)
+	}
+	stub := &runtimeLogStub{t: t, activeID: "rev_2", activeRevision: `{"id":"rev_2","revision":2}`, revisions: `[{"id":"rev_1","revision":1}]`, pages: []func(http.ResponseWriter, url.Values){page}}
+	out, notices, err := runLogsCommand(t, context.Background(), stub, "agent", "logs", "agt_1", "--source", "gateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "active revision output") || !strings.Contains(notices, "reading the active revision rev_2") {
+		t.Fatalf("output=%q notices=%q", out, notices)
+	}
+	if got := stub.paths[len(stub.paths)-1]; got != "/namespaces/ns_1/agents/agt_1/deployments/rev_2/runtime/logs" {
+		t.Fatalf("final request=%s", got)
 	}
 }
 
@@ -857,10 +920,7 @@ func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
 		_, _ = io.WriteString(w, `{"data":{"id":"agt_1","name":"stopped-agent","namespaceId":"ns_1","desiredRuntimeState":"stopped"},"meta":{"requestId":"req_1"}}`)
 	}))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	var out, errOut strings.Builder
 	command := New(&out, &errOut)
 	command.SetArgs([]string{"agent", "stop", "agt_1", "--url", server.URL, "--service-key-file", keyFile, "--namespace", "ns_1"})
@@ -912,10 +972,7 @@ func TestCredentialSourceListTableOmitsTheLiveGatewayStatusOnlyGetCarries(t *tes
 		}
 	}))
 	t.Cleanup(server.Close)
-	keyFile := filepath.Join(t.TempDir(), "service-key.json")
-	if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 	for _, test := range []struct {
 		args []string
 		rows [][]string
@@ -966,10 +1023,7 @@ func TestRedirectIsReportedWithItsTargetAndNotFollowed(t *testing.T) {
 				w.WriteHeader(http.StatusPermanentRedirect)
 			}))
 			defer origin.Close()
-			keyFile := filepath.Join(t.TempDir(), "service-key.json")
-			if err := os.WriteFile(keyFile, []byte(`{"data":{"key":"test-key"}}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 			command := New(io.Discard, io.Discard)
 			command.SetArgs([]string{"installation", "get", "--url", origin.URL, "--service-key-file", keyFile})
 			err := command.Execute()
