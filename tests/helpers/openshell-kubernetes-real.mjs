@@ -233,14 +233,7 @@ export function createOpenShellInstallationConfiguration({
     "limits.cpu": "16",
     "limits.memory": "8Gi",
   };
-  configuration.drivers.compute.configuration.servicePrincipalCredentials =
-    process.env.OCC_TEST_OPENSHELL_HARNESS === "openclaw"
-      ? {
-          mode: "projectedServiceAccountToken",
-          audience: "openclaw-enterprise",
-          expirationSeconds: 3600,
-        }
-      : { mode: "disabled" };
+  configuration.drivers.compute.configuration.servicePrincipalCredentials = { mode: "disabled" };
   // The integration replaces this placeholder transport with each namespace's port-forward.
   configuration.backend = [
     {

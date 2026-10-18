@@ -155,7 +155,7 @@ test("OpenShell host probes retain the exposed hostname while connecting to loop
   assert.equal(observedHost, `${serviceHostname}:${address.port}`);
 });
 
-test("OpenShell privilege checks retain native status verification without a bridge bypass", () => {
+test("OpenShell privilege checks require the Harness status verifier", () => {
   const { assertApprovedOpenShellPrivileges: check } = createOpenShellKubernetesFixture({});
   const pod = {
     spec: {
@@ -170,14 +170,11 @@ test("OpenShell privilege checks retain native status verification without a bri
       ],
     },
   };
-  // Native Compute now requests a temporary held-failure exposure. It requires the
-  // same verifier boundary as Codex; the retired bridge must not bypass that check.
+  // Native held-failure status and Codex transport both require a verifier,
+  // while the raw token must stay outside the Harness Pod spec.
   assert.doesNotThrow(() => check(pod));
   pod.spec.containers[0].env = [];
-  assert.throws(
-    () => check(pod, { compatibilityBridge: true }),
-    /transport\/status token verifier/,
-  );
+  assert.throws(() => check(pod), /transport\/status token verifier/);
   pod.spec.containers[0].env = [{ name: "APP_SERVER_TOKEN", value: "synthetic-token" }];
   assert.throws(() => check(pod), /raw app-server token must stay outside/);
 });
@@ -534,6 +531,35 @@ test("OpenShell probe waits for a command that outlives its turn up to the fixtu
       () => createOpenShellKubernetesFixture({ codexCommandGraceMs }),
       /codexCommandGraceMs must be a positive number/,
     );
+  }
+});
+
+test("OpenShell fixture disables ServicePrincipal credentials for both Harness selections", () => {
+  const previous = process.env.OCC_TEST_OPENSHELL_HARNESS;
+  try {
+    for (const harness of ["codex", "openclaw"]) {
+      process.env.OCC_TEST_OPENSHELL_HARNESS = harness;
+      const configuration = createOpenShellInstallationConfiguration({
+        authentication: {},
+        platformNamespace: "openclaw-system",
+        gatewayImage: "gateway-fixture",
+        codexImage: "codex-fixture",
+        cluster: { name: "fixture" },
+      });
+      // The real Driver rejects projected identity. Every fixture caller must
+      // receive the supported mode without patching Compute requirements later.
+      assert.deepEqual(
+        configuration.drivers.compute.configuration.servicePrincipalCredentials,
+        { mode: "disabled" },
+        harness,
+      );
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.OCC_TEST_OPENSHELL_HARNESS;
+    } else {
+      process.env.OCC_TEST_OPENSHELL_HARNESS = previous;
+    }
   }
 });
 

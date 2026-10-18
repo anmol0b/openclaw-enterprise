@@ -1417,7 +1417,6 @@ async function prepareProductionInstallation(
   if (harnessId === "openclaw") {
     // scripts/k3d builds this runtime from an OpenClaw source with native worker support.
     configuration.runtime = { nativeWorkerSupport: "custom-image" };
-    configuration.drivers.compute.configuration.servicePrincipalCredentials = { mode: "disabled" };
     configuration.drivers.compute.configuration.runtime.nativeOpenClawSessionCapacity = 2;
     // The node and two retained session workers share one container; the single-Harness
     // 2 GiB budget OOM-kills the second turn. Keep Compute and Sandbox budgets aligned.
@@ -1983,7 +1982,7 @@ async function prepareProductionInstallation(
     assertNoProjectedAgentIdentity(harnessPod);
     assertApprovedOpenShellPrivileges(harnessPod);
   } else {
-    // Native delivery uses the production provider path without copied identity tokens or Jobs.
+    // Native provider delivery keeps projected identity out of the Harness.
     assertNoProjectedAgentIdentity(harnessPod);
     assertApprovedOpenShellPrivileges(harnessPod);
     assert.deepEqual(
@@ -1991,7 +1990,7 @@ async function prepareProductionInstallation(
         metadata.name.startsWith("openshell-cred-"),
       ),
       [],
-      "native delivery must not create bootstrap Jobs",
+      "native provider delivery must not create credential Jobs",
     );
   }
   process.stderr.write(
@@ -2013,7 +2012,7 @@ async function prepareProductionInstallation(
   const logs = await request("GET", `${runtimePath}/logs?source=gateway&tailLines=10`);
   assert.equal(logs.status, 200, "the demo API must read bounded Gateway logs");
   assert.ok(Array.isArray(logs.data.records));
-  assert.equal(JSON.stringify(logs).includes(process.env.OPENAI_API_KEY), false);
+  assert.equal(JSON.stringify(logs).includes(modelCredential), false);
   assert.ok(
     runtime.data.sources.some(({ id }) => id === "sandbox"),
     "the wrapper must preserve OpenShell policy-log support",
@@ -2021,7 +2020,7 @@ async function prepareProductionInstallation(
   const sandboxLogs = await request("GET", `${runtimePath}/logs?source=sandbox&tailLines=10`);
   assert.equal(sandboxLogs.status, 200, "the demo API must read OpenShell policy logs");
   assert.ok(Array.isArray(sandboxLogs.data.records));
-  assert.equal(JSON.stringify(sandboxLogs).includes(process.env.OPENAI_API_KEY), false);
+  assert.equal(JSON.stringify(sandboxLogs).includes(modelCredential), false);
 
   const agentServiceName = openShellAgentName(agent.data.id);
   const gatewayPods = (await resources("pods", gatewayPlacement)).filter(

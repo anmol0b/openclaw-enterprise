@@ -27,8 +27,7 @@ Missing prerequisites fail rather than skip.
 
 ## Native authority
 
-The native `--harness openclaw` case uses production provider delivery and no
-credential-copy bridge. Its separate
+The native `--harness openclaw` case exercises production provider delivery. Its separate
 `tests/integration/sandbox-driver-openshell-native-k3d-real.test.mjs` entry runs
 in the registered OpenShell lane with `OPENAI_API_KEY`; the Codex entry cannot
 substitute for it. It provisions independent Agents A and B using the same

@@ -142,8 +142,8 @@ the native test and builds the sibling `../openclaw` checkout. Set
 ./scripts/k3d demo --harness openclaw
 ```
 
-Both commands use unmodified Compute requirements and the production Driver,
-without bootstrap Jobs or copied identity tokens. `test` requires an authorized
+Both commands use unmodified Compute requirements and production Driver delivery.
+`test` requires an authorized
 `OPENAI_API_KEY`; `demo` prompts for one if it is not set. `demo` leaves the
 proven environment running and opens the Control UI and OCE console on loopback.
 It leaves the dedicated worker slot free for the first browser session.
