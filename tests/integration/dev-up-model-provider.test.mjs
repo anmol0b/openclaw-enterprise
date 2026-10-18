@@ -471,7 +471,11 @@ test("failed build tails redact multiline credential values before cutting", () 
       `  "session": "${value}"`,
       "}}",
     ],
-    "auth scheme after a key": [`token: Bearer ${value}`, `secret=Basic ${value}`],
+    "auth scheme after a key": [
+      `token: Bearer ${value}`,
+      `secret=Basic ${value}`,
+      `token="Bearer invented-first-1847" session_id=${value}`,
+    ],
     "key below an empty key": ["token:", "credentials: {", `  session: ${value}`, "}"],
     "value on the line after its key": ["token:", `  ${value}`],
     "next-line value below an empty key": ["token:", "password:", `  ${value}`],
