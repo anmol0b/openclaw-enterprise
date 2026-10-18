@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { failureSecrets, redactLogLine } from "../../scripts/ci/failure-redaction.mjs";
 import { availablePort } from "./available-port.mjs";
 import {
   configureModelProviderDNS,
@@ -18,6 +19,51 @@ const registryImage =
   "docker.io/library/registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373";
 const nodeBaseImage =
   "docker.io/library/node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584";
+
+// The runner keeps the first 16 KiB of a failure message, and buildx and dev-up print progress
+// before their cause, so a failure carries only the redacted end of a command's output.
+export function outputTail(text, environment, budget = 6_000) {
+  const secrets = failureSecrets([environment]);
+  const lines = String(text ?? "")
+    .trimEnd()
+    .split("\n");
+  const kept = [];
+  let size = 0;
+  for (let index = lines.length - 1; index >= 0 && kept.length < 80; index -= 1) {
+    const line = redactLogLine(lines[index], secrets, 1_000);
+    if (size + line.length + 1 > budget) {
+      break;
+    }
+    kept.unshift(line);
+    size += line.length + 1;
+  }
+  return kept.length < lines.length
+    ? ["[earlier output omitted]", ...kept].join("\n")
+    : kept.join("\n");
+}
+
+// Name each failed build with its exit status and the end of its stderr; the
+// rejection reasons stay attached, but the runner reports only the message.
+export function imageBuildFailure(failures, environment) {
+  const secrets = failureSecrets([environment]);
+  const sections = failures.map(({ image, reason }) => {
+    const [summary, ...rest] = String(reason?.message ?? reason).split("\n");
+    // A command that ran reports its exit; anything else (a spawn or abort error) its message.
+    const exited = Number.isInteger(reason?.code) || Boolean(reason?.signal);
+    const head = exited
+      ? [
+          reason.signal ? `signal ${reason.signal}` : `exit ${reason.code}`,
+          ...(reason.killed ? ["killed"] : []),
+        ].join(", ")
+      : redactLogLine(summary, secrets, 400);
+    const output = String(reason?.stderr ?? "").trim() ? reason.stderr : rest.join("\n");
+    return `${image} (${head}):\n${outputTail(output, environment)}`;
+  });
+  return new AggregateError(
+    failures.map(({ reason }) => reason),
+    `Checkout image builds failed:\n${sections.join("\n\n")}`,
+  );
+}
 
 function execute(
   command,
@@ -311,10 +357,10 @@ export function createDevUpModelProvider({
       ),
     ]);
     const failures = builds
-      .filter((result) => result.status === "rejected")
-      .map((result) => result.reason);
+      .map((result, index) => ({ ...result, image: [controllerTag, baseTag][index] }))
+      .filter((result) => result.status === "rejected");
     if (failures.length) {
-      throw new AggregateError(failures, "Checkout image builds failed");
+      throw imageBuildFailure(failures, env);
     }
     const context = join(directory, "runtime-trust");
     await writeModelProviderTrust({ context, caPath: join(modelDirectory, "ca.pem") });

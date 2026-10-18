@@ -27,6 +27,7 @@ async function scenario(
     signal,
     beforeCreate,
     beforeBuild,
+    extraEnvironment = {},
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "oce-provider-contract-"));
@@ -40,6 +41,7 @@ async function scenario(
   const environment = {
     OCC_DEVELOPMENT_CONTAINER_ENGINE: "docker",
     DOCKER_HOST: "unix:///owned.sock",
+    ...extraEnvironment,
   };
   const events = [{ event: "listening", at: 1 }];
   const faults = { inspectError: undefined };
@@ -385,6 +387,54 @@ test("provider retains ownership obligations when the engine cannot be inspected
   faults.inspectError = undefined;
   await fixture.cleanup();
   assert.equal(objects.size, 0);
+});
+
+// Buildx streams progress before its cause, and the runner keeps only a failure message's first
+// 16 KiB, so each failed build must name itself with the end of its stderr (finding 1847).
+test("failed checkout builds report each image's exit and redacted stderr tail", async (t) => {
+  const token = "build-secret-value-1847";
+  const buildFailure = (name, cause) =>
+    Object.assign(new Error(`Command failed: docker buildx build --tag ${name} .\nprogress`), {
+      code: 1,
+      killed: false,
+      signal: null,
+      stdout: "",
+      stderr: [
+        ...Array.from({ length: 2_000 }, (_, index) => `#${index} sha256:${"f".repeat(64)} 1.2MB`),
+        `#9 using ${token}`,
+        cause,
+      ].join("\n"),
+    });
+  for (const failing of [["runtime-base"], ["controller", "runtime-base"]]) {
+    const { fixture } = await scenario(t, {
+      extraEnvironment: { BUILD_TOKEN: token },
+      beforeBuild: async ({ name }) => {
+        const role = failing.find((candidate) => name.includes(`/${candidate}:`));
+        if (role) {
+          throw buildFailure(name, `ERROR: failed to solve: ${role} recipe exit code: 1`);
+        }
+      },
+    });
+    const error = await fixture.prepare().then(
+      () => assert.fail("a failed build must reject preparation"),
+      (rejection) => rejection,
+    );
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors.length, failing.length);
+    assert.ok(error.message.length < 16_384, "each tail must fit the runner's message budget");
+    assert.equal(error.message.includes(token), false, "build output must be redacted");
+    assert.match(error.message, /\[env:BUILD_TOKEN\]/);
+    for (const role of ["controller", "runtime-base"]) {
+      const shown = new RegExp(
+        `/${role}:a{40} \\(exit 1\\):\\n\\[earlier output omitted\\][^]*ERROR: failed to solve: ${role} recipe exit code: 1`,
+      );
+      if (failing.includes(role)) {
+        assert.match(error.message, shown);
+      } else {
+        assert.doesNotMatch(error.message, new RegExp(`/${role}:`));
+      }
+    }
+  }
 });
 
 test("cleanup drains admitted image builds before reconciling their reservations", async (t) => {
