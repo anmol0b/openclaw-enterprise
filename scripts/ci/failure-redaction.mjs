@@ -309,7 +309,7 @@ export function redactFailureDetail(error, secrets, root) {
 }
 
 const privateKeyEnd = /-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/u;
-const privateKeyLine = "[redacted credential-bearing line]";
+const maskedLine = "[redacted credential-bearing line]";
 // Longer than any PEM key or ordinary PGP key block; an orphan END masks at most
 // this many lines above it.
 const orphanKeyLines = 1_024;
@@ -324,7 +324,7 @@ export function maskPrivateKeyLines(lines) {
   const masked = [...lines];
   const mask = (from, to) => {
     for (let index = Math.max(0, from); index <= to && index < masked.length; index += 1) {
-      masked[index] = privateKeyLine;
+      masked[index] = maskedLine;
     }
   };
   const end = privateKeyEnd.exec(text);
@@ -378,7 +378,7 @@ export function maskSecretLines(lines, secrets) {
   const { text, lineAt } = joinedLines(lines);
   const mask = (from, to) => {
     for (let index = from; index <= to && index < masked.length; index += 1) {
-      masked[index] = privateKeyLine;
+      masked[index] = maskedLine;
     }
   };
   const spans = [];
@@ -386,7 +386,9 @@ export function maskSecretLines(lines, secrets) {
   for (const [start, end] of spans) {
     mask(lineAt(start) + 1, lineAt(Math.max(start, end - 1)));
   }
-  for (const [value] of secrets) {
+  for (const [raw] of secrets) {
+    // The text was control-stripped, so a CRLF value is found by its stripped form.
+    const value = stripControl(raw);
     if (value.includes("\n")) {
       for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + value.length)) {
         mask(lineAt(at), lineAt(at + value.length - 1));
