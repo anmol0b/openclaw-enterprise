@@ -393,6 +393,7 @@ test("provider retains ownership obligations when the engine cannot be inspected
 // 16 KiB, so each failed build must name itself with the end of its stderr (finding 1847).
 test("failed checkout builds report each image's exit and redacted stderr tail", async (t) => {
   const token = "build-secret-value-1847";
+  const keyBody = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC1847";
   const buildFailure = (name, cause) =>
     Object.assign(new Error(`Command failed: docker buildx build --tag ${name} .\nprogress`), {
       code: 1,
@@ -402,6 +403,9 @@ test("failed checkout builds report each image's exit and redacted stderr tail",
       stderr: [
         ...Array.from({ length: 2_000 }, (_, index) => `#${index} sha256:${"f".repeat(64)} 1.2MB`),
         `#9 using ${token}`,
+        "-----BEGIN PRIVATE KEY-----",
+        keyBody,
+        "-----END PRIVATE KEY-----",
         cause,
       ].join("\n"),
     });
@@ -424,6 +428,7 @@ test("failed checkout builds report each image's exit and redacted stderr tail",
     assert.ok(error.message.length < 16_384, "each tail must fit the runner's message budget");
     assert.equal(error.message.includes(token), false, "build output must be redacted");
     assert.match(error.message, /\[env:BUILD_TOKEN\]/);
+    assert.equal(error.message.includes(keyBody), false, "a key's body lines must be masked");
     for (const role of ["controller", "runtime-base"]) {
       const shown = new RegExp(
         `/${role}:a{40} \\(exit 1\\):\\n\\[earlier output omitted\\][^]*ERROR: failed to solve: ${role} recipe exit code: 1`,

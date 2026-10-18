@@ -180,10 +180,11 @@ process.exit(result.status ?? 1);
         maxBuffer: 16 * 1024 * 1024,
       }),
       (error) => {
-        // A dev-up that stops early names its cause at the end of stderr (finding 1847).
+        // A dev-up that stops early names its cause at the end of stderr (finding 1847); it
+        // comes first so the job log's short copy of the message starts with it.
         const output = [
-          `dev-up stdout tail:\n${outputTail(error.stdout, environment, 3_000)}`,
           `dev-up stderr tail:\n${outputTail(error.stderr ?? error.message, environment, 8_000)}`,
+          `dev-up stdout tail:\n${outputTail(error.stdout, environment, 3_000)}`,
         ].join("\n");
         assert.match(
           error.stdout,

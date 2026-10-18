@@ -5,7 +5,11 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { failureSecrets, redactLogLine } from "../../scripts/ci/failure-redaction.mjs";
+import {
+  failureSecrets,
+  redactLogLine,
+  redactOutputLines,
+} from "../../scripts/ci/failure-redaction.mjs";
 import { availablePort } from "./available-port.mjs";
 import {
   configureModelProviderDNS,
@@ -21,29 +25,38 @@ const nodeBaseImage =
   "docker.io/library/node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584";
 
 // The runner keeps the first 16 KiB of a failure message, and buildx and dev-up print progress
-// before their cause, so a failure carries only the redacted end of a command's output.
-export function outputTail(text, environment, budget = 6_000) {
-  const secrets = failureSecrets([environment]);
-  const lines = String(text ?? "")
-    .trimEnd()
-    .split("\n");
+// before their cause, so a failure carries only the end of a command's output. It is redacted
+// as the runner redacts a failed file's output, private keys masked across lines first.
+export function outputTail(
+  text,
+  environment,
+  budget = 6_000,
+  secrets = failureSecrets([environment]),
+) {
+  const lines = redactOutputLines(
+    String(text ?? "")
+      .trimEnd()
+      .split("\n"),
+    secrets,
+    "",
+    1_000,
+  );
   const kept = [];
   let size = 0;
   for (let index = lines.length - 1; index >= 0 && kept.length < 80; index -= 1) {
-    const line = redactLogLine(lines[index], secrets, 1_000);
-    if (size + line.length + 1 > budget) {
+    if (size + lines[index].length + 1 > budget) {
       break;
     }
-    kept.unshift(line);
-    size += line.length + 1;
+    kept.unshift(lines[index]);
+    size += lines[index].length + 1;
   }
   return kept.length < lines.length
     ? ["[earlier output omitted]", ...kept].join("\n")
     : kept.join("\n");
 }
 
-// Name each failed build with its exit status and the end of its stderr; the
-// rejection reasons stay attached, but the runner reports only the message.
+// Name each failed build with its exit status and the end of its stderr. The rejection reasons
+// stay attached for local debugging; the CI runner reports only the message.
 export function imageBuildFailure(failures, environment) {
   const secrets = failureSecrets([environment]);
   const sections = failures.map(({ image, reason }) => {
@@ -57,7 +70,7 @@ export function imageBuildFailure(failures, environment) {
         ].join(", ")
       : redactLogLine(summary, secrets, 400);
     const output = String(reason?.stderr ?? "").trim() ? reason.stderr : rest.join("\n");
-    return `${image} (${head}):\n${outputTail(output, environment)}`;
+    return `${image} (${head}):\n${outputTail(output, environment, 6_000, secrets)}`;
   });
   return new AggregateError(
     failures.map(({ reason }) => reason),
