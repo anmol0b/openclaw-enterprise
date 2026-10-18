@@ -239,6 +239,9 @@ const PRESET_BODY_LIMIT = 6 * PRESET_JSON_MAX_BYTES + 8 * 1024;
 // bindings, each a 253-character name and a reference: under 32 KiB), all written with
 // six-byte JSON escapes. Like Preset writes, these routes check the grant before the body.
 const CONFIGURATION_BODY_LIMIT = 6 * (1024 * 1024 + 32 * 1024);
+// Create Agent's preflight carries both bodies it checks: the unsaved Configuration and Agent
+// create's fields (finding 1869). Like Configuration writes, it checks the grant before the body.
+const AGENT_CREATE_VALIDATE_BODY_LIMIT = CONFIGURATION_BODY_LIMIT + AGENT_CREATE_BODY_LIMIT;
 const WORKSPACE_FILE_CONTENT_LIMIT = 16 * 1024;
 // 16 KiB of content may need six bytes per UTF-8 byte in JSON (`\u0001`), plus `{"content":""}`.
 const WORKSPACE_FILE_BODY_LIMIT = 6 * WORKSPACE_FILE_CONTENT_LIMIT + 1024;
@@ -491,7 +494,8 @@ function authorizesBeforeBody(operation: OccApiRoute): boolean {
     operation.operationId === "createPreset" ||
     operation.operationId === "updatePreset" ||
     operation.operationId === "createConfiguration" ||
-    operation.operationId === "updateConfiguration"
+    operation.operationId === "updateConfiguration" ||
+    operation.operationId === "validateAgentCreate"
   );
 }
 
@@ -1994,8 +1998,9 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
   }
 
   /**
-   * Preset and Configuration writes accept bodies of about 6 MiB (PRESET_BODY_LIMIT,
-   * CONFIGURATION_BODY_LIMIT), far above the general limit. Their grant check needs only the
+   * Preset and Configuration writes, and Create Agent's preflight, accept bodies of about 6 MiB
+   * (PRESET_BODY_LIMIT, CONFIGURATION_BODY_LIMIT, AGENT_CREATE_VALIDATE_BODY_LIMIT), far above
+   * the general limit. Their grant check needs only the
    * path and the caller, so it runs here, in onRequest, before the body is read: a caller
    * without the grant gets the same 403 or 404 and audit row as when the check ran in the
    * handler, and the controller never buffers the body. The handler repeats the check in its
@@ -2010,6 +2015,10 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
       throw failure(404, "NOT_FOUND", "The requested platform resource was not found.");
     }
     const params = request.params as Record<string, string>;
+    if (operation.operationId === "validateAgentCreate") {
+      await controller.authorizeAgentCreate(context.actorId, params.namespaceId as string);
+      return;
+    }
     if (
       operation.operationId === "createConfiguration" ||
       operation.operationId === "updateConfiguration"
@@ -4090,16 +4099,16 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
         url: operation.path,
         ...(operation.operationId === "putAgentWorkspaceFile"
           ? { bodyLimit: WORKSPACE_FILE_BODY_LIMIT }
-          : operation.operationId === "createAgent" ||
-              operation.operationId === "validateAgentCreate" ||
-              operation.operationId === "provisionAgent"
+          : operation.operationId === "createAgent" || operation.operationId === "provisionAgent"
             ? { bodyLimit: options.maxBodyBytes ?? AGENT_CREATE_BODY_LIMIT }
-            : operation.operationId === "createPreset" || operation.operationId === "updatePreset"
-              ? { bodyLimit: options.maxBodyBytes ?? PRESET_BODY_LIMIT }
-              : operation.operationId === "createConfiguration" ||
-                  operation.operationId === "updateConfiguration"
-                ? { bodyLimit: options.maxBodyBytes ?? CONFIGURATION_BODY_LIMIT }
-                : {}),
+            : operation.operationId === "validateAgentCreate"
+              ? { bodyLimit: options.maxBodyBytes ?? AGENT_CREATE_VALIDATE_BODY_LIMIT }
+              : operation.operationId === "createPreset" || operation.operationId === "updatePreset"
+                ? { bodyLimit: options.maxBodyBytes ?? PRESET_BODY_LIMIT }
+                : operation.operationId === "createConfiguration" ||
+                    operation.operationId === "updateConfiguration"
+                  ? { bodyLimit: options.maxBodyBytes ?? CONFIGURATION_BODY_LIMIT }
+                  : {}),
         schema,
         onRequest: async (request) => {
           await admit(request, operation);

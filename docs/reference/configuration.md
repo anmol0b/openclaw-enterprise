@@ -24,7 +24,10 @@ must serialize to less than 1 MiB; a save over that is refused with
 `400 INVALID_REQUEST` and a message naming the limit. Configuration POST/PATCH
 bodies allow six times 1 MiB plus 32 KiB (6.2 MiB), room for the values and the
 envelope in six-byte JSON escapes; a caller without the create or update grant
-is refused before the body is read. Reviewed
+is refused before the body is read. Create Agent's check,
+`POST /namespaces/{namespaceId}/agents/validate`, carries an unsaved
+Configuration, so it allows that limit plus Agent create's 448 KiB and refuses a
+caller without `agent:create` before the body is read. Reviewed
 bundled and installed Configuration Drivers are available in development and
 production.
 
