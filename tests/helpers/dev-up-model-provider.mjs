@@ -7,10 +7,9 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   failureSecrets,
-  maskPrivateKeyLines,
+  maskSecretLines,
   redactLogLine,
   redactOutputLine,
-  redactSecretValues,
 } from "../../scripts/ci/failure-redaction.mjs";
 import { availablePort } from "./available-port.mjs";
 import {
@@ -28,23 +27,21 @@ const nodeBaseImage =
 
 // The runner keeps the first 16 KiB of a failure message, and buildx and dev-up print progress
 // before their cause, so a failure carries only the end of a command's output. Private keys and
-// secret values that span lines are redacted over the whole output, while their context is
-// there; then each line is redacted as the runner redacts a failed file's output, newest first,
-// only until the tail is full.
+// secret values that span lines are masked over the whole output, while their context is there;
+// then lines are redacted as the runner redacts a failed file's output, newest first, only
+// until the tail is full.
 export function outputTail(
   text,
   environment,
   budget = 6_000,
   secrets = failureSecrets([environment]),
 ) {
-  const lines = redactSecretValues(
-    maskPrivateKeyLines(
-      String(text ?? "")
-        .trimEnd()
-        .split("\n"),
-    ).join("\n"),
+  const lines = maskSecretLines(
+    String(text ?? "")
+      .trimEnd()
+      .split("\n"),
     secrets,
-  ).split("\n");
+  );
   const kept = [];
   let size = 0;
   for (let index = lines.length - 1; index >= 0 && kept.length < 80; index -= 1) {

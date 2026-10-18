@@ -99,8 +99,9 @@ function bracketValueEnd(text, start) {
 
 // A quoted value can contain spaces, punctuation, or an escaped quote. When JSON has itself
 // been serialized, its opening delimiter tells us how many backslashes end the value. A value
-// that opens with "{" or "[" is redacted through its matching close.
-function redactSecretAssignments(text) {
+// that opens with "{" or "[" is redacted through its matching close. `spans`, when given,
+// receives each assignment's raw [start, end) offsets, key included.
+function redactSecretAssignments(text, spans) {
   let result = "";
   let end = 0;
   assignment.lastIndex = 0;
@@ -116,6 +117,7 @@ function redactSecretAssignments(text) {
         end += 1;
       }
       assignment.lastIndex = end;
+      spans?.push([match.index, end]);
       continue;
     }
     if (!quote) {
@@ -134,6 +136,7 @@ function redactSecretAssignments(text) {
         end = phraseEnd;
         assignment.lastIndex = end;
       }
+      spans?.push([match.index, end]);
       continue;
     }
 
@@ -151,6 +154,7 @@ function redactSecretAssignments(text) {
       backslashes = char === "\\" ? backslashes + 1 : 0;
     }
     assignment.lastIndex = end;
+    spans?.push([match.index, end]);
   }
   return result + text.slice(end);
 }
@@ -316,8 +320,29 @@ const orphanKeyLines = 1_024;
 // runs to the end, and an END line with no BEGIN before it (a tail that starts
 // inside a key) takes the lines above it.
 export function maskPrivateKeyLines(lines) {
+  const { text, lineAt } = joinedLines(lines);
+  const masked = [...lines];
+  const mask = (from, to) => {
+    for (let index = Math.max(0, from); index <= to && index < masked.length; index += 1) {
+      masked[index] = privateKeyLine;
+    }
+  };
+  const end = privateKeyEnd.exec(text);
+  let first = text.length;
+  for (const match of text.matchAll(privateKeyShape)) {
+    first = Math.min(first, match.index);
+    mask(lineAt(match.index), lineAt(match.index + match[0].length));
+  }
+  if (end && end.index < first) {
+    const endLine = lineAt(end.index);
+    mask(endLine - orphanKeyLines, endLine);
+  }
+  return masked;
+}
+
+// Control-stripped lines joined with "\n", and the line holding a joined offset.
+function joinedLines(lines) {
   const clean = lines.map((line) => stripControl(String(line)));
-  const text = clean.join("\n");
   // Each element's start offset in the joined text; an element may hold "\n" itself.
   const starts = [];
   let offset = 0;
@@ -338,21 +363,35 @@ export function maskPrivateKeyLines(lines) {
     }
     return low;
   };
-  const masked = [...lines];
+  return { text: clean.join("\n"), lineAt };
+}
+
+// Output that is cut to its last lines, or redacted a line at a time, loses a secret value's
+// context when the value spans lines: a credential object pretty-printed across lines names
+// its key only on its first line. This masks private keys as maskPrivateKeyLines does, plus
+// every line after the key's line that a secret assignment's value reaches (through the
+// matching close, or to the end when it never closes) and every line of an environment value
+// that holds a newline, all found on the whole text. The key's own line is left for the
+// per-line redactor, so single-line output is redacted exactly as before; the line count is kept.
+export function maskSecretLines(lines, secrets) {
+  const masked = maskPrivateKeyLines(lines);
+  const { text, lineAt } = joinedLines(lines);
   const mask = (from, to) => {
-    for (let index = Math.max(0, from); index <= to && index < masked.length; index += 1) {
+    for (let index = from; index <= to && index < masked.length; index += 1) {
       masked[index] = privateKeyLine;
     }
   };
-  const end = privateKeyEnd.exec(text);
-  let first = text.length;
-  for (const match of text.matchAll(privateKeyShape)) {
-    first = Math.min(first, match.index);
-    mask(lineAt(match.index), lineAt(match.index + match[0].length));
+  const spans = [];
+  redactSecretAssignments(text, spans);
+  for (const [start, end] of spans) {
+    mask(lineAt(start) + 1, lineAt(Math.max(start, end - 1)));
   }
-  if (end && end.index < first) {
-    const endLine = lineAt(end.index);
-    mask(endLine - orphanKeyLines, endLine);
+  for (const [value] of secrets) {
+    if (value.includes("\n")) {
+      for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + value.length)) {
+        mask(lineAt(at), lineAt(at + value.length - 1));
+      }
+    }
   }
   return masked;
 }
@@ -376,18 +415,6 @@ export function newestMatchingLogLines(logs, secrets, { pattern, exclude, budget
     length += shown.length + 1;
   }
   return kept.reverse().join("\n");
-}
-
-// Environment values and secret assignments over a whole text, before it is split into lines
-// and cut: a credential pretty-printed across lines keeps its key only on its first line, so a
-// line-by-line pass (or a tail that starts inside it) shows the nested values. A value opened
-// with "{" or "[" is redacted through its matching close, as redactText does.
-export function redactSecretValues(text, secrets) {
-  let result = stripControl(String(text));
-  for (const [value, name] of secrets) {
-    result = result.replaceAll(value, `[env:${name}]`);
-  }
-  return redactSecretAssignments(result);
 }
 
 // Lines of a failed file's output (or a component log) for the diagnostics
