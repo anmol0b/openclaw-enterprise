@@ -147,17 +147,13 @@ has no managed Secret storage or model-key delivery. Saving a key does not prove
 provider acceptance or runtime readiness. See
 [harness authentication](../agents.md#harness-authentication).
 
-Successful draft saves retain IDs and freeze inputs, including authentication.
-Correct names or permissions, then retry failed resources.
-Ordinary draft creation grants the Agent exact `operate` access to the model
-Secret and each unique same-Namespace environment Secret in its saved
-Configuration, including Preset bindings; this requires
+Successful draft saves retain IDs and freeze inputs, including authentication;
+correct names or permissions, then retry failed resources. Creation grants the
+Agent `operate` on its model Secret and each bound Configuration Secret, needing
 [Installation administration](../authorization.md#manage-namespace-policy).
-If grants fail after Agent creation, select **Retry credential access**, which
-reuses the saved Agent, Configuration and existing grants, or ask an
-administrator to check them.
-Uncertain responses block another attempt: check displayed IDs and the Agents list;
-give the request ID to your operator if the outcome remains unknown.
+If grants fail, **Retry credential access** or ask an administrator.
+Uncertain responses block retries: check the IDs and Agents list; give your
+operator the request ID if the outcome stays unknown.
 
 After a lost admission response, **Retry provisioning request** resubmits the same
 request ID and saved Secret references. Retry acknowledged jobs through their URL;

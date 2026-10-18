@@ -281,15 +281,6 @@ export async function createConsoleAppFixture(t, options = {}) {
             }
             roles.push(...(await view.iamPolicy.listRoles(namespace.id)));
             bindings.push(...(await view.iamPolicy.listAccessBindings(namespace.id)));
-            // Agent creation persists this identity in PostgresPlatformState.agents.createAgent.
-            for (const agent of await view.agents.listAgents(namespace.id)) {
-              identities.push({
-                id: agent.servicePrincipalId,
-                kind: "service_principal",
-                namespaceId: agent.namespaceId,
-                agentId: agent.id,
-              });
-            }
           }
           return { roles, bindings, identities };
         };
