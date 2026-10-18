@@ -205,8 +205,9 @@ test("Agent create preflight admits every Configuration that Configuration and A
   });
   assert.equal(created.status, 201, JSON.stringify(created.body).slice(0, 500));
 
-  // Configuration create's largest body (just under 1 MiB of values, every character a six-byte
-  // escape) with Agent create's largest initial workspace files, written the same way.
+  // Just under the 1 MiB of values Configuration create admits, saved as plain JSON, then sent to
+  // the preflight with Agent create's largest initial workspace files, every character of both a
+  // six-byte escape: over 6 MiB, more than Configuration create's body limit alone.
   const largest = { meta: { notes: "x".repeat(1024 * 1024 - 128) } };
   const saved = await f.createConfiguration(f.namespace.id, largest);
   assert.equal(saved.values.meta.notes.length, largest.meta.notes.length);

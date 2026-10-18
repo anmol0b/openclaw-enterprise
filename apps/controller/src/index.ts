@@ -2004,7 +2004,7 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
    * path and the caller, so it runs here, in onRequest, before the body is read: a caller
    * without the grant gets the same 403 or 404 and audit row as when the check ran in the
    * handler, and the controller never buffers the body. The handler repeats the check in its
-   * transaction, with the Secret binding checks that need the body.
+   * transaction; Configuration writes then run the Secret binding checks that need the body.
    */
   async function authorizeBeforeBody(request: FastifyRequest, operation: OccApiRoute) {
     const context = contexts.get(request);

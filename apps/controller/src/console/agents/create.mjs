@@ -152,11 +152,12 @@ function namedRefusal(error) {
   return preAdmissionRefusal(error);
 }
 
-// Create Agent's preflight saved nothing, so its 400, 409 and 422 refusals show the API's rule
-// as sent (finding 1871). rejectionMessage's 409 text names a saved state and an Agent name that
-// this check never reads. The catch-all conflict names nothing and keeps the generic text.
+// Create Agent's preflight saved nothing, so its 400 and 409 refusals show the API's rule as
+// sent (finding 1871). rejectionMessage's 409 text names a saved state and an Agent name that
+// this check never reads. The catch-all conflict names nothing and keeps the generic text. A 413
+// names the size limit, which a retry of the same body cannot pass.
 function preflightRefusal(error) {
-  return [400, 409, 422].includes(error.status) &&
+  return [400, 409, 413].includes(error.status) &&
     error.serverMessage !== undefined &&
     error.serverMessage !== GENERIC_CONFLICT
     ? error.serverMessage

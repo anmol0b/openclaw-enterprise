@@ -298,8 +298,9 @@ async function assertPreflightBlocked(form, expected) {
   );
 }
 
-// Answers the next preflight with `answer` (a status and message, or "abort"), submits, and
-// checks the save is blocked with `expected`.
+// Answers the next preflight with `answer` (an API error envelope's status, code and message, a
+// status with a plain-text body as a proxy sends, or "abort"), submits, and checks the save is
+// blocked with `expected`.
 async function refusePreflight(form, answer, expected) {
   const { page, agentsUrl, isPreflight } = form;
   await page.route(
@@ -307,14 +308,18 @@ async function refusePreflight(form, answer, expected) {
     (route) =>
       answer === "abort"
         ? route.abort("failed")
-        : route.fulfill({
-            status: answer.status,
-            contentType: "application/json",
-            body: JSON.stringify({
-              error: { code: answer.code, message: answer.message },
-              meta: { requestId: "req_test_preflight" },
-            }),
-          }),
+        : route.fulfill(
+            answer.text === undefined
+              ? {
+                  status: answer.status,
+                  contentType: "application/json",
+                  body: JSON.stringify({
+                    error: { code: answer.code, message: answer.message },
+                    meta: { requestId: "req_test_preflight" },
+                  }),
+                }
+              : { status: answer.status, contentType: "text/plain", body: answer.text },
+          ),
     { times: 1 },
   );
   // Settles once this try's preflight has its answer or failed; the form then shows the result.
@@ -338,7 +343,11 @@ test("Create Agent shows the API's reason when the preflight refuses, then creat
   for (const answer of [
     { status: 409, code: "RESOURCE_CONFLICT", message: workspaceRule },
     { status: 400, code: "INVALID_REQUEST", message: "Configuration setting x is invalid." },
-    { status: 422, code: "INVALID_REQUEST", message: "Configuration setting y is invalid." },
+    {
+      status: 413,
+      code: "PAYLOAD_TOO_LARGE",
+      message: "The request body exceeds the permitted size.",
+    },
   ]) {
     await refusePreflight(form, answer, answer.message);
   }
@@ -359,19 +368,31 @@ test("Create Agent shows the API's reason when the preflight refuses, then creat
 });
 
 // The preflight fails closed: a failed check blocks the save with a retryable error and saves
-// nothing, and the next try runs the check again (finding 1872).
+// nothing, and the next try runs the check again (finding 1872). A 413 shows the API's reason,
+// above.
 test("Create Agent blocks the save when the preflight fails, and a retry checks again", async (t) => {
   const form = await filledCreateForm(t, "Preflight failures", {}, { selected: "{}" });
   const unavailable = "Service unavailable. The read could not be completed. Try again.";
   for (const [answer, expected] of [
     ["abort", "Request interrupted. Retry to check current access and saved state."],
-    [{ status: 500, code: "INTERNAL_ERROR", message: "Internal failure." }, unavailable],
-    [{ status: 503, code: "DEPENDENCY_UNAVAILABLE", message: "Unavailable." }, unavailable],
-    [{ status: 413, code: "PAYLOAD_TOO_LARGE", message: "Too large." }, unavailable],
     [
-      { status: 429, code: "RATE_LIMITED", message: "Slow down." },
-      "Too many requests. Wait before trying again.",
+      {
+        status: 500,
+        code: "INTERNAL_ERROR",
+        message: "The platform request could not be completed.",
+      },
+      unavailable,
     ],
+    [
+      {
+        status: 503,
+        code: "DEPENDENCY_UNAVAILABLE",
+        message: "A required platform dependency is unavailable.",
+      },
+      unavailable,
+    ],
+    // A proxy in front of the controller may limit requests; the API itself sends no 429 here.
+    [{ status: 429, text: "Too Many Requests" }, "Too many requests. Wait before trying again."],
   ]) {
     await refusePreflight(form, answer, expected);
   }

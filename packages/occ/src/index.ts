@@ -6945,7 +6945,8 @@ export class OpenClawController {
       });
       // The form saves the Configuration first, so its rules answer first, in
       // createConfiguration's order: size, content, then the Configuration Driver's own check
-      // (credential references, finding 1870), which stores nothing.
+      // (credential references, finding 1870). This relies on `validate` only checking, as both
+      // bundled Drivers' do; the Configuration passed is never stored.
       const driver = this.configurationDriver();
       await driver.validateSize?.(values);
       this.validateConfigurationContent(values);

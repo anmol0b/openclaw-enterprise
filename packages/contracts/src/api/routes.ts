@@ -1326,7 +1326,7 @@ export const occApiRoutes = [
       response: {
         204: Type.Null({
           description:
-            "The request passed every check this call runs: Configuration create's size and content rules and its Configuration Driver's check (such as credential references), then Agent create's plugin and initial-workspace-files rules. A refusal carries the message those creates would send. Not checked here: Secret bindings, model authentication and credential sources, live repository policy and an adopted Namespace's readiness; Configuration and Agent create check those when they save.",
+            "The request passed every check this call runs: the Namespace's state, Configuration create's size and content rules and its Configuration Driver's check (such as credential references), then Agent create's plugin, execution-mode and initial-workspace-files rules. A refusal carries the message those creates would send. Not checked here: Secret bindings, model authentication and credential sources, live repository policy and an adopted Namespace's readiness; Configuration and Agent create check those when they save.",
         }),
         ...createErrors,
       },
