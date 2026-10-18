@@ -13,7 +13,6 @@ import dns from "node:dns";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { createRequire } from "node:module";
 import { connect, isIP, isIPv4 } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
