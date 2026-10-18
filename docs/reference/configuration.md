@@ -27,7 +27,8 @@ envelope in six-byte JSON escapes; a caller without the create or update grant
 is refused before the body is read. Create Agent's check,
 `POST /namespaces/{namespaceId}/agents/validate`, carries an unsaved
 Configuration, so it allows that limit plus Agent create's 448 KiB and refuses a
-caller without `agent:create` before the body is read. Reviewed
+caller without `agent:create` before the body is read. Values there may also nest
+one level deeper than the 24-level body bound, matching Configuration create. Reviewed
 bundled and installed Configuration Drivers are available in development and
 production.
 

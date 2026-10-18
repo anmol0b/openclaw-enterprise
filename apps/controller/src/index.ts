@@ -464,7 +464,21 @@ function validAuthorizationEvidence(value: unknown): value is AuthorizationEvide
   ].every((entries) => Array.isArray(entries) && entries.every(isNonEmptyString));
 }
 
-function validateConfiguration(value: unknown, depth = 0, path = ""): void {
+// Create Agent's preflight carries Configuration values at /configuration/values, one level below
+// Configuration create's /values, so a value there may sit one level deeper (issue #2831).
+const AGENT_CREATE_VALIDATE_DEEPER: readonly [string, string] = ["configuration", "values"];
+
+/**
+ * `wrapped` marks a body whose AGENT_CREATE_VALIDATE_DEEPER value may hold one more level, as
+ * tooDeepJsonPath's `extraLevelBelow`: the step into it is not counted. It is "body" at the
+ * root and "first" in the value of its first key.
+ */
+function validateConfiguration(
+  value: unknown,
+  depth = 0,
+  path = "",
+  wrapped?: "body" | "first",
+): void {
   // The JSON body parser already refuses deeper bodies; this keeps the rule for any other input.
   if (depth > MAX_JSON_BODY_DEPTH) {
     throw tooDeepFailure(path);
@@ -484,7 +498,14 @@ function validateConfiguration(value: unknown, depth = 0, path = ""): void {
         { path: cappedPath(`${path}/${jsonPointer(key)}`), code: "INVALID_VALUE" },
       ]);
     }
-    validateConfiguration(entry, depth + 1, `${path}/${jsonPointer(key)}`);
+    const entryPath = `${path}/${jsonPointer(key)}`;
+    if (wrapped === "body" && key === AGENT_CREATE_VALIDATE_DEEPER[0]) {
+      validateConfiguration(entry, depth + 1, entryPath, "first");
+    } else if (wrapped === "first" && key === AGENT_CREATE_VALIDATE_DEEPER[1]) {
+      validateConfiguration(entry, depth, entryPath);
+    } else {
+      validateConfiguration(entry, depth + 1, entryPath);
+    }
   }
 }
 
@@ -1243,7 +1264,13 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     app.initialConfig.onConstructorPoisoning ?? "error",
   );
   app.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
-    const tooDeep = tooDeepJsonPath(body as string);
+    const operationId = (request.routeOptions.schema as { operationId?: string } | undefined)
+      ?.operationId;
+    const tooDeep = tooDeepJsonPath(
+      body as string,
+      MAX_JSON_BODY_DEPTH,
+      operationId === "validateAgentCreate" ? AGENT_CREATE_VALIDATE_DEEPER : undefined,
+    );
     if (tooDeep !== undefined) {
       done(tooDeepFailure(tooDeep), undefined);
       return;
@@ -2053,7 +2080,12 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     const params = request.params as Record<string, string>;
     const body = request.body as Record<string, unknown> | undefined;
     if (body !== undefined) {
-      validateConfiguration(body);
+      validateConfiguration(
+        body,
+        0,
+        "",
+        operation.operationId === "validateAgentCreate" ? "body" : undefined,
+      );
     }
 
     if (operation.operationId === "bootstrapInstallation") {
