@@ -7,7 +7,12 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { createDevUpModelProvider } from "../helpers/dev-up-model-provider.mjs";
+import {
+  failureSecrets,
+  redactFailure,
+  redactFailureDetail,
+} from "../../scripts/ci/failure-redaction.mjs";
+import { createDevUpModelProvider, imageBuildFailure } from "../helpers/dev-up-model-provider.mjs";
 import { configureModelProviderDNS } from "../helpers/runtime-model-provider.mjs";
 
 const execute = promisify(execFile);
@@ -440,6 +445,73 @@ test("failed checkout builds report each image's exit and redacted stderr tail",
       }
     }
   }
+});
+
+// A credential pretty-printed across lines loses its key when the tail starts inside it, and the
+// reporter can no longer redact a nested value it cannot tie to that key. The tail must be cut
+// after redaction, whether the raw opener is inside or before the last 80 lines.
+test("failed build tails redact multiline credential values before cutting", () => {
+  const value = "invented-session-value-1847";
+  const cause = "ERROR: failed to solve: runtime-base recipe exit code: 1";
+  for (const padding of [0, 120]) {
+    const stderr = [
+      ...Array.from({ length: 200 }, (_, index) => `#${index} pulling layer ${index}`),
+      '{ "credentials": {',
+      ...Array.from({ length: padding }, (_, index) => `    "field${index}": "filler",`),
+      `    "session": "${value}"`,
+      "  }",
+      "}",
+      cause,
+    ].join("\n");
+    const error = imageBuildFailure(
+      [
+        {
+          image: "runtime-base",
+          reason: Object.assign(new Error("Command failed"), { code: 1, stderr }),
+        },
+      ],
+      {},
+    );
+    const detail = redactFailureDetail(error, failureSecrets([{}]), "");
+    const summary = redactFailure(error, failureSecrets([{}]), "");
+    for (const [name, text] of [
+      ["message", error.message],
+      ["diagnostic", detail.message],
+      ["job log", summary.message],
+    ]) {
+      assert.equal(
+        text.includes(value),
+        false,
+        `${name} (padding ${padding}) must not show the value`,
+      );
+    }
+    assert.ok(
+      detail.message.includes(cause),
+      `the diagnostic (padding ${padding}) keeps the cause`,
+    );
+    assert.match(error.message, /runtime-base \(exit 1\):\n\[earlier output omitted\]\n/);
+  }
+  // A private key that begins before the retained lines is masked too.
+  const keyLine = "InventedKeyBody1847InventedKeyBody1847";
+  const tail = imageBuildFailure(
+    [
+      {
+        image: "controller",
+        reason: Object.assign(new Error("Command failed"), {
+          code: 1,
+          stderr: [
+            "-----BEGIN PRIVATE KEY-----",
+            ...Array.from({ length: 120 }, () => keyLine),
+            "-----END PRIVATE KEY-----",
+            cause,
+          ].join("\n"),
+        }),
+      },
+    ],
+    {},
+  ).message;
+  assert.equal(tail.includes(keyLine), false);
+  assert.ok(tail.endsWith(cause));
 });
 
 test("cleanup drains admitted image builds before reconciling their reservations", async (t) => {

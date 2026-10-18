@@ -378,6 +378,18 @@ export function newestMatchingLogLines(logs, secrets, { pattern, exclude, budget
   return kept.reverse().join("\n");
 }
 
+// Environment values and secret assignments over a whole text, before it is split into lines
+// and cut: a credential pretty-printed across lines keeps its key only on its first line, so a
+// line-by-line pass (or a tail that starts inside it) shows the nested values. A value opened
+// with "{" or "[" is redacted through its matching close, as redactText does.
+export function redactSecretValues(text, secrets) {
+  let result = stripControl(String(text));
+  for (const [value, name] of secrets) {
+    result = result.replaceAll(value, `[env:${name}]`);
+  }
+  return redactSecretAssignments(result);
+}
+
 // Lines of a failed file's output (or a component log) for the diagnostics
 // report, with private keys removed across lines first.
 export function redactOutputLines(lines, secrets, root, limit) {

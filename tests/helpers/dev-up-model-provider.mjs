@@ -7,8 +7,10 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   failureSecrets,
+  maskPrivateKeyLines,
   redactLogLine,
-  redactOutputLines,
+  redactOutputLine,
+  redactSecretValues,
 } from "../../scripts/ci/failure-redaction.mjs";
 import { availablePort } from "./available-port.mjs";
 import {
@@ -25,30 +27,33 @@ const nodeBaseImage =
   "docker.io/library/node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584";
 
 // The runner keeps the first 16 KiB of a failure message, and buildx and dev-up print progress
-// before their cause, so a failure carries only the end of a command's output. It is redacted
-// as the runner redacts a failed file's output, private keys masked across lines first.
+// before their cause, so a failure carries only the end of a command's output. Private keys and
+// secret values that span lines are redacted over the whole output, while their context is
+// there; then each line is redacted as the runner redacts a failed file's output, newest first,
+// only until the tail is full.
 export function outputTail(
   text,
   environment,
   budget = 6_000,
   secrets = failureSecrets([environment]),
 ) {
-  const lines = redactOutputLines(
-    String(text ?? "")
-      .trimEnd()
-      .split("\n"),
+  const lines = redactSecretValues(
+    maskPrivateKeyLines(
+      String(text ?? "")
+        .trimEnd()
+        .split("\n"),
+    ).join("\n"),
     secrets,
-    "",
-    1_000,
-  );
+  ).split("\n");
   const kept = [];
   let size = 0;
   for (let index = lines.length - 1; index >= 0 && kept.length < 80; index -= 1) {
-    if (size + lines[index].length + 1 > budget) {
+    const line = redactOutputLine(lines[index], secrets, "", 1_000);
+    if (size + line.length + 1 > budget) {
       break;
     }
-    kept.unshift(lines[index]);
-    size += lines[index].length + 1;
+    kept.unshift(line);
+    size += line.length + 1;
   }
   return kept.length < lines.length
     ? ["[earlier output omitted]", ...kept].join("\n")
