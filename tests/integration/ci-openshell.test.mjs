@@ -155,6 +155,33 @@ test("OpenShell host probes retain the exposed hostname while connecting to loop
   assert.equal(observedHost, `${serviceHostname}:${address.port}`);
 });
 
+test("OpenShell privilege checks retain native status verification without a bridge bypass", () => {
+  const { assertApprovedOpenShellPrivileges: check } = createOpenShellKubernetesFixture({});
+  const pod = {
+    spec: {
+      runtimeClassName: "openshell-sandbox",
+      securityContext: { runAsUser: 10001, runAsGroup: 10001 },
+      containers: [
+        {
+          name: "agent",
+          env: [{ name: "APP_TOKEN_SHA", value: "a".repeat(64) }],
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } },
+        },
+      ],
+    },
+  };
+  // Native Compute now requests a temporary held-failure exposure. It requires the
+  // same verifier boundary as Codex; the retired bridge must not bypass that check.
+  assert.doesNotThrow(() => check(pod));
+  pod.spec.containers[0].env = [];
+  assert.throws(
+    () => check(pod, { compatibilityBridge: true }),
+    /transport\/status token verifier/,
+  );
+  pod.spec.containers[0].env = [{ name: "APP_SERVER_TOKEN", value: "synthetic-token" }];
+  assert.throws(() => check(pod), /raw app-server token must stay outside/);
+});
+
 test("OpenShell probe observes its command after the turn ends, or preserves the unknown outcome", async (t) => {
   // Run the actual in-Pod client and probe decision. Only kubectl transport and the
   // app-server peer are fixtures. WebSocket message order, not a sleep, creates the boundary.

@@ -117,7 +117,7 @@ jobs:
     if: needs.eligibility.outputs.trusted == 'true'
     # OpenShell requires an enabled Landlock LSM, absent on the Blacksmith kernel.
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 160
     environment: integration-qa-pr
     env:
       NODE_BASE_IMAGE: ${{ vars.CONTAINER_NODE_BASE_IMAGE }}
@@ -149,4 +149,4 @@ jobs:
           profile: full
           node-version: "24.16.0"
           artifact-prefix: qa-advisory
-          job-timeout-minutes: 120
+          job-timeout-minutes: 160

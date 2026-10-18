@@ -40,6 +40,8 @@ export async function connectNativeGateway(options) {
   });
   const client = new GatewayClient({
     ...options,
+    minProtocol: 4,
+    maxProtocol: 4,
     hostDeps: {
       signDevicePayload: (key, payload) =>
         sign(null, Buffer.from(payload), key).toString("base64url"),

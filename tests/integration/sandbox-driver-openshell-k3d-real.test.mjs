@@ -1089,6 +1089,7 @@ function createIntegrationSandboxDriverFactory(
             kind: "ServiceAccount",
             metadata: {
               name:
+                gatewayState.get(namespaceName)?.sandboxServiceAccountName ??
                 requirements.workloadIdentity?.serviceAccountName ??
                 openShellAgentName(requirements.labels["openclaw.dev/agent"]),
             },
@@ -1170,6 +1171,7 @@ function createIntegrationSandboxDriverFactory(
         // The real Driver receives unmodified Compute requirements for both Harness kinds.
         const endpoint = await endpointForNamespace(context, {
           sandboxServiceAccountName: agentSandboxServiceAccount(context),
+          exact: context.requirements.workloadIdentity !== undefined,
         });
         return await delegate(
           context.requirements,
@@ -1181,6 +1183,7 @@ function createIntegrationSandboxDriverFactory(
       async harnessEndpoint(context) {
         const endpoint = await endpointForNamespace(context, {
           sandboxServiceAccountName: agentSandboxServiceAccount(context),
+          exact: context.requirements.workloadIdentity !== undefined,
         });
         return await delegate(
           context.requirements,
@@ -1192,6 +1195,7 @@ function createIntegrationSandboxDriverFactory(
       async harnessStatus(context) {
         const endpoint = await endpointForNamespace(context, {
           sandboxServiceAccountName: agentSandboxServiceAccount(context),
+          exact: context.requirements.workloadIdentity !== undefined,
         });
         return await delegate(
           context.requirements,
@@ -1199,12 +1203,6 @@ function createIntegrationSandboxDriverFactory(
           endpoint,
           context,
         ).harnessStatus(context);
-      },
-      async workspaceNodePeerLabels(context) {
-        const endpoint = existingEndpointForNamespace(context);
-        return await delegate(undefined, context.namespace.name, endpoint).workspaceNodePeerLabels(
-          context,
-        );
       },
       async readSandboxLogs(context, request) {
         const endpoint = existingEndpointForNamespace(context);
@@ -1215,26 +1213,19 @@ function createIntegrationSandboxDriverFactory(
       },
       // Compute drops a native worker's exposure once its node has enrolled (finding 1657).
       async withdrawHarnessExposure(context) {
-        const endpoint = await endpointForNamespace(context, {
-          sandboxServiceAccountName: agentSandboxServiceAccount(context),
-          exact: context.requirements.workloadIdentity !== undefined,
-        });
-        await delegate(
-          context.requirements,
-          context.namespace.name,
-          endpoint,
+        // Sweeps also call this hook without provisioning requirements.
+        const endpoint = existingEndpointForNamespace(context);
+        await delegate(undefined, context.namespace.name, endpoint).withdrawHarnessExposure(
           context,
-        ).withdrawHarnessExposure(context);
+        );
       },
       // Compute admits the workspace-node connection only from the revision's
       // supervisor Pod, which the real Driver labels from the gateway's Sandbox record.
       async workspaceNodePeerLabels(context) {
         const endpoint = existingEndpointForNamespace(context);
-        return await delegate(
-          undefined,
-          context.namespace.name,
-          endpoint,
-        ).workspaceNodePeerLabels(context);
+        return await delegate(undefined, context.namespace.name, endpoint).workspaceNodePeerLabels(
+          context,
+        );
       },
       async cleanup(context) {
         if (context.revision === undefined) {
@@ -1980,11 +1971,11 @@ async function prepareProductionInstallation(
       "test -w /sandbox/.openclaw-runtime/home/.codex",
     );
     assertNoProjectedAgentIdentity(harnessPod);
-    assertApprovedOpenShellPrivileges(harnessPod, harnessId);
+    assertApprovedOpenShellPrivileges(harnessPod);
   } else {
     // Native delivery uses the production provider path without copied identity tokens or Jobs.
     assertNoProjectedAgentIdentity(harnessPod);
-    assertApprovedOpenShellPrivileges(harnessPod, harnessId);
+    assertApprovedOpenShellPrivileges(harnessPod);
     assert.deepEqual(
       (await resources("jobs", placement)).filter(({ metadata }) =>
         metadata.name.startsWith("openshell-cred-"),
@@ -3899,11 +3890,7 @@ async function createNativeTurnRequester(context, topology) {
         );
       }
       const body = await response.text();
-      assert.equal(
-        body.includes(process.env.OPENAI_API_KEY),
-        false,
-        "model key leaked in response",
-      );
+      assert.equal(body.includes(modelCredential), false, "model key leaked in response");
       assert.equal(body.includes(gatewayPassword), false, "Gateway password leaked in response");
       let payload;
       try {
@@ -3951,6 +3938,21 @@ async function assertNativeOpenClawWorkspaceFiles(topology) {
   const read = await topology.request("GET", path);
   assert.equal(read.status, 200, "native workspace read must succeed");
   assert.deepEqual(read.data, { name: "AGENTS.md", content });
+}
+
+async function assertNativeExposureWithdrawn(context, topology) {
+  const client = topology.gatewayClient();
+  const workspace = topology.placement;
+  const name = topology.sandbox.metadata.name;
+  // A historical create URL can exist for held-startup diagnostics. Read live
+  // state, and confirm Workspace visibility rather than trusting a hidden 404.
+  assert.equal((await client.getWorkspace(workspace, context.signal))?.name, workspace);
+  assert.equal((await client.getSandbox({ workspace, name }, context.signal))?.name, name);
+  assert.equal(
+    await client.getService(workspace, name, "", context.signal),
+    undefined,
+    "an enrolled native Harness must have no remaining provider exposure",
+  );
 }
 
 async function createSecondNativeAgent(topology) {
@@ -4063,6 +4065,11 @@ async function assertNativeAuthorityChain(context, topology, positive) {
     "workspace-node-" + hash(peer.agent.id) + "-" + hash("harness:openclaw"),
     peer.placement,
   );
+  assert.equal(
+    Buffer.from(peerNodeSecret.data.enrolledRevisionId, "base64").toString(),
+    peer.revision.id,
+    "the retained node identity must have enrolled for Agent B's active revision",
+  );
   const peerNodeId = Buffer.from(peerNodeSecret.data.deviceId, "base64").toString();
   assert.ok(peerNodeId.length > 0);
   // Sandbox readiness precedes native node enrollment. Observe the Gateway's real
@@ -4070,6 +4077,7 @@ async function assertNativeAuthorityChain(context, topology, positive) {
   await waitFor("native Agent B workspace node connected", async () =>
     (await adminB("node.describe", { nodeId: peerNodeId })).connected === true ? true : undefined,
   );
+  await assertNativeExposureWithdrawn(context, peer);
   await assertNativeOpenClawWorkspaceFiles(peer);
   const peerTurns = await requestNativeOpenClawTurns(context, peer);
   nativeAuthorityTrace(context, "positive-native-workspace-and-successive-turns", { agents: 2 });
@@ -5935,7 +5943,9 @@ if (demoStatePath !== undefined) {
 }
 
 test(
-  "OpenShell enforces provider delivery and authenticated Codex exposure",
+  selectedHarness === "openclaw"
+    ? "OpenShell enforces native provider delivery and Gateway authority"
+    : "OpenShell enforces provider delivery and authenticated Codex exposure",
   {
     ...requiresOpenShellK3d,
     ...(demoStatePath === undefined ? { timeout: 2_400_000 } : {}),
@@ -5963,11 +5973,7 @@ test(
       );
       assert.ok(topology.sandbox.metadata.name);
       if (selectedHarness === "openclaw") {
-        assert.equal(
-          topology.harnessServiceUrl,
-          undefined,
-          "native OpenClaw must not request an inbound OpenShell service exposure.",
-        );
+        await assertNativeExposureWithdrawn(context, topology);
         process.stderr.write(
           "OpenShell integration: verifying dedicated native workspace file access.\n",
         );
