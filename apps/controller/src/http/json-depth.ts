@@ -43,6 +43,10 @@ function keyIs(text: string, start: number | undefined, end: number | undefined,
   if (raw === `"${name}"`) {
     return true;
   }
+  // Only an escape can make other text decode to the name.
+  if (!raw.includes("\\")) {
+    return false;
+  }
   try {
     return JSON.parse(raw) === name;
   } catch {
@@ -78,8 +82,9 @@ export function tooDeepJsonPath(
   let depth = 0;
   // Whether a string here would be an object key (after "{" or "," in an object).
   let expectKey = false;
-  // Whether the open container one level below the root is the value of extraLevelBelow's
-  // first key, and the depth that extraLevelBelow's value opened at while it is open (or -1).
+  // Whether the container most recently opened one level below the root is the value of
+  // extraLevelBelow's first key (a container two levels down always opens inside it), and the
+  // depth that extraLevelBelow's value opened at while it is open (or -1).
   let firstKeyOpen = false;
   let extendedAt = -1;
   for (let at = 0; at < text.length; at += 1) {
@@ -183,4 +188,56 @@ function pathAt(
     path += `/${jsonPointer(segment)}`;
   }
   return path;
+}
+
+/**
+ * The parsed-body counterpart of tooDeepJsonPath, with the same `maxDepth` and
+ * `extraLevelBelow`, for a body the JSON parser already read (it keeps the rule for any other
+ * input). It also refuses an object key that names a prototype. Throws the request failure.
+ */
+export function checkJsonValue(
+  value: unknown,
+  maxDepth: number = MAX_JSON_BODY_DEPTH,
+  extraLevelBelow?: readonly [string, string],
+): void {
+  checkValue(value, 0, "", maxDepth, extraLevelBelow, extraLevelBelow === undefined ? 0 : 1);
+}
+
+// `stage` is 1 at the root and 2 in the value of extraLevelBelow's first key, where the step into
+// its second key is not counted; 0 everywhere else.
+function checkValue(
+  value: unknown,
+  depth: number,
+  path: string,
+  maxDepth: number,
+  extraLevelBelow: readonly [string, string] | undefined,
+  stage: 0 | 1 | 2,
+): void {
+  if (depth > maxDepth) {
+    throw tooDeepFailure(path);
+  }
+  if (value === null || typeof value !== "object") {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, entry] of value.entries()) {
+      checkValue(entry, depth + 1, `${path}/${index}`, maxDepth, undefined, 0);
+    }
+    return;
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    const entryPath = `${path}/${jsonPointer(key)}`;
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      throw failure(400, "INVALID_REQUEST", "The supplied configuration is invalid.", [
+        { path: cappedPath(entryPath), code: "INVALID_VALUE" },
+      ]);
+    }
+    if (stage === 1 && key === extraLevelBelow![0]) {
+      checkValue(entry, depth + 1, entryPath, maxDepth, extraLevelBelow, 2);
+    } else if (stage === 2 && key === extraLevelBelow![1]) {
+      checkValue(entry, depth, entryPath, maxDepth, undefined, 0);
+    } else {
+      checkValue(entry, depth + 1, entryPath, maxDepth, undefined, 0);
+    }
+  }
 }

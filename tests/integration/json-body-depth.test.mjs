@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { tooDeepJsonPath } from "../../apps/controller/src/http/json-depth.ts";
+import { checkJsonValue, tooDeepJsonPath } from "../../apps/controller/src/http/json-depth.ts";
 import { authenticatedHeaders } from "../helpers/auth-session.mjs";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 
@@ -313,24 +313,47 @@ test("the depth scan reads raw JSON text in one pass", () => {
   assert.equal(tooDeepJsonPath(`${"[".repeat(24)}1${"]".repeat(24)}`), undefined);
   assert.equal(tooDeepJsonPath(`${"[".repeat(25)}${"]".repeat(25)}`), undefined);
   assert.equal(tooDeepJsonPath(`${"[".repeat(25)}1${"]".repeat(25)}`), "/0".repeat(25));
-  // One extra level below a named two-key path, only while that value is open.
+  // One extra level below a named two-key path, only while that value is open. The parsed-body
+  // walk gives every valid case the same answer.
   const below = ["c", "v"];
+  const parsedPath = (text, maxDepth) => {
+    try {
+      checkJsonValue(JSON.parse(text), maxDepth, below);
+      return undefined;
+    } catch (error) {
+      assert.equal(error.details?.[0]?.code, "TOO_DEEP", text);
+      return error.details[0].path;
+    }
+  };
   for (const [text, expected] of [
     ['{"c":{"v":[[1]]}}', undefined],
     ['{"c":{"v":[[[1]]]}}', "/c/v/0/0/0"],
+    // The allowance lasts until that value closes, not its first entry.
+    ['{"c":{"v":[[1],[1]]}}', undefined],
     // Escaped keys name the same path.
-    [String.raw`{"c":{"v":[[1]]}}`, undefined],
+    [String.raw`{"\u0063":{"\u0076":[[1]]}}`, undefined],
+    [String.raw`{"\u0063":{"\u0076":[[[1]]]}}`, "/c/v/0/0/0"],
     // Its siblings, before and after it, and other paths keep the bound.
     ['{"c":{"v":[[1]],"w":[[1]]}}', "/c/w/0/0"],
     ['{"c":{"w":[[1]],"v":[[1]]}}', "/c/w/0/0"],
     ['{"c":{"v":[[1]]},"d":[[[1]]]}', "/d/0/0/0"],
     ['{"d":[[[1]]],"c":{"v":[[1]]}}', "/d/0/0/0"],
+    ['{"c":{},"x":{"v":[[1]]}}', "/x/v/0/0"],
+    ['{"c":1,"x":{"v":[[1]]}}', "/x/v/0/0"],
     ['{"x":{"v":[[1]]}}', "/x/v/0/0"],
     ['{"c":{"x":{"v":[1]}}}', "/c/x/v/0"],
+    // Only at the root: the same keys deeper down, or inside the value itself, add nothing.
+    ['{"x":{"c":{"v":[[1]]}}}', "/x/c/v/0"],
+    ['{"c":{"v":{"v":[[1]]}}}', "/c/v/v/0/0"],
+    ['{"c":{"v":{"c":{"v":[1]}}}}', "/c/v/c/v/0"],
     ['[{"v":[[1]]}]', "/0/v/0/0"],
     ['{"c":[{"v":1}]}', undefined],
+    ['{"c":[[[1]]]}', "/c/0/0/0"],
+    // A repeated key: the later value keeps the bound (the parser keeps only that one).
+    ['{"c":{"v":1},"c":[[[1]]]}', "/c/0/0/0"],
   ]) {
     assert.equal(tooDeepJsonPath(text, 3, below), expected, text);
+    assert.equal(parsedPath(text, 3), expected, `parsed ${text}`);
   }
   // Keys are cut to 1024 characters, more than a 512-character detail path shows.
   const longKey = `${"~".repeat(1023)}\u{1F600}${"k".repeat(1_000_000)}`;

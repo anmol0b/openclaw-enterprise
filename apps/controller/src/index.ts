@@ -104,10 +104,9 @@ import type { NativeAdminAccessConfig } from "./gateway/native-admin.ts";
 import { createAgentHandlers } from "./http/agents.ts";
 import { configurationHandlers } from "./http/configurations.ts";
 import { credentialSourceHandlers } from "./http/credential-sources.ts";
-import { jsonPointer, type ErrorDetail } from "./http/error-details.ts";
+import { type ErrorDetail } from "./http/error-details.ts";
 import {
   canonicalFailure,
-  cappedPath,
   dependencyUnavailable,
   dependencyUnavailableLogFields,
   failure,
@@ -119,7 +118,12 @@ import {
   unstorableTextFailure,
 } from "./http/errors.ts";
 import { iamHandlers } from "./http/iam.ts";
-import { MAX_JSON_BODY_DEPTH, tooDeepFailure, tooDeepJsonPath } from "./http/json-depth.ts";
+import {
+  MAX_JSON_BODY_DEPTH,
+  checkJsonValue,
+  tooDeepFailure,
+  tooDeepJsonPath,
+} from "./http/json-depth.ts";
 import {
   createNativeAdminAccess,
   nativeAdminStatusOperation,
@@ -465,48 +469,10 @@ function validAuthorizationEvidence(value: unknown): value is AuthorizationEvide
 }
 
 // Create Agent's preflight carries Configuration values at /configuration/values, one level below
-// Configuration create's /values, so a value there may sit one level deeper (issue #2831).
-const AGENT_CREATE_VALIDATE_DEEPER: readonly [string, string] = ["configuration", "values"];
-
-/**
- * `wrapped` marks a body whose AGENT_CREATE_VALIDATE_DEEPER value may hold one more level, as
- * tooDeepJsonPath's `extraLevelBelow`: the step into it is not counted. It is "body" at the
- * root and "first" in the value of its first key.
- */
-function validateConfiguration(
-  value: unknown,
-  depth = 0,
-  path = "",
-  wrapped?: "body" | "first",
-): void {
-  // The JSON body parser already refuses deeper bodies; this keeps the rule for any other input.
-  if (depth > MAX_JSON_BODY_DEPTH) {
-    throw tooDeepFailure(path);
-  }
-  if (value === null || typeof value !== "object") {
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const [index, entry] of value.entries()) {
-      validateConfiguration(entry, depth + 1, `${path}/${index}`);
-    }
-    return;
-  }
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === "__proto__" || key === "constructor" || key === "prototype") {
-      throw failure(400, "INVALID_REQUEST", "The supplied configuration is invalid.", [
-        { path: cappedPath(`${path}/${jsonPointer(key)}`), code: "INVALID_VALUE" },
-      ]);
-    }
-    const entryPath = `${path}/${jsonPointer(key)}`;
-    if (wrapped === "body" && key === AGENT_CREATE_VALIDATE_DEEPER[0]) {
-      validateConfiguration(entry, depth + 1, entryPath, "first");
-    } else if (wrapped === "first" && key === AGENT_CREATE_VALIDATE_DEEPER[1]) {
-      validateConfiguration(entry, depth, entryPath);
-    } else {
-      validateConfiguration(entry, depth + 1, entryPath);
-    }
-  }
+// Configuration create's /values, so a value there may sit one level deeper (issue #2831). Both
+// depth checks, the raw-body scan and the parsed-body walk, take it from here.
+function deeperJsonValue(operationId: string | undefined): readonly [string, string] | undefined {
+  return operationId === "validateAgentCreate" ? ["configuration", "values"] : undefined;
 }
 
 /** Operations whose grant check runs before their body is read (see authorizeBeforeBody). */
@@ -1269,7 +1235,7 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     const tooDeep = tooDeepJsonPath(
       body as string,
       MAX_JSON_BODY_DEPTH,
-      operationId === "validateAgentCreate" ? AGENT_CREATE_VALIDATE_DEEPER : undefined,
+      deeperJsonValue(operationId),
     );
     if (tooDeep !== undefined) {
       done(tooDeepFailure(tooDeep), undefined);
@@ -2080,12 +2046,7 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
     const params = request.params as Record<string, string>;
     const body = request.body as Record<string, unknown> | undefined;
     if (body !== undefined) {
-      validateConfiguration(
-        body,
-        0,
-        "",
-        operation.operationId === "validateAgentCreate" ? "body" : undefined,
-      );
+      checkJsonValue(body, MAX_JSON_BODY_DEPTH, deeperJsonValue(operation.operationId));
     }
 
     if (operation.operationId === "bootstrapInstallation") {
