@@ -1168,17 +1168,28 @@ function createIntegrationSandboxDriverFactory(
         }
       },
       async provisionHarness(context) {
-        // The real Driver receives unmodified Compute requirements for both Harness kinds.
-        const endpoint = await endpointForNamespace(context, {
-          sandboxServiceAccountName: agentSandboxServiceAccount(context),
-          exact: context.requirements.workloadIdentity !== undefined,
-        });
-        return await delegate(
-          context.requirements,
-          context.namespace.name,
-          endpoint,
-          context,
-        ).provisionHarness(context);
+        try {
+          // The real Driver receives unmodified Compute requirements for both Harness kinds.
+          const endpoint = await endpointForNamespace(context, {
+            sandboxServiceAccountName: agentSandboxServiceAccount(context),
+            exact: context.requirements.workloadIdentity !== undefined,
+          });
+          return await delegate(
+            context.requirements,
+            context.namespace.name,
+            endpoint,
+            context,
+          ).provisionHarness(context);
+        } catch (error) {
+          // Preserve main's first-failure evidence for startup and second-Agent diagnostics.
+          if (!provisioningFailures.has(context.revision.id)) {
+            process.stderr.write(
+              `OpenShell first provisioning failure for ${context.revision.id}: ${error.message}\n`,
+            );
+            provisioningFailures.set(context.revision.id, error);
+          }
+          throw error;
+        }
       },
       async harnessEndpoint(context) {
         const endpoint = await endpointForNamespace(context, {
