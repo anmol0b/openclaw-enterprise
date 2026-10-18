@@ -100,7 +100,7 @@ function bracketValueEnd(text, start) {
 // A quoted value can contain spaces, punctuation, or an escaped quote. When JSON has itself
 // been serialized, its opening delimiter tells us how many backslashes end the value. A value
 // that opens with "{" or "[" is redacted through its matching close. `spans`, when given,
-// receives each assignment's raw [start, end) offsets, key included.
+// receives each assignment's raw [start, end) offsets, key included, and the result is unused.
 function redactSecretAssignments(text, spans) {
   let result = "";
   let end = 0;
@@ -108,6 +108,10 @@ function redactSecretAssignments(text, spans) {
   for (let match; (match = assignment.exec(text));) {
     const [value, key, keyword, separator, escapes = "", quote = "", bracket] = match;
     const delimiter = escapes + quote;
+    // For spans only: a value found on the line after its key may be the next key itself
+    // (`token:` above `password:`), so the scan resumes at that value's start.
+    const valueStart = match.index + key.length;
+    const nextLine = spans !== undefined && key.slice(key.search(/[:=]/u)).includes("\n");
     result += text.slice(end, match.index) + key + delimiter + "[redacted]";
     end = assignment.lastIndex;
     if (bracket) {
@@ -137,6 +141,9 @@ function redactSecretAssignments(text, spans) {
         assignment.lastIndex = end;
       }
       spans?.push([match.index, end]);
+      if (nextLine) {
+        assignment.lastIndex = valueStart;
+      }
       continue;
     }
 
@@ -155,6 +162,14 @@ function redactSecretAssignments(text, spans) {
     }
     assignment.lastIndex = end;
     spans?.push([match.index, end]);
+    // A quoted key (`"password":`) closes on its own line and is followed by a separator.
+    if (
+      nextLine &&
+      !text.slice(valueStart, end).includes("\n") &&
+      /^[^\S\n]*[:=]/u.test(text.slice(end, end + 64))
+    ) {
+      assignment.lastIndex = valueStart;
+    }
   }
   return result + text.slice(end);
 }
@@ -370,9 +385,10 @@ function joinedLines(lines) {
 // context when the value spans lines: a credential object pretty-printed across lines names
 // its key only on its first line. This masks private keys as maskPrivateKeyLines does, plus
 // every line after the key's line that a secret assignment's value reaches (through the
-// matching close, or to the end when it never closes) and every line of an environment value
-// that holds a newline, all found on the whole text. The key's own line is left for the
-// per-line redactor, so single-line output is redacted exactly as before; the line count is kept.
+// matching close, or to the end when it never closes), a key below an empty one included,
+// and every line of an environment value that holds a newline, all found on the whole text.
+// The key's own line is left for the per-line redactor, so single-line output is redacted
+// exactly as before; the line count is kept.
 export function maskSecretLines(lines, secrets) {
   const masked = maskPrivateKeyLines(lines);
   const { text, lineAt } = joinedLines(lines);

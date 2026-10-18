@@ -472,6 +472,16 @@ test("failed build tails redact multiline credential values before cutting", () 
       "}}",
     ],
     "auth scheme after a key": [`token: Bearer ${value}`, `secret=Basic ${value}`],
+    "key below an empty key": ["token:", "credentials: {", `  session: ${value}`, "}"],
+    "value on the line after its key": ["token:", `  ${value}`],
+    "next-line value below an empty key": ["token:", "password:", `  ${value}`],
+    "next-line object below an empty key": [
+      "token:",
+      "credentials:",
+      "{",
+      `  session: ${value}`,
+      "}",
+    ],
     "private key before the tail": [
       "-----BEGIN PRIVATE KEY-----",
       ...Array.from({ length: 120 }, () => value),
