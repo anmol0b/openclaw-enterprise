@@ -180,9 +180,10 @@ func readInitialization(ctx context.Context, config, kctx, ns, name, release, ex
 
 // get --raw skips discovery. kubectl versions differ on whether the raw path
 // replaces or extends the server URL path, which a gateway can use to select
-// the cluster. Resolve only the server URL and TLS name from local kubeconfig.
+// the cluster. Read only the routing fields and exec cluster-info setting from
+// local kubeconfig; do not request credentials or the full configuration.
 func installationJobReadArgs(ctx context.Context, target []string, ns, name string) []string {
-	const fields = `jsonpath={.clusters[0].cluster.server}{"\n"}{.clusters[0].cluster.tls-server-name}`
+	const fields = `jsonpath={.clusters[0].cluster.server}{"\n"}{.clusters[0].cluster.tls-server-name}{"\n"}{.users[*].user.exec.provideClusterInfo}`
 	args := append(target, "config", "view", "--minify", "-o", fields)
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
 	cmd.WaitDelay = time.Second
@@ -191,11 +192,21 @@ func installationJobReadArgs(ctx context.Context, target []string, ns, name stri
 	if err := cmd.Run(); err != nil || out.overflow {
 		return nil
 	}
-	server, tlsName, ok := strings.Cut(out.buf.String(), "\n")
-	u, err := url.Parse(server)
-	if !ok || err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") ||
+	fieldsOut := strings.SplitN(out.buf.String(), "\n", 3)
+	if len(fieldsOut) != 3 {
+		return nil
+	}
+	u, err := url.Parse(fieldsOut[0])
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return nil
+	}
+	tlsName, provideClusterInfo := fieldsOut[1], fieldsOut[2]
+	if provideClusterInfo == "true" && strings.Trim(u.EscapedPath(), "/") != "" {
+		// The credential plugin needs the same full cluster URL as the Job read.
+		// Let kubectl discover the resource and get it by name, without overriding
+		// the server or falling back to a potentially different credential target.
+		return append(target, "get", "jobs.v1.batch", name, "--namespace="+ns, "--output=json")
 	}
 	jobPath := u.JoinPath("apis/batch/v1/namespaces", ns, "jobs", name).EscapedPath()
 	// Put the entire path in --raw and only the origin in --server, so the

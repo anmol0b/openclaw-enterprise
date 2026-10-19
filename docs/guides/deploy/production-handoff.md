@@ -39,6 +39,10 @@ release, and Job UID if recorded. Use the [matching released CLI](../cli.md#occ-
 normally `<release>-initialization`. These commands read the Kubernetes API and
 do not require an OCC endpoint or service key.
 
+If the kubeconfig selects the cluster by URL path and its credential plugin
+requires that cluster information, `kubectl` may also read API discovery
+metadata. It still gets the Job by name; it does not need to list Jobs or Pods.
+
 If a matching CLI release is not yet published, use a trusted checkout of the
 matching source with Go installed, and substitute `go run ./cmd/occ` for `occ` in
 both commands below. Run them from the checkout root.

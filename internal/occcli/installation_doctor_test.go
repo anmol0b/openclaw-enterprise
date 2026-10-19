@@ -180,6 +180,62 @@ func TestInstallationDoctor(t *testing.T) {
 		}
 	})
 
+	t.Run("credential plugin and Job use the same cluster path", func(t *testing.T) {
+		const prefix = "/clusters/selected"
+		const jobPath = "/apis/batch/v1/namespaces/operations/jobs/demo-initialization"
+		// Permit API discovery metadata and exactly one named Job. In particular,
+		// a request to the gateway root or an attempt to list Jobs fails this test.
+		responses := map[string]string{
+			"/api":           `{"kind":"APIVersions","apiVersion":"v1","versions":["v1"]}`,
+			"/api/v1":        `{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"v1","resources":[]}`,
+			"/apis":          `{"kind":"APIGroupList","apiVersion":"v1","groups":[{"name":"batch","versions":[{"groupVersion":"batch/v1","version":"v1"}]}]}`,
+			"/apis/batch/v1": `{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"batch/v1","resources":[{"name":"jobs","kind":"Job","namespaced":true,"verbs":["get"]}]}`,
+			jobPath:          job,
+		}
+		var reads atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path, routed := strings.CutPrefix(r.URL.Path, prefix)
+			body, allowed := responses[path]
+			if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer fixture" || !routed || !allowed {
+				t.Errorf("unexpected %s %s", r.Method, r.URL.RequestURI())
+				http.NotFound(w, r)
+				return
+			}
+			if path == jobPath {
+				reads.Add(1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, body)
+		}))
+		defer server.Close()
+
+		// A path-scoped credential must not be requested for the bare gateway.
+		// Fail before issuing it unless kubectl tells the plugin the full server URL.
+		serverURL := server.URL + prefix
+		plugin := filepath.Join(t.TempDir(), "credential")
+		script := fmt.Sprintf(`#!/bin/sh
+case "$KUBERNETES_EXEC_INFO" in
+  *'"server":"%s"'*) ;;
+  *) echo "wrong cluster in credential request" >&2; exit 1 ;;
+esac
+echo '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","status":{"token":"fixture"}}'
+`, serverURL)
+		if err := os.WriteFile(plugin, []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+		user := fmt.Sprintf("exec: {command: %q, apiVersion: client.authentication.k8s.io/v1, interactiveMode: Never, provideClusterInfo: true}", plugin)
+		ca := filepath.Join(t.TempDir(), "ca.pem")
+		if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
+			t.Fatal(err)
+		}
+		config := installationReaderKubeconfig(t, user, "server: "+serverURL, "certificate-authority: "+ca)
+		out, _, err := runHelp(t, "installation", "plan", "--kubeconfig", config, "--context", "read",
+			"--kube-namespace", "operations", "--release", "demo", "--expect-job-uid", "id")
+		if err != nil || reads.Load() != 1 || !strings.Contains(out, "matches the recorded UID") {
+			t.Fatalf("error=%v Job reads=%d output=%s", err, reads.Load(), out)
+		}
+	})
+
 	t.Run("rate-limited read observes replacement", func(t *testing.T) {
 		var requests atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,13 +268,18 @@ func TestInstallationDoctor(t *testing.T) {
 
 func installationDoctorKubeconfig(t *testing.T, serverURL string, clusterFields ...string) string {
 	t.Helper()
+	return installationReaderKubeconfig(t, "token: fixture", append([]string{"server: " + serverURL}, clusterFields...)...)
+}
+
+func installationReaderKubeconfig(t *testing.T, user string, clusterFields ...string) string {
+	t.Helper()
 	config := filepath.Join(t.TempDir(), "kubeconfig")
 	contents := fmt.Sprintf(`apiVersion: v1
 kind: Config
 clusters: [{name: test, cluster: {%s}}]
 contexts: [{name: read, context: {cluster: test, user: fixture}}]
-users: [{name: fixture, user: {token: fixture}}]
-`, strings.Join(append([]string{"server: " + serverURL}, clusterFields...), ", "))
+users: [{name: fixture, user: {%s}}]
+`, strings.Join(clusterFields, ", "), user)
 	if err := os.WriteFile(config, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +317,7 @@ func TestReportedKubectlReadProblemRequiresAnUnwrappedDiagnostic(t *testing.T) {
 func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	kubectl := filepath.Join(dir, "kubectl")
-	const configView = "#!/bin/sh\n" + `case " $* " in *" config view "*) echo https://cluster.example.invalid; exit 0;; esac` + "\n"
+	const configView = "#!/bin/sh\n" + `case " $* " in *" config view "*) printf '%s\n\n' https://cluster.example.invalid; exit 0;; esac` + "\n"
 	if err := os.WriteFile(kubectl, []byte(configView+"printf '%s\\n' 'Error from server (Forbidden): details' >&2\nexit 2\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +345,7 @@ func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	}
 
 	// An unusable server URL must stop before a raw GET could reach the wrong cluster.
-	script = "#!/bin/sh\n" + `case " $* " in *" config view "*) echo not-an-absolute-url; exit 0;; esac` + "\ntouch \"$0.read\"\n"
+	script = "#!/bin/sh\n" + `case " $* " in *" config view "*) printf '%s\n\n' not-an-absolute-url; exit 0;; esac` + "\ntouch \"$0.read\"\n"
 	if err := os.WriteFile(kubectl, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
