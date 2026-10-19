@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 )
@@ -40,7 +41,11 @@ func (app *application) installationHandoffCommand(action string) *cobra.Command
 			out := cmd.OutOrStdout()
 			fmt.Fprintln(out, message)
 			if action == "plan" {
-				fmt.Fprintf(out, "Resume in order:\n1. %s\n", state.next(expectedUID != ""))
+				next := state.next(expectedUID != "")
+				if state == initializationFailed && expectedUID != "" {
+					next = failedJobPodLookup(kubeconfig, kubeContext, namespace, expectedUID)
+				}
+				fmt.Fprintf(out, "Resume in order:\n1. %s\n", next)
 				fmt.Fprintln(out, "2. If an API operation was attempted, inspect that original attempt before another write. Never replay an uncertain operation.")
 				fmt.Fprintln(out, "3. Verify temporary access was removed, separately with the access owner.")
 				fmt.Fprintln(out, "4. Qualify useful work from the installed Agent.")
@@ -78,6 +83,7 @@ const (
 	initializationAbsent
 	initializationOriginalNotFound
 	initializationUnresolved
+	initializationFailed
 	initializationComplete
 )
 
@@ -97,6 +103,24 @@ func (s initializationState) next(expectUID bool) string {
 	default:
 		return "Resolve the identity, progress and effects of this initialization Job before considering another attempt."
 	}
+}
+
+// Called only for a failed Job whose observed UID matched --expect-job-uid.
+// The selector finds candidates; controller ownership, not the label, ties a Pod to the Job.
+func failedJobPodLookup(config, kctx, ns, uid string) string {
+	const inspect = "Ask an operator who already has Pod read access to find Pods controlled by this Job."
+	const verify = "Use only rows whose CONTROLLER_UID equals the recorded Job UID. An empty result cannot establish whether a Pod ran. " +
+		"Check migration and bootstrap exit status; if needed, share only a short, redacted diagnostic."
+	// Kubernetes normally assigns a UUID. For unfamiliar UIDs or terminal control
+	// characters in the target, keep the guidance but do not print a copyable command.
+	if !dns1123Label(uid) || strings.IndexFunc(config+kctx, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+		return inspect + " " + verify
+	}
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+	const columns = "custom-columns=POD:.metadata.name,CONTROLLER_UID:.metadata.ownerReferences[?(@.controller==true)].uid"
+	command := fmt.Sprintf("kubectl --kubeconfig=%s --context=%s --namespace=%s get pods --selector=batch.kubernetes.io/controller-uid=%s -o %s",
+		quote(config), quote(kctx), ns, uid, quote(columns))
+	return inspect + "\n   " + command + "\n   " + verify
 }
 
 func readInitialization(ctx context.Context, config, kctx, ns, name, release, expectedUID string) (string, initializationState) {
@@ -196,7 +220,7 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 		}
 		switch c.Type {
 		case "Failed", "FailureTarget":
-			return "Initialization Job: failed. Inspect this attempt; migration or bootstrap might already have taken effect.", initializationUnresolved
+			return "Initialization Job: failed. Inspect this attempt; migration or bootstrap might already have taken effect.", initializationFailed
 		case "Complete":
 			complete = true
 		}
