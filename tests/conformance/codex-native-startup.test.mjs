@@ -1042,8 +1042,18 @@ test("Codex runtime retries a reliability failure of its login or model check, n
       loginClasses: ["network"],
     },
     ...[
-      ["a login 401", "request failed with status 401 Unauthorized", "http_401_403", "AUTHENTICATION_FAILED"],
-      ["a login 403", "request failed with status 403 Forbidden", "http_401_403", "AUTHENTICATION_FAILED"],
+      [
+        "a login 401",
+        "request failed with status 401 Unauthorized",
+        "http_401_403",
+        "AUTHENTICATION_FAILED",
+      ],
+      [
+        "a login 403",
+        "request failed with status 403 Forbidden",
+        "http_401_403",
+        "AUTHENTICATION_FAILED",
+      ],
       // A credential rejection Codex quotes beside network text still names the credential.
       [
         "a login credential rejection beside network text",
@@ -1053,7 +1063,11 @@ test("Codex runtime retries a reliability failure of its login or model check, n
       ],
       ["a login rate limit", "last status: 429 Too Many Requests", "http_other"],
       ["a login TLS failure", "invalid peer certificate: UnknownIssuer", "tls"],
-      ["a login TLS failure beside network text", "error sending request: tls handshake eof", "tls"],
+      [
+        "a login TLS failure beside network text",
+        "error sending request: tls handshake eof",
+        "tls",
+      ],
       ["unrecognized login output", "something else went wrong", "unknown"],
       ["a silent login failure", "", "empty"],
     ].map(([description, stderr, failureClass, code]) => ({
@@ -1135,7 +1149,10 @@ test("Codex runtime retries a reliability failure of its login or model check, n
     // A security class vetoes the timeout and transient retries too.
     {
       name: "a model check timeout whose output names a 401 is held at once",
-      native: [login(), probe([], { ...timedOut, stderr: "unexpected status 401 Unauthorized" }, 30000)],
+      native: [
+        login(),
+        probe([], { ...timedOut, stderr: "unexpected status 401 Unauthorized" }, 30000),
+      ],
       expect: probeTimeout,
       probeFailureClasses: ["http_401_403"],
     },
