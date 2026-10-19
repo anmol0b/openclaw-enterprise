@@ -80,11 +80,14 @@ pull credentials configured by the operator. Install the selected chart version
 after the prerequisites are ready:
 
 ```bash
-helm upgrade --install oce oci://ghcr.io/openclaw/charts/openclaw-enterprise \
+helm install oce oci://ghcr.io/openclaw/charts/openclaw-enterprise \
   --version "$OCE_VERSION" --namespace openclaw-system \
   --kubeconfig "$KUBECONFIG_FILE" --kube-context "$CONTEXT" \
   -f "$OCC_INPUT_DIRECTORY/values.yaml" --wait --timeout 5m
 ```
+
+If the response is lost or Helm refuses the release name, stop; do not rerun or
+switch to an upgrade. [Resume the original installation](../guides/deploy/production-handoff.md#resume-an-installation-in-progress).
 
 This release packages the chart and images. It does not distribute the
 repository's bootstrap helper or Installation examples, and does not complete a

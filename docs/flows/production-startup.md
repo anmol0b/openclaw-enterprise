@@ -18,7 +18,7 @@ Commands: [deployment guide](../guides/deploy.md).
 ## Entry Points
 
 - Trigger: Run `scripts/prepare-bootstrap-volume`, then
-  `helm upgrade --install oce deploy/helm/openclaw-enterprise`.
+  `helm install oce deploy/helm/openclaw-enterprise`.
 - Source: `scripts/prepare-bootstrap-volume:53`,
   `deploy/helm/openclaw-enterprise/templates/jobs.yaml:8`, and
   `apps/controller/src/composition/production.ts:28`.
