@@ -1908,7 +1908,7 @@ test("helper, fixture and other test-tree changes select full", async (t) => {
       "tests/integration/support.mjs",
       "tests/integration/nested/deep.test.mjs",
       "tests/unknown/other.test.mjs",
-      "tests/integration/postgres-a.test.ts",
+      "tests/integration/postgres-a.test.js",
     ],
     async (path) => {
       const [f, shallow] = await suiteFixture(
@@ -1994,6 +1994,7 @@ test("unmapped, non-CI, referenced or irregular test files select full", async (
     // Not registered in any lane, or only in a manual lane.
     unmapped_test: [
       [({ put }) => put("tests/integration/unlisted.test.mjs", "// new\n")],
+      [postgresEdit(({ put }) => put("tests/integration/postgres-a.test.ts", "// changed\n"))],
       [editTest("tests/integration/openshell-real.test.mjs")],
     ],
     // Another file reads, copies or runs it; Markdown mentions do not count.
