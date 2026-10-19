@@ -1,8 +1,7 @@
 # OCC CLI command reference
 
-`occ` manages OpenClaw Control Plane (OCC) resources. To install it and make
-your first request, see [CLI setup](../guides/cli.md). To see help for the
-installed version, run `occ --help` or add `--help` to a command.
+[Install `occ` and make your first request](../guides/cli.md). For version-specific help, run
+`occ --help` or append `--help` to a command.
 
 ## Global options
 
@@ -112,42 +111,31 @@ For [unreadable saved Agent settings](agents.md#unreadable-saved-settings),
 deployment status null for an unreadable revision and names it on stderr; if
 the Agent itself is unreadable, it skips all status reads and explains why. See the [CLI browsing flow](../flows/cli-agent-browsing.md).
 
-`service-key create --out FILE` sets the new file to `0600` before requesting a
-key, including under a restrictive umask. Existing files and symlinks are refused.
+`service-key create --out FILE` creates a new file at `0600` before requesting
+the key, even under a restrictive umask. Existing files and symlinks are refused.
+`--expires-in-days N` accepts 1–365 (default 30); zero fails before file or key creation.
 
-`service-key create --expires-in-days N` accepts 1–365. Omit the flag for 30 days;
-explicit zero is refused before output-file creation or API issuance.
+Commands take IDs, not names. If the expected prefix (such as `ns_` or
+`agt_`) is missing, the error names the command that lists valid IDs.
 
-Commands take IDs, not names. The CLI rejects a value without the expected
-prefix, such as `ns_` or `agt_`, and names the list command that shows the ID.
-
-The `installation get`, `installation deployment-inventory`, and `namespace
-list` commands require an Installation-scoped service key. With a
-Namespace-scoped key, use `namespace get ID` to read that exact Namespace
-instead.
+`installation get`, `installation deployment-inventory` and `namespace list`
+require an Installation-scoped service key. With a Namespace-scoped key, use
+`namespace get ID` for that Namespace.
 
 `installation deployment-inventory` requires Installation `administer`, exact
-`read` access to every Namespace and Agent, exact `read` access to each selected
-Agent's active revision, and exact `deploy` access to every running Agent that is
-eligible for coordinated deployment. It fails instead of silently omitting an
-unauthorized resource. JSON and YAML output include each Agent's desired runtime
-state, execution mode, active revision, and whether deployment work is queued or
-claimed.
+`read` on every Namespace, Agent and selected active revision, and exact `deploy`
+on each running Agent eligible for coordinated deployment. Unauthorized resources
+fail the request. JSON and YAML include desired runtime state, execution mode,
+active revision, and whether deployment work is queued or claimed.
 
 ## Installation handoff
 
-`occ installation doctor` reads the Helm initialization Job. `occ installation plan`
-reads the same Job and orders the handoff checks without executing them. Supply
-`--kubeconfig`, `--context`, `--kube-namespace` and `--release`. Both commands
-need only Kubernetes permission to get that named Job; neither uses an OCC
-service key nor reads Secrets or logs.
-
-Exit zero means the retained chart Job reports completion, not that the
-installation or runtime is ready. Helm reuses the name. To check identity, pass
-`--expect-job-uid` with the UID recorded from the persisted Job during the
-original installation. A different UID, a missing or unreadable Job, or
-unconfirmed completion exits nonzero. In particular, denied access means
-unknown, not absent. See the [handoff procedure](../guides/deploy/production-handoff.md#resume-an-installation-in-progress).
+For [handoff](../guides/deploy/production-handoff.md#resume-an-installation-in-progress),
+`occ installation doctor` reads only the named Kubernetes Job; `plan` orders the
+next checks. Specify `--kubeconfig`, `--context`, `--kube-namespace` and `--release`.
+Use `--expect-job-uid` with the original persisted UID: Helm reuses the name.
+Exit zero means the Job reports completion, not runtime readiness. Denied access
+means unknown, not absent.
 
 ## Runtime status and logs
 

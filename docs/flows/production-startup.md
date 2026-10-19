@@ -125,24 +125,18 @@ then upgrade/restart.
 `deploy/helm/openclaw-enterprise/templates/_network-policies.tpl:openclaw.networkPolicy.matchLabels`
 refuses peer maps Kubernetes rejects, preserving null/empty semantics and accepted labels.
 
-On upgrades, `deploy/helm/openclaw-enterprise/files/check-installation.mjs` first
-loads the Installation as API startup does, without database or Kubernetes access;
-a refusal fails the hook before migration and API replacement.
+On upgrade, `deploy/helm/openclaw-enterprise/files/check-installation.mjs` applies
+API startup validation offline. Refusal precedes migration and API replacement.
 
-The hook keeps the release name and bounds its suffix to 63 characters. Both
-database containers optionally mount the CA. Helm validates distinct application and
-migration Secret keys against Kubernetes syntax before use. `installation.key`
-and `executionCluster.kubeconfigKey` must be Secret keys at most 253 characters,
-not `.` or a `..` prefix.
-Bootstrap receives auth, administrator, Installation and output settings.
+The Job name includes the release and is capped at 63 characters. Both database
+containers can mount the CA. Helm requires distinct, valid application and migration
+Secret keys. `installation.key` and `executionCluster.kubeconfigKey` allow up to 253
+characters, excluding `.` and the `..` prefix. Bootstrap receives authentication,
+administrator, Installation and output settings.
 
-For an [operator handoff](../guides/deploy/production-handoff.md#resume-an-installation-in-progress),
-record the UID of the persisted Job. Helm can replace it under the same name.
-`occ installation doctor` and `plan` need only permission to get that named Job;
-pass `--expect-job-uid` to require the recorded identity. Exit zero means this
-Job reports completion, including bootstrap that verified an existing Installation.
-Missing, unreadable, replaced or incomplete evidence exits nonzero. Reconcile any
-original API attempt, verify temporary access removal and qualify runtime separately.
+For [handoff](../guides/deploy/production-handoff.md#resume-an-installation-in-progress),
+record the persisted Job UID. Helm reuses its name; `occ installation doctor
+--expect-job-uid` checks that Job’s completion, not runtime readiness.
 
 `scripts/migrate-production.mjs:1`, `scripts/migration-history.mjs:migrateWithHistory`
 
