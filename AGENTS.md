@@ -385,8 +385,8 @@ Use `tests/fixtures/synthetic-credential-url.mjs` to construct synthetic credent
 
 ## Running integration tests
 
-Run all integration tests with `pnpm test:integration`, or target one case with
-`node --test tests/integration/<name>.test.mjs`. Real-runtime coverage uses the
+Run all integration tests with `pnpm test:integration`, or target one test file with
+`node --test tests/integration/<name>.test.ts`. Real-runtime coverage uses the
 Docker Compose or Kubernetes integrations with explicitly selected runtime
 images and existing authorized model credentials. Follow the
 [testing guide](docs/testing/README.md) and
