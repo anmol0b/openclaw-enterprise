@@ -155,7 +155,12 @@ func (b *doctorBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
-func initializationEvidence(data []byte, namespace, name, release, expectedUID string) (message string, state initializationState) {
+type initializationJobStatus struct {
+	Succeeded, Active int
+	Conditions        []struct{ Type, Status string }
+}
+
+func initializationEvidence(data []byte, namespace, name, release, expectedUID string) (string, initializationState) {
 	type container struct {
 		Name          string
 		Command, Args []string
@@ -172,10 +177,7 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 				Spec struct{ InitContainers, Containers []container }
 			}
 		}
-		Status struct {
-			Succeeded, Active int
-			Conditions        []struct{ Type, Status string }
-		}
+		Status initializationJobStatus
 	}
 	err := json.Unmarshal(data, &job)
 	m := job.Metadata
@@ -204,29 +206,39 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	if !migrationMatches || !is(p.Containers, "bootstrap", "scripts/bootstrap-installation.mjs") {
 		return "Initialization: unknown. Job steps do not match the supported chart.", initializationUnresolved
 	}
+	state := job.Status.state()
+	message := "Initialization Job: completion not established. Inspect this attempt before any retry."
+	switch state {
+	case initializationFailed:
+		message = "Initialization Job: failed. Inspect this attempt; migration or bootstrap might already have taken effect."
+	case initializationComplete:
+		message = "Initialization Job (" + hook + " hook): complete. The chart reports migration and bootstrap completed (created or verified existing installation). Current database state and external provisioning are not verified."
+	}
 	// Helm reuses the name; the UID identifies this Job, not an API attempt.
-	defer func() {
-		message += fmt.Sprintf("\nObserved Job %s/%s, UID %+q", namespace, name, m.UID)
-		if expectedUID != "" {
-			message += " matches the recorded UID. This identifies only this Job; it does not establish an API attempt, its effects or permission to retry."
-		} else {
-			message += " (compare with the installation record)."
-		}
-	}()
+	message += fmt.Sprintf("\nObserved Job %s/%s, UID %+q", namespace, name, m.UID)
+	if expectedUID != "" {
+		message += " matches the recorded UID. This identifies only this Job; it does not establish an API attempt, its effects or permission to retry."
+	} else {
+		message += " (compare with the installation record)."
+	}
+	return message, state
+}
+
+func (status initializationJobStatus) state() initializationState {
 	complete := false
-	for _, c := range job.Status.Conditions {
+	for _, c := range status.Conditions {
 		if c.Status != "True" {
 			continue
 		}
 		switch c.Type {
 		case "Failed", "FailureTarget":
-			return "Initialization Job: failed. Inspect this attempt; migration or bootstrap might already have taken effect.", initializationFailed
+			return initializationFailed
 		case "Complete":
 			complete = true
 		}
 	}
-	if !complete || job.Status.Succeeded != 1 || job.Status.Active != 0 {
-		return "Initialization Job: completion not established. Inspect this attempt before any retry.", initializationUnresolved
+	if !complete || status.Succeeded != 1 || status.Active != 0 {
+		return initializationUnresolved
 	}
-	return "Initialization Job (" + hook + " hook): complete. The chart reports migration and bootstrap completed (created or verified existing installation). Current database state and external provisioning are not verified.", initializationComplete
+	return initializationComplete
 }
