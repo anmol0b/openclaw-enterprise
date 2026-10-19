@@ -983,6 +983,20 @@ test("Codex runtime retries a reliability failure of its login or model check, n
       loginPauses: [1000],
     },
     {
+      // The request URL Codex names is not output that fails the same way again.
+      name: "a login network failure naming a URL with failure words retries once",
+      native: [
+        loginFailed(
+          "error sending request for url (https://credential-quota.example.invalid/apikey/403)",
+        ),
+        login(),
+        success,
+      ],
+      expect: ready,
+      loginClasses: ["network"],
+      loginPauses: [1000],
+    },
+    {
       name: "a login 5xx then success retries once",
       native: [loginFailed(serverError), login(), success],
       expect: ready,
@@ -1321,6 +1335,9 @@ test("a no-retry marker anywhere in the output vetoes a retry, whatever its clas
     "failed to lookup address information: Try again",
     "operation timed out",
     "port 4010 closed",
+    // A configured endpoint's URL names no failure, whatever words it carries.
+    "error sending request for url (https://quota-credential.example.invalid/v1/apikey/401/responses?rate_limit=1)",
+    "connection refused: http://proxy.internal:3128/forbidden",
     "",
   ]) {
     assert.equal(context.noRetry(text), false, text);
