@@ -84,6 +84,15 @@ func TestInstallationDoctor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var requests atomic.Int32
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path := r.URL.Path
+				if r.Method == http.MethodGet && serveJobDiscovery(w, path) {
+					return
+				}
+				if tc.status == http.StatusNotFound && r.Method == http.MethodGet && path == "/api/v1/namespaces/operations" {
+					// kubectl may check for the namespace; the reader need not have that access.
+					http.Error(w, "Forbidden", http.StatusForbidden)
+					return
+				}
 				requests.Add(1)
 				if r.Method != "GET" || r.URL.RequestURI() != "/apis/batch/v1/namespaces/operations/jobs/demo-initialization" {
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
@@ -146,22 +155,30 @@ func TestInstallationDoctor(t *testing.T) {
 		})
 	}
 
-	t.Run("server URL path selects the cluster", func(t *testing.T) {
-		// A gateway can serve different clusters under one origin. Its root
-		// deliberately returns a plausible Job, not an error that hides misrouting.
+	t.Run("kubeconfig replacement does not split cluster path from credential", func(t *testing.T) {
+		// A gateway serving different clusters must see the selected cluster's
+		// path and credential together, including on discovery requests.
 		const prefix = "/k8s/clusters/selected%20cluster"
 		const jobPath = "/apis/batch/v1/namespaces/operations/jobs/demo-initialization"
 		const tlsName = "gateway.example.com" // covered by the httptest certificate
 		var requests atomic.Int32
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path, selected := strings.CutPrefix(r.URL.EscapedPath(), prefix)
+			if r.Method != http.MethodGet || !selected || r.Header.Get("Authorization") != "Bearer selected-reader" {
+				t.Errorf("wrong target or credential for %s %s", r.Method, r.URL.RequestURI())
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			if serveJobDiscovery(w, path) {
+				return
+			}
 			requests.Add(1)
 			if r.TLS.ServerName != tlsName {
 				t.Errorf("TLS server name = %q; want %q", r.TLS.ServerName, tlsName)
 			}
-			w.Header().Set("Content-Type", "application/json")
-			if r.Method != http.MethodGet || r.URL.RequestURI() != prefix+jobPath {
+			if path != jobPath {
 				t.Errorf("read %s %s; want GET %s", r.Method, r.URL.RequestURI(), prefix+jobPath)
-				fmt.Fprint(w, strings.Replace(job, `"uid":"id"`, `"uid":"other-cluster"`, 1))
+				http.NotFound(w, r)
 				return
 			}
 			fmt.Fprint(w, job)
@@ -172,7 +189,30 @@ func TestInstallationDoctor(t *testing.T) {
 		if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
 			t.Fatal(err)
 		}
-		config := installationDoctorKubeconfig(t, server.URL+prefix+"/", "certificate-authority: "+ca, "tls-server-name: "+tlsName)
+		oldCluster := "server: " + server.URL + "/previous"
+		newCluster := "server: " + server.URL + prefix + "/"
+		caField, tlsField := "certificate-authority: "+ca, "tls-server-name: "+tlsName
+		config := installationReaderKubeconfig(t, "token: previous-reader", oldCluster, caField, tlsField)
+		replacement := installationReaderKubeconfig(t, "token: selected-reader", newCluster, caField, tlsField)
+
+		// Replace the config just before the get. A separate preliminary config
+		// read would select /previous and then send selected-reader there.
+		kubectl, err := exec.LookPath("kubectl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		shim := `#!/bin/sh
+case " $* " in *" get "*) mv "$REPLACEMENT_CONFIG" "$ACTIVE_CONFIG" || exit 1;; esac
+exec "$REAL_KUBECTL" "$@"
+`
+		if err := os.WriteFile(filepath.Join(dir, "kubectl"), []byte(shim), 0700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("REAL_KUBECTL", kubectl)
+		t.Setenv("REPLACEMENT_CONFIG", replacement)
+		t.Setenv("ACTIVE_CONFIG", config)
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 		out, _, err := runHelp(t, "installation", "plan", "--kubeconfig", config, "--context", "read",
 			"--kube-namespace", "operations", "--release", "demo", "--expect-job-uid", "id")
 		if err != nil || requests.Load() != 1 || !strings.Contains(out, "matches the recorded UID") {
@@ -185,27 +225,24 @@ func TestInstallationDoctor(t *testing.T) {
 		const jobPath = "/apis/batch/v1/namespaces/operations/jobs/demo-initialization"
 		// Permit API discovery metadata and exactly one named Job. In particular,
 		// a request to the gateway root or an attempt to list Jobs fails this test.
-		responses := map[string]string{
-			"/api":           `{"kind":"APIVersions","apiVersion":"v1","versions":["v1"]}`,
-			"/api/v1":        `{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"v1","resources":[]}`,
-			"/apis":          `{"kind":"APIGroupList","apiVersion":"v1","groups":[{"name":"batch","versions":[{"groupVersion":"batch/v1","version":"v1"}]}]}`,
-			"/apis/batch/v1": `{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"batch/v1","resources":[{"name":"jobs","kind":"Job","namespaced":true,"verbs":["get"]}]}`,
-			jobPath:          job,
-		}
 		var reads atomic.Int32
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			path, routed := strings.CutPrefix(r.URL.Path, prefix)
-			body, allowed := responses[path]
-			if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer fixture" || !routed || !allowed {
+			if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer fixture" || !routed {
 				t.Errorf("unexpected %s %s", r.Method, r.URL.RequestURI())
 				http.NotFound(w, r)
 				return
 			}
-			if path == jobPath {
-				reads.Add(1)
+			if serveJobDiscovery(w, path) {
+				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, body)
+			if path != jobPath {
+				t.Errorf("unexpected resource %s", path)
+				http.NotFound(w, r)
+				return
+			}
+			reads.Add(1)
+			fmt.Fprint(w, job)
 		}))
 		defer server.Close()
 
@@ -239,6 +276,9 @@ echo '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","s
 	t.Run("rate-limited read observes replacement", func(t *testing.T) {
 		var requests atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && serveJobDiscovery(w, r.URL.Path) {
+				return
+			}
 			if r.Method != http.MethodGet || r.URL.RequestURI() != "/apis/batch/v1/namespaces/operations/jobs/demo-initialization" {
 				t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
 			}
@@ -264,6 +304,22 @@ echo '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","s
 			}
 		}
 	})
+}
+
+// Serve only the API metadata kubectl needs to locate batch/v1 Jobs.
+// The test's resource handler must account for every other request.
+func serveJobDiscovery(w http.ResponseWriter, path string) bool {
+	w.Header().Set("Content-Type", "application/json")
+	body, ok := map[string]string{
+		"/api":           `{"kind":"APIVersions","apiVersion":"v1","versions":["v1"]}`,
+		"/api/v1":        `{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"v1","resources":[]}`,
+		"/apis":          `{"kind":"APIGroupList","apiVersion":"v1","groups":[{"name":"batch","versions":[{"groupVersion":"batch/v1","version":"v1"}]}]}`,
+		"/apis/batch/v1": `{"kind":"APIResourceList","apiVersion":"v1","groupVersion":"batch/v1","resources":[{"name":"jobs","kind":"Job","namespaced":true,"verbs":["get"]}]}`,
+	}[path]
+	if ok {
+		fmt.Fprint(w, body)
+	}
+	return ok
 }
 
 func installationDoctorKubeconfig(t *testing.T, serverURL string, clusterFields ...string) string {
@@ -317,8 +373,7 @@ func TestReportedKubectlReadProblemRequiresAnUnwrappedDiagnostic(t *testing.T) {
 func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	kubectl := filepath.Join(dir, "kubectl")
-	const configView = "#!/bin/sh\n" + `case " $* " in *" config view "*) printf '%s\n\n' https://cluster.example.invalid; exit 0;; esac` + "\n"
-	if err := os.WriteFile(kubectl, []byte(configView+"printf '%s\\n' 'Error from server (Forbidden): details' >&2\nexit 2\n"), 0700); err != nil {
+	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nprintf '%s\\n' 'Error from server (Forbidden): details' >&2\nexit 2\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -332,7 +387,7 @@ func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	if err := os.WriteFile(kubectl+".data", bytes.Repeat([]byte("x"), (4<<20)+1), 0600); err != nil {
 		t.Fatal(err)
 	}
-	script := configView + "printf '%s\\n' 'Error from server (NotFound): jobs.batch \"demo-initialization\" not found' >&2\ncat \"$0.data\"\ntouch \"$0.done\"\nexit 1\n"
+	script := "#!/bin/sh\nprintf '%s\\n' 'Error from server (NotFound): jobs.batch \"demo-initialization\" not found' >&2\ncat \"$0.data\"\ntouch \"$0.done\"\nexit 1\n"
 	if err := os.WriteFile(kubectl, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -342,17 +397,6 @@ func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	}
 	if state != initializationUnreadable || !strings.Contains(message, "unknown. Could not read") || strings.Contains(message, "not found at the selected target") {
 		t.Fatalf("message=%q state=%v", message, state)
-	}
-
-	// An unusable server URL must stop before a raw GET could reach the wrong cluster.
-	script = "#!/bin/sh\n" + `case " $* " in *" config view "*) printf '%s\n\n' not-an-absolute-url; exit 0;; esac` + "\ntouch \"$0.read\"\n"
-	if err := os.WriteFile(kubectl, []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	message, state = readInitialization(context.Background(), "unused", "read", "operations", "demo-initialization", "demo", "")
-	if _, err := os.Stat(kubectl + ".read"); !errors.Is(err, os.ErrNotExist) ||
-		state != initializationUnreadable || !strings.Contains(message, "No Job read was attempted") {
-		t.Fatalf("unexpected read or result: stat=%v message=%q state=%v", err, message, state)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os/exec"
 	"slices"
 	"strings"
@@ -144,14 +143,12 @@ func failedJobPodLookup(config, kctx, ns, uid string) string {
 }
 
 func readInitialization(ctx context.Context, config, kctx, ns, name, release, expectedUID string) (string, initializationState) {
-	target := []string{"--kubeconfig=" + config, "--context=" + kctx}
-	args := installationJobReadArgs(ctx, target, ns, name)
-	if args == nil {
-		return "Initialization: unknown. Could not resolve the Kubernetes server for the selected context. No Job read was attempted.", initializationUnreadable
-	}
-	// kubectl owns authentication and any retry of this named GET.
-	// Never relay the Job, credentials or raw diagnostics.
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	// Let one kubectl invocation resolve the server, TLS settings and credentials
+	// together. Reading the server first and passing it back with --server can
+	// send credentials to the wrong cluster if kubeconfig changes between reads.
+	// kubectl may read API discovery and check the namespace after a missing Job.
+	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig="+config, "--context="+kctx,
+		"get", "jobs.v1.batch", name, "--namespace="+ns, "--output=json")
 	cmd.WaitDelay = time.Second
 	var out, diagnostic doctorBuffer
 	cmd.Stdout, cmd.Stderr = &out, &diagnostic
@@ -176,44 +173,6 @@ func readInitialization(ctx context.Context, config, kctx, ns, name, release, ex
 		return "Initialization: unknown. Could not read the named Job; check target, kubectl and connectivity. Do not assume it is absent.", initializationUnreadable
 	}
 	return initializationEvidence(out.buf.Bytes(), ns, name, release, expectedUID)
-}
-
-// get --raw skips discovery. kubectl versions differ on whether the raw path
-// replaces or extends the server URL path, which a gateway can use to select
-// the cluster. Read only the routing fields and exec cluster-info setting from
-// local kubeconfig; do not request credentials or the full configuration.
-func installationJobReadArgs(ctx context.Context, target []string, ns, name string) []string {
-	const fields = `jsonpath={.clusters[0].cluster.server}{"\n"}{.clusters[0].cluster.tls-server-name}{"\n"}{.users[*].user.exec.provideClusterInfo}`
-	args := append(target, "config", "view", "--minify", "-o", fields)
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
-	cmd.WaitDelay = time.Second
-	var out doctorBuffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil || out.overflow {
-		return nil
-	}
-	fieldsOut := strings.SplitN(out.buf.String(), "\n", 3)
-	if len(fieldsOut) != 3 {
-		return nil
-	}
-	u, err := url.Parse(fieldsOut[0])
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") ||
-		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil
-	}
-	tlsName, provideClusterInfo := fieldsOut[1], fieldsOut[2]
-	if provideClusterInfo == "true" && strings.Trim(u.EscapedPath(), "/") != "" {
-		// The credential plugin needs the same full cluster URL as the Job read.
-		// Let kubectl discover the resource and get it by name, without overriding
-		// the server or falling back to a potentially different credential target.
-		return append(target, "get", "jobs.v1.batch", name, "--namespace="+ns, "--output=json")
-	}
-	jobPath := u.JoinPath("apis/batch/v1/namespaces", ns, "jobs", name).EscapedPath()
-	// Put the entire path in --raw and only the origin in --server, so the
-	// gateway prefix is sent exactly once. Overriding --server also clears
-	// tls-server-name in kubectl; preserve that separately.
-	origin := u.Scheme + "://" + u.Host
-	return append(target, "--server="+origin, "--tls-server-name="+tlsName, "get", "--raw=/"+strings.TrimPrefix(jobPath, "/"))
 }
 
 // These single-line kubectl prefixes only guide the operator. They do not
