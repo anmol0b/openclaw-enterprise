@@ -116,7 +116,10 @@ test(
       await applyManifest(JSON.stringify(job));
       const now = new Date().toISOString();
       const status = {
-        conditions: [{ type: "Complete", status: "True", lastTransitionTime: now }],
+        conditions: [
+          { type: "SuccessCriteriaMet", status: "True", lastTransitionTime: now },
+          { type: "Complete", status: "True", lastTransitionTime: now },
+        ],
         succeeded: 1,
         startTime: now,
         completionTime: now,
