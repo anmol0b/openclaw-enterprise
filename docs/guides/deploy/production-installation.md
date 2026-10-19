@@ -520,33 +520,9 @@ Once every ordinary account has an identity, set `auth.passwordSignIn: recovery-
 ([recovery-only sign-in](../../reference/authentication/external-sign-in.md#recovery-only-password-sign-in)).
 Loopback tests do not qualify production stop/drain, cookies, logging, or GitHub registration.
 
-## Resume an installation handoff
-
-From a clean checkout of this revision, with Go, kubectl and a trusted kubeconfig:
-
-```sh
-go run ./cmd/occ installation doctor \
-  --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" \
-  --kube-namespace "$NAMESPACE" --release "$RELEASE"
-```
-
-Use the context, Kubernetes namespace and Helm release from the handoff. The
-only Kubernetes permission needed is `get` on the named `batch/jobs` resource
-(normally `$RELEASE-initialization`). No OCC key or previous operator's files are
-needed. `occ installation plan` reads the same evidence and orders the next checks; it does not execute a plan.
-
-Helm replaces this Job before its next install or upgrade hook. A successful
-exit means the retained Job matches the chart and reports completion, not that
-the release is ready or the database was newly provisioned. Check it against the
-attempt you are resuming. If the API request outcome was uncertain, inspect that
-original attempt before considering another write. Verify removal of temporary
-access independently, then qualify useful work from the installed Agent.
-
-If the Job cannot be read, its state is unknown. If Kubernetes reports it missing,
-that establishes only its absence at this target. Neither result authorizes a
-second bootstrap. An incomplete or failed Job may already have changed state.
-
 ## Related
+
+[Resume an interrupted installation](production-handoff.md#resume-an-installation-in-progress).
 
 Use the [production image upgrade](production-upgrade.md) for an existing release. For failed
 initialization, preserve state and follow [bootstrap recovery](../../reference/authentication/service-api-keys.md#recover-an-incomplete-bootstrap)

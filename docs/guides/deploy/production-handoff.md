@@ -7,6 +7,37 @@ your organization's private operations record. The deployment guides cover
 installation and runtime checks; your organization is responsible for service
 commitments, regulatory compliance, and recovery targets for the workload.
 
+## Resume an installation in progress
+
+Ask the installer for the Kubernetes context, namespace, Helm release, and the
+initialization Job UID if recorded. From a clean checkout of the matching
+release, use Go, kubectl, and your own trusted kubeconfig. Both commands need
+only permission to get the named Job, normally `<release>-initialization`.
+
+```bash
+target=(--kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT"
+        --kube-namespace "$NAMESPACE" --release "$RELEASE")
+go run ./cmd/occ installation doctor "${target[@]}"
+go run ./cmd/occ installation plan "${target[@]}"
+```
+
+`doctor` reports what the retained Job establishes. `plan` orders the checks for
+the person taking over and makes no changes. Interpret the result at this target:
+
+- **Completed.** Match the Job UID to the handoff. Helm replaces this Job before
+  its next install or upgrade. Completion means the chart ran migration and
+  bootstrap, which may have verified an existing Installation. It does not
+  establish the current database state.
+- **Not found.** Confirm with the database, identity, and volume owners whether
+  this is a first installation. A missing Job is not permission to bootstrap again.
+- **Unknown or incomplete.** Verify read access or inspect the original Job as
+  directed. An interrupted initialization may already have changed state.
+
+The Job UID identifies the initialization, not a later API operation. If an API
+attempt had an uncertain outcome, reconcile that original attempt before another
+write. Confirm removal of temporary access with its owner, then use the
+[workload checks](#verify-the-deployed-workflow) below.
+
 ## Choose the first workflow
 
 Start with one task and a small group. For example, let an Agent read a
