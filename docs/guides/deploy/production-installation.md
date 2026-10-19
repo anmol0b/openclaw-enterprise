@@ -396,7 +396,7 @@ binds, reports `Prepared bootstrap volume claim ... with UID/GID 1000 mode 0700.
 and retains failed Pods. If policy forbids the Pod, have the storage administrator
 prepare the same root state.
 
-Install the chart with native values:
+[Prepare to record the initialization Job UID](production-handoff.md#record-the-initialization-job-for-handoff), then install once:
 
 ```bash
 helm install oce deploy/helm/openclaw-enterprise \
@@ -405,9 +405,8 @@ helm install oce deploy/helm/openclaw-enterprise \
   --wait --timeout 5m
 ```
 
-If the response is lost or Helm refuses the name, stop; do not rerun or switch
-to `helm upgrade`. [Resume the original installation](production-handoff.md#resume-an-installation-in-progress).
-Even an unused release name does not prove the database, identity, or storage is fresh.
+If the response is lost or Helm refuses the name, [resume this installation](production-handoff.md#resume-an-installation-in-progress).
+Do not repeat the install or switch to an upgrade. An unused release name does not prove the database, identity or storage is fresh.
 
 For an explicitly [published chart release](../../release/chart-publication.md#pull-and-install)
 (created with `publish_chart: true`),

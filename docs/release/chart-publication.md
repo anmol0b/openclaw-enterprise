@@ -76,8 +76,9 @@ placeholder image, so replace it before installation.
 Prepare the other operator-owned values, database, Secrets, routing, and
 bootstrap volume as described in the [production installation guide](../guides/deploy/production-installation.md).
 Public GHCR image pulls need no node pull Secret. Private mirrors still need node
-pull credentials configured by the operator. Install the selected chart version
-after the prerequisites are ready:
+pull credentials configured by the operator. Before installing, [prepare to record
+the initialization Job UID for handoff](../guides/deploy/production-handoff.md#record-the-initialization-job-for-handoff).
+Then install the selected chart version after the prerequisites are ready:
 
 ```bash
 helm install oce oci://ghcr.io/openclaw/charts/openclaw-enterprise \

@@ -7,6 +7,29 @@ your organization's private operations record. The deployment guides cover
 installation and runtime checks; your organization is responsible for service
 commitments, regulatory compliance, and recovery targets for the workload.
 
+## Record the initialization Job for handoff
+
+Before starting, record the trusted cluster, context, namespace and Helm release
+in your private operations record. Leave the kubeconfig and credentials out.
+
+For the documented first install (release `oce` in `openclaw-system`), run Helm
+once. If no initialization Job existed beforehand and no other install or upgrade
+can replace it, read its UID in a second terminal while Helm is running:
+
+```bash
+kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" -n openclaw-system \
+  get job oce-initialization -o 'jsonpath={.metadata.uid}{"\n"}'
+```
+
+If the Job is not found yet, repeat only the read. Record the UID immediately,
+then record the Helm outcome separately (`unknown` if the response was lost).
+The UID identifies the Job; it does not mean the installation succeeded.
+
+If you cannot establish those conditions or read the UID, write `Job UID: not
+recorded`. Helm can replace an older Job even when the release name is unused;
+do not substitute a later UID or rerun the install. The next operator can still
+[inspect the current Job](#resume-an-installation-in-progress) without `--expect-job-uid`.
+
 ## Resume an installation in progress
 
 Run `occ installation doctor` and `occ installation plan` to inspect the retained
