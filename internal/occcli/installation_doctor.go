@@ -178,9 +178,9 @@ func readInitialization(ctx context.Context, config, kctx, ns, name, release, ex
 	return initializationEvidence(out.buf.Bytes(), ns, name, release, expectedUID)
 }
 
-// get --raw skips discovery, but its path replaces (rather than extends) the
-// server URL path. A gateway can use that path to select the cluster. Resolve
-// only the server URL and TLS name from local kubeconfig, within the read deadline.
+// get --raw skips discovery. kubectl versions differ on whether the raw path
+// replaces or extends the server URL path, which a gateway can use to select
+// the cluster. Resolve only the server URL and TLS name from local kubeconfig.
 func installationJobReadArgs(ctx context.Context, target []string, ns, name string) []string {
 	const fields = `jsonpath={.clusters[0].cluster.server}{"\n"}{.clusters[0].cluster.tls-server-name}`
 	args := append(target, "config", "view", "--minify", "-o", fields)
@@ -198,9 +198,11 @@ func installationJobReadArgs(ctx context.Context, target []string, ns, name stri
 		return nil
 	}
 	jobPath := u.JoinPath("apis/batch/v1/namespaces", ns, "jobs", name).EscapedPath()
-	// Read from the server we resolved. kubectl clears tls-server-name when
-	// server is overridden, so pass both. An unresolved target never falls back to root.
-	return append(target, "--server="+server, "--tls-server-name="+tlsName, "get", "--raw=/"+strings.TrimPrefix(jobPath, "/"))
+	// Put the entire path in --raw and only the origin in --server, so the
+	// gateway prefix is sent exactly once. Overriding --server also clears
+	// tls-server-name in kubectl; preserve that separately.
+	origin := u.Scheme + "://" + u.Host
+	return append(target, "--server="+origin, "--tls-server-name="+tlsName, "get", "--raw=/"+strings.TrimPrefix(jobPath, "/"))
 }
 
 // These single-line kubectl prefixes only guide the operator. They do not
