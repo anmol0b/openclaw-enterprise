@@ -109,7 +109,7 @@ func TestInstallationDoctor(t *testing.T) {
 				}
 				expected := []string{tc.want, "Do not replay", "removal unknown", "not qualified"}
 				if action == "plan" {
-					first := map[string]string{"login": "1. Confirm the cluster target", "denied": "1. Confirm the cluster target and intended reader", "missing": "first-install intent", "install": "1. Establish whether", "guarded-install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Resume after migration", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "1. Confirm the cluster target and intended reader", "server-marker": "1. Confirm the cluster target"}[tc.name]
+					first := map[string]string{"login": "1. Confirm the cluster target", "denied": "1. Confirm the cluster target and intended reader", "missing": "first-install intent", "install": "1. Establish whether", "guarded-install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Continue from the completed migration and bootstrap for the recorded Job", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "1. Confirm the cluster target and intended reader", "server-marker": "1. Confirm the cluster target"}[tc.name]
 					expected = []string{tc.want, first, "2. If an API operation was attempted", "3. Verify temporary access", "4. Qualify useful work"}
 					switch tc.status {
 					case 401:
@@ -124,6 +124,12 @@ func TestInstallationDoctor(t *testing.T) {
 				}
 				if tc.success {
 					expected = append(expected, `operations/demo-initialization, UID "id"`)
+					// A completed hook can precede a failed Helm release. Its named Job
+					// cannot prove the release or its API and worker workloads are ready.
+					expected = append(expected, "This Job does not establish Helm release status", "whether the API and worker Deployments rolled out and are ready")
+					if action == "plan" && tc.uid == "id" {
+						expected = append(expected, "Ask the release operator to check the Helm release status", "whether its API and worker Deployments rolled out and are ready", "Do not rerun initialization")
+					}
 				}
 				for _, want := range expected {
 					if !strings.Contains(out, want) {

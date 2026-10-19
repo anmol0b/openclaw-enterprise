@@ -132,8 +132,8 @@ active revision, and whether deployment work is queued or claimed.
 
 `occ installation doctor` and `plan` read the named Job; `plan` orders checks.
 A throttled read may retry within the deadline. Exit zero indicates consistent
-completion evidence, not attested execution or runtime readiness. Compare the
-returned UID with the original. For inputs, limits, and recovery, see
+Job completion evidence. It does not establish Helm release status or API and
+worker rollout or readiness. Compare the UID with the original. See
 [installation handoff](../guides/deploy/production-handoff.md#resume-an-installation-in-progress).
 
 ## Runtime status and logs

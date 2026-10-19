@@ -116,7 +116,7 @@ func (s initializationState) next(expectUID bool) string {
 		return "Recover the original installation record and reconcile that attempt. Do not replay initialization or substitute the current Job UID."
 	case initializationComplete:
 		if expectUID {
-			return "Resume after migration and bootstrap for the recorded Job."
+			return "Continue from the completed migration and bootstrap for the recorded Job. Ask the release operator to check the Helm release status and whether its API and worker Deployments rolled out and are ready. Do not rerun initialization."
 		}
 		return "Establish whether this retained Job is the original. Without that link, the original outcome remains unknown."
 	default:
@@ -270,7 +270,7 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	case initializationFailed:
 		message = "Initialization Job: failed. Inspect this attempt; migration or bootstrap might already have taken effect."
 	case initializationComplete:
-		message = "Initialization Job (" + hook + " hook): complete. The chart reports migration and bootstrap completed (created or verified existing installation). Current database state and external provisioning are not verified."
+		message = "Initialization Job (" + hook + " hook): complete. The chart reports migration and bootstrap completed (created or verified existing installation). Current database state and external provisioning are not verified. This Job does not establish Helm release status or whether the API and worker Deployments rolled out and are ready."
 	}
 	// Helm reuses the name; the UID identifies this Job, not an API attempt.
 	message += fmt.Sprintf("\nObserved Job %s/%s, UID %+q", namespace, name, m.UID)

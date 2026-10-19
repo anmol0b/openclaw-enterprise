@@ -45,7 +45,12 @@ it to that earlier attempt. Interpret the result at this target:
   chart fields, no unsupported controller specified, and consistent terminal
   completion evidence. This is consistent with migration and bootstrap
   completing, including verification of an existing Installation. The Job read
-  does not attest execution or establish the current database state.
+  does not attest execution or establish the current database state. A completed
+  Job can precede a failed Helm release. Once the original UID matches, ask the
+  release operator to verify that release's status and its API and worker
+  Deployments' rollout and readiness before using an Agent. Keep the migration
+  and bootstrap checkpoint; do not rerun initialization or expand this reader's
+  named-Job permission.
 - **Recorded Job replaced or missing.** Recover the original installation record.
   A later Job with the same name cannot establish what happened to that attempt.
 - **Not found, no UID recorded.** Confirm with the database, identity, and volume owners whether
