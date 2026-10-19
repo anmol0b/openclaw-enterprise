@@ -9,10 +9,16 @@ commitments, regulatory compliance, and recovery targets for the workload.
 
 ## Resume an installation in progress
 
-Ask the installer for the Kubernetes context, namespace, Helm release, and the
-initialization Job UID if recorded. From a clean checkout of the matching
-release, use Go, kubectl, and your own trusted kubeconfig. Both commands need
-only permission to get the named Job, normally `<release>-initialization`.
+Run `occ installation doctor` and `occ installation plan` to inspect the retained
+initialization Job. Ask the installer for the Kubernetes context, namespace, Helm
+release, and Job UID if recorded. Use the [matching released CLI](../cli.md#occ-cli),
+`kubectl`, and your own trusted kubeconfig with permission to get the named Job,
+normally `<release>-initialization`. These commands read the Kubernetes API and
+do not require an OCC endpoint or service key.
+
+If a matching CLI release is not yet published, use a trusted checkout of the
+matching source with Go installed, and substitute `go run ./cmd/occ` for `occ` in
+both commands below. Run them from the checkout root.
 
 ```bash
 target=(--kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT"
@@ -21,8 +27,8 @@ target=(--kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT"
 if [[ -n ${RECORDED_JOB_UID:-} ]]; then
   target+=(--expect-job-uid "$RECORDED_JOB_UID")
 fi
-go run ./cmd/occ installation doctor "${target[@]}"
-go run ./cmd/occ installation plan "${target[@]}"
+occ installation doctor "${target[@]}"
+occ installation plan "${target[@]}"
 ```
 
 `doctor` reports evidence from the retained Job. `plan` orders the checks for
