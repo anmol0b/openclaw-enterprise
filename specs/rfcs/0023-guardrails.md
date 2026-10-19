@@ -9,9 +9,13 @@ author: kevinlin-openai
 - **ID:** RFC-0023
 - **Created:** 2026-10-19
 - **Last updated:** 2026-10-19
+- **RFC PR:** [#2968](https://github.com/openclaw/openclaw-enterprise/pull/2968)
 - **Related:** [shared configuration definitions](0022-driver-configuration-contributions.md), [managed runtime](0021-managed-runtime-mode/index.md)
 
-## Decision and motivation
+<a id="decision-and-motivation"></a>
+<a id="problem-and-decision"></a>
+
+## Summary
 
 Add an OCC-owned **Guardrail** resource that can deny operations and constrain
 configuration across all Namespaces or one Namespace. A Guardrail grants nothing.
@@ -19,20 +23,92 @@ Operations retain existing IAM permissions, Restrictions, and platform invariant
 Except for the Installation administrator bypass below, every applicable Guardrail
 must pass; Namespace policy cannot relax a global ceiling.
 
+## Motivation
+
 Today [IAM Restrictions](../../docs/reference/authorization.md) deny exact actions
 but have no public management API. [Sandbox policies](../../docs/reference/sandbox-policies.md)
 have a startup delegation ceiling and a temporary per-Agent editing switch.
 Neither provides reusable, inspectable configuration ceilings. RFC-0022 supplies
 the proposed schema and validation foundation; it remains unimplemented.
 
-This RFC selects the resource, targeting, and Driver interfaces. It covers OCC
-admission, not an AWS firewall or a claim that native runtime settings cannot be
-changed out of band. Runtime protection depends on RFC-0021 and qualified Drivers.
-Inspection of existing resources for Guardrail compliance is out of scope,
-including on-demand scans, background reevaluation, and compliance status views.
-Implementation needs a separate plan after review.
+<a id="scope"></a>
 
-## Resource and policy model
+## Goals
+
+- Let administrators set global and Namespace ceilings for operations and
+  configuration, with no Namespace override of global limits.
+- Apply every matching binding restriction, with an audited blanket bypass for
+  Installation administrators.
+- Share Driver-owned ceiling validation between configuration editors, API
+  admission, and workers, using RFC-0022's proposed definitions.
+- Reject unauthorized changes before effects and preserve existing IAM,
+  validation, and platform limits.
+
+## Non-goals
+
+- Inspect existing resources for compliance, run on-demand or background scans,
+  or show existing-resource compliance status.
+- Automatically reconfigure or terminate running Agents after policy changes.
+- Provide an AWS firewall or prevent out-of-band native runtime changes. Runtime
+  protection depends on RFC-0021 and qualified Drivers.
+- Add resource-specific Guardrail filters, arbitrary AWS condition expressions,
+  a generic Driver configuration store, or hot-editable startup configuration.
+
+<a id="design"></a>
+
+## Proposal
+
+### Architecture
+
+OCC owns Guardrail CRUD, scope, policy versions, persistence and attributable
+audit. The selected IAM Driver owns identity/Group/Role resolution and evaluates
+deny rules alongside existing Restrictions. Extend its decision evidence with
+matched Guardrail IDs/generations and require a complete targeting result for
+configuration checks; a missing capability is unavailable, never an empty match.
+Do not derive targeting from the first successful grant alone.
+
+Configuration Drivers validate their domain; they cannot choose which Guardrails
+apply or grant an exemption.
+
+The diagram shows proposed Guardrail integration; dashed arrows are not
+implemented paths. Base IAM and platform limits still apply to bypassed operations.
+
+```mermaid
+---
+config:
+  theme: base
+  htmlLabels: true
+  themeVariables:
+    fontSize: 14px
+    primaryTextColor: "#344054"
+    lineColor: "#8B949E"
+    edgeLabelBackground: "#FFFFFF"
+  flowchart:
+    curve: linear
+    nodeSpacing: 28
+    rankSpacing: 32
+    padding: 14
+---
+flowchart TB
+  Entry["<b>API and worker</b><br/>Original actor"]
+  OCC["<b>OCC admission</b><br/>Scope and policy state"]
+  IAM["<b>IAM Driver</b><br/>Grants, targeting,<br/>denies and bypass"]
+  Driver["<b>Configuration owner</b><br/>Schema and ceiling<br/>validation"]
+  State["<b>State and audit</b><br/>Admitted change<br/>and evidence"]
+  Entry -.->|request or recheck| OCC
+  OCC -.->|authorize| IAM
+  OCC -.->|validate candidate| Driver
+  OCC -.->|commit if admitted| State
+  classDef state fill:#EDF2F7,stroke:#879AB0,color:#25364A,stroke-width:1px
+  classDef gate fill:#F7F1E5,stroke:#B3A078,color:#514532,stroke-width:1px
+  classDef pending fill:#F3F4F6,stroke:#98A2AE,color:#44505F,stroke-width:1px,stroke-dasharray:4 4
+  class Entry,IAM,Driver pending
+  class OCC gate
+  class State state
+  linkStyle default stroke:#8B949E,stroke-width:1px
+```
+
+### Resource and policy model
 
 `Guardrail` has server-owned `id`, `generation`, timestamps, `name`, `scope`,
 `policy`, and `configurations`. Its scope is immutable:
@@ -89,7 +165,7 @@ reject wildcards, unknown actions, arbitrary condition expressions, and
 `resourceId` filters. Rules constrain the whole selected scope, not individual
 resources. Use ordinary IAM bindings for resource-specific grants.
 
-### Binding selectors are conditions, not grants
+#### Binding selectors are conditions, not grants
 
 Either kind of entry may have `accessBindings`. Omission matches everyone in
 scope. An empty array is invalid, avoiding accidental confusion between everyone
@@ -116,7 +192,7 @@ Shared Configuration saves check the actor; each later Agent use checks its own
 context again. Agents inherit neither their creator's identity nor an administrator's
 bypass. Unbound ceilings cover the Namespace, subject to the administrator bypass.
 
-## Configuration interface
+### Configuration interface
 
 Extend RFC-0022 definitions at their owning configuration surface:
 
@@ -151,7 +227,7 @@ nor arbitrary plugin dispatch. Unsupported targets refuse policy creation;
 changing Drivers must validate existing ceilings rather than silently orphan them.
 Installation startup values are not made hot-editable by this contract.
 
-### Structural choices and semantic ceilings
+#### Structural choices and semantic ceilings
 
 For native OpenClaw values, the proposed ceiling contains `fields`: approved JSON
 Pointers with a TypeBox-compatible schema and an explicit presence requirement:
@@ -200,7 +276,9 @@ array length; it does not bound the authority of a wildcard entry. Defaults and
 generated transport rules remain separately owned and are not silently described
 as covered by an additions ceiling.
 
-## Ownership and enforcement
+<a id="ownership-and-enforcement"></a>
+
+### Administrator bypass
 
 An **Installation administrator** is an actor currently allowed `administer` on
 the exact singleton Installation by base IAM authorization, including existing
@@ -211,15 +289,9 @@ operations, including prerequisite and additional Agent-identity checks. Ordinar
 IAM grants, Restrictions, base validation, startup ceilings, and platform limits
 still apply. This exemption grants no permanent authority to a deployed Agent.
 
-OCC owns Guardrail CRUD, scope, policy versions, persistence and attributable
-audit. The selected IAM Driver owns identity/Group/Role resolution and evaluates
-deny rules alongside existing Restrictions. Extend its decision evidence with
-matched Guardrail IDs/generations and require a complete targeting result for
-configuration checks; a missing capability is unavailable, never an empty match.
-Do not derive targeting from the first successful grant alone.
+### Request lifecycle
 
-Configuration Drivers validate their domain; they cannot choose which Guardrails
-apply or grant an exemption. API and worker use the same admission path:
+API and worker use the same admission path:
 
 1. Authenticate; resolve server-owned scope; authorize the exact operation and
    determine the original actor's current administrator status through base IAM.
@@ -258,7 +330,7 @@ explicitly deny delegated SandboxPolicy updates until an administrator configure
 the intended policy; removing a deny still grants no permissions. Do not preserve
 a hidden per-Agent exception or present defaults as mutable ceilings.
 
-## API, IAM, and console
+### API, IAM, and console
 
 Proposed routes use the existing `{ data, meta }` and error envelopes:
 
@@ -293,17 +365,11 @@ JSON, CLI and HTTP have identical admission.
 Do not silently clamp values or erase an invalid draft. A read-only field is a
 constraint, not merely a disabled widget.
 
-## Alternatives, decisions, and proof
+## Delivery and verification
 
-Reusing only Restrictions cannot express configuration containment. Copying the
-whole AWS condition language adds unsupported resource semantics. Arbitrary
-JSON Schema alone handles field values but not network containment. A generic
-Driver configuration registry is unnecessary for these two explicit callers.
-
-The author confirmed matching-binding constraints, a blanket Installation
-administrator bypass, and prospective enforcement. Existing-resource inspection
-and compliance reporting are explicitly deferred.
-The RFC remains Proposed; these choices do not constitute architecture acceptance.
+Implementation needs a separate plan after review. No implementation or runtime
+proof is included in this RFC. This single decision document keeps targeting,
+the ceiling interface, and enforcement boundaries together for review.
 
 Required implementation proof must use real API, IAM and PostgreSQL paths: global
 plus Namespace composition, alternate grants, Group changes, cross-Namespace
@@ -319,9 +385,35 @@ prove that a subsequent non-bypassed save, deployment, or live application that
 exceeds it is denied. Console changes require rebuilt Storybook, screenshots, and video;
 fixtures do not prove backend enforcement.
 
-No implementation or runtime proof is included in this RFC. Source baseline:
-`5f494a0fdf8f36f5b4cdf0a2886987ca49a5248c`. This single decision document keeps
-targeting, the ceiling interface, and enforcement boundaries together for review.
+<a id="alternatives-decisions-and-proof"></a>
+<a id="alternatives-and-open-decisions"></a>
+
+## Rationale and alternatives
+
+Reusing only Restrictions cannot express configuration containment. Copying the
+whole AWS condition language adds unsupported resource semantics. Arbitrary
+JSON Schema alone handles field values but not network containment. A generic
+Driver configuration registry is unnecessary for these two explicit callers.
+
+The author confirmed matching-binding constraints, a blanket Installation
+administrator bypass, and prospective enforcement. Existing-resource inspection
+and compliance reporting are explicitly deferred.
+The RFC remains Proposed; these choices do not constitute architecture acceptance.
+
+## Unresolved questions
+
+No material design questions remain open in this draft. The proposal still
+requires architecture review; implementation planning is a separate step.
+
+## References
+
+- [Shared Driver configuration definitions (RFC-0022)](0022-driver-configuration-contributions.md).
+- [Managed runtime contract (RFC-0021)](0021-managed-runtime-mode/index.md).
+- [Current IAM authorization](../../docs/reference/authorization.md).
+- [Current SandboxPolicy lifecycle and ceilings](../../docs/reference/sandbox-policies.md).
+- [Network containment contract](../../packages/contracts/src/sandbox-policy.ts).
+
+Source baseline: `5f494a0fdf8f36f5b4cdf0a2886987ca49a5248c`.
 
 ## Manual Notes
 
@@ -329,5 +421,6 @@ targeting, the ceiling interface, and enforcement boundaries together for review
 
 ## Changelog
 
+- 2026-10-19: Reorganized under the RFC template, with explicit goals, non-goals, architecture, request lifecycle, verification, and rationale.
 - 2026-10-19: Deferred existing-resource inspection and compliance reporting; retained admission enforcement and the administrator bypass.
 - 2026-10-19: Drafted Guardrail scope, binding selectors, configuration ceilings, and admission boundaries from the proposed outline and current contracts.
