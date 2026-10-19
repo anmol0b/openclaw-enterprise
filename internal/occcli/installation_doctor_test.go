@@ -1,6 +1,7 @@
 package occcli
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -21,10 +22,18 @@ func TestInstallationDoctor(t *testing.T) {
 	}
 	const job = `{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"demo-initialization","namespace":"operations","uid":"id","labels":{"app.kubernetes.io/instance":"demo","app.kubernetes.io/name":"openclaw-enterprise","app.kubernetes.io/component":"initialization","app.kubernetes.io/managed-by":"Helm"},"annotations":{"helm.sh/hook":"pre-install,pre-upgrade"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migration","args":["scripts/migrate-production.mjs"]}],"containers":[{"name":"bootstrap","args":["scripts/bootstrap-installation.mjs"]}]}}},"status":{"succeeded":1,"conditions":[{"type":"Complete","status":"True"}]}}`
 	const migration = `"scripts/migrate-production.mjs"`
-	failed := strings.Replace(job, `"type":"Complete"`, `"type":"Failed"`, 1)
+	failed := strings.Replace(strings.Replace(job, `"type":"Complete"`, `"type":"Failed"`, 1), `"succeeded":1`, `"failed":1`, 1)
 	guarded := strings.Replace(job, migration, migration+`, "--expect-empty"`, 1)
+	checkScript, err := os.ReadFile("../../deploy/helm/openclaw-enterprise/files/check-installation.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkArg, err := json.Marshal(string(checkScript))
+	if err != nil {
+		t.Fatal(err)
+	}
 	asUpgrade := func(job string) string {
-		return strings.Replace(job, `"initContainers":[`, `"initContainers":[{"name":"installation-check"},`, 1)
+		return strings.Replace(job, `"initContainers":[`, `"initContainers":[{"name":"installation-check","command":["node"],"args":["--input-type=module","-e",`+string(checkArg)+`]},`, 1)
 	}
 	for _, tc := range []struct {
 		name       string
@@ -36,10 +45,12 @@ func TestInstallationDoctor(t *testing.T) {
 		{"install", 200, job, "Initialization Job (install hook): complete", true, ""},
 		{"guarded-install", 200, guarded, "Initialization Job (install hook): complete", true, ""},
 		{"upgrade", 200, asUpgrade(job), "upgrade hook): complete", true, ""},
+		{"wrong-upgrade-check", 200, strings.Replace(asUpgrade(job), string(checkArg), `"process.exit(0)"`, 1), "steps do not match", false, ""},
 		{"guarded-upgrade", 200, asUpgrade(guarded), "steps do not match", false, ""},
 		{"extra-install-arg", 200, strings.Replace(guarded, `"--expect-empty"`, `"--expect-empty","unexpected"`, 1), "steps do not match", false, ""},
 		{"wrong-release", 200, strings.Replace(job, `io/instance":"demo"`, `io/instance":"other"`, 1), "did not identify", false, ""},
 		{"deleting", 200, strings.Replace(job, `"uid":"id"`, `"uid":"id","deletionTimestamp":"now"`, 1), "did not identify", false, ""},
+		{"external-controller", 200, strings.Replace(job, `"spec":{"template"`, `"spec":{"managedBy":"example.invalid/handoff-readback","template"`, 1), "unsupported Job controller", false, "id"},
 		{"no-condition", 200, strings.Replace(job, "Complete", "SuccessCriteriaMet", 1), "completion not established", false, ""},
 		{"wrong-steps", 200, strings.Replace(job, "migrate-production.mjs", "sensitive-detail", 1), "do not match", false, ""},
 		{"missing", 404, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":"jobs.batch \"demo-initialization\" not found"}`, "not found at the selected target", false, ""},
@@ -49,7 +60,11 @@ func TestInstallationDoctor(t *testing.T) {
 		{"pinned", 200, job, "matches the recorded UID", true, "id"},
 		{"replaced", 200, job, `expected UID "old", observed UID "id"`, false, "old"},
 		{"pinned-failed", 200, failed, "Initialization Job: failed", false, "id"},
-		{"pinned-failing", 200, strings.Replace(failed, "Failed", "FailureTarget", 1), "Initialization Job: failed", false, "id"},
+		{"pinned-failing", 200, strings.Replace(failed, "Failed", "FailureTarget", 1), "completion not established", false, "id"},
+		{"pinned-active-failed", 200, strings.Replace(failed, `"failed":1`, `"failed":1,"active":1`, 1), "completion not established", false, "id"},
+		{"pinned-terminating-failed", 200, strings.Replace(failed, `"failed":1`, `"failed":1,"terminating":1`, 1), "completion not established", false, "id"},
+		{"conflicting-terminal-conditions", 200, strings.Replace(job, `"conditions":[`, `"conditions":[{"type":"Failed","status":"True"},`, 1), "completion not established", false, "id"},
+		{"suspended-complete", 200, strings.Replace(job, `"conditions":[`, `"conditions":[{"type":"Suspended","status":"True"},`, 1), "completion not established", false, "id"},
 		{"unpinned-failed", 200, failed, "Initialization Job: failed", false, ""},
 		{"replaced-failed", 200, failed, "original outcome remains unknown", false, "old"},
 		{"unsafe-uid-failed", 200, strings.Replace(failed, `"uid":"id"`, `"uid":"a,b"`, 1), "Initialization Job: failed", false, "a,b"},
@@ -91,7 +106,7 @@ contexts: [{name: read, context: {cluster: test}}]
 					first := map[string]string{"denied": "permission to get", "missing": "first-install intent", "install": "1. Establish whether", "guarded-install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Resume after migration", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "permission to get"}[tc.name]
 					expected = []string{tc.want, first, "2. If an API operation was attempted", "3. Verify temporary access", "4. Qualify useful work"}
 				}
-				wantLookup := action == "plan" && (tc.name == "pinned-failed" || tc.name == "pinned-failing")
+				wantLookup := action == "plan" && tc.name == "pinned-failed"
 				if strings.Contains(out, "get pods") != wantLookup {
 					t.Errorf("want operator Pod lookup %v in %s", wantLookup, out)
 				}

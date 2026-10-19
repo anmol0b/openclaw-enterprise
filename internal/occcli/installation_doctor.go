@@ -3,6 +3,7 @@ package occcli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -156,8 +157,8 @@ func (b *doctorBuffer) Write(p []byte) (int, error) {
 }
 
 type initializationJobStatus struct {
-	Succeeded, Active int
-	Conditions        []struct{ Type, Status string }
+	Succeeded, Active, Terminating int
+	Conditions                     []struct{ Type, Status string }
 }
 
 func initializationEvidence(data []byte, namespace, name, release, expectedUID string) (string, initializationState) {
@@ -173,7 +174,8 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 			Labels, Annotations  map[string]string
 		}
 		Spec struct {
-			Template struct {
+			ManagedBy *string
+			Template  struct {
 				Spec struct{ InitContainers, Containers []container }
 			}
 		}
@@ -192,9 +194,17 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	if expectedUID != "" && m.UID != expectedUID {
 		return fmt.Sprintf("Initialization Job %s/%s: expected UID %+q, observed UID %+q. This is a different Job; the original outcome remains unknown.", namespace, name, expectedUID, m.UID), initializationOriginalNotFound
 	}
+	if job.Spec.ManagedBy != nil && *job.Spec.ManagedBy != "kubernetes.io/job-controller" {
+		return "Initialization: unknown. The Job uses an unsupported Job controller.", initializationUnresolved
+	}
 	init := p.InitContainers
 	hook := "install"
-	if len(init) == 2 && init[0].Name == "installation-check" {
+	// Match the chart's Node invocation and the exact contents of
+	// deploy/helm/openclaw-enterprise/files/check-installation.mjs.
+	const checkScriptSHA256 = "d6919627a375f708d4d7e8142aff8bbc783c0a0565254c4372b83b7a306ffd13"
+	if len(init) == 2 && init[0].Name == "installation-check" && slices.Equal(init[0].Command, []string{"node"}) &&
+		len(init[0].Args) == 3 && init[0].Args[0] == "--input-type=module" && init[0].Args[1] == "-e" &&
+		fmt.Sprintf("%x", sha256.Sum256([]byte(init[0].Args[2]))) == checkScriptSHA256 {
 		init, hook = init[1:], "upgrade"
 	}
 	is := func(cs []container, name string, args ...string) bool {
@@ -225,20 +235,35 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 }
 
 func (status initializationJobStatus) state() initializationState {
-	complete := false
+	var complete, failed, failureTarget, successCriteriaMet, suspended bool
 	for _, c := range status.Conditions {
 		if c.Status != "True" {
 			continue
 		}
 		switch c.Type {
-		case "Failed", "FailureTarget":
-			return initializationFailed
+		case "Failed":
+			failed = true
+		case "FailureTarget":
+			failureTarget = true
 		case "Complete":
 			complete = true
+		case "SuccessCriteriaMet":
+			successCriteriaMet = true
+		case "Suspended":
+			suspended = true
 		}
 	}
-	if !complete || status.Succeeded != 1 || status.Active != 0 {
+	if status.Active != 0 || status.Terminating != 0 || suspended {
 		return initializationUnresolved
 	}
-	return initializationComplete
+	if complete && (failed || failureTarget) || failed && (successCriteriaMet || status.Succeeded != 0) {
+		return initializationUnresolved
+	}
+	if failed {
+		return initializationFailed
+	}
+	if complete && status.Succeeded == 1 {
+		return initializationComplete
+	}
+	return initializationUnresolved
 }

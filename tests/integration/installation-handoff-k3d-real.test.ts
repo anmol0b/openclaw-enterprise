@@ -14,7 +14,7 @@ import { parseProductionChart, renderProductionChart } from "../helpers/producti
 type ChartResource = {
   kind?: string;
   metadata?: { name?: string; namespace?: string };
-  spec?: { managedBy?: string };
+  spec?: { managedBy?: string; suspend?: boolean };
 };
 
 const selection = {
@@ -118,51 +118,55 @@ test(
     );
     handoff("doctor", 1, /not found at the selected target/);
 
-    async function retainedJob(isUpgrade: boolean) {
+    async function renderJob(isUpgrade: boolean) {
       const { stdout } = await renderProductionChart({}, { namespace, isUpgrade });
       const resources: ChartResource[] = await parseProductionChart(stdout);
       const job = resources.find(
         (resource) => resource.kind === "Job" && resource.metadata?.name === name,
       );
       assert.ok(job?.metadata && job.spec);
-      // This verifies readback, not installation. Delegate reconciliation away
-      // from the Job controller; no Pod runs and we supply Complete deliberately.
       job.metadata.namespace = namespace;
-      job.spec.managedBy = "example.invalid/handoff-readback";
-      await applyManifest(JSON.stringify(job));
-      const now = new Date().toISOString();
-      const status = {
-        conditions: [
-          { type: "SuccessCriteriaMet", status: "True", lastTransitionTime: now },
-          { type: "Complete", status: "True", lastTransitionTime: now },
-        ],
-        succeeded: 1,
-        startTime: now,
-        completionTime: now,
-      };
-      return (
-        await admin(
-          "patch",
-          "job",
-          name,
-          "--subresource=status",
-          "--type=merge",
-          "-p",
-          JSON.stringify({ status }),
-          "-o",
-          "jsonpath={.metadata.uid}",
-        )
-      ).trim();
+      return { manifest: job, spec: job.spec };
     }
 
-    const first = await retainedJob(false);
+    // A foreign controller can write completion without running the chart.
+    // The CLI must refuse that evidence even when the recorded UID matches.
+    const foreignJob = await renderJob(false);
+    foreignJob.spec.managedBy = "example.invalid/handoff-readback";
+    await applyManifest(JSON.stringify(foreignJob.manifest));
+    const now = new Date().toISOString();
+    const status = {
+      conditions: [{ type: "Complete", status: "True", lastTransitionTime: now }],
+      succeeded: 1,
+      startTime: now,
+      completionTime: now,
+    };
+    const first = (
+      await admin(
+        "patch",
+        "job",
+        name,
+        "--subresource=status",
+        "--type=merge",
+        "-p",
+        JSON.stringify({ status }),
+        "-o",
+        "jsonpath={.metadata.uid}",
+      )
+    ).trim();
     assert.ok(first);
-    handoff("doctor", 0, /install hook\): complete/, "--expect-job-uid", first);
+    handoff("doctor", 1, /unsupported Job controller/, "--expect-job-uid", first);
     await admin("delete", "job", name);
-    const second = await retainedJob(true);
+
+    // Suspending the replacement keeps the built-in controller from starting
+    // Pods while preserving a supported upgrade Job for identity and step checks.
+    const replacementJob = await renderJob(true);
+    replacementJob.spec.suspend = true;
+    await applyManifest(JSON.stringify(replacementJob.manifest));
+    const second = (await admin("get", "job", name, "-o", "jsonpath={.metadata.uid}")).trim();
     assert.ok(second);
     assert.notEqual(second, first);
     handoff("plan", 1, /1\. Recover the original installation record/, "--expect-job-uid", first);
-    handoff("doctor", 0, /upgrade hook\): complete/, "--expect-job-uid", second);
+    handoff("doctor", 1, /completion not established/, "--expect-job-uid", second);
   },
 );
