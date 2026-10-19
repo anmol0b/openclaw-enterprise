@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"slices"
 	"strings"
@@ -143,11 +144,14 @@ func failedJobPodLookup(config, kctx, ns, uid string) string {
 }
 
 func readInitialization(ctx context.Context, config, kctx, ns, name, release, expectedUID string) (string, initializationState) {
-	// get --raw skips discovery and needs only get on this named Job. kubectl may
-	// retry the read within the deadline; the evidence reflects the successful response.
-	// Never relay the Job, stderr, credentials or exec-plugin diagnostics.
-	path := "/apis/batch/v1/namespaces/" + ns + "/jobs/" + name
-	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig="+config, "--context="+kctx, "get", "--raw="+path)
+	target := []string{"--kubeconfig=" + config, "--context=" + kctx}
+	args := installationJobReadArgs(ctx, target, ns, name)
+	if args == nil {
+		return "Initialization: unknown. Could not resolve the Kubernetes server for the selected context. No Job read was attempted.", initializationUnreadable
+	}
+	// kubectl owns authentication and any retry of this named GET.
+	// Never relay the Job, credentials or raw diagnostics.
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
 	cmd.WaitDelay = time.Second
 	var out, diagnostic doctorBuffer
 	cmd.Stdout, cmd.Stderr = &out, &diagnostic
@@ -172,6 +176,31 @@ func readInitialization(ctx context.Context, config, kctx, ns, name, release, ex
 		return "Initialization: unknown. Could not read the named Job; check target, kubectl and connectivity. Do not assume it is absent.", initializationUnreadable
 	}
 	return initializationEvidence(out.buf.Bytes(), ns, name, release, expectedUID)
+}
+
+// get --raw skips discovery, but its path replaces (rather than extends) the
+// server URL path. A gateway can use that path to select the cluster. Resolve
+// only the server URL and TLS name from local kubeconfig, within the read deadline.
+func installationJobReadArgs(ctx context.Context, target []string, ns, name string) []string {
+	const fields = `jsonpath={.clusters[0].cluster.server}{"\n"}{.clusters[0].cluster.tls-server-name}`
+	args := append(target, "config", "view", "--minify", "-o", fields)
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	cmd.WaitDelay = time.Second
+	var out doctorBuffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil || out.overflow {
+		return nil
+	}
+	server, tlsName, ok := strings.Cut(out.buf.String(), "\n")
+	u, err := url.Parse(server)
+	if !ok || err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") ||
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil
+	}
+	jobPath := u.JoinPath("apis/batch/v1/namespaces", ns, "jobs", name).EscapedPath()
+	// Read from the server we resolved. kubectl clears tls-server-name when
+	// server is overridden, so pass both. An unresolved target never falls back to root.
+	return append(target, "--server="+server, "--tls-server-name="+tlsName, "get", "--raw=/"+strings.TrimPrefix(jobPath, "/"))
 }
 
 // These single-line kubectl prefixes only guide the operator. They do not

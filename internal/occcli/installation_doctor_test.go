@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -145,6 +146,40 @@ func TestInstallationDoctor(t *testing.T) {
 		})
 	}
 
+	t.Run("server URL path selects the cluster", func(t *testing.T) {
+		// A gateway can serve different clusters under one origin. Its root
+		// deliberately returns a plausible Job, not an error that hides misrouting.
+		const prefix = "/k8s/clusters/selected%20cluster"
+		const jobPath = "/apis/batch/v1/namespaces/operations/jobs/demo-initialization"
+		const tlsName = "gateway.example.com" // covered by the httptest certificate
+		var requests atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			if r.TLS.ServerName != tlsName {
+				t.Errorf("TLS server name = %q; want %q", r.TLS.ServerName, tlsName)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet || r.URL.RequestURI() != prefix+jobPath {
+				t.Errorf("read %s %s; want GET %s", r.Method, r.URL.RequestURI(), prefix+jobPath)
+				fmt.Fprint(w, strings.Replace(job, `"uid":"id"`, `"uid":"other-cluster"`, 1))
+				return
+			}
+			fmt.Fprint(w, job)
+		}))
+		defer server.Close()
+
+		ca := filepath.Join(t.TempDir(), "ca.pem")
+		if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
+			t.Fatal(err)
+		}
+		config := installationDoctorKubeconfig(t, server.URL+prefix+"/", "certificate-authority: "+ca, "tls-server-name: "+tlsName)
+		out, _, err := runHelp(t, "installation", "plan", "--kubeconfig", config, "--context", "read",
+			"--kube-namespace", "operations", "--release", "demo", "--expect-job-uid", "id")
+		if err != nil || requests.Load() != 1 || !strings.Contains(out, "matches the recorded UID") {
+			t.Fatalf("error=%v requests=%d output=%s", err, requests.Load(), out)
+		}
+	})
+
 	t.Run("rate-limited read observes replacement", func(t *testing.T) {
 		var requests atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,14 +210,15 @@ func TestInstallationDoctor(t *testing.T) {
 	})
 }
 
-func installationDoctorKubeconfig(t *testing.T, serverURL string) string {
+func installationDoctorKubeconfig(t *testing.T, serverURL string, clusterFields ...string) string {
 	t.Helper()
 	config := filepath.Join(t.TempDir(), "kubeconfig")
 	contents := fmt.Sprintf(`apiVersion: v1
 kind: Config
-clusters: [{name: test, cluster: {server: %s}}]
-contexts: [{name: read, context: {cluster: test}}]
-`, serverURL)
+clusters: [{name: test, cluster: {%s}}]
+contexts: [{name: read, context: {cluster: test, user: fixture}}]
+users: [{name: fixture, user: {token: fixture}}]
+`, strings.Join(append([]string{"server: " + serverURL}, clusterFields...), ", "))
 	if err := os.WriteFile(config, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +256,8 @@ func TestReportedKubectlReadProblemRequiresAnUnwrappedDiagnostic(t *testing.T) {
 func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	kubectl := filepath.Join(dir, "kubectl")
-	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nprintf '%s\\n' 'Error from server (Forbidden): details' >&2\nexit 2\n"), 0700); err != nil {
+	const configView = "#!/bin/sh\n" + `case " $* " in *" config view "*) echo https://cluster.example.invalid; exit 0;; esac` + "\n"
+	if err := os.WriteFile(kubectl, []byte(configView+"printf '%s\\n' 'Error from server (Forbidden): details' >&2\nexit 2\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -234,7 +271,7 @@ func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	if err := os.WriteFile(kubectl+".data", bytes.Repeat([]byte("x"), (4<<20)+1), 0600); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nprintf '%s\\n' 'Error from server (NotFound): jobs.batch \"demo-initialization\" not found' >&2\ncat \"$0.data\"\ntouch \"$0.done\"\nexit 1\n"
+	script := configView + "printf '%s\\n' 'Error from server (NotFound): jobs.batch \"demo-initialization\" not found' >&2\ncat \"$0.data\"\ntouch \"$0.done\"\nexit 1\n"
 	if err := os.WriteFile(kubectl, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +281,17 @@ func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	}
 	if state != initializationUnreadable || !strings.Contains(message, "unknown. Could not read") || strings.Contains(message, "not found at the selected target") {
 		t.Fatalf("message=%q state=%v", message, state)
+	}
+
+	// An unusable server URL must stop before a raw GET could reach the wrong cluster.
+	script = "#!/bin/sh\n" + `case " $* " in *" config view "*) echo not-an-absolute-url; exit 0;; esac` + "\ntouch \"$0.read\"\n"
+	if err := os.WriteFile(kubectl, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	message, state = readInitialization(context.Background(), "unused", "read", "operations", "demo-initialization", "demo", "")
+	if _, err := os.Stat(kubectl + ".read"); !errors.Is(err, os.ErrNotExist) ||
+		state != initializationUnreadable || !strings.Contains(message, "No Job read was attempted") {
+		t.Fatalf("unexpected read or result: stat=%v message=%q state=%v", err, message, state)
 	}
 }
 
