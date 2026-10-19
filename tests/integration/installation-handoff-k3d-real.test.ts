@@ -37,7 +37,8 @@ test(
     execFileSync("go", ["build", "-o", occ, "./cmd/occ"]);
 
     const namespace = `handoff-${randomUUID()}`;
-    const name = "oce-initialization";
+    const release = "oce.prod";
+    const name = "oce.prod-initialization";
     await kubectl("create", "namespace", namespace);
     t.after(() => kubectl("delete", "namespace", namespace, "--wait=false"));
     const admin = (...args: string[]) => kubectl("-n", namespace, ...args);
@@ -92,7 +93,7 @@ test(
           "--kube-namespace",
           namespace,
           "--release",
-          "oce",
+          release,
           ...args,
         ],
         { encoding: "utf8" },
@@ -119,7 +120,7 @@ test(
     handoff("doctor", 1, /not found at the selected target/);
 
     async function renderJob(isUpgrade: boolean) {
-      const { stdout } = await renderProductionChart({}, { namespace, isUpgrade });
+      const { stdout } = await renderProductionChart({}, { namespace, isUpgrade, release });
       const resources: ChartResource[] = await parseProductionChart(stdout);
       const job = resources.find(
         (resource) => resource.kind === "Job" && resource.metadata?.name === name,

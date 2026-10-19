@@ -26,7 +26,7 @@ func (app *application) installationHandoffCommand(action string) *cobra.Command
 		Annotations: map[string]string{outputFormatsAnnotation: "text"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if strings.TrimSpace(kubeconfig) == "" || strings.TrimSpace(kubeContext) == "" || !dns1123Label(namespace) ||
-				!dns1123Label(release) || len(release) > 53 {
+				!helmReleaseName(release) {
 				return errors.New("provide an explicit kubeconfig, context, Kubernetes namespace and Helm release name")
 			}
 			if cmd.Flags().Changed("expect-job-uid") && expectedUID == "" {
@@ -75,6 +75,18 @@ func (app *application) installationHandoffCommand(action string) *cobra.Command
 		cmd.Short = "Show the read-only handoff plan for this installation checkpoint"
 	}
 	return cmd
+}
+
+func helmReleaseName(name string) bool {
+	if len(name) > 53 {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if !dns1123Label(label) {
+			return false
+		}
+	}
+	return true
 }
 
 type initializationState int
