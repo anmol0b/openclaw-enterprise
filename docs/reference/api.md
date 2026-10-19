@@ -67,7 +67,7 @@ the paths.
 | [Backends](#backends) | 1 operation |
 | [Installation](#installation) | 4 operations |
 | [Namespaces](#namespaces) | 5 operations |
-| [Agents](#agents) | 35 operations |
+| [Agents](#agents) | 36 operations |
 | [Agent deployments](#agent-deployments) | 4 operations |
 | [Agent revisions](#agent-revisions) | 2 operations |
 | [Configurations](#configurations) | 4 operations |
@@ -1317,6 +1317,9 @@ Get the singleton Installation
 | `data.capabilities.credentialSources.types[].type` | `string` | Yes | min length: 1; max length: 64; pattern: `^[a-z][a-z0-9-]{0,63}$`; Source type from the selected Credential Gateway catalog, for example `openai`. |
 | `data.capabilities.nativeWorkers` | `object` | No | Present only when dedicated native OpenClaw can be admitted, and says where its native worker support comes from. |
 | `data.capabilities.nativeWorkers.support` | `"pinned-runtime" or "custom-image"` | Yes | — |
+| `data.capabilities.openclaw` | `object` | No | — |
+| `data.capabilities.openclaw.executionModes` | `array<"embedded" or "dedicated">` | Yes | max items: 2; The OpenClaw execution modes this Installation's Sandbox Driver and runtime let an Agent deploy. Agent save also refuses Embedded with a selected Sandbox Driver, but saves Dedicated without one that can provision it; deploy refuses that. Empty when no mode can deploy: a selected Sandbox Driver refuses Embedded execution, Dedicated needs one that can provision dedicated OpenClaw, and a selected Sandbox Driver that is unavailable admits neither. |
+| `data.capabilities.openclaw.sandboxDriverUnavailable` | `true` | No | Present while the selected Sandbox Driver is unavailable. executionModes is then empty until it returns, and Agent save and deploy answer 503 DEPENDENCY_UNAVAILABLE. |
 | `data.capabilities.pluginDiscovery` | `object` | No | — |
 | `data.capabilities.pluginDiscovery.credential` | `"required" or "none"` | Yes | — |
 | `data.capabilities.pluginPolicies` | `object` | No | — |
@@ -1409,6 +1412,9 @@ Bootstrap the singleton Installation
 | `data.capabilities.credentialSources.types[].type` | `string` | Yes | min length: 1; max length: 64; pattern: `^[a-z][a-z0-9-]{0,63}$`; Source type from the selected Credential Gateway catalog, for example `openai`. |
 | `data.capabilities.nativeWorkers` | `object` | No | Present only when dedicated native OpenClaw can be admitted, and says where its native worker support comes from. |
 | `data.capabilities.nativeWorkers.support` | `"pinned-runtime" or "custom-image"` | Yes | — |
+| `data.capabilities.openclaw` | `object` | No | — |
+| `data.capabilities.openclaw.executionModes` | `array<"embedded" or "dedicated">` | Yes | max items: 2; The OpenClaw execution modes this Installation's Sandbox Driver and runtime let an Agent deploy. Agent save also refuses Embedded with a selected Sandbox Driver, but saves Dedicated without one that can provision it; deploy refuses that. Empty when no mode can deploy: a selected Sandbox Driver refuses Embedded execution, Dedicated needs one that can provision dedicated OpenClaw, and a selected Sandbox Driver that is unavailable admits neither. |
+| `data.capabilities.openclaw.sandboxDriverUnavailable` | `true` | No | Present while the selected Sandbox Driver is unavailable. executionModes is then empty until it returns, and Agent save and deploy answer 503 DEPENDENCY_UNAVAILABLE. |
 | `data.capabilities.pluginDiscovery` | `object` | No | — |
 | `data.capabilities.pluginDiscovery.credential` | `"required" or "none"` | Yes | — |
 | `data.capabilities.pluginPolicies` | `object` | No | — |
@@ -1770,6 +1776,7 @@ Report advisory primary IAM permissions on a readable Namespace, not authorizati
 | [`GET /namespaces/{namespaceId}/agents/provision/{workId}`](#get-namespacesnamespaceidagentsprovisionworkid) | Get first-time provisioning status for one exact work item |
 | [`POST /namespaces/{namespaceId}/agents/provision/{workId}/retry`](#post-namespacesnamespaceidagentsprovisionworkidretry) | Retry failed first-time provisioning for one exact work item |
 | [`GET /namespaces/{namespaceId}/agents/repository-options`](#get-namespacesnamespaceidagentsrepositoryoptions) | List approved repository choices for Agent creation in one Namespace |
+| [`POST /namespaces/{namespaceId}/agents/validate`](#post-namespacesnamespaceidagentsvalidate) | Check an unsaved Agent Configuration, plugin selections and initial workspace files as Configuration and Agent create would, without saving anything |
 | [`DELETE /namespaces/{namespaceId}/agents/{agentId}`](#delete-namespacesnamespaceidagentsagentid) | Begin or retry deletion of an exact Namespace-owned Agent and its AgentRevisions |
 | [`GET /namespaces/{namespaceId}/agents/{agentId}`](#get-namespacesnamespaceidagentsagentid) | Get an exact Namespace-owned Agent |
 | [`PATCH /namespaces/{namespaceId}/agents/{agentId}`](#patch-namespacesnamespaceidagentsagentid) | Replace an exact Namespace-owned Agent's editable draft |
@@ -2405,6 +2412,9 @@ Create a new Agent and queue first-time provisioning
 | `data.provisioning.error.code` | `string` | Yes | min length: 1; max length: 64 |
 | `data.provisioning.error.message` | `string` | Yes | min length: 1; max length: 256 |
 | `data.provisioning.phase` | `"admitted" or "configuration" or "transport" or "handoff"` | Yes | — |
+| `data.provisioning.progress` | `object` | No | Present while a job past handoff is queued or running. The job defers without spending attempts while it waits, so `attemptCount` can stay 0. |
+| `data.provisioning.progress.lastAttempt` | `null or object` | Yes | With `agent_revision:read`, this can report the deployment's named wait. Otherwise it reports the job's own `PROVISIONING_DEPLOYMENT_PENDING`, or null if the job has not recorded that wait. The controller writes the message; a refusal can include a code restricted to uppercase letters, digits, and underscores. |
+| `data.provisioning.progress.phase` | `"deployment"` | Yes | Handoff is done; the job waits for its initial deployment. |
 | `data.provisioning.revisionId` | `string` | No | pattern: `^rev_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.provisioning.status` | `"queued" or "running" or "succeeded" or "failed"` | Yes | — |
 | `data.provisioning.updatedAt` | `string (date-time)` | Yes | pattern: `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$` |
@@ -2468,6 +2478,9 @@ Get first-time provisioning status for one exact work item
 | `data.error.code` | `string` | Yes | min length: 1; max length: 64 |
 | `data.error.message` | `string` | Yes | min length: 1; max length: 256 |
 | `data.phase` | `"admitted" or "configuration" or "transport" or "handoff"` | Yes | — |
+| `data.progress` | `object` | No | Present while a job past handoff is queued or running. The job defers without spending attempts while it waits, so `attemptCount` can stay 0. |
+| `data.progress.lastAttempt` | `null or object` | Yes | With `agent_revision:read`, this can report the deployment's named wait. Otherwise it reports the job's own `PROVISIONING_DEPLOYMENT_PENDING`, or null if the job has not recorded that wait. The controller writes the message; a refusal can include a code restricted to uppercase letters, digits, and underscores. |
+| `data.progress.phase` | `"deployment"` | Yes | Handoff is done; the job waits for its initial deployment. |
 | `data.revisionId` | `string` | No | pattern: `^rev_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.status` | `"queued" or "running" or "succeeded" or "failed"` | Yes | — |
 | `data.updatedAt` | `string (date-time)` | Yes | pattern: `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$` |
@@ -2531,6 +2544,9 @@ Retry failed first-time provisioning for one exact work item
 | `data.error.code` | `string` | Yes | min length: 1; max length: 64 |
 | `data.error.message` | `string` | Yes | min length: 1; max length: 256 |
 | `data.phase` | `"admitted" or "configuration" or "transport" or "handoff"` | Yes | — |
+| `data.progress` | `object` | No | Present while a job past handoff is queued or running. The job defers without spending attempts while it waits, so `attemptCount` can stay 0. |
+| `data.progress.lastAttempt` | `null or object` | Yes | With `agent_revision:read`, this can report the deployment's named wait. Otherwise it reports the job's own `PROVISIONING_DEPLOYMENT_PENDING`, or null if the job has not recorded that wait. The controller writes the message; a refusal can include a code restricted to uppercase letters, digits, and underscores. |
+| `data.progress.phase` | `"deployment"` | Yes | Handoff is done; the job waits for its initial deployment. |
 | `data.revisionId` | `string` | No | pattern: `^rev_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.status` | `"queued" or "running" or "succeeded" or "failed"` | Yes | — |
 | `data.updatedAt` | `string (date-time)` | Yes | pattern: `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$` |
@@ -2585,6 +2601,63 @@ List approved repository choices for Agent creation in one Namespace
 | `meta` | `object` | Yes | — |
 | `meta.descriptionsPending` | `boolean` | Yes | — |
 | `meta.requestId` | `string` | Yes | pattern: `^req_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
+
+#### `POST /namespaces/{namespaceId}/agents/validate`
+
+<span id="post-namespacesnamespaceidagentsvalidate"></span>
+
+Check an unsaved Agent Configuration, plugin selections and initial workspace files as Configuration and Agent create would, without saving anything
+
+**Operation ID:** `validateAgentCreate`
+
+**Permissions:** Requires create permission for Agent resources in the requested Namespace.
+
+| Action | Resource | Scope |
+| --- | --- | --- |
+| `create` | `agent` | `namespace` |
+
+##### Parameters
+
+| Name | In | Type | Required | Constraints |
+| --- | --- | --- | --- | --- |
+| `namespaceId` | path | `string` | Yes | pattern: `^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
+
+##### Request body
+
+**Required:** Yes
+
+**Content type:** `application/json`
+
+| Field | Type | Required | Constraints |
+| --- | --- | --- | --- |
+| `configuration` | `object` | Yes | The Agent Configuration the caller will save, not yet saved. |
+| `configuration.kind` | `"agent"` | Yes | — |
+| `configuration.values` | `object<string, SafeJsonValue>` | Yes | A native OpenClaw configuration document. |
+| `executionMode` | `"embedded" or "dedicated"` | No | — |
+| `initialWorkspaceFiles` | `object` | No | — |
+| `initialWorkspaceFiles.AGENTS.md` | `string` | No | max length: 16384; pattern: `^[^\u0000]*$` |
+| `initialWorkspaceFiles.IDENTITY.md` | `string` | No | max length: 16384; pattern: `^[^\u0000]*$` |
+| `initialWorkspaceFiles.SOUL.md` | `string` | No | max length: 16384; pattern: `^[^\u0000]*$` |
+| `initialWorkspaceFiles.USER.md` | `string` | No | max length: 16384; pattern: `^[^\u0000]*$` |
+| `pluginApprovers` | `PluginApprovers` | No | max items: 64 |
+| `pluginApprovers[].channel` | `string` | Yes | min length: 1; max length: 64; pattern: `^[a-z][a-z0-9_-]*$` |
+| `pluginApprovers[].id` | `string` | Yes | min length: 1; max length: 200; pattern: `^[^\u0000-\u0020\u007f]+$` |
+| `plugins` | `PluginDesiredState` | No | Agent plugin selection map. Keys must be 1-253 characters matching ^[A-Za-z0-9._~:@-]{1,253}$. |
+
+##### Responses
+
+| Status | Meaning |
+| --- | --- |
+| `204` | No Content |
+| `400` | Bad Request |
+| `401` | Unauthorized |
+| `403` | Forbidden |
+| `404` | Not Found |
+| `409` | Conflict |
+| `413` | Payload Too Large |
+| `415` | Unsupported Media Type |
+| `500` | Internal Server Error |
+| `503` | Service Unavailable |
 
 #### `DELETE /namespaces/{namespaceId}/agents/{agentId}`
 
@@ -3997,7 +4070,7 @@ Get the durable deployment status for one admitted Agent revision
 | `data.agentId` | `string` | Yes | pattern: `^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.cleanup` | `null or object` | Yes | Durable retirement of this exact revision, independent of its deployment outcome. Null means no retirement obligation was registered; succeeded confirms cleanup completed. |
 | `data.deploymentId` | `string` | Yes | pattern: `^rev_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
-| `data.error` | `null or object` | Yes | Null unless deployment failed. A failure contains code, a fixed safe message, and optional allowlisted data. CONVERGENCE_DEADLINE_EXCEEDED may include data.timeoutMs and data.runtimeFailure with bounded startup-failure evidence. RUNTIME_MODEL_PROBE_FAILED may include data.runtimeFailure with the classified cause of the startup model check failure. Native error text is never returned. |
+| `data.error` | `null or object` | Yes | Null unless deployment failed. A failure contains code, a fixed safe message, and optional allowlisted data. CONVERGENCE_DEADLINE_EXCEEDED may include data.timeoutMs and data.runtimeFailure with bounded startup-failure evidence; a component, check or code outside the runtime's own vocabulary reads UNRECOGNIZED. RUNTIME_MODEL_PROBE_FAILED may include data.runtimeFailure with the classified cause of the startup model check failure. Native error text is never returned. |
 | `data.namespaceId` | `string` | Yes | pattern: `^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data.progress` | `null or object` | Yes | Pending deployment progress. Null for terminal outcomes. A last attempt describes a recorded result, not current runtime health. |
 | `data.status` | `"queued" or "running" or "succeeded" or "failed"` | Yes | — |

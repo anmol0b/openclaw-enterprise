@@ -94,7 +94,6 @@ import type {
   RuntimeDiagnosticCheck,
   Role,
   SandboxDriver,
-  SandboxFacet,
   SandboxHarnessLostCode,
   Secret,
   SecretBindings,
@@ -111,6 +110,7 @@ import type {
   HarnessAuthSnapshot,
 } from "@openclaw-enterprise/contracts";
 import {
+  HARNESS_EXECUTION_MODES,
   isName,
   NAME_RULE,
   normalizeInitialWorkspaceFiles,
@@ -151,6 +151,8 @@ import {
   AgentDeletingError,
   AgentPrincipalAuthorizationError,
   AuthorizationDeniedError,
+  DEDICATED_OPENCLAW_SANDBOX_REQUIRED,
+  DedicatedOpenClawSandboxError,
   DeletionRetryOwnedError,
   DependencyUnavailableError,
   DeviceAuthorizationStartError,
@@ -210,6 +212,7 @@ import {
 } from "./runtime-logs/index.ts";
 import {
   nativeWorkerSupportSource,
+  provisionsDedicatedOpenClaw,
   type NativeWorkerSupport,
   type NativeWorkerSupportSource,
 } from "./native-worker-support.ts";
@@ -248,6 +251,7 @@ import {
   normalizeProvisioningHarnessAuth,
   normalizeProvisioningWorkspace,
   normalizeRequestSecretBindings,
+  PROVISIONING_DEPLOYMENT_PENDING,
   provisioningProgress,
   requireProvisioningRequestId,
   type ProvisionAgentInput,
@@ -277,6 +281,7 @@ export {
   restrictionsRemovedWithAgent,
 } from "./iam-policy-cleanup.ts";
 export type { RemovedAccessBinding } from "./iam-policy-cleanup.ts";
+export { operationRefusalHint } from "./state/controller-work.ts";
 export {
   ActivationFailedError,
   ComputePreparationFailedError,
@@ -286,6 +291,8 @@ export {
   AgentDeletingError,
   AgentPrincipalAuthorizationError,
   AuthorizationDeniedError,
+  DEDICATED_OPENCLAW_SANDBOX_REQUIRED,
+  DedicatedOpenClawSandboxError,
   DeletionRetryOwnedError,
   DependencyUnavailableError,
   DeviceAuthorizationStartError,
@@ -330,8 +337,11 @@ export {
   RuntimeLogsError,
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
+  SANDBOX_DELETION_UNCONFIRMED,
+  SandboxGatewayUnauthorizedError,
   SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
+  SandboxWorkspaceSetupRefusedError,
   ScopeViolationError,
   SecretBindingDriverError,
   ServiceAccountCredentialSecretExistsError,
@@ -365,6 +375,7 @@ export {
 } from "./runtime-logs/index.ts";
 export {
   PINNED_OPENCLAW_RUNTIME_SUPPORTS_NATIVE_WORKERS,
+  provisionsDedicatedOpenClaw,
   type NativeWorkerSupport,
   type NativeWorkerSupportSource,
 } from "./native-worker-support.ts";
@@ -655,6 +666,19 @@ export interface CreateAgentInput {
   readonly pluginApprovers?: PluginApprovers;
   readonly repositoryBindings?: readonly RepositoryBindingRequest[];
   readonly repositoryAccess?: RepositoryAccess;
+}
+
+/** Create Agent's preflight input: an Agent create body with its Configuration inline, unsaved. */
+export interface ValidateAgentCreateInput {
+  readonly namespaceId: string;
+  readonly configuration: {
+    readonly kind: "agent";
+    readonly values: Readonly<OpenClawConfigurationDocument>;
+  };
+  readonly initialWorkspaceFiles?: InitialWorkspaceFiles;
+  readonly executionMode?: HarnessExecutionMode;
+  readonly plugins?: PluginDesiredState;
+  readonly pluginApprovers?: PluginApprovers;
 }
 
 export interface UpdateAgentInput {
@@ -1294,7 +1318,10 @@ function requireDedicatedNativeSupport(
   harness: Readonly<RevisionHarnessDescriptor>,
   sandbox: SandboxDriver | undefined,
   nativeWorkers: NativeWorkerSupportSource | undefined,
-  { runtimeImage = true }: { readonly runtimeImage?: boolean } = {},
+  {
+    runtimeImage = true,
+    stored = false,
+  }: { readonly runtimeImage?: boolean; readonly stored?: boolean } = {},
 ): void {
   if (harness.id !== "openclaw" || harness.mode !== "dedicated") {
     return;
@@ -1302,14 +1329,43 @@ function requireDedicatedNativeSupport(
   if (runtimeImage && nativeWorkers === undefined) {
     throw new NativeWorkerSupportError();
   }
-  const requiredFacets: readonly SandboxFacet[] = ["networking", "filesystem", "process"];
-  if (
-    sandbox?.provisionHarness === undefined ||
-    requiredFacets.some((facet) => !sandbox.facets.includes(facet))
-  ) {
-    throw new DependencyUnavailableError(
-      "Dedicated OpenClaw requires a provisioning SandboxDriver with networking, filesystem, and process containment.",
+  if (!provisionsDedicatedOpenClaw(sandbox)) {
+    // A new request meets a fixed Installation shape: a permanent refusal (finding 1609). Stored
+    // provisioning work waits for the Driver to return, as for any dependency outage.
+    if (stored) {
+      throw new DependencyUnavailableError(DEDICATED_OPENCLAW_SANDBOX_REQUIRED);
+    }
+    throw new DedicatedOpenClawSandboxError();
+  }
+}
+
+/**
+ * Whether an OpenClaw Agent in this execution mode passes both save and deploy admission on this
+ * Installation shape. It runs admission's own checks, so the Installation capability built from
+ * it cannot disagree with them (#2670).
+ */
+function admitsOpenClawExecutionMode(
+  sandbox: SandboxDriver | undefined,
+  executionMode: HarnessExecutionMode,
+  nativeWorkers: NativeWorkerSupportSource | undefined,
+): boolean {
+  try {
+    requireSandboxExecutionMode(sandbox, executionMode);
+    requireDedicatedNativeSupport(
+      { id: "openclaw", version: "capability", mode: executionMode },
+      sandbox,
+      nativeWorkers,
     );
+    return true;
+  } catch (error) {
+    if (
+      error instanceof ConfigurationHarnessError ||
+      error instanceof NativeWorkerSupportError ||
+      error instanceof DedicatedOpenClawSandboxError
+    ) {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -1328,7 +1384,7 @@ function validRepositoryOption(value: unknown): value is RepositoryOption {
     !hasControlCharacter(displayName) &&
     (option?.description === undefined ||
       (isNonEmptyString(option.description) &&
-        option.description.length <= 512 &&
+        Array.from(option.description).length <= 512 &&
         !hasControlCharacter(option.description))) &&
     Array.isArray(allowedProfiles) &&
     allowedProfiles.length >= 1 &&
@@ -1629,11 +1685,23 @@ export class OpenClawController {
       kind: "installation",
       id: this.installation.id,
     });
+    // openclaw lists the execution modes admission accepts for OpenClaw; an empty list means
+    // none (#2670), and sandboxDriverUnavailable says that is an outage, not the Installation's
+    // shape (finding 1624). nativeWorkers promises that dedicated native OpenClaw can be
+    // admitted, so it is reported only when that mode is listed (finding 1608).
+    const {
+      nativeWorkers: _unchecked,
+      openclaw: _derived,
+      ...declared
+    } = this.installation.capabilities ?? {};
+    const openclaw = this.openClawExecutionModes();
+    const nativeWorkers = openclaw.executionModes.includes("dedicated")
+      ? this.nativeWorkers
+      : undefined;
     const capabilities = {
-      ...this.installation.capabilities,
-      ...(this.nativeWorkers === undefined
-        ? {}
-        : { nativeWorkers: { support: this.nativeWorkers } }),
+      ...declared,
+      ...(nativeWorkers === undefined ? {} : { nativeWorkers: { support: nativeWorkers } }),
+      openclaw,
       ...(this.selections.has("credential_gateway")
         ? {
             credentialSources: {
@@ -1663,6 +1731,30 @@ export class OpenClawController {
         },
       },
     });
+  }
+
+  /**
+   * The OpenClaw execution modes this Installation's Sandbox Driver and runtime let an Agent
+   * deploy. A selected Sandbox Driver that is unavailable admits none until it returns.
+   */
+  private openClawExecutionModes(): {
+    executionModes: HarnessExecutionMode[];
+    sandboxDriverUnavailable?: true;
+  } {
+    let sandbox: SandboxDriver | undefined;
+    try {
+      sandbox = this.sandboxDriver();
+    } catch (error) {
+      if (error instanceof DependencyUnavailableError) {
+        return { executionModes: [], sandboxDriverUnavailable: true };
+      }
+      throw error;
+    }
+    return {
+      executionModes: HARNESS_EXECUTION_MODES.filter((mode) =>
+        admitsOpenClawExecutionMode(sandbox, mode, this.nativeWorkers),
+      ),
+    };
   }
 
   async getInstallationDeploymentInventory(
@@ -2469,7 +2561,12 @@ export class OpenClawController {
         await this.authorizeProvisioningRecord(state, principalId, replay);
         const work = await state.operations.findWork(replay.workId);
         const result = Object.freeze({
-          provisioning: provisioningProgress(replay, work, this.clock()),
+          provisioning: provisioningProgress(
+            replay,
+            work,
+            this.clock(),
+            await this.provisioningDeploymentProgress(state, principalId, replay, work),
+          ),
         });
         if (auditEvent) {
           await state.audit.append(auditEvent(result));
@@ -2560,7 +2657,9 @@ export class OpenClawController {
           },
         },
       });
-      await this.authorizeProvisioningRecord(state, principalId, record.record);
+      await this.authorizeProvisioningRecord(state, principalId, record.record, {
+        admission: true,
+      });
       await state.audit.append({
         id: `aud_${crypto.randomUUID()}`,
         installationId: this.installation.id,
@@ -2598,8 +2697,59 @@ export class OpenClawController {
       if (work === undefined) {
         throw new DependencyUnavailableError("The provisioning work is unavailable.");
       }
-      return Object.freeze({ provisioning: provisioningProgress(record, work, this.clock()) });
+      return Object.freeze({
+        provisioning: provisioningProgress(
+          record,
+          work,
+          this.clock(),
+          await this.provisioningDeploymentProgress(state, principalId, record, work),
+        ),
+      });
     });
+  }
+
+  /**
+   * The initial deployment's progress for a job waiting on it after handoff (finding 1634).
+   * The provisioning read does not check `agent_revision:read`, which the deployment read
+   * needs, so a caller without it gets undefined and the job reports only its own deferral.
+   */
+  private async provisioningDeploymentProgress(
+    state: PlatformReadView,
+    principalId: string,
+    record: Readonly<AgentProvisioningRecord>,
+    work: { readonly state: string } | undefined,
+  ): Promise<DeploymentStatusResult["progress"] | undefined> {
+    const revisionId = record.revisionId;
+    if (
+      revisionId === undefined ||
+      record.agentId === undefined ||
+      (record.status !== "queued" && record.status !== "running") ||
+      work === undefined ||
+      work.state === "failed_permanent"
+    ) {
+      return undefined;
+    }
+    const key = `agent_revision:${revisionId}:reconcile`;
+    const deployment = await state.operations.findWork(key);
+    if (
+      deployment === undefined ||
+      deployment.namespaceId !== record.namespaceId ||
+      deployment.agentId !== record.agentId ||
+      deployment.revisionId !== revisionId ||
+      !(await this.canRead(principalId, {
+        kind: "agent_revision",
+        id: revisionId,
+        namespaceId: record.namespaceId,
+      }))
+    ) {
+      return undefined;
+    }
+    return deploymentProgressForWork(
+      deployment,
+      deployment.state === "queued" || deployment.state === "claimed"
+        ? await state.operations.findWorkAttempt(key)
+        : undefined,
+    );
   }
 
   async retryAgentProvisioning(
@@ -3693,7 +3843,7 @@ export class OpenClawController {
           : deploymentError;
       const pending = status !== "failed";
       const code = pending
-        ? "PROVISIONING_DEPLOYMENT_PENDING"
+        ? PROVISIONING_DEPLOYMENT_PENDING
         : (error?.code ?? "PROVISIONING_DEPLOYMENT_FAILED");
       const message = pending
         ? "Waiting for the initial deployment to complete."
@@ -6727,6 +6877,78 @@ export class OpenClawController {
     });
   }
 
+  /**
+   * Create Agent's preflight, for a Configuration the caller has not saved yet: createConfiguration's
+   * content rules, then createAgent's checks of plugin selections and initial workspace files
+   * against those values, with their messages, under createAgent's `agent:create` check. A
+   * refusal is reported before the caller saves its Secret or Configuration. It writes nothing.
+   * Checks that need saved resources (Secret bindings, Harness authentication and credential
+   * sources) or live repository policy stay with those writes.
+   * `resolveHarness` as in createAgent.
+   */
+  async validateAgentCreate(
+    principalId: string,
+    input: ValidateAgentCreateInput,
+    resolveHarness?: HarnessResolver,
+  ): Promise<void> {
+    let initialWorkspaceFiles: InitialWorkspaceFiles | undefined;
+    try {
+      initialWorkspaceFiles = normalizeInitialWorkspaceFiles(input.initialWorkspaceFiles);
+    } catch {
+      throw new ScopeViolationError("The initial workspace setup input is invalid.");
+    }
+    const executionMode = input.executionMode ?? "embedded";
+    if (!validExecutionMode(executionMode)) {
+      throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
+    }
+    const plugins = normalizeAgentPlugins(input.plugins);
+    const pluginApprovers = normalizeAgentPluginApprovers(input.pluginApprovers);
+    this.namespaceIdentity(input.namespaceId);
+    await this.authorize(principalId, "create", {
+      kind: "agent",
+      id: input.namespaceId,
+      namespaceId: input.namespaceId,
+    });
+    await this.read(async (state) => {
+      const namespace = await this.exactNamespace(state, input.namespaceId);
+      if (namespace.status !== "provisioning" && namespace.status !== "ready") {
+        throw new ResourceStateConflictError("The Namespace does not accept new Agents.");
+      }
+      if (input.configuration?.kind !== "agent") {
+        throw new ScopeViolationError("The Configuration kind must identify an Agent.");
+      }
+      const values = frozenValues(input.configuration.values);
+      // The form saves the Configuration first, so its content rules answer first, in
+      // createConfiguration's order.
+      await this.configurationDriver().validateSize?.(values);
+      this.validateConfigurationContent(values);
+      this.validatePluginPolicies(plugins, pluginApprovers);
+      // Shaped like the saved Configuration createAgent reads; only its values are checked.
+      const configuration: () => Promise<Readonly<Configuration>> = async () =>
+        Object.freeze({
+          id: "cfg_00000000-0000-4000-8000-000000000000",
+          namespaceId: namespace.id,
+          kind: "agent" as const,
+          generation: 1,
+          values,
+          createdAt: this.timestamp(),
+        });
+      await this.validateSavedPluginConfiguration(plugins, configuration);
+      await this.validateSavedAgentTopology(
+        state,
+        resolveHarness,
+        {
+          namespaceId: namespace.id,
+          executionMode,
+          harnessAuth: null,
+          repositoryBindings: undefined,
+          workspaceSetup: initialWorkspaceFiles !== undefined,
+        },
+        configuration,
+      );
+    });
+  }
+
   /** `resolveHarness` as in createAgent. */
   async updateAgent(
     principalId: string,
@@ -7066,7 +7288,9 @@ export class OpenClawController {
         mode: lockedAgent.executionMode,
       });
       // Capability refusals precede Agent principal grants: a grant cannot make an unsupported
-      // topology deployable, so the refusal the operator can act on must surface first.
+      // topology deployable, so the refusal the operator can act on must surface first. A
+      // missing Sandbox Driver is a permanent 409 here; provisioning handoff reaches this only
+      // after fenceAgentProvisioning applied the stored-work check, which stays a retryable 503.
       requireDedicatedNativeSupport(revisionHarness, sandbox, this.nativeWorkers);
       const harnessAuth = await this.admitHarnessAuth(state, principalId, lockedAgent);
       const credentialSourceType = await this.admittedCredentialSourceType(harnessAuth, sandbox);
@@ -8680,7 +8904,10 @@ export class OpenClawController {
     state: PlatformUnitOfWork,
     principalId: string,
     record: Readonly<AgentProvisioningRecord>,
-    { statusRead = false }: { readonly statusRead?: boolean } = {},
+    {
+      statusRead = false,
+      admission = false,
+    }: { readonly statusRead?: boolean; readonly admission?: boolean } = {},
   ): Promise<void> {
     const namespaceId = record.namespaceId;
     await this.authorizeProvisioningRequest(principalId, namespaceId);
@@ -8778,6 +9005,7 @@ export class OpenClawController {
     // the plugin policy below: a status read still reports the stored work after the image loses it.
     requireDedicatedNativeSupport(harness, sandbox, this.nativeWorkers, {
       runtimeImage: !statusRead,
+      stored: !admission,
     });
     const configuration =
       sandbox?.configureAgent?.(plan.configuration.values, harness) ?? plan.configuration.values;
@@ -10784,7 +11012,7 @@ export class OpenClawController {
   // with deployment: an unapproved Harness runtime, and Harness authentication through a
   // ServiceAccount (issued credential) or a credential source (its state and type).
   private async validateSavedAgentTopology(
-    state: PlatformUnitOfWork,
+    state: PlatformReadView,
     resolveHarness: HarnessResolver | undefined,
     agent: {
       readonly namespaceId: string;
@@ -10846,7 +11074,7 @@ export class OpenClawController {
   // operator-managed runtime, or a Secret (its record names the Secret Driver). Undefined for
   // every other binding, and for a Secret that is gone, which deployment refuses.
   private async savedHarnessAuthSnapshot(
-    state: PlatformUnitOfWork,
+    state: PlatformReadView,
     namespaceId: string,
     binding: HarnessAuthBinding | null,
   ): Promise<HarnessAuthSnapshot | undefined> {

@@ -437,6 +437,12 @@ test("Codex runtime retries a transient startup model probe failure once", async
   const erroredWith = (message) => probe([started, errorEvent(message)], { status: 1 });
   const killed = probe([], { status: null, signal: "SIGKILL" });
   const recoveredNotice = errorEvent("Reconnecting... 1/3 stream disconnected before completion");
+  // Finding 1618: the pinned Codex build prints this for a provider it cannot connect to
+  // (refused, unresolvable or failed TLS alike) and keeps waiting until the probe times out.
+  // Finding 1621: only this exact text is transient; any other cause is held.
+  const networkWait = (cause = "Connection failed: error sending request") =>
+    errorEvent(`Reconnecting... waiting for network (${cause})`);
+  const unreachable = probe([started, networkWait(), networkWait()], timedOut, 30000);
   // Each transient class, by the one marker that makes it transient.
   const transient = [
     [
@@ -444,6 +450,12 @@ test("Codex runtime retries a transient startup model probe failure once", async
       failedWith("unexpected status 502: upstream"),
       "turn-failed",
       { status: 502 },
+    ],
+    [
+      "the lowest provider 5xx",
+      failedWith("unexpected status 500"),
+      "turn-failed",
+      { status: 500 },
     ],
     [
       "a provider server error",
@@ -474,7 +486,33 @@ test("Codex runtime retries a transient startup model probe failure once", async
       "error-event",
     ],
     ["a failed connection", erroredWith("connection refused"), "error-event"],
+    // Codex's HTTP client names no cause for a failed connection, so a DNS or TLS
+    // failure reported this way cannot be told from a transient one.
+    [
+      "a failed connection that names no cause",
+      erroredWith("Connection failed: error sending request"),
+      "error-event",
+    ],
+    [
+      "a DNS lookup that may recover",
+      failedWith(
+        "stream disconnected before completion: failed to lookup address information: Try again",
+      ),
+      "turn-failed",
+    ],
     ["a broken pipe", erroredWith("broken pipe"), "error-event"],
+    ["a reset connection", erroredWith("Connection reset by peer (os error 104)"), "error-event"],
+    [
+      "a closed connection",
+      erroredWith("connection closed before message completed"),
+      "error-event",
+    ],
+    [
+      "a failed connection that names its cause",
+      erroredWith("Connection failed: tcp connect error"),
+      "error-event",
+    ],
+    ["an unreachable provider", unreachable, "error-event"],
     ["a killed probe", killed, "signal-SIGKILL", undefined, "PROCESS_EXIT"],
     [
       "a terminated probe",
@@ -484,7 +522,147 @@ test("Codex runtime retries a transient startup model probe failure once", async
       "PROCESS_EXIT",
     ],
   ];
+  // Findings 1601 and 1602: each of these fails the same way again, even with a
+  // transient word in its text, so it is held at once without a second model call.
+  // The messages follow what the pinned Codex build prints for each failure.
+  const heldAtOnce = [
+    [
+      "a provider 404 that says overloaded",
+      failedWith(
+        "unexpected status 404 Not Found: overloaded, url: https://provider.example/v1/responses",
+      ),
+      "turn-failed",
+      { status: 404 },
+    ],
+    [
+      "a provider 402 with a server error body",
+      failedWith(
+        'unexpected status 402 Payment Required: {"error":{"type":"server_error"}}, url: https://provider.example/v1/responses',
+      ),
+      "turn-failed",
+      { status: 402, code: "server_error" },
+    ],
+    [
+      // Codex prints a 400 as its bare body, without the status.
+      "a provider 400 body that says overloaded",
+      failedWith(
+        '{"error":{"message":"the server is overloaded","type":"invalid_request_error","code":"server_error"}}',
+      ),
+      "turn-failed",
+      { code: "server_error" },
+    ],
+    [
+      "a content-filter stop",
+      failedWith(
+        "stream disconnected before completion: Incomplete response returned, reason: content_filter",
+      ),
+      "turn-failed",
+    ],
+    [
+      "a rejected provider certificate",
+      erroredWith(
+        "stream disconnected before completion: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))",
+      ),
+      "error-event",
+    ],
+    [
+      "a provider host name that does not resolve",
+      erroredWith(
+        "stream disconnected before completion: failed to lookup address information: Name does not resolve",
+      ),
+      "error-event",
+    ],
+    [
+      "a provider host name with no address",
+      erroredWith(
+        "stream disconnected before completion: failed to lookup address information: Name has no usable address",
+      ),
+      "error-event",
+    ],
+    // The 4xx guard's bounds; a compatible endpoint may print the status.
+    [
+      "a provider 400 with its status that says overloaded",
+      failedWith(
+        "unexpected status 400 Bad Request: the server is overloaded, url: https://provider.example/v1/responses",
+      ),
+      "turn-failed",
+      { status: 400 },
+    ],
+    [
+      "the highest provider 4xx",
+      failedWith("unexpected status 499: overloaded"),
+      "turn-failed",
+      { status: 499 },
+    ],
+    // A credential marker vetoes a transient one, each on its own.
+    [
+      "a dropped stream naming auth",
+      erroredWith("stream disconnected before completion: auth token expired"),
+      "error-event",
+    ],
+    [
+      "a server error naming a forbidden request",
+      erroredWith("server_error: forbidden by the workspace policy"),
+      "error-event",
+      { code: "server_error" },
+    ],
+    [
+      "an overload naming a credential",
+      erroredWith("overloaded: the credential was revoked"),
+      "error-event",
+    ],
+    [
+      "a dropped stream naming a 403 without its status",
+      erroredWith("stream disconnected before completion: upstream answered 403"),
+      "error-event",
+    ],
+    [
+      "a dropped stream naming the API key in any case",
+      erroredWith("stream disconnected before completion: Incorrect API key provided"),
+      "error-event",
+    ],
+    // Only a network wait for a failed connection is transient; any other Reconnecting
+    // notice the recovered-stream rule refused is held, even with a transient cause. These
+    // are boundary shapes the pinned build does not print, so a looser match fails here.
+    [
+      "a network wait for a provider 503",
+      erroredWith("Reconnecting... waiting for network (unexpected status 503)"),
+      "error-event",
+      { status: 503 },
+    ],
+    [
+      "a network wait that does not start the notice",
+      erroredWith(`Error: ${networkWait().message}`),
+      "error-event",
+    ],
+    [
+      "a network wait with text after its cause",
+      erroredWith(`${networkWait().message} after 3 tries`),
+      "error-event",
+    ],
+    [
+      "a network wait for a failed connection naming a credential",
+      erroredWith(networkWait("Connection failed: invalid credential").message),
+      "error-event",
+    ],
+    // Finding 1621: a cause other than the pinned text may be permanent, so it is held.
+    ...[
+      "Connection failed: invalid URL, scheme is not http",
+      "Connection failed: builder error",
+      "Connection failed: error sending request for url (https://provider.example/v1/responses)",
+      "Connection failed: blocked by policy",
+    ].map((cause) => [
+      `a network wait for "${cause}"`,
+      erroredWith(networkWait(cause).message),
+      "error-event",
+    ]),
+  ];
   const scenarios = [
+    ...heldAtOnce.map(([description, first, detail, provider]) => ({
+      name: `${description} is held at once, with no second probe`,
+      native: [login(), first],
+      expect: probeFailure({ kind: "PROBE_STATUS", detail }, provider),
+    })),
     ...transient.map(([description, first]) => ({
       name: `${description} recovers on the second attempt`,
       native: [login(), first, success],
@@ -579,6 +757,80 @@ test("Codex runtime retries a transient startup model probe failure once", async
       expect: ready,
       probeCodes: ["MODEL_PROBE_FAILED", "READY"],
     },
+    // Finding 1622: Codex reconnects after a network wait on its own, so a wait inside the
+    // turn of an attempt that exits answered passes, like a recovered stream notice.
+    {
+      name: "network waits then a completed reply in the same attempt pass",
+      native: [login(), probe([started, networkWait(), networkWait(), assistant, completed])],
+      expect: ready,
+    },
+    ...[
+      ["a network wait before the turn", [networkWait(), started, assistant, completed]],
+      [
+        "a failed turn with the network wait text",
+        [started, failedTurn(networkWait().message), assistant, completed],
+        undefined,
+        "turn-failed",
+      ],
+      [
+        // A made-up shape: only an error event's own text is a network wait.
+        "a failed turn naming the network wait beside a transient error",
+        [
+          started,
+          { ...failedTurn("unexpected status 503"), message: networkWait().message },
+          assistant,
+          completed,
+        ],
+        undefined,
+        "turn-failed",
+      ],
+      [
+        "a network wait and a transient error",
+        [started, errorEvent("unexpected status 503"), networkWait(), assistant, completed],
+      ],
+      ["a network wait then a completed turn with no reply", [started, networkWait(), completed]],
+      [
+        "a network wait then a blank reply",
+        [
+          started,
+          networkWait(),
+          { type: "item.completed", item: { type: "agent_message", text: "  " } },
+          completed,
+        ],
+      ],
+      [
+        // A made-up shape: one turn reported complete twice is not an answer.
+        "a network wait then a turn completed twice",
+        [started, networkWait(), assistant, completed, completed],
+      ],
+      [
+        "a network wait then a reply after the turn",
+        [started, networkWait(), completed, assistant],
+      ],
+      [
+        "a network wait then a reply from a failed process",
+        [started, networkWait(), assistant, completed],
+        { status: 1 },
+      ],
+      [
+        // Held as the network wait, not as the kill that ended the process.
+        "a network wait then a reply from a terminated process",
+        [started, networkWait(), assistant, completed],
+        { status: null, signal: "SIGTERM" },
+      ],
+      [
+        "a network wait then a reply from a probe that overflowed its output",
+        [started, networkWait(), assistant, completed],
+        { error: { code: "ENOBUFS" } },
+      ],
+    ].map(([description, events, result, detail = "error-event"]) => ({
+      name: `${description} in one attempt is still retried`,
+      native: [login(), probe(events, result), success],
+      retryAfterMs: 1000,
+      expect: ready,
+      probeCodes: ["MODEL_PROBE_FAILED", "READY"],
+      probeCauses: [{ kind: "PROBE_STATUS", detail }, undefined],
+    })),
     {
       name: "two transient failures in one attempt still get one retry",
       native: [
@@ -656,6 +908,33 @@ test("Codex runtime retries a transient startup model probe failure once", async
       name: "a transient failure with no budget left for a retry holds at once",
       native: [login(), failedWith("unexpected status 503", 60500)],
       expect: probeFailure({ kind: "PROBE_STATUS", detail: "turn-failed" }, { status: 503 }),
+    },
+    {
+      // The retry waits one second, so exactly one second left is not enough.
+      name: "a transient failure with exactly the retry delay left holds at once",
+      native: [login(), failedWith("unexpected status 503", 60000)],
+      expect: probeFailure({ kind: "PROBE_STATUS", detail: "turn-failed" }, { status: 503 }),
+    },
+    {
+      // A transient event the attempt saw is its failure, even when the attempt then timed out.
+      name: "a transient error then a timeout in the same attempt is retried as transient",
+      native: [
+        login(),
+        probe([started, errorEvent("unexpected status 503")], timedOut, 30000),
+        success,
+      ],
+      retryAfterMs: 1000,
+      expect: ready,
+      probeCodes: ["MODEL_PROBE_FAILED", "READY"],
+    },
+    {
+      // Only a detail token is marked as retried; a cause with no detail keeps none.
+      name: "a wrapper error after a transient failure holds a cause with no detail",
+      // A non-string stdout makes the wrapper throw.
+      native: [login(), killed, probe([], { stdout: 1 })],
+      retryAfterMs: 1000,
+      expect: probeFailure({ kind: "WRAPPER_ERROR" }),
+      probeCodes: ["MODEL_PROBE_FAILED", "MODEL_PROBE_FAILED"],
     },
   ];
   for (const scenario of scenarios) {

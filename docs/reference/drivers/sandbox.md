@@ -39,11 +39,18 @@ For Codex, Compute derives the native hook credential directory from `harnessHom
 The Sandbox must create that owner-only directory outside the Harness workspace
 and file-transfer roots. Compute validates the path and retains ownership of the
 relay URL and authentication.
-`harnessStatus(context)`, offered only with `harnessEndpoint`, observes that
-transport with the Agent transport token. It answers `serving` only after an
-authenticated handshake, or `failed` with the Harness's held startup failure,
-which Compute validates and fails the revision with; anything else is `starting`.
-Compute activates only a `serving` Harness. An endpoint may select
+`harnessStatus(context)` observes the Harness's exposed port with the Agent
+transport token. It answers `serving` only after an authenticated handshake, or
+`failed` with the Harness's held startup failure, which Compute validates and
+fails the revision with; anything else is `starting`. A read the provider does
+not answer is a transient dependency failure, not evidence. Compute activates
+only a `serving` Codex Harness, and reads a dedicated OpenClaw worker's status
+only before its node has enrolled (`workspaceNodeEnrolled` in the context); then
+it calls `withdrawHarnessExposure(context)`, which removes that worker's exposure
+and resolves only once the provider confirms it gone, through a read the
+controller's identity still passes (a missing answer alone is no proof). Its
+context carries no requirements: Compute also calls it outside a pass, for a
+revision already active at start or one that failed for good. An endpoint may select
 `codexPermissionProfile: ":danger-full-access"` when the provider supplies the
 sandbox boundary. Kubernetes Compute projects that selection to the Gateway;
 without it, the Codex bridge retains its configured sandbox behavior.
@@ -84,11 +91,12 @@ resolving another credential.
 
 Optional `workspaceSetup` carries `{id, defaultsId?, secretKeyRef: {name, key}}`.
 Compute stages an Agent-owned, same-Namespace setup Secret; OCC retains
-completion state. Document contents are not part of the workload requirements. A Sandbox
-receiving the reference must initialize its approved workspace and verify the
-matching completion marker before Harness execution, or reject the handoff.
+completion state. Requirements exclude document contents. A receiving
+Sandbox must initialize the approved workspace and verify its
+completion marker before Harness execution, or reject the handoff.
 Private initialization must preserve the [workspace setup lifecycle](../../flows/workspace-files.md#2-deployment-initializes-storage-before-execution),
-including safe retries and protection of later edits.
+including safe retries and preserved later edits. Throw
+`SandboxWorkspaceSetupRefusedError` for a refusal; Compute fails at once.
 
 `credentialAttachments` holds one opaque `{ sourceId, ref }` entry per
 credential source the revision binds; it is empty otherwise. The selected
@@ -159,7 +167,17 @@ cannot run an exact revision and a retry cannot change that, it throws
 code. The worker then fails the deployment with that code and a fixed message
 at once. The driver's own message stays in the controller:
 `SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED` (Secret-backed environment) and
-`SANDBOX_HARNESS_UNSUPPORTED` (unsupported Harness).
+`SANDBOX_HARNESS_UNSUPPORTED` (unsupported Harness). `SandboxGatewayUnauthorizedError`
+(`SANDBOX_GATEWAY_UNAUTHORIZED`) fails it the same way when the provider refuses
+the controller's identity while it confirms a Harness exposure withdrawn or a
+Sandbox removed; an Agent stop, deletion or credential withdrawal fails with it
+too, so a Sandbox the identity may no longer see (the provider hides it as
+missing) is never recorded gone. A missing role fails at once; an identity the
+provider could not authenticate (`transient`: a token file or signing key between
+refreshes) retries within the attempt budget first. The worker logs the failed
+stop, deletion or withdrawal with the same guidance the deployment status shows.
+A delete that finds nothing where the read just did is `SANDBOX_DELETION_UNCONFIRMED`:
+the sweep logs it `worker.harness-exposure-withdrawal-unconfirmed` and retries.
 
 When the provider refuses the controller's own identity during `ensureNamespace`
 or Namespace `cleanup`, a retry cannot help until an operator fixes that identity.

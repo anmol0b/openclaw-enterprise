@@ -2,8 +2,9 @@
 
 Create Agents and supported Dedicated runtimes with the
 [platform console](../console.md). Kubernetes needs a
-[ready Namespace and Secret storage](../../guides/deploy/production-agents.md#prepare-each-namespace).
-Creating tokens requires Secret creation permission. Provisioning grants accepted
+[ready Namespace and Secret storage](../../guides/deploy/production-agents.md#prepare-each-namespace)
+to deploy; while it provisions, drafts needing no new Secret or sign-in still save, unless it
+[adopts](../namespaces.md#lifecycle) an existing namespace. Creating tokens requires Secret creation permission. Provisioning grants accepted
 Secret access; drafts also require permission to grant Agent key access. After deployment, [verify the same
 Agent and revision](../../guides/deploy/production-agents.md#verify-production-workloads).
 The [local walkthrough](../../guides/first-agent.md) creates a separate Agent.
@@ -32,9 +33,9 @@ block direct Secret-backed model and environment projection.
    skips Presets.
 3. Enter a unique name within the Namespace. Choose **Provider**, then
    **Harness**. OpenAI offers **Codex** by default and **OpenClaw**;
-   Anthropic offers only **OpenClaw**. Codex uses Dedicated **Execution mode**; OpenClaw starts Embedded. Supported
-   Installations offer OpenAI OpenClaw **Dedicated** under **Runtime details**. Anthropic
-   OpenClaw stays Embedded.
+   Anthropic offers only **OpenClaw**. Codex uses Dedicated **Execution mode**. OpenClaw
+   starts Embedded without a Sandbox Driver, or Dedicated (OpenAI only; **Runtime details**)
+   with one that provisions it. Anthropic OpenClaw stays Embedded.
    For Codex, choose **OpenAI API key**, **Service Accounts**, or **ChatGPT
    OAuth** ([experimental](../../guides/deploy/credential-lifecycle.md#use-a-personal-codex-login)).
    OpenClaw uses the provider's API key.
@@ -42,7 +43,6 @@ block direct Secret-backed model and environment projection.
    [OpenAI admin](https://admin.openai.com/) → your workspace → **Service accounts**
    to create a token with Codex scope.
    Choose a model Secret or **Create new Secret...**.
-   New Secrets persist after cancellation.
    Choose a model from the starter list or select **Enter model ID manually**.
    **Choose a model from the list** returns. Switching modes retains that provider's listed models; returning with an unlisted custom ID
    requires another selection. Other settings remain.
@@ -52,9 +52,8 @@ block direct Secret-backed model and environment projection.
    open **Advanced settings**. Selection changes preserve unrelated JSON edits;
    **Reset template** replaces them.
 5. Under **Repository access**, optionally select up to 16 approved repositories
-   and set their access levels. Kubernetes supports Codex (Dedicated) or OpenClaw
-   (Embedded), without a Sandbox Driver. Dedicated OpenClaw requires a Sandbox
-   Driver, so repository credentials remain unsupported. Use Codex for repositories
+   and set their access levels. Kubernetes supports Codex (Dedicated) and Embedded
+   OpenClaw without a Sandbox Driver, not Dedicated OpenClaw. Use Codex for repositories
    with Slack.
 
 6. If you need Slack, select **Dedicated** execution and use its channel card.
@@ -71,7 +70,8 @@ block direct Secret-backed model and environment projection.
    [initial contents](../agents.md#initial-contents-at-creation) for limits.
 8. Select **Create Agent** to submit Configuration, Secret references, Agent inputs,
    repositories, and workspace files for supported Dedicated provisioning.
-   Provisioning waits for deployment activation or failure.
+   Provisioning waits for deployment activation or failure, naming the deployment's current wait
+   when you can read the deployment.
    Success opens Agent details. Failure links to the same Agent and revision;
    correct its cause and deploy again through **Deployment activity**. If the
    first deployment was stopped, no repair is needed before deploying again.
@@ -80,9 +80,11 @@ block direct Secret-backed model and environment projection.
    [workspace editor](../console.md#edit-workspace-files). Pending inputs have no
    update API; see [workspace recovery](../../guides/topics/workspace-files.md#set-files-when-creating-an-agent).
 
-Before saving, selected Preset forms retain variables across Back/Forward; passwords clear. Leaving a default or no-Preset form discards unsaved state. Saved Agents and Secrets remain. **Start over** confirms discard.
-Reload, page exit, and sign-out clear local drafts. Once saving begins, navigation
-does not retain partial-save or uncertain-outcome state; follow save recovery below.
+Before saving, forms and Preset variables survive navigation; passwords clear.
+**Cancel** and **Start over** discard the draft, confirming once changed. Saved Agents
+and Secrets remain. Sign-out clears drafts; a reload asks first. A refused Create stays a draft
+reusing saved resources, except a repository-policy refusal; uncertain outcomes follow save
+recovery below.
 
 For Codex plugins, open **Configure plugins**. With the
 [OpenAI curated catalog](../drivers/plugin-bundled.md#selection-and-catalogs),
@@ -126,7 +128,6 @@ The starter list proves neither runtime compatibility nor provider acceptance.
 
 Optional model discovery requires Namespace Agent `create`, sends credentials
 upstream without saving them, and lists Codex models for `codex_pat`.
-Console selection needs no discovery.
 
 Configure Helm `api.modelDiscoveryCidrs` with provider IPv4 `/32` hosts, then
 upgrade. This grants only API Pods TCP 443 egress; Harness rules are unchanged.
@@ -164,7 +165,7 @@ existing Namespace Secrets before starting again.
 **Check credential registration** recovers an uncertain source. If absent,
 **Create Agent** retries its name/references; uniqueness fences late commits. **Remove failed credential registration** deletes a source left
 `registering`/`deleting`, requiring source `delete`. Retry removal after the gateway's
-registration safety window if needed. The model Secret stays saved. See the [provisioning flow](../../flows/agent-provisioning.md) for the API sequence.
+registration safety window if needed. See the [provisioning flow](../../flows/agent-provisioning.md) for the API sequence.
 
 A failed or stopped first deployment, or a Stop before it
 (`PROVISIONING_CANCELLED`), keeps the Agent and its name; provisioning cannot

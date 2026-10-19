@@ -78,15 +78,17 @@ editing/deployment without defaults.
 **Selected version** uses `activeRevisionId`; **View version vN** opens read-only
 details without activating it. **Deployment activity** shows the newest readable
 version's persisted status, not live health. Routine completion folds; pending work,
-read errors, warnings, and cleanup stay visible. Failed deployments offer Logs
-unless log text or revision access was denied during this sign-in. Configuration recovery
-requires Agent `update` or `deploy` and an existing Configuration without known read
-errors or denials; access remains separately authorized. Credentials recovery
-requires Agent `update`. Hidden or unlisted current versions suppress recovery;
-viewed versions show results. Activity polls every
-`DEPLOYMENT_POLL_MS` (`apps/controller/src/console/agents/detail.mjs`) until a
-result or read error; a new result also rereads selection. **Refresh deployment** rereads
-activity and selection. **Current observations** requests timestamped
+read errors, warnings, and cleanup stay visible. Failed deployments show the API's message
+(logs advice if it names no step) and offer Logs unless log text or revision access was
+denied this sign-in. **Open Configuration** needs Agent `update` and no known Configuration
+read error or denial. **Open version draft** (`deploy` only) and **Deploy again** (per the
+message) need `deploy` and a successful Configuration read; Deploy again focuses **Deploy new
+version**. Credentials recovery needs `update`. Hidden or unlisted
+current versions suppress recovery; viewed versions show results. Activity polls every
+`DEPLOYMENT_POLL_MS` until a result or read error; a new result also rereads selection. **Refresh deployment** rereads
+activity and selection, after any poll in flight. Polls patch in place (`patchChildren`), so
+an unchanged poll writes nothing. A pending deploy lists its result rows before the first attempt;
+the details keep their tallest height until Refresh after it settles. **Current observations** requests timestamped
 `succeeded`, `failed`, or `unknown` diagnostics without changing deployment status.
 Its bodyless POST requires Agent `read`/`operate` and exact AgentRevision `read`.
 **Create new version** opens the saved draft; **Deploy new version** admits its
@@ -96,6 +98,8 @@ values. Stop/deletion target the Agent.
 **Edit Configuration** rereads the Agent and Configuration, then PATCHes only
 `{ values, expectedGeneration }`, preserving `secretBindings`. A changed ID or stale
 generation (including a `409` from a racing save) requires **Reload draft**.
+When a focused **Save Configuration** becomes disabled, focus moves to **Checking Configuration…**.
+Success focuses **Edit Configuration**, unless the reader moved focus elsewhere during the save.
 
 **Enable gateway password access** sets `gateway.auth.password` to reference
 `OPENCLAW_GATEWAY_PASSWORD`, changing nothing else; **Cancel** discards it. Kubernetes
@@ -182,10 +186,9 @@ uncertain outcomes block retries until refresh. The
 recovery. Metadata and Credentials links open new tabs, preserving edits.
 Values are never retrieved.
 
-Saving channels rereads Agent and Configuration; a changed association or
-generation, or a racing `409`, offers Reload draft. The PATCH sends
-`{ values, expectedGeneration }`, adding
-`secretBindings` only for changed selections. A rejected PATCH writes no Secret grant.
+Channel saves reread the Agent and Configuration. A changed association or stale generation
+offers **Reload draft**; a provisioning reservation explains the refusal. PATCH sends
+`{ values, expectedGeneration }` and changed `secretBindings`. Rejection grants no Secret access.
 
 After PATCH, `apps/controller/src/console/agents/credential-access.mjs:ensureCredentialOperateBinding`
 grants the Agent service principal access to selected Secrets through Namespace
@@ -246,8 +249,9 @@ Pickers switch references; rotating shared Secret values is separate.
 ### 6. Read and replace live workspace files
 
 `apps/controller/src/console/agents/workspace.mjs:renderWorkspaceFiles` opens from
-`tab=workspace` after an exact Agent read. It skips Configuration and revision history. Contents belong to the live Agent.
-With no active revision, files stay unavailable and no file request is sent.
+`tab=workspace` after an exact Agent read. Contents belong to the live Agent, not Configuration or revision history.
+With no active revision, files stay unavailable and no file request is sent. Another current version
+keeps the editors, focus and caret, rereading unedited files in place; gaining or losing one rebuilds them.
 
 The editor GETs each supported filename and normalizes textareas to LF. An
 untouched CRLF file stays clean and is not rewritten. Only an edit enables Save.
@@ -285,7 +289,8 @@ not that Compute has shut down. Cancel restores focus to the invoking button; su
 
 For a stopped Agent, **Request Stop again** confirms a new stop intent, even with no selected
 revision; the Console cannot inspect history or candidate cleanup. With no selected revision
-and no readable versions yet (`setNoReadableVersions`), it shows no Stop control.
+and no readable versions yet (`setNoReadableVersions`), the Stop card is hidden unless the viewer
+just used it. The overview's **Runtime** row reports a requested stop.
 
 Refresh reads desired state and selected revision, not live health. Denial stays inline; changed
 state updates panels in place. An uncertain write blocks another Stop until readback succeeds.
@@ -354,21 +359,6 @@ worker cleanup and the Namespace-owned resources it preserves.
 
 ## Changelog
 
-- 2026-10-16 00:38: Reconcile in-place OAuth save feedback after merging main. (01a11d95-ebef-76e1-b9b9-9d3d2e88e99e - 697ca86d47f67a9671f07708f362bcfb671650e6)
-
-- 2026-10-15 22:35: Reconcile failed-version recovery and OAuth editing. (authoring-run/8c4ab973-b5a0-4bcf-8fcf-5f9d908ea26c - c997748f661b5df1198047de5a97c9cf23fb241a)
-
-- 2026-10-15 22:26: Reconcile current main behavior with OpenShell OAuth contracts in the accompanying merge. (authoring-run/41e4bb7a-c8eb-4332-b1f9-07fb8e234f63 - b747cf5b6402ad36ce9f1ae6dbed08928ddcf3dc)
-
-- 2026-10-15 21:30: Separate selected version, recorded deployment, and live-serving uncertainty; surface failed-version recovery. (authoring-run/6d9b833d-e4fc-4f58-98a8-f0fac29f709d - 7adac57cc03545bdd3cdc383c88219396a677fd9)
-- 2026-10-15 04:40: Hide stop controls for a never-deployed Agent in the accompanying change. (authoring-run/2aecf15b-82ac-4724-94d9-45b8c1c99fc6 - c78f96b706ce94dbfe6aadfdac9c40e7e7e759ae)
-- 2026-10-10 20:00: Keep untouched CRLF workspace files clean; only an edit enables Save. (public-pr/2000 - a3ca862c37d05ba850d3c9595e5668917d7f480d)
-- 2026-10-10 08:46: Trace keyboard focus after Stop confirmation cancellation. (authoring-run/9c1f0e85-9f16-436e-900f-b3d0e6e8cdd9 - b8783d7942e875c6eb751222329c63fac5c028a1)
-
-- 2026-10-13 09:37: Reconcile current admission and lifecycle behavior with external OAuth custody in the accompanying merge. (authoring-run/fd902939-ed58-4508-8d33-95a863d966af - e8d39978d801e7a5a8ac7242f32035f426da94e1)
-
-- 2026-10-09 20:35: Replace only the old Harness source binding while preserving unrelated sources. (01a11d95-ebef-76e1-b9b9-9d3d2e88e99e - ece639c78)
-
-- 2026-10-07 17:42: Trace exact CredentialSource grants alongside Secret grants after authentication saves. (01a0e5ec-d802-7800-9eb6-8022c1ac0d06 - da984340a)
+- 2026-10-18 20:30: Show each failure's next step; add Deploy again. (ux-a1)
 
 [Console Agent editing documentation history](agent-editing/history.md) preserves the older dated entries.

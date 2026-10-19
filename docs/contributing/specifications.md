@@ -253,8 +253,10 @@ Plan filenames and historical commit links retain their original names.
 | `40-agent-egress-0x`                      | [RFC-0017](../../specs/rfcs/0017-agent-egress-0x/index.md)              |
 | `2026-09-28-installation-profiles-design` | [RFC-0018](../../specs/rfcs/0018-installation-profiles-design/index.md) |
 
-The unmerged Egress Proxy proposal was renumbered after RFC-0019 was assigned:
+The unmerged Egress Proxy proposal was renumbered when RFC-0019 and, later,
+RFC-0021 were assigned to other proposals:
 
 | Previous RFC path                         | Current RFC                                                                  |
 | ----------------------------------------- | ---------------------------------------------------------------------------- |
-| `0019-egress-proxy-credential-lifecycle/` | [RFC-0021](../../specs/rfcs/0021-egress-proxy-credential-lifecycle/index.md) |
+| `0019-egress-proxy-credential-lifecycle/` | [RFC-0022](../../specs/rfcs/0022-egress-proxy-credential-lifecycle/index.md) |
+| `0021-egress-proxy-credential-lifecycle/` | [RFC-0022](../../specs/rfcs/0022-egress-proxy-credential-lifecycle/index.md) |

@@ -9,8 +9,10 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import pg from "pg";
 import {
-  OpenShellGateway,
   createOpenShellBackend,
+  OpenShellGateway,
+  openShellProviderName,
+  openShellWorkspaceName,
 } from "../../apps/controller/src/backends/openshell.ts";
 import { OpenShellCredentialGatewayDriver } from "../../apps/controller/src/drivers/credential-gateway/openshell.ts";
 import {
@@ -31,13 +33,20 @@ import {
   OpenShellRequestReplayRefusedError,
   OpenShellSandboxAlreadyExistsError,
 } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
-import { serviceTarget } from "../../apps/controller/src/drivers/sandbox/openshell-service-transport.ts";
+import {
+  OpenShellServiceTransportError,
+  serviceTarget,
+} from "../../apps/controller/src/drivers/sandbox/openshell-service-transport.ts";
 import { createControllerWorker } from "../../apps/controller/src/worker.ts";
 import {
   CredentialSourceConfigError,
   CredentialSourceRevisionError,
+  DependencyUnavailableError,
+  SandboxGatewayUnauthorizedError,
   SandboxRevisionUnsupportedError,
+  SandboxWorkspaceSetupRefusedError,
   ScopeViolationError,
+  TransientDependencyError,
 } from "../../packages/occ/src/index.ts";
 import { createInstallationDriverConfiguration as installation } from "../helpers/installation-driver-configuration.mjs";
 import { loadInstallationFile } from "../helpers/installation-file.mjs";
@@ -283,6 +292,14 @@ function storedSandbox(request, fields = {}) {
     serviceUrls: { "": url },
     ...fields,
   };
+}
+
+/** A live Sandbox record by name, as GetSandbox reports one without its Harness service. */
+function sandboxRecord(name, workspace) {
+  return storedSandbox(
+    { name, workspace, labels: {}, annotations: {}, spec: {} },
+    { serviceUrls: {} },
+  );
 }
 
 /** The Codex Harness's bearer-passthrough service at `url`, or none. */
@@ -659,8 +676,15 @@ test("startup requires protected OpenShell transport or an explicit NetworkPolic
     certificatePath: "/etc/openclaw/openshell/operator.crt",
     privateKeyPath: "/etc/openclaw/openshell/operator.key",
   };
-  protectedTransport.backend[0].configuration.operatorTls = operatorTls;
-  await load(protectedTransport);
+  // URI schemes are case-insensitive; both gateway transports parse the protocol before
+  // choosing TLS. Startup must admit the same protected connection, including operator TLS.
+  for (const scheme of ["https", "HTTPS", "hTtPs"]) {
+    protectedTransport.backend[0].configuration.endpoint = `${scheme}://openshell-gateway.openshell.svc:8080`;
+    delete protectedTransport.backend[0].configuration.operatorTls;
+    await load(protectedTransport);
+    protectedTransport.backend[0].configuration.operatorTls = operatorTls;
+    await load(protectedTransport);
+  }
   tlsOnly.backend[0].configuration.operatorTls = operatorTls;
   await assert.rejects(load(tlsOnly), /requires TLS with bearerTokenFile authentication/);
 
@@ -995,6 +1019,685 @@ test("OpenShell provisions native OpenClaw without exposing an inbound Harness s
   assert.equal(gatewayClient.profiles.has("oce-openclaw-runtime"), true);
   await driver.cleanup(context);
   assert.equal(gatewayClient.profiles.has("oce-openclaw-runtime"), false);
+});
+
+// Finding 1676: OpenShell answers NOT_FOUND for a Sandbox this identity may not see exactly as
+// for one that is gone (GetSandbox and DeleteSandbox alike), so a stop, retirement or deletion
+// records the Sandbox removed only once OpenShell confirms it: a present Sandbox is deleted, an
+// absent one counts as gone only after GetWorkspace (which keeps PERMISSION_DENIED) answers, a
+// refusal on any call fails with SANDBOX_GATEWAY_UNAUTHORIZED, and a missing Workspace or a
+// gateway that does not answer fails closed with its own class. Nothing is deleted on any of them.
+test("OpenShell revision cleanup records a Sandbox removed only once OpenShell confirms it", async () => {
+  const gatewayClient = workspaceGatewayClient();
+  const driver = openShellDriver(gatewayClient);
+  const { context, revision } = runtimeSandboxFixture(driver);
+  const { name: workspace, id: namespaceId } = context.namespace;
+  gatewayClient.workspaces.set(workspace, ownedWorkspace(workspace, namespaceId));
+  let present = sandboxRecord("sb-live", workspace);
+  const reads = [];
+  const deletions = [];
+  const workspaceReads = [];
+  gatewayClient.getSandbox = async (request) => {
+    reads.push(request.name);
+    return present;
+  };
+  gatewayClient.deleteSandbox = async (request) => {
+    deletions.push(request.name);
+  };
+  const getWorkspace = gatewayClient.getWorkspace;
+  gatewayClient.getWorkspace = async (name) => {
+    workspaceReads.push(name);
+    return getWorkspace(name);
+  };
+  const cleanup = () => driver.cleanup({ ...context, revision });
+  // grpc-js ServiceError shape, as unary() passes PERMISSION_DENIED (7) and UNAUTHENTICATED (16).
+  const refusal = (code, details) =>
+    Object.assign(new Error(`${code} refused: ${details}`), { code, details });
+  // UNAUTHENTICATED is transient (the worker retries it within its budget), PERMISSION_DENIED
+  // is not (finding 1694); both carry the code.
+  const unauthorized = (operation, transient = false) =>
+    assert.rejects(operation(), (error) => {
+      assert.ok(error instanceof SandboxGatewayUnauthorizedError, String(error));
+      assert.equal(error.code, "SANDBOX_GATEWAY_UNAUTHORIZED");
+      assert.equal(error.transient, transient);
+      assert.match(error.message, /cannot be confirmed removed/);
+      return true;
+    });
+
+  // A present Sandbox is deleted by its revision-derived name; no Workspace read is needed.
+  await cleanup();
+  assert.equal(reads.length, 1);
+  assert.match(reads[0], /^sb-[a-f0-9]{16}$/u);
+  assert.deepEqual(deletions, reads);
+  assert.deepEqual(workspaceReads, []);
+  // An absent one is gone once the Workspace read passes and a second read still finds none,
+  // with no DeleteSandbox.
+  present = undefined;
+  await cleanup();
+  assert.deepEqual(workspaceReads, [workspace]);
+  assert.equal(reads.length, 3);
+  assert.deepEqual(deletions, reads.slice(0, 1));
+  // Finding 1692: GetWorkspace proves the role now, not at the first read, so a role restored
+  // between them would confirm a live Sandbox gone. A Sandbox the second read finds is deleted
+  // instead; a refusal on that read is the same lost identity, and nothing is recorded.
+  const answers = (...values) => {
+    const queue = [...values];
+    gatewayClient.getSandbox = async (request) => {
+      reads.push(request.name);
+      const answer = queue.length === 0 ? present : queue.shift();
+      if (answer instanceof Error) {
+        throw answer;
+      }
+      return answer;
+    };
+  };
+  answers(undefined, sandboxRecord("sb-live", workspace));
+  await cleanup();
+  assert.deepEqual(workspaceReads, [workspace, workspace]);
+  assert.equal(reads.length, 5);
+  assert.deepEqual(deletions, [reads[0], reads[0]]);
+  answers(undefined, refusal(7, "sandbox"));
+  await unauthorized(cleanup);
+  assert.deepEqual(deletions, [reads[0], reads[0]]);
+  answers();
+  // The identity is refused on the Workspace read: the Sandbox may be live and hidden.
+  for (const code of [7, 16]) {
+    gatewayClient.getWorkspace = async () => {
+      throw refusal(code, "workspace");
+    };
+    await unauthorized(cleanup, code === 16);
+  }
+  // The identity is refused on the Sandbox read itself (an expired token fails every call).
+  gatewayClient.getWorkspace = getWorkspace;
+  gatewayClient.getSandbox = async () => {
+    throw refusal(16, "token expired");
+  };
+  await unauthorized(cleanup, true);
+  assert.deepEqual(workspaceReads, [workspace, workspace, workspace]);
+  // OpenShell reports no Workspace: nothing proves the Sandbox gone, so cleanup fails closed.
+  gatewayClient.getSandbox = async () => undefined;
+  gatewayClient.getWorkspace = async () => undefined;
+  await assert.rejects(cleanup(), /reports no Workspace .* cannot be confirmed removed/);
+  // A gateway that does not answer keeps its class, so the worker retries the idempotent stop.
+  const unanswered = new DependencyUnavailableError(
+    "OpenShell GetWorkspace failed with gRPC status 14.",
+  );
+  gatewayClient.getWorkspace = async () => {
+    throw unanswered;
+  };
+  await assert.rejects(cleanup(), (error) => error === unanswered);
+  gatewayClient.getWorkspace = getWorkspace;
+  // A Sandbox that is present but refused on the delete: the same code, nothing recorded.
+  gatewayClient.getSandbox = async () => sandboxRecord("sb-live", workspace);
+  gatewayClient.deleteSandbox = async () => {
+    throw refusal(7, "sandbox:delete");
+  };
+  await unauthorized(cleanup);
+  // A Sandbox removed between the read and the delete answers NOT_FOUND, which the client
+  // reports unconfirmed; that failure keeps its class, and the next pass's read confirms it.
+  const unconfirmed = new Error(
+    "OpenShell DeleteSandbox did not find the Sandbox, so the deletion is unconfirmed.",
+  );
+  gatewayClient.deleteSandbox = async () => {
+    throw unconfirmed;
+  };
+  await assert.rejects(cleanup(), (error) => error === unconfirmed);
+  assert.deepEqual(deletions, [reads[0], reads[0]]);
+  // The runtime provider is removed only after the Sandbox's state is confirmed.
+  assert.equal(
+    gatewayClient.calls.some(([method]) => method === "deleteProvider"),
+    false,
+  );
+
+  // The same refusal on CreateSandbox: OpenShell keeps PERMISSION_DENIED there, so a Sandbox
+  // hidden from the identity is neither adopted nor created over, and the deployment fails with
+  // the code instead of spending its attempts on a generic failure.
+  const requirements = runtimeSandboxFixture(driver).requirements;
+  gatewayClient.getSandbox = async () => undefined;
+  gatewayClient.createSandbox = async () => {
+    throw refusal(7, "sandbox:create");
+  };
+  await assert.rejects(driver.provisionHarness({ ...context, revision, requirements }), (error) => {
+    assert.ok(error instanceof SandboxGatewayUnauthorizedError, String(error));
+    assert.equal(error.transient, false);
+    assert.match(error.message, /cannot be created or adopted/);
+    return true;
+  });
+});
+
+// Finding 1676, credential path: a credential withdrawal that reports `absent` settles as
+// withdrawn, so a Sandbox hidden from the identity (GetSandbox and DetachSandboxProvider answer
+// NOT_FOUND for it) must not read as absent while it keeps resolving the credential. The gateway
+// confirms absence through GetWorkspace and fails a refusal with SANDBOX_GATEWAY_UNAUTHORIZED.
+test("the OpenShell Credential Gateway reports a withdrawal absent only once the Workspace confirms it", async () => {
+  const { client, driver, context } = credentialGatewayOverProviders();
+  const sourceId = "cs_00000000-0000-4000-8000-0000000000c1";
+  const { namespace, signal } = context(sourceId);
+  const workspace = openShellWorkspaceName(namespace);
+  const provider = openShellProviderName(sourceId);
+  const sandbox = "sb-credential";
+  let visibleWorkspace = { name: workspace, labels: {}, phase: "WORKSPACE_PHASE_ACTIVE" };
+  let listed;
+  let detachAnswer;
+  // Answers for the next detaches and Sandbox reads, ahead of `detachAnswer` and `listed`.
+  const detachAnswers = [];
+  const sandboxAnswers = [];
+  const calls = [];
+  client.getWorkspace = async (name) => {
+    calls.push(["getWorkspace", name]);
+    return visibleWorkspace;
+  };
+  client.getSandbox = async (request) => {
+    calls.push(["getSandbox", request.name]);
+    const providers = sandboxAnswers.length === 0 ? listed : sandboxAnswers.shift();
+    return providers === undefined ? undefined : { name: sandbox, spec: { providers } };
+  };
+  client.detachSandboxProvider = async (_workspace, name, detached) => {
+    calls.push(["detachSandboxProvider", name, detached]);
+    return detachAnswers.length === 0 ? detachAnswer : detachAnswers.shift();
+  };
+  // The receipts the status reads name: each settles the detach it follows.
+  const receipts = [];
+  client.getSandboxProviderStatus = async (_workspace, _sandbox, _provider, _signal, receiptId) => {
+    receipts.push(receiptId);
+    return { state: "PROVIDER_READINESS_STATE_REVOKED" };
+  };
+  const withdraw = (recheck) =>
+    driver.withdraw({
+      namespace,
+      revision: { harness: { id: "codex", mode: "dedicated" } },
+      sandbox: { resourceName: sandbox },
+      sourceId,
+      signal,
+      ...(recheck ? { recheck: true } : {}),
+    });
+  const refusal = (code) => Object.assign(new Error(`${code} refused`), { code, details: "ws" });
+  const unauthorized = (recheck, transient = false) =>
+    assert.rejects(withdraw(recheck), (error) => {
+      assert.ok(error instanceof SandboxGatewayUnauthorizedError, String(error));
+      assert.equal(error.code, "SANDBOX_GATEWAY_UNAUTHORIZED");
+      assert.equal(error.transient, transient);
+      assert.match(error.message, /credential of Sandbox .* cannot be confirmed withdrawn/);
+      return true;
+    });
+
+  // A detach receipt revokes without any Workspace read.
+  detachAnswer = { receiptId: "receipt-1" };
+  assert.deepEqual(await withdraw(false), { sourceId, state: "revoked" });
+  assert.deepEqual(calls, [["detachSandboxProvider", sandbox, provider]]);
+  // A detach that finds no Sandbox is absent only once the Workspace answers and a second
+  // Sandbox read still finds none.
+  calls.length = 0;
+  detachAnswer = undefined;
+  assert.deepEqual(await withdraw(false), { sourceId, state: "absent" });
+  assert.deepEqual(calls, [
+    ["detachSandboxProvider", sandbox, provider],
+    ["getWorkspace", workspace],
+    ["getSandbox", sandbox],
+  ]);
+  // Finding 1692: a Sandbox that second read finds (a role restored between the detach and
+  // GetWorkspace) is detached again, not recorded absent; a detach that misses it again is
+  // unconfirmed, so the worker retries, and a refusal on the second read carries the code.
+  calls.length = 0;
+  listed = [provider];
+  receipts.length = 0;
+  detachAnswers.push(undefined, { receiptId: "receipt-restored" });
+  assert.deepEqual(await withdraw(false), { sourceId, state: "revoked" });
+  assert.deepEqual(calls, [
+    ["detachSandboxProvider", sandbox, provider],
+    ["getWorkspace", workspace],
+    ["getSandbox", sandbox],
+    ["detachSandboxProvider", sandbox, provider],
+  ]);
+  assert.deepEqual(receipts, ["receipt-restored"]);
+  detachAnswers.push(undefined, undefined);
+  await assert.rejects(
+    withdraw(false),
+    /GetSandbox finds Sandbox .* but DetachSandboxProvider did not, so the credential .* cannot be confirmed withdrawn/,
+  );
+  assert.equal(detachAnswers.length, 0);
+  const sandboxRead = client.getSandbox;
+  client.getSandbox = async () => {
+    throw refusal(16);
+  };
+  await unauthorized(false, true);
+  client.getSandbox = sandboxRead;
+  // Outside a recheck only a receipt revokes: a restored Sandbox that does not list the provider
+  // is detached all the same.
+  calls.length = 0;
+  receipts.length = 0;
+  listed = ["operator-static"];
+  detachAnswers.push(undefined, { receiptId: "receipt-unlisted" });
+  assert.deepEqual(await withdraw(false), { sourceId, state: "revoked" });
+  assert.deepEqual(calls, [
+    ["detachSandboxProvider", sandbox, provider],
+    ["getWorkspace", workspace],
+    ["getSandbox", sandbox],
+    ["detachSandboxProvider", sandbox, provider],
+  ]);
+  assert.deepEqual(receipts, ["receipt-unlisted"]);
+  listed = [provider];
+  // A refusal on the receipt's status read carries the code too.
+  const statusRead = client.getSandboxProviderStatus;
+  client.getSandboxProviderStatus = async () => {
+    throw refusal(7);
+  };
+  detachAnswers.push({ receiptId: "receipt-refused" });
+  await unauthorized(false);
+  client.getSandboxProviderStatus = statusRead;
+  listed = undefined;
+  for (const code of [7, 16]) {
+    client.getWorkspace = async () => {
+      throw refusal(code);
+    };
+    await unauthorized(false, code === 16);
+  }
+  client.getWorkspace = async () => undefined;
+  await assert.rejects(withdraw(false), /reports no Workspace .* cannot be confirmed withdrawn/);
+  // The refusal on the detach itself carries the same code.
+  client.getWorkspace = async (name) => {
+    calls.push(["getWorkspace", name]);
+    return visibleWorkspace;
+  };
+  client.detachSandboxProvider = async () => {
+    throw refusal(7);
+  };
+  await unauthorized(false);
+  // A recheck reads the Sandbox first: a listed provider is detached again, a Sandbox without it
+  // is revoked, and a missing one is absent only with the Workspace's confirmation.
+  calls.length = 0;
+  client.detachSandboxProvider = async (_workspace, name, detached) => {
+    calls.push(["detachSandboxProvider", name, detached]);
+    return { receiptId: "receipt-2" };
+  };
+  listed = ["operator-static", provider];
+  assert.deepEqual(await withdraw(true), { sourceId, state: "revoked" });
+  listed = ["operator-static"];
+  assert.deepEqual(await withdraw(true), { sourceId, state: "revoked" });
+  listed = undefined;
+  assert.deepEqual(await withdraw(true), { sourceId, state: "absent" });
+  assert.deepEqual(calls, [
+    ["getSandbox", sandbox],
+    ["detachSandboxProvider", sandbox, provider],
+    ["getSandbox", sandbox],
+    ["getSandbox", sandbox],
+    ["getWorkspace", workspace],
+    ["getSandbox", sandbox],
+  ]);
+  // A recheck whose second read finds the Sandbox without the provider is revoked, no detach;
+  // one that lists it is detached again.
+  calls.length = 0;
+  sandboxAnswers.push(undefined, ["operator-static"]);
+  assert.deepEqual(await withdraw(true), { sourceId, state: "revoked" });
+  sandboxAnswers.push(undefined, ["operator-static", provider]);
+  assert.deepEqual(await withdraw(true), { sourceId, state: "revoked" });
+  assert.deepEqual(calls, [
+    ["getSandbox", sandbox],
+    ["getWorkspace", workspace],
+    ["getSandbox", sandbox],
+    ["getSandbox", sandbox],
+    ["getWorkspace", workspace],
+    ["getSandbox", sandbox],
+    ["detachSandboxProvider", sandbox, provider],
+  ]);
+  client.getWorkspace = async () => {
+    throw refusal(16);
+  };
+  await unauthorized(true, true);
+  client.getSandbox = async () => {
+    throw refusal(7);
+  };
+  await unauthorized(true);
+});
+
+// Finding 1642: a native worker that holds a failed model check never connects its node.
+// Compute asks for the Codex bearer-passthrough exposure (APP_SERVER_PORT with the
+// APP_TOKEN_SHA verifier) so it can read that held failure; the raw token never arrives.
+test("OpenShell exposes a native OpenClaw worker's held-failure port when Compute asks for it", async () => {
+  const requests = [];
+  let storedSandbox;
+  const gatewayClient = workspaceGatewayClient();
+  let createdServiceUrl = "http://native.example.test:9443/";
+  gatewayClient.createSandbox = async (request) => {
+    requests.push(request);
+    storedSandbox = {
+      name: request.name,
+      workspace: request.workspace,
+      labels: structuredClone(request.labels),
+      annotations: structuredClone(request.annotations),
+      spec: structuredClone(request.spec),
+      // Like the real client: an exposure always comes back with its URL.
+      serviceUrls: request.serviceExposures.length === 0 ? {} : { "": createdServiceUrl },
+    };
+    return storedSandbox;
+  };
+  gatewayClient.getSandbox = async () => storedSandbox;
+  const service = {
+    sandbox: "",
+    name: "",
+    targetPort: 18790,
+    authorizationMode: "SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH",
+    advertisedUrl: "http://native.example.test:18790/",
+    url: "http://native.example.test:9443/",
+  };
+  let exposedService = undefined;
+  gatewayClient.getService = async (_workspace, sandbox, name) =>
+    exposedService === undefined ? undefined : { ...exposedService, sandbox, name };
+  const driver = openShellDriver(gatewayClient);
+  const { context, revision, requirements } = runtimeSandboxFixture(driver, {
+    harnessId: "openclaw",
+  });
+  const exposing = (environment) => ({
+    ...requirements,
+    environment: [...requirements.environment, ...environment],
+  });
+  await driver.ensureNamespace(context);
+
+  // The exposure needs the verifier, and never the raw token, exactly like Codex.
+  for (const [environment, message] of [
+    [[{ name: "APP_SERVER_PORT", value: "18790" }], /requires one literal APP_TOKEN_SHA verifier/],
+    [
+      [
+        { name: "APP_SERVER_PORT", value: "18790" },
+        { name: "APP_TOKEN_SHA", value: "b".repeat(64) },
+        {
+          name: "APP_SERVER_TOKEN",
+          valueFrom: { secretKeyRef: { name: "agent-token", key: "token" } },
+        },
+      ],
+      /cannot receive APP_SERVER_TOKEN/,
+    ],
+  ]) {
+    await assert.rejects(
+      driver.provisionHarness({ ...context, revision, requirements: exposing(environment) }),
+      (error) => {
+        assert.ok(error instanceof SandboxRevisionUnsupportedError, String(error));
+        assert.equal(error.code, "SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED");
+        assert.match(error.message, message);
+        return true;
+      },
+    );
+  }
+  assert.equal(requests.length, 0);
+
+  const exposed = exposing([
+    { name: "APP_SERVER_PORT", value: "18790" },
+    { name: "APP_TOKEN_SHA", value: "b".repeat(64) },
+  ]);
+  // The created exposure's URL is validated on the create pass, as for Codex.
+  createdServiceUrl = "ftp://native.example.test/";
+  await assert.rejects(
+    driver.provisionHarness({ ...context, revision, requirements: exposed }),
+    /Harness service URL must be an HTTP origin/,
+  );
+  requests.length = 0;
+  storedSandbox = undefined;
+  createdServiceUrl = "http://native.example.test:9443/";
+  const sandbox = await driver.provisionHarness({ ...context, revision, requirements: exposed });
+  assert.equal(sandbox.revisionId, revision.id);
+  assert.equal(requests.length, 1);
+  // The worker's transport port, not Codex's app-server port.
+  assert.deepEqual(requests[0].serviceExposures, [
+    { service: "", targetPort: 18790, authorizationMode: "bearer_passthrough" },
+  ]);
+  assert.equal(requests[0].spec.environment.APP_SERVER_PORT, "18790");
+  assert.equal(requests[0].spec.environment.APP_TOKEN_SHA, "b".repeat(64));
+  assert.equal(requests[0].spec.environment.APP_SERVER_TOKEN, undefined);
+  assert.equal(requests[0].spec.environment.OPENAI_API_KEY, undefined);
+  // Adoption needs the exact exposure: a lost or mismatched service fails closed,
+  // like Codex, since the spec match proves the Sandbox was created with it.
+  for (const lost of [undefined, { ...service, targetPort: 8081 }]) {
+    exposedService = lost;
+    await assert.rejects(
+      driver.provisionHarness({ ...context, revision, requirements: exposed }),
+      /exists without its exact bearer-passthrough Harness service/,
+    );
+  }
+  exposedService = service;
+  await driver.provisionHarness({ ...context, revision, requirements: exposed });
+  assert.equal(requests.length, 1);
+  // The exposure is for Compute's status read only: no inbound Harness endpoint.
+  await assert.rejects(
+    driver.harnessEndpoint({ ...context, revision, requirements: exposed }),
+    /only for dedicated Codex revisions/,
+  );
+  // A projected APP_SERVER_PORT asks for no exposure (finding 1661): it is refused as a
+  // secretKeyRef variable, not for a missing verifier, before any gateway call.
+  await assert.rejects(
+    driver.provisionHarness({
+      ...context,
+      revision,
+      requirements: exposing([
+        { name: "APP_SERVER_PORT", valueFrom: { secretKeyRef: { name: "ports", key: "port" } } },
+      ]),
+    }),
+    (error) => {
+      assert.ok(error instanceof SandboxRevisionUnsupportedError, String(error));
+      assert.match(error.message, /cannot receive secretKeyRef environment APP_SERVER_PORT/);
+      return true;
+    },
+  );
+  assert.equal(requests.length, 1);
+
+  // Finding 1657: the exposure serves Compute's read only until the worker's node enrolls.
+  // OpenShell routes it without authenticating the caller, so once nothing of Compute's
+  // listens there it goes, and a Sandbox adopted after enrollment is without it.
+  const deletions = [];
+  let deletion = async () => {
+    exposedService = undefined;
+  };
+  gatewayClient.deleteService = async (workspace, sandboxName, name) => {
+    deletions.push([workspace, sandboxName, name]);
+    await deletion();
+  };
+  const enrolled = { ...context, revision, requirements: exposed, workspaceNodeEnrolled: true };
+  // The gateway does not confirm the delete: adoption fails closed, the service stays.
+  deletion = async () => {
+    throw new Error("OpenShell DeleteService did not confirm deletion.");
+  };
+  await assert.rejects(driver.provisionHarness(enrolled), /did not confirm deletion/);
+  assert.deepEqual(deletions, [[requests[0].workspace, requests[0].name, ""]]);
+  assert.notEqual(exposedService, undefined);
+  deletion = async () => {
+    exposedService = undefined;
+  };
+  await driver.provisionHarness(enrolled);
+  assert.equal(deletions.length, 2);
+  assert.equal(exposedService, undefined);
+  // Absent after enrollment is the steady state: no delete, no complaint, no create.
+  await driver.provisionHarness(enrolled);
+  assert.equal(deletions.length, 2);
+  assert.equal(requests.length, 1);
+  // Before enrollment the same absence stays an anomaly.
+  await assert.rejects(
+    driver.provisionHarness({ ...context, revision, requirements: exposed }),
+    /exists without its exact bearer-passthrough Harness service/,
+  );
+  // A Sandbox created again after enrollment (the stale one was removed) carries the
+  // exposure its immutable request names and loses it in the same pass.
+  storedSandbox = undefined;
+  exposedService = service;
+  await driver.provisionHarness(enrolled);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1].serviceExposures, requests[0].serviceExposures);
+  assert.equal(deletions.length, 3);
+  assert.equal(exposedService, undefined);
+  // The enrolling pass withdraws it directly, once; a Codex Harness keeps its transport.
+  exposedService = service;
+  await driver.withdrawHarnessExposure(enrolled);
+  assert.equal(deletions.length, 4);
+  assert.equal(exposedService, undefined);
+  await driver.withdrawHarnessExposure(enrolled);
+  assert.equal(deletions.length, 4);
+  exposedService = service;
+  deletion = async () => {
+    throw new Error("OpenShell DeleteService did not confirm deletion.");
+  };
+  await assert.rejects(driver.withdrawHarnessExposure(enrolled), /did not confirm deletion/);
+  assert.notEqual(exposedService, undefined);
+  assert.equal(deletions.length, 5);
+  await assert.rejects(
+    driver.withdrawHarnessExposure({
+      ...enrolled,
+      revision: { ...revision, harness: { id: "codex", version: "1.0.0", mode: "dedicated" } },
+    }),
+    (error) => {
+      assert.ok(error instanceof SandboxRevisionUnsupportedError, String(error));
+      assert.equal(error.code, "SANDBOX_HARNESS_UNSUPPORTED");
+      assert.match(error.message, /keeps its exposure as the Gateway transport/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    driver.withdrawHarnessExposure({
+      ...enrolled,
+      revision: { ...revision, sandboxDriverId: "other" },
+    }),
+    /another Sandbox Driver/,
+  );
+  assert.equal(deletions.length, 5);
+  // Finding 1670: OpenShell answers NOT_FOUND for a Sandbox this identity may not see exactly
+  // as for one that is gone, so an absent service is "withdrawn" only once a Workspace read the
+  // identity still passes confirms it (GetWorkspace keeps PERMISSION_DENIED). A refusal there
+  // fails closed with its own code, a missing Workspace fails closed too, a gateway that does
+  // not answer keeps its class, and no deletion is attempted on any of them.
+  exposedService = undefined;
+  const getWorkspace = gatewayClient.getWorkspace;
+  const workspaceReads = [];
+  gatewayClient.getWorkspace = async (name) => {
+    workspaceReads.push(name);
+    return getWorkspace(name);
+  };
+  await driver.withdrawHarnessExposure(enrolled);
+  await driver.provisionHarness(enrolled);
+  assert.deepEqual(workspaceReads, [requests[0].workspace, requests[0].workspace]);
+  assert.equal(deletions.length, 5);
+  // grpc-js ServiceError shape: PERMISSION_DENIED (7) and UNAUTHENTICATED (16).
+  for (const [code, name] of [
+    [7, "PERMISSION_DENIED"],
+    [16, "UNAUTHENTICATED"],
+  ]) {
+    gatewayClient.getWorkspace = async () => {
+      throw Object.assign(new Error(`${code} ${name}: workspace`), { code, details: "workspace" });
+    };
+    for (const withdraw of [
+      () => driver.withdrawHarnessExposure(enrolled),
+      () => driver.provisionHarness(enrolled),
+    ]) {
+      await assert.rejects(withdraw(), (error) => {
+        assert.ok(error instanceof SandboxGatewayUnauthorizedError, String(error));
+        assert.equal(error.code, "SANDBOX_GATEWAY_UNAUTHORIZED");
+        assert.equal(error.transient, code === 16);
+        assert.match(error.message, /cannot be confirmed withdrawn/);
+        return true;
+      });
+    }
+  }
+  gatewayClient.getWorkspace = async () => undefined;
+  await assert.rejects(
+    driver.withdrawHarnessExposure(enrolled),
+    /reports no Workspace .* cannot be confirmed withdrawn/,
+  );
+  const unansweredWorkspace = new DependencyUnavailableError(
+    "OpenShell GetWorkspace failed with gRPC status 14.",
+  );
+  gatewayClient.getWorkspace = async () => {
+    throw unansweredWorkspace;
+  };
+  await assert.rejects(
+    driver.withdrawHarnessExposure(enrolled),
+    (error) => error === unansweredWorkspace,
+  );
+  assert.equal(deletions.length, 5);
+  gatewayClient.getWorkspace = getWorkspace;
+  // The same lost or expired identity answers on the first read (an expired token fails every
+  // call as UNAUTHENTICATED) or on the delete itself: those fail with the code too, instead of
+  // spending attempts as a generic failure, and nothing is confirmed.
+  const serviceRead = gatewayClient.getService;
+  gatewayClient.getService = async () => {
+    throw Object.assign(new Error("16 UNAUTHENTICATED: token expired"), {
+      code: 16,
+      details: "token expired",
+    });
+  };
+  for (const withdraw of [
+    () => driver.withdrawHarnessExposure(enrolled),
+    () => driver.provisionHarness(enrolled),
+  ]) {
+    await assert.rejects(withdraw(), (error) => {
+      assert.ok(error instanceof SandboxGatewayUnauthorizedError, String(error));
+      assert.equal(error.code, "SANDBOX_GATEWAY_UNAUTHORIZED");
+      assert.equal(error.transient, true);
+      return true;
+    });
+  }
+  gatewayClient.getService = serviceRead;
+  exposedService = service;
+  const serviceDelete = gatewayClient.deleteService;
+  gatewayClient.deleteService = async () => {
+    throw Object.assign(new Error("7 PERMISSION_DENIED: workspace"), {
+      code: 7,
+      details: "workspace",
+    });
+  };
+  await assert.rejects(
+    driver.withdrawHarnessExposure(enrolled),
+    (error) => error instanceof SandboxGatewayUnauthorizedError,
+  );
+  gatewayClient.deleteService = serviceDelete;
+  exposedService = undefined;
+  assert.equal(deletions.length, 5);
+  // Finding 1692: GetWorkspace proves the role now, not at the first read, so a role restored
+  // between them would confirm a live service withdrawn. The service is read again after
+  // GetWorkspace: one that read finds is deleted, a refusal there carries the code, and only a
+  // service still missing counts as withdrawn.
+  gatewayClient.getWorkspace = async (name) => {
+    workspaceReads.push(name);
+    return getWorkspace(name);
+  };
+  const serviceAnswers = [];
+  gatewayClient.getService = async (...args) => {
+    const answer = serviceAnswers.length === 0 ? serviceRead(...args) : serviceAnswers.shift();
+    if (answer instanceof Error) {
+      throw answer;
+    }
+    return answer;
+  };
+  exposedService = service;
+  deletion = async () => {
+    exposedService = undefined;
+  };
+  serviceAnswers.push(undefined);
+  await driver.withdrawHarnessExposure(enrolled);
+  assert.equal(workspaceReads.length, 3);
+  assert.equal(deletions.length, 6);
+  assert.equal(exposedService, undefined);
+  exposedService = service;
+  serviceAnswers.push(
+    undefined,
+    Object.assign(new Error("7 PERMISSION_DENIED: workspace"), { code: 7, details: "workspace" }),
+  );
+  await assert.rejects(
+    driver.withdrawHarnessExposure(enrolled),
+    (error) => error instanceof SandboxGatewayUnauthorizedError,
+  );
+  assert.equal(deletions.length, 6);
+  assert.notEqual(exposedService, undefined);
+  exposedService = undefined;
+  serviceAnswers.push(undefined);
+  await driver.withdrawHarnessExposure(enrolled);
+  assert.equal(workspaceReads.length, 5);
+  assert.equal(deletions.length, 6);
+  gatewayClient.getService = serviceRead;
+  gatewayClient.getWorkspace = getWorkspace;
+  // Nothing is observed through a withdrawn exposure, and nothing is asked of the gateway.
+  const getService = gatewayClient.getService;
+  gatewayClient.getService = async () => assert.fail("an enrolled worker is not observed");
+  await assert.rejects(
+    driver.harnessStatus({ ...enrolled, transportToken: "transport-token" }),
+    /node has enrolled; its Harness exposure is withdrawn/,
+  );
+  gatewayClient.getService = getService;
 });
 
 test("OpenShell native startup creates private temporary state without changing the supervisor temporary directory", async () => {
@@ -2006,10 +2709,46 @@ for (const harnessId of ["codex", "openclaw"]) {
     // Failed initialization and foreign Secret ownership must never report successful delivery.
     exitCode = 1;
     await assert.rejects(provision(), /workspace initialization failed/);
+    // A refusal (the runner's exit status 2) repeats on every retry, so Compute fails the
+    // deployment at once with WORKSPACE_SETUP_REFUSED (finding 1708).
+    exitCode = 2;
+    await assert.rejects(provision(), (error) => {
+      assert.ok(error instanceof SandboxWorkspaceSetupRefusedError, String(error));
+      assert.equal(error.code, "WORKSPACE_SETUP_REFUSED");
+      assert.equal(error.message, "OpenShell workspace initialization refused.");
+      return true;
+    });
     foreign = true;
     const before = executions.length;
     await assert.rejects(provision(), /workspace initialization failed/);
     assert.equal(executions.length, before);
+
+    await t.test("the setup wrapper passes the runner's refusal status through", async (t) => {
+      const root = await mkdtemp(join(tmpdir(), "openshell-workspace-wrapper-"));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const workspace = join(root, "workspace");
+      await mkdir(workspace);
+      const wrapped = (payload, environment = {}) =>
+        spawnSync(process.execPath, ["-e", execution.command[2]], {
+          input: JSON.stringify(payload),
+          encoding: "utf8",
+          timeout: 60_000,
+          env: {
+            ...process.env,
+            HOME: root,
+            OPENCLAW_STATE_DIR: join(root, "state"),
+            OPENCLAW_WORKSPACE_DIR: workspace,
+            OPENCLAW_EXECUTABLE: join(root, "absent-runtime.mjs"),
+            ...environment,
+          },
+        }).status;
+      // A completed setup whose workspace has no record refuses on every retry.
+      const { files: _files, ...record } = setup;
+      assert.equal(wrapped({ ...record, completed: true }), 2);
+      // A missing runtime may be back on a retry; a workspace path the wrapper rejects exits 1.
+      assert.equal(wrapped(setup), 1);
+      assert.equal(wrapped(setup, { OPENCLAW_WORKSPACE_DIR: "relative" }), 1);
+    });
 
     if (harnessId === "codex") {
       await t.test(
@@ -2511,12 +3250,25 @@ test("OpenShell Namespace steps fail at once when OpenShell refuses the controll
       { name: "SandboxNamespaceRefusedError", message: refusal("PERMISSION_DENIED") },
     );
   }
-  // Revision cleanup keeps its raw error: the refusal classification is for Namespace steps only.
+  // Revision cleanup is not a Namespace step: a refusal there fails closed with the revision
+  // code SANDBOX_GATEWAY_UNAUTHORIZED (finding 1676), and a non-identity error keeps its class.
   {
     const raw = grpcError("PERMISSION_DENIED", "sandbox:delete");
-    const driver = openShellDriver(failing("deleteSandbox", raw));
+    const gatewayClient = failing("deleteSandbox", raw);
+    gatewayClient.getSandbox = async () => sandboxRecord("sb-present", "oce-present");
+    const driver = openShellDriver(gatewayClient);
     const { context, revision } = runtimeSandboxFixture(driver);
-    await assert.rejects(driver.cleanup({ ...context, revision }), keeps(raw));
+    await assert.rejects(driver.cleanup({ ...context, revision }), (error) => {
+      assert.ok(error instanceof SandboxGatewayUnauthorizedError, String(error));
+      assert.equal(error.code, "SANDBOX_GATEWAY_UNAUTHORIZED");
+      assert.equal(error.cause, raw);
+      return true;
+    });
+    const busy = grpcError("RESOURCE_EXHAUSTED", "rate limit");
+    gatewayClient.deleteSandbox = async () => {
+      throw busy;
+    };
+    await assert.rejects(driver.cleanup({ ...context, revision }), keeps(busy));
   }
   // Other passed-through codes keep their error: FAILED_PRECONDITION names a Workspace state and
   // RESOURCE_EXHAUSTED a rate limit or busy admission workers, neither of them the identity.
@@ -3551,13 +4303,95 @@ test("OpenShell observes the Codex Harness through its exact bearer-passthrough 
     await assert.rejects(driver.harnessStatus(statusContext), /exact Codex bearer-passthrough/);
     Object.assign(service, { targetPort: 8080, authorizationMode: 2 });
   }
+  // A dedicated OpenClaw worker (finding 1642) is observed through the same exposure, with
+  // the same exactness: wrong port or a missing service fail closed.
+  const nativeContext = {
+    ...statusContext,
+    revision: { ...revision, harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" } },
+  };
+  document = { status: 200, json: { runtimeFailure } };
+  assert.deepEqual(await driver.harnessStatus(nativeContext), { state: "failed", runtimeFailure });
+  Object.assign(service, { targetPort: 8081 });
+  await assert.rejects(
+    driver.harnessStatus(nativeContext),
+    /exact OpenClaw worker bearer-passthrough/,
+  );
+  Object.assign(service, { targetPort: 8080 });
+  const getService = gatewayClient.getService;
+  gatewayClient.getService = async () => undefined;
+  observed.length = 0;
+  await assert.rejects(
+    driver.harnessStatus(nativeContext),
+    /exact OpenClaw worker bearer-passthrough/,
+  );
+  await assert.rejects(driver.harnessStatus(statusContext), /exact Codex bearer-passthrough/);
+  assert.deepEqual(observed, []);
+  gatewayClient.getService = getService;
   await assert.rejects(
     driver.harnessStatus({
       ...statusContext,
-      revision: { ...revision, harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" } },
+      revision: { ...revision, harness: { id: "other", version: "1.0.0", mode: "dedicated" } },
     }),
-    /only for dedicated Codex revisions/,
+    /only for dedicated Codex or OpenClaw revisions/,
   );
+  await assert.rejects(driver.harnessEndpoint(nativeContext), /only for dedicated Codex revisions/);
+  // Finding 1658: a gateway that does not answer, over its service listener or over gRPC, is
+  // no evidence about the Harness. The read is a transient dependency failure the worker
+  // rechecks until the deadline without spending attempts, with the transport's own reason.
+  // Refusals, invalid answers and the gateway's own transient classes keep their classes.
+  document = { status: 200, json: { runtimeFailure } };
+  for (const [fail, reason] of [
+    [
+      () =>
+        (gatewayClient.serviceWebSocketHandshake = async () => {
+          throw new OpenShellServiceTransportError("timeout");
+        }),
+      "timeout",
+    ],
+    [
+      () =>
+        (gatewayClient.getServiceDocument = async () => {
+          throw new OpenShellServiceTransportError("unreachable");
+        }),
+      "unreachable",
+    ],
+    [
+      () =>
+        (gatewayClient.getService = async () => {
+          throw new DependencyUnavailableError("OpenShell GetService failed with gRPC status 14.");
+        }),
+      "unavailable",
+    ],
+  ]) {
+    const restore = {
+      serviceWebSocketHandshake: gatewayClient.serviceWebSocketHandshake,
+      getServiceDocument: gatewayClient.getServiceDocument,
+      getService: gatewayClient.getService,
+    };
+    fail();
+    for (const target of [statusContext, nativeContext]) {
+      await assert.rejects(driver.harnessStatus(target), (error) => {
+        assert.ok(error instanceof TransientDependencyError, String(error));
+        assert.equal(error.dependency, "sandbox_gateway");
+        assert.equal(error.reason, reason);
+        assert.equal(error.code, "SANDBOX_GATEWAY_UNAVAILABLE");
+        assert.ok(error.cause instanceof DependencyUnavailableError);
+        return true;
+      });
+    }
+    Object.assign(gatewayClient, restore);
+  }
+  const transient = new TransientDependencyError("sandbox_admission", "unavailable", "limit");
+  const refused = new Error("OpenShell GetService refused: PERMISSION_DENIED");
+  for (const thrown of [transient, refused]) {
+    const getService = gatewayClient.getService;
+    gatewayClient.getService = async () => {
+      throw thrown;
+    };
+    await assert.rejects(driver.harnessStatus(statusContext), (error) => error === thrown);
+    gatewayClient.getService = getService;
+  }
+  assert.deepEqual(await driver.harnessStatus(statusContext), { state: "failed", runtimeFailure });
   // Another Sandbox Driver's revision, or a deferred managed Workspace, is refused before the
   // Harness is observed.
   observed.length = 0;
@@ -3756,6 +4590,9 @@ async function orphanedNativePreparation() {
     backend: backendFor(gateway),
   });
   const fixture = runtimeSandboxFixture(driver, { harnessId: "openclaw" });
+  // Revision cleanup confirms an absent Sandbox through the Workspace ensureNamespace created.
+  const { name, id } = fixture.context.namespace;
+  gateway.workspaces.set(name, ownedWorkspace(name, id));
   const { revision, requirements, prepared } = fixture;
   const api = fixture.context.kubernetes;
   const create = api.create;

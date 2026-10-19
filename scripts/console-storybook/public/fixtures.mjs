@@ -166,6 +166,13 @@ function candidateDeploymentError(scenario, checkedAt) {
       },
     };
   }
+  if (scenario.candidateDependencyUnavailable) {
+    return {
+      code: "DEPENDENCY_UNAVAILABLE",
+      message:
+        "A dependency the controller needs stayed unavailable through every attempt. Deploy again; if it keeps failing, ask an admin to check the controller worker log.",
+    };
+  }
   if (scenario.candidateSelected) {
     return {
       code: "REVISION_FINALIZATION_INCOMPLETE",
@@ -185,6 +192,8 @@ function candidateDeploymentError(scenario, checkedAt) {
 
 export function installFixture(scenario, evidence) {
   const rules = structuredClone(scenario.rules ?? []);
+  const namespaceRechecks = [...(scenario.namespaceRechecks ?? [])];
+  let podRolloverStatusReads = 0;
   let signedIn = !scenario.signedOut;
   let repositoryDescriptionRequests = 0;
   if (scenario.pendingGithubAttempt) {
@@ -227,7 +236,7 @@ export function installFixture(scenario, evidence) {
         {
           id: namespaceId,
           name: scenario.namespaceName ?? "Engineering",
-          status: "ready",
+          status: scenario.namespaceStatus ?? "ready",
           createdAt,
         },
         {
@@ -457,6 +466,8 @@ export function installFixture(scenario, evidence) {
             ? candidateDeploymentError(scenario, candidate.createdAt)
             : null,
         warnings: scenario.candidateDeploymentWarnings ?? [],
+        // The next status poll records success and selects v7 for service.
+        ...(scenario.candidateActivates ? { reads: 0 } : {}),
       });
     }
   }
@@ -630,7 +641,9 @@ export function installFixture(scenario, evidence) {
         (rule.method ?? "GET") !== method ||
         (rule.path && rule.path !== path) ||
         (rule.prefix && !path.startsWith(rule.prefix)) ||
+        (rule.pathIncludes && !path.includes(rule.pathIncludes)) ||
         (rule.suffix && !path.endsWith(rule.suffix)) ||
+        (rule.queryParam && !url.searchParams.has(rule.queryParam)) ||
         (rule.bodyHasIds !== undefined && rule.bodyHasIds !== Array.isArray(body.ids))
       ) {
         continue;
@@ -683,7 +696,14 @@ export function installFixture(scenario, evidence) {
         );
       }
       if (rule.status) {
-        return response(null, rule.status, rule.code, {}, rule.message, rule.details);
+        const failure = response(null, rule.status, rule.code, {}, rule.message, rule.details);
+        if (rule.retryAfter !== undefined) {
+          failure.headers.set("retry-after", String(rule.retryAfter));
+        }
+        return failure;
+      }
+      if (rule.data !== undefined) {
+        return response(rule.data);
       }
     }
     if (path === "/api/auth/providers" && method === "GET") {
@@ -732,6 +752,14 @@ export function installFixture(scenario, evidence) {
           ...(scenario.nativeWorkerSupport === false
             ? {}
             : { nativeWorkers: { support: scenario.nativeWorkerSupport ?? "pinned-runtime" } }),
+          ...(scenario.openclawExecutionModes === undefined
+            ? {}
+            : {
+                openclaw: {
+                  executionModes: scenario.openclawExecutionModes,
+                  ...(scenario.sandboxDriverUnavailable ? { sandboxDriverUnavailable: true } : {}),
+                },
+              }),
           ...(scenario.credentialSourceTypes !== undefined
             ? { credentialSources: { types: scenario.credentialSourceTypes } }
             : {}),
@@ -743,6 +771,20 @@ export function installFixture(scenario, evidence) {
       });
     }
     if (path === "/namespaces" && method === "GET") {
+      // Once the story's actions ran, each read takes the next recheck answer: a status for the
+      // story's Namespace, "missing" to leave it out of the list, or an HTTP status to fail
+      // with. The last one repeats.
+      if (evidence.ready && namespaceRechecks.length) {
+        const next =
+          namespaceRechecks.length > 1 ? namespaceRechecks.shift() : namespaceRechecks[0];
+        if (typeof next === "number") {
+          return error(next);
+        }
+        if (next === "missing") {
+          return response(namespaces.slice(1));
+        }
+        namespaces[0].status = next;
+      }
       return response(namespaces);
     }
     if (path === "/backends" && method === "GET") {
@@ -1034,6 +1076,10 @@ export function installFixture(scenario, evidence) {
           return response(saved, 201);
         }
       }
+      // Create Agent's preflight accepts unless a scenario rule refuses it.
+      if (resource === "agents/validate" && method === "POST") {
+        return new Response(null, { status: 204 });
+      }
       if (resource === "agents/provision" && method === "POST") {
         const {
           configuration,
@@ -1084,7 +1130,13 @@ export function installFixture(scenario, evidence) {
             namespaceId,
             agentId: saved.id,
             status: scenario.provisionedDeploymentStatus ?? "queued",
-            progress: initialDeploymentProgress(scenario.provisionedDeploymentStatus ?? "queued"),
+            progress:
+              scenario.provisionedDeploymentAttempt === undefined
+                ? initialDeploymentProgress(scenario.provisionedDeploymentStatus ?? "queued")
+                : {
+                    lastAttempt: { at: createdAt, ...scenario.provisionedDeploymentAttempt },
+                    nextAttemptAt: createdAt,
+                  },
             reads: scenario.provisionedDeploymentStatus === undefined ? 0 : undefined,
             error:
               scenario.provisionedDeploymentStatus !== "failed"
@@ -1200,6 +1252,19 @@ export function installFixture(scenario, evidence) {
                     configurationId: current.configurationId,
                     agentId: current.agentId,
                     revisionId: current.revisionId,
+                  }
+                : {}),
+              // After handoff the job names its first deployment's wait, as it does for a
+              // reader of that deployment (#2744).
+              ...(scenario.provisioningNamesDeploymentWait &&
+              current.reads > 1 &&
+              (current.status === "queued" || current.status === "running")
+                ? {
+                    progress: {
+                      phase: "deployment",
+                      lastAttempt:
+                        deployments.get(current.revisionId)?.progress?.lastAttempt ?? null,
+                    },
                   }
                 : {}),
             },
@@ -1447,15 +1512,29 @@ export function installFixture(scenario, evidence) {
                   },
                 ],
           };
+          const pods = [pod];
+          if (scenario.runtimePod === "rollover") {
+            const retiring = podRolloverStatusReads++ === 0;
+            pods.push({
+              ...pod,
+              name: retiring ? "gateway-retiring" : "gateway-standby",
+              uid: pod.uid.slice(0, -1) + (retiring ? "2" : "3"),
+            });
+          }
           return response({
             revisionId,
             observedAt: "2026-09-27T12:00:00.000Z",
-            pods: [pod],
+            pods,
             sources: [
               {
                 id: "gateway",
                 kind: "container",
-                pods: [{ name: pod.name, uid: pod.uid, container: "gateway", restartCount: 1 }],
+                pods: pods.map(({ name, uid }) => ({
+                  name,
+                  uid,
+                  container: "gateway",
+                  restartCount: 1,
+                })),
                 available: true,
                 retention:
                   "Kubernetes keeps only the current and the previous instance of each container; older output and output from deleted Pods is gone.",
@@ -1532,13 +1611,18 @@ export function installFixture(scenario, evidence) {
               ],
             });
           }
+          const pod = url.searchParams.get("pod") ?? "gateway-7d9f8c-x2k4q";
+          const podSuffix =
+            pod === "gateway-retiring" ? "2" : pod === "gateway-standby" ? "3" : "1";
           const stream = {
             source: "gateway",
-            pod: "gateway-7d9f8c-x2k4q",
-            podUid: "0f3b6c1e-7d52-4f4b-9a2e-5c6d7e8f9a01",
+            pod,
+            podUid: "0f3b6c1e-7d52-4f4b-9a2e-5c6d7e8f9a0" + podSuffix,
             container: "gateway",
             restartCount: 1,
           };
+          const listeningMessage =
+            scenario.runtimePod === "rollover" ? `${pod} ready for requests` : "gateway listening";
           const line = (time, kind, level, message, extra = {}) => ({
             type: "line",
             time,
@@ -1558,7 +1642,7 @@ export function installFixture(scenario, evidence) {
               line("2026-09-27T11:40:01.120Z", "wrapper", "info", "runtime.startup_phase", {
                 fields: { container: "gateway", phase: "config", outcome: "ok", ms: 12 },
               }),
-              line("2026-09-27T11:40:03.400Z", "openclaw", "info", "gateway listening", {
+              line("2026-09-27T11:40:03.400Z", "openclaw", "info", listeningMessage, {
                 subsystem: "gateway",
               }),
               {
@@ -1712,7 +1796,9 @@ export function installFixture(scenario, evidence) {
           return response(
             scenario.emptySecrets
               ? []
-              : [...secrets.values()].map((secret) => structuredClone(secret)),
+              : [...secrets.values()]
+                  .filter(({ id }) => id !== scenario.unreadableSecretId)
+                  .map((secret) => structuredClone(secret)),
           );
         }
         if (method === "POST") {
@@ -1728,7 +1814,7 @@ export function installFixture(scenario, evidence) {
       if (resource.startsWith("secrets/")) {
         const id = resource.split("/")[1];
         const secret = secrets.get(id);
-        if (!secret) {
+        if (!secret || id === scenario.unreadableSecretId) {
           return error(404);
         }
         if (method === "GET") {

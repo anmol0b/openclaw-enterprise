@@ -4,7 +4,7 @@ rfc: index.md
 
 # Execution and request protocol
 
-This page specifies the sequence and failure behavior for [RFC-0021](index.md).
+This page specifies the sequence and failure behavior for [RFC-0022](index.md).
 The [interfaces and records](contracts.md) name the parties and data; the
 [verification requirements](security.md) define the evidence needed to use them.
 A configuration, a credential and an authorization are separate decisions.

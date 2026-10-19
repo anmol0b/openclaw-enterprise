@@ -16,6 +16,7 @@ import {
   OpenShellAdmissionLimitError,
   OpenShellRequestReplayRefusedError,
 } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
+import { OpenShellGatewayFailure } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-errors.ts";
 import { OpenShellCredentialGatewayDriver } from "../../apps/controller/src/drivers/credential-gateway/openshell.ts";
 import {
   openShellProviderName,
@@ -514,12 +515,19 @@ test("OpenShell client reports a Sandbox deleted only once OpenShell confirms it
       unnamed: true,
       replacedBy: "sandbox-id-2",
     },
+    // NOT_FOUND: OpenShell answers it for a Sandbox this identity may not see as for one that
+    // is gone (finding 1676), so it confirms nothing and the caller decides with GetWorkspace.
+    "sandbox-missing": { notFound: true },
   };
   const server = new grpc.Server();
   server.addService(OpenShell.service, {
     DeleteSandbox(call, callback) {
       deletes.push(call.request.name);
       const scenario = scenarios[call.request.name];
+      if (scenario.notFound) {
+        callback({ code: grpc.status.NOT_FOUND, details: "sandbox not found" });
+        return;
+      }
       setTimeout(
         () =>
           callback(null, {
@@ -577,6 +585,18 @@ test("OpenShell client reports a Sandbox deleted only once OpenShell confirms it
       return true;
     });
     assert.ok(Date.now() - started < 5_000);
+    await assert.rejects(remove("sandbox-missing"), (error) => {
+      assert.ok(error instanceof OpenShellGatewayFailure, String(error));
+      assert.match(
+        error.message,
+        /DeleteSandbox did not find the Sandbox, so the deletion is unconfirmed/,
+      );
+      // The code the worker's sweep logs apart from a failure (finding 1696).
+      assert.equal(error.code, "SANDBOX_DELETION_UNCONFIRMED");
+      assert.equal(error.cause?.code, grpc.status.NOT_FOUND);
+      return true;
+    });
+    assert.equal(gets.includes("sandbox-missing"), false);
     assert.deepEqual(deletes, Object.keys(scenarios));
 
     const aborted = new AbortController();
@@ -632,11 +652,61 @@ test("OpenShell client reads an existing Sandbox and its service endpoint", asyn
         url: "http://tenant-workspace--sandbox-wire.openshell.localhost:8080/",
       });
     },
+    // Per Sandbox name: how DeleteService answers (finding 1657).
+    DeleteService(call, callback) {
+      requests.push(["DeleteService", call.request]);
+      const outcomes = {
+        "sandbox-wire": { outcome: "DELETION_OUTCOME_COMPLETED" },
+        "sandbox-absent": { outcome: "DELETION_OUTCOME_ALREADY_ABSENT" },
+        "sandbox-accepted": { outcome: "DELETION_OUTCOME_ACCEPTED" },
+        "sandbox-silent": {},
+      };
+      const answer = outcomes[call.request.sandbox];
+      if (answer === undefined) {
+        notFound(callback);
+        return;
+      }
+      callback(null, answer);
+    },
   });
   const port = await bindWireServer(server);
   const client = new GrpcOpenShellGatewayClient({ endpoint: `127.0.0.1:${port}` });
   const signal = AbortSignal.timeout(2_000);
   try {
+    // A service is gone on COMPLETED or ALREADY_ABSENT only; an accepted or unstated outcome
+    // is not a confirmation, so the exposure is reported as still present. Neither is
+    // NOT_FOUND: OpenShell answers it for a Sandbox this identity may not see as for one that
+    // is gone (finding 1670), so the caller confirms with a read it can trust.
+    for (const sandbox of ["sandbox-wire", "sandbox-absent"]) {
+      await client.deleteService("tenant-workspace", sandbox, "", signal);
+    }
+    for (const sandbox of ["sandbox-accepted", "sandbox-silent"]) {
+      await assert.rejects(
+        client.deleteService("tenant-workspace", sandbox, "", signal),
+        /DeleteService did not confirm deletion/,
+      );
+    }
+    await assert.rejects(
+      client.deleteService("tenant-workspace", "sandbox-missing", "", signal),
+      (error) => {
+        assert.match(
+          error.message,
+          /DeleteService did not find the Sandbox, so the deletion is unconfirmed/,
+        );
+        assert.equal(error.code, "SANDBOX_DELETION_UNCONFIRMED");
+        return true;
+      },
+    );
+    const deletions = requests.filter(([method]) => method === "DeleteService");
+    assert.equal(deletions.length, 5);
+    // The delete is idempotent by itself: no request_id, so no durable admission per pass.
+    assert.deepEqual(deletions[0][1], {
+      sandbox: "sandbox-wire",
+      name: "",
+      workspace_scope: { workspace: "tenant-workspace", selection: "workspace" },
+      allow_missing: true,
+    });
+    requests.length = 0;
     const sandbox = await client.getSandbox(
       { name: "sandbox-wire", workspace: "tenant-workspace" },
       signal,
@@ -1761,6 +1831,16 @@ test("OpenShell gateway rechecks a revoked source through the Sandbox's provider
         },
       });
     },
+    // A missing Sandbox is absent only once the Workspace read passes (finding 1676).
+    GetWorkspace(call, callback) {
+      calls.push(["GetWorkspace", call.request.name]);
+      callback(null, {
+        workspace: {
+          metadata: { name: call.request.name },
+          status: { phase: "WORKSPACE_PHASE_ACTIVE" },
+        },
+      });
+    },
   });
   const port = await bindWireServer(server);
   const client = new GrpcOpenShellGatewayClient({
@@ -1794,7 +1874,8 @@ test("OpenShell gateway rechecks a revoked source through the Sandbox's provider
       reason: "PROVIDER_READINESS_REASON_WAITING_FOR_SUPERVISOR",
     });
     assert.deepEqual(sandboxes.get("os-listed"), ["operator-static"]);
-    // Once the Sandbox no longer lists it, or no longer exists, a recheck mutates nothing.
+    // Once the Sandbox no longer lists it, or no longer exists, a recheck mutates nothing; a
+    // missing Sandbox is absent only after GetWorkspace and a second GetSandbox (finding 1692).
     assert.deepEqual(await recheck("os-listed"), { sourceId, state: "revoked" });
     assert.deepEqual(await recheck("os-detached"), { sourceId, state: "revoked" });
     assert.deepEqual(await recheck("os-bare"), { sourceId, state: "revoked" });
@@ -1806,6 +1887,8 @@ test("OpenShell gateway rechecks a revoked source through the Sandbox's provider
       ["GetSandbox", "os-listed"],
       ["GetSandbox", "os-detached"],
       ["GetSandbox", "os-bare"],
+      ["GetSandbox", "os-missing"],
+      ["GetWorkspace", workspace],
       ["GetSandbox", "os-missing"],
     ]);
   } finally {
