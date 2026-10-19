@@ -41,6 +41,14 @@ to that earlier attempt. Interpret the result at this target:
   A later Job with the same name cannot establish what happened to that attempt.
 - **Not found, no UID recorded.** Confirm with the database, identity, and volume owners whether
   this is a first installation. A missing Job is not permission to bootstrap again.
+- **Failed.** With a matching Job UID, `plan` shows a Pod lookup for an operator
+  who already has that access; it does not list Pods itself. Match the Pod's
+  controlling owner UID to the recorded Job UID. A label alone is insufficient,
+  and no result does not establish that no Pod ran. Ask for migration and bootstrap
+  termination states, exit codes and nonsecret error codes separately, not raw logs
+  or credentials. Ask the database and storage owners for current state and output
+  provenance; treat unverified state or provenance as unknown. Preserve the attempt
+  and do not retry.
 - **Unknown or incomplete.** Verify read access or inspect the original Job as
   directed. An interrupted initialization may already have changed state.
 
