@@ -66,6 +66,9 @@ contexts: [{name: read, context: {cluster: test}}]
 					first := map[string]string{"denied": "permission to get", "missing": "first-install intent", "install": "Resume after migration", "upgrade": "Resume after migration"}[tc.name]
 					expected = []string{tc.want, first, "2. If an API operation was attempted", "3. Verify temporary access", "4. Qualify useful work"}
 				}
+				if tc.success {
+					expected = append(expected, `operations/demo-initialization, UID "id"`)
+				}
 				for _, want := range expected {
 					if !strings.Contains(out, want) {
 						t.Errorf("want %q in %s", want, out)

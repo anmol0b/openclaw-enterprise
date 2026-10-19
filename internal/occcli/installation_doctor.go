@@ -118,7 +118,7 @@ func (b *doctorBuffer) Write(p []byte) (int, error) {
 	return b.buf.Write(p)
 }
 
-func initializationEvidence(data []byte, namespace, name, release string) (string, initializationState) {
+func initializationEvidence(data []byte, namespace, name, release string) (message string, state initializationState) {
 	type container struct {
 		Name          string
 		Command, Args []string
@@ -161,6 +161,10 @@ func initializationEvidence(data []byte, namespace, name, release string) (strin
 	if !is(init, "migration", "migrate-production") || !is(p.Containers, "bootstrap", "bootstrap-installation") {
 		return "Initialization: unknown. Job steps do not match the supported chart.", initializationUnresolved
 	}
+	// Helm reuses the name; the UID identifies this Job, not an API attempt.
+	defer func() {
+		message += fmt.Sprintf("\nObserved Job %s/%s, UID %+q (compare with the installation record).", namespace, name, m.UID)
+	}()
 	complete := false
 	for _, c := range job.Status.Conditions {
 		if c.Status != "True" {
