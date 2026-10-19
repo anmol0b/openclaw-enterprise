@@ -86,7 +86,10 @@ it to that earlier attempt. Interpret the result at this target:
 - **Not found, no UID recorded.** Confirm with the database, identity, and volume owners whether
   this is a first installation. A missing Job is not permission to bootstrap again.
 - **Failed.** With a matching Job UID, `plan` shows a Pod lookup for an operator
-  who can already list Pods in that namespace; it does not list Pods itself. Match the Pod's
+  who can already list Pods in that namespace; it does not list Pods itself. That
+  operator sets `POD_READER_KUBECONFIG` to their own trusted kubeconfig and
+  `POD_READER_CONTEXT` to its matching context in their shell, then runs the
+  displayed command. Match the Pod's
   controlling owner UID to the recorded Job UID. A label alone is insufficient,
   and no result does not establish that no Pod ran. Ask for migration and bootstrap
   termination states, exit codes and nonsecret error codes separately, not raw logs

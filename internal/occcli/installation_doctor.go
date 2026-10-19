@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/spf13/cobra"
 )
@@ -44,7 +43,7 @@ func (app *application) installationHandoffCommand(action string) *cobra.Command
 			if action == "plan" {
 				next := state.next(expectedUID != "")
 				if state == initializationFailed && expectedUID != "" {
-					next = failedJobPodLookup(kubeconfig, kubeContext, namespace, expectedUID)
+					next = failedJobPodLookup(namespace, expectedUID)
 				}
 				fmt.Fprintf(out, "Resume in order:\n1. %s\n", next)
 				fmt.Fprintln(out, "2. If an API operation was attempted, inspect that original attempt before another write. Never replay an uncertain operation.")
@@ -126,20 +125,17 @@ func (s initializationState) next(expectUID bool) string {
 
 // Called only for a failed Job whose observed UID matched --expect-job-uid.
 // The selector finds candidates; controller ownership, not the label, ties a Pod to the Job.
-func failedJobPodLookup(config, kctx, ns, uid string) string {
+func failedJobPodLookup(ns, uid string) string {
 	const inspect = "Ask an operator who can already list Pods in this namespace to find Pods controlled by this Job."
 	const verify = "Use only rows whose CONTROLLER_UID equals the recorded Job UID. An empty result cannot establish whether a Pod ran. " +
 		"Check migration and bootstrap exit status; if needed, share only a short, redacted diagnostic."
-	// Kubernetes normally assigns a UUID. For unfamiliar UIDs or terminal control
-	// characters in the target, keep the guidance but do not print a copyable command.
-	if !dns1123Label(uid) || strings.IndexFunc(config+kctx, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+	// Kubernetes normally assigns a UUID. Keep the guidance for unfamiliar UIDs,
+	// but do not print a copyable command.
+	if !dns1123Label(uid) {
 		return inspect + " " + verify
 	}
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-	const columns = "custom-columns=POD:.metadata.name,CONTROLLER_UID:.metadata.ownerReferences[?(@.controller==true)].uid"
-	command := fmt.Sprintf("kubectl --kubeconfig=%s --context=%s --namespace=%s get pods --selector=batch.kubernetes.io/controller-uid=%s -o %s",
-		quote(config), quote(kctx), ns, uid, quote(columns))
-	return inspect + "\n   " + command + "\n   " + verify
+	command := fmt.Sprintf(`kubectl --kubeconfig="${POD_READER_KUBECONFIG:?select your Pod-reader kubeconfig}" --context="${POD_READER_CONTEXT:?select its matching context}" --namespace=%s get pods --selector=batch.kubernetes.io/controller-uid=%s -o 'custom-columns=POD:.metadata.name,CONTROLLER_UID:.metadata.ownerReferences[?(@.controller==true)].uid'`, ns, uid)
+	return inspect + " Set POD_READER_KUBECONFIG and POD_READER_CONTEXT in that operator's shell before running:\n   " + command + "\n   " + verify
 }
 
 func readInitialization(ctx context.Context, config, kctx, ns, name, release, expectedUID string) (string, initializationState) {

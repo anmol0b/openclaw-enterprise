@@ -146,6 +146,9 @@ func TestInstallationDoctor(t *testing.T) {
 				if strings.Contains(out, "get pods") != wantLookup {
 					t.Errorf("want operator Pod lookup %v in %s", wantLookup, out)
 				}
+				if wantLookup && (strings.Contains(out, config) || strings.Contains(out, "--context=read") || strings.Contains(out, "--context='read'")) {
+					t.Errorf("operator Pod lookup includes the Job reader's target: %s", out)
+				}
 				if tc.success {
 					expected = append(expected, `operations/demo-initialization, UID "id"`)
 					// A completed hook can precede a failed Helm release. Its named Job
@@ -410,15 +413,20 @@ func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 }
 
 func TestFailedJobPodLookupShellArguments(t *testing.T) {
-	config, kctx := "/path/with space/operator's config", "reader '$USER"
-	guidance := failedJobPodLookup(config, kctx, "operations", "abc-123")
+	config, kctx := "/path/with space/operator's $(printf injected) config", "reader '$USER; echo injected"
+	guidance := failedJobPodLookup("operations", "abc-123")
 	lines := strings.Split(guidance, "\n")
 	if len(lines) != 3 {
 		t.Fatalf("missing command in %q", guidance)
 	}
 	// Ask the shell how it parsed the displayed command. Do not run kubectl.
 	script := `kubectl() { printf '%s\n' "$@"; }; ` + lines[1]
-	out, err := exec.Command("sh", "-c", script).Output()
+	run := func(env ...string) ([]byte, error) {
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Env = append([]string{}, env...)
+		return cmd.Output()
+	}
+	out, err := run("POD_READER_KUBECONFIG="+config, "POD_READER_CONTEXT="+kctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,5 +436,20 @@ func TestFailedJobPodLookupShellArguments(t *testing.T) {
 		"custom-columns=POD:.metadata.name,CONTROLLER_UID:.metadata.ownerReferences[?(@.controller==true)].uid"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("arguments: %q, want %q", got, want)
+	}
+	for _, tc := range []struct {
+		env  []string
+		want string
+	}{
+		{[]string{"POD_READER_CONTEXT=" + kctx}, "POD_READER_KUBECONFIG"},
+		{[]string{"POD_READER_KUBECONFIG=", "POD_READER_CONTEXT=" + kctx}, "POD_READER_KUBECONFIG"},
+		{[]string{"POD_READER_KUBECONFIG=" + config}, "POD_READER_CONTEXT"},
+		{[]string{"POD_READER_KUBECONFIG=" + config, "POD_READER_CONTEXT="}, "POD_READER_CONTEXT"},
+	} {
+		out, err := run(tc.env...)
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || len(out) != 0 || !strings.Contains(string(exit.Stderr), tc.want) {
+			t.Errorf("env=%q stdout=%q err=%v; want %s error before kubectl", tc.env, out, err, tc.want)
+		}
 	}
 }
