@@ -17,18 +17,27 @@ only permission to get the named Job, normally `<release>-initialization`.
 ```bash
 target=(--kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT"
         --kube-namespace "$NAMESPACE" --release "$RELEASE")
+# If recorded, use the UID of the Job persisted during the original installation.
+target+=(--expect-job-uid "$RECORDED_JOB_UID")
 go run ./cmd/occ installation doctor "${target[@]}"
 go run ./cmd/occ installation plan "${target[@]}"
 ```
 
 `doctor` reports what the retained Job establishes. `plan` orders the checks for
-the person taking over and makes no changes. Interpret the result at this target:
+the person taking over and makes no changes. Use the UID recorded from the persisted
+Job during the original installation. A dry-run UID or a UID first read after
+Helm could have replaced the Job cannot identify that original. If the original
+UID was not recorded, omit
+`--expect-job-uid`: the commands can describe the current Job but cannot tie it
+to that earlier attempt. Interpret the result at this target:
 
 - **Completed.** Match the Job UID to the handoff. Helm replaces this Job before
   its next install or upgrade. Completion means the chart ran migration and
   bootstrap, which may have verified an existing Installation. It does not
   establish the current database state.
-- **Not found.** Confirm with the database, identity, and volume owners whether
+- **Recorded Job replaced or missing.** Recover the original installation record.
+  A later Job with the same name cannot establish what happened to that attempt.
+- **Not found, no UID recorded.** Confirm with the database, identity, and volume owners whether
   this is a first installation. A missing Job is not permission to bootstrap again.
 - **Unknown or incomplete.** Verify read access or inspect the original Job as
   directed. An interrupted initialization may already have changed state.
