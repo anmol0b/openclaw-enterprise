@@ -211,8 +211,8 @@ type initializationJobStatus struct {
 
 func initializationEvidence(data []byte, namespace, name, release, expectedUID string) (string, initializationState) {
 	type container struct {
-		Name          string
-		Command, Args []string
+		Name, RestartPolicy string
+		Command, Args       []string
 	}
 	var job struct {
 		Kind, APIVersion string
@@ -246,6 +246,13 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 		return "Initialization: unknown. The Job uses an unsupported Job controller.", initializationUnresolved
 	}
 	init := p.InitContainers
+	// A native sidecar only has to start before the next container runs.
+	// The Job can complete without that initialization step ever succeeding.
+	for _, step := range init {
+		if step.RestartPolicy == "Always" {
+			return "Initialization: unknown. The Job runs an initialization step as a sidecar; Job completion does not show that step succeeded.", initializationUnresolved
+		}
+	}
 	hook := "install"
 	// Match the chart's Node invocation and the exact contents of
 	// deploy/helm/openclaw-enterprise/files/check-installation.mjs.

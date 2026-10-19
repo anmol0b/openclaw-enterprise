@@ -38,6 +38,9 @@ func TestInstallationDoctor(t *testing.T) {
 	asUpgrade := func(job string) string {
 		return strings.Replace(job, `"initContainers":[`, `"initContainers":[{"name":"installation-check","command":["node"],"args":["--input-type=module","-e",`+string(checkArg)+`]},`, 1)
 	}
+	withSidecar := func(body string) string {
+		return strings.Replace(body, `"initContainers":[{`, `"initContainers":[{"restartPolicy":"Always",`, 1)
+	}
 	for _, tc := range []struct {
 		name       string
 		status     int
@@ -48,6 +51,8 @@ func TestInstallationDoctor(t *testing.T) {
 		{"install", 200, job, "Initialization Job (install hook): complete", true, ""},
 		{"guarded-install", 200, guarded, "Initialization Job (install hook): complete", true, ""},
 		{"upgrade", 200, asUpgrade(job), "upgrade hook): complete", true, ""},
+		{"sidecar-migration", 200, withSidecar(job), "runs an initialization step as a sidecar", false, "id"},
+		{"sidecar-upgrade-check", 200, withSidecar(asUpgrade(job)), "runs an initialization step as a sidecar", false, "id"},
 		{"wrong-upgrade-check", 200, strings.Replace(asUpgrade(job), string(checkArg), `"process.exit(0)"`, 1), "steps do not match", false, ""},
 		{"guarded-upgrade", 200, asUpgrade(guarded), "steps do not match", false, ""},
 		{"extra-install-arg", 200, strings.Replace(guarded, `"--expect-empty"`, `"--expect-empty","unexpected"`, 1), "steps do not match", false, ""},
