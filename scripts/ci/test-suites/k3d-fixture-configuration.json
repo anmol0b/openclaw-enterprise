@@ -17,7 +17,7 @@
   "parallelFiles": [
     "tests/integration/kubernetes-compute-real.test.mjs",
     "tests/integration/kubernetes-plugin-status-real.test.mjs",
-    "tests/integration/installation-handoff-k3d-real.test.mjs"
+    "tests/integration/installation-handoff-k3d-real.test.ts"
   ],
   "files": [
     {
@@ -34,7 +34,7 @@
       ]
     },
     {
-      "path": "tests/integration/installation-handoff-k3d-real.test.mjs",
+      "path": "tests/integration/installation-handoff-k3d-real.test.ts",
       "expectedTests": [
         "installation handoff distinguishes replaced Helm Jobs with only named get access"
       ]

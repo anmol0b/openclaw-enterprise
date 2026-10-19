@@ -44,15 +44,15 @@ function documentationPath(path) {
 
 // Test-only mode: flat test files under the runner's test roots and the lane
 // manifests the suite index names. Helpers, fixtures and the index are not here.
-const testPath = /^tests\/(?:conformance|integration|browser|docs)\/[A-Za-z0-9._-]+\.test\.mjs$/;
+const testPath =
+  /^tests\/(?:conformance|integration|browser|docs)\/[A-Za-z0-9._-]+\.test\.(?:mjs|ts)$/;
 const manifestPath = /^scripts\/ci\/test-suites\/[a-z0-9-]+\.json$/;
 const suiteIndexPath = "scripts/ci/test-suites.json";
 const laneName = /^[a-z0-9-]+$/;
 // Static Checks lints, format-checks and builds documentation in every mode.
-// Checks and Conformance 1's own extra checks (typecheck, Go CLI) read no test
-// file, so a test-only change runs it only when the lane lists a changed test,
-// or as the matrix lane a selection needs when only the runtime image fixture
-// (its own job) would run.
+// Checks and Conformance 1 typechecks TypeScript tests. It also supplies the
+// matrix lane a selection needs when only the runtime image fixture (its own
+// job) would run.
 const fallbackLane = "checks-baseline-1";
 const fixtureLane = "runtime-image-fixture";
 
@@ -196,7 +196,10 @@ function selectTestLanes(mergeBase, tested, tests, manifests) {
       }
     }
   }
-  if ([...selected].every((name) => name === fixtureLane)) {
+  if (
+    tests.some((path) => path.endsWith(".test.ts")) ||
+    [...selected].every((name) => name === fixtureLane)
+  ) {
     selected.add(fallbackLane);
   }
   return [...selected].sort();

@@ -11,6 +11,12 @@ import {
 } from "../helpers/kubernetes-real.mjs";
 import { parseProductionChart, renderProductionChart } from "../helpers/production-chart.mjs";
 
+type ChartResource = {
+  kind?: string;
+  metadata?: { name?: string; namespace?: string };
+  spec?: { managedBy?: string };
+};
+
 const selection = {
   kubeconfigPath: process.env.OCC_TEST_KUBERNETES_KUBECONFIG,
   kubernetesContext: process.env.OCC_TEST_KUBERNETES_CONTEXT,
@@ -34,13 +40,13 @@ test(
     const name = "oce-initialization";
     await kubectl("create", "namespace", namespace);
     t.after(() => kubectl("delete", "namespace", namespace, "--wait=false"));
-    const admin = (...args) => kubectl("-n", namespace, ...args);
+    const admin = (...args: string[]) => kubectl("-n", namespace, ...args);
 
     // Start with a new service account and no binding. Build its kubeconfig
     // from public cluster connection details only; never copy the admin user.
     await admin("create", "serviceaccount", "reader");
     const token = (await admin("create", "token", "reader", "--duration=10m")).trim();
-    const clusters = JSON.parse(
+    const clusters: unknown = JSON.parse(
       await kubectl(
         "config",
         "view",
@@ -51,6 +57,10 @@ test(
         "jsonpath-as-json={.clusters[*]}",
       ),
     );
+    assert.ok(Array.isArray(clusters));
+    const cluster: unknown = clusters[0];
+    assert.ok(cluster && typeof cluster === "object" && "name" in cluster);
+    assert.ok(typeof cluster.name === "string");
     const config = join(dir, "reader.json");
     await writeFile(
       config,
@@ -58,13 +68,18 @@ test(
         apiVersion: "v1",
         kind: "Config",
         clusters,
-        contexts: [{ name: "read", context: { cluster: clusters[0].name, user: "reader" } }],
+        contexts: [{ name: "read", context: { cluster: cluster.name, user: "reader" } }],
         users: [{ name: "reader", user: { token } }],
       }),
       { mode: 0o600 },
     );
 
-    function handoff(action, status, expected, ...args) {
+    function handoff(
+      action: "doctor" | "plan",
+      status: number,
+      expected: RegExp,
+      ...args: string[]
+    ) {
       const result = spawnSync(
         occ,
         [
@@ -103,12 +118,13 @@ test(
     );
     handoff("doctor", 1, /not found at the selected target/);
 
-    async function retainedJob(isUpgrade) {
+    async function retainedJob(isUpgrade: boolean) {
       const { stdout } = await renderProductionChart({}, { namespace, isUpgrade });
-      const job = (await parseProductionChart(stdout)).find(
-        (o) => o.kind === "Job" && o.metadata.name === name,
+      const resources: ChartResource[] = await parseProductionChart(stdout);
+      const job = resources.find(
+        (resource) => resource.kind === "Job" && resource.metadata?.name === name,
       );
-      assert.ok(job);
+      assert.ok(job?.metadata && job.spec);
       // This verifies readback, not installation. Delegate reconciliation away
       // from the Job controller; no Pod runs and we supply Complete deliberately.
       job.metadata.namespace = namespace;

@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "composite": false,
+    "declaration": false,
+    "erasableSyntaxOnly": true,
+    "noEmit": true
+  },
+  "include": ["conformance/**/*.ts", "integration/**/*.ts", "browser/**/*.ts", "docs/**/*.ts"],
+  "references": [{ "path": "../packages/occ" }]
+}

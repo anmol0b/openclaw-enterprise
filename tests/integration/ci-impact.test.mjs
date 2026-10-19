@@ -1809,6 +1809,16 @@ test("a test-only change selects the lanes that list its files", async (t) => {
     [
       [editTest("tests/integration/postgres-a.test.mjs"), ["postgres"]],
       [
+        ({ put }) => {
+          put("tests/integration/postgres-types.test.ts", "export const value: number = 1;\n");
+          put(
+            "scripts/ci/test-suites/postgres.json",
+            laneManifest([...suiteLanes.postgres, "tests/integration/postgres-types.test.ts"]),
+          );
+        },
+        ["checks-baseline-1", "postgres"],
+      ],
+      [
         withEdit("tests/integration/postgres-b.test.mjs", ({ put }) =>
           put("docs/testing.md", "Notes on tests/integration/postgres-b.test.mjs.\n"),
         ),
