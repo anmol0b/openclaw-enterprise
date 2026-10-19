@@ -130,12 +130,11 @@ active revision, and whether deployment work is queued or claimed.
 
 ## Installation handoff
 
-For [handoff](../guides/deploy/production-handoff.md#resume-an-installation-in-progress),
-`occ installation doctor` reads only the named Kubernetes Job; `plan` orders the
-next checks. Specify `--kubeconfig`, `--context`, `--kube-namespace` and `--release`.
-Use `--expect-job-uid` with the original persisted UID: Helm reuses the name.
-Exit zero means the Job reports completion, not runtime readiness. Denied access
-means unknown, not absent.
+`occ installation doctor` and `plan` read the named Job; `plan` orders checks.
+A throttled read may retry within the deadline. Exit zero indicates consistent
+completion evidence, not attested execution or runtime readiness. Compare the
+returned UID with the original. For inputs, limits, and recovery, see
+[installation handoff](../guides/deploy/production-handoff.md#resume-an-installation-in-progress).
 
 ## Runtime status and logs
 

@@ -25,18 +25,21 @@ go run ./cmd/occ installation doctor "${target[@]}"
 go run ./cmd/occ installation plan "${target[@]}"
 ```
 
-`doctor` reports what the retained Job establishes. `plan` orders the checks for
-the person taking over and makes no changes. Use the UID recorded from the persisted
-Job during the original installation. A dry-run UID or a UID first read after
-Helm could have replaced the Job cannot identify that original. If the original
-UID was not recorded, omit
-`--expect-job-uid`: the commands can describe the current Job but cannot tie it
-to that earlier attempt. Interpret the result at this target:
+`doctor` reports evidence from the retained Job. `plan` orders the checks for
+the person taking over and makes no changes. A command may read the named Job
+again if throttled; its result describes the response returned. Compare the
+observed UID with the UID recorded from the persisted Job during the original
+installation. A dry-run UID or a UID first read after Helm could have replaced
+the Job cannot identify that original. If the original UID was not recorded,
+omit `--expect-job-uid`: the commands can describe the current Job but cannot tie
+it to that earlier attempt. Interpret the result at this target:
 
 - **Completed.** Match the Job UID to the handoff. Helm replaces this Job before
-  its next install or upgrade. Completion means the chart ran migration and
-  bootstrap, which may have verified an existing Installation. It does not
-  establish the current database state.
+  its next install or upgrade. Exit zero means the returned Job has recognized
+  chart fields, no unsupported controller specified, and consistent terminal
+  completion evidence. This is consistent with migration and bootstrap
+  completing, including verification of an existing Installation. The Job read
+  does not attest execution or establish the current database state.
 - **Recorded Job replaced or missing.** Recover the original installation record.
   A later Job with the same name cannot establish what happened to that attempt.
 - **Not found, no UID recorded.** Confirm with the database, identity, and volume owners whether
@@ -49,13 +52,16 @@ to that earlier attempt. Interpret the result at this target:
   or credentials. Ask the database and storage owners for current state and output
   provenance; treat unverified state or provenance as unknown. Preserve the attempt
   and do not retry.
-- **Unknown or incomplete.** Verify read access or inspect the original Job as
-  directed. An interrupted initialization may already have changed state.
+- **Unknown or incomplete.** A denied read leaves the outcome unknown; it does
+  not mean the Job is absent. `FailureTarget` alone does not establish terminal
+  failure. Verify read access or inspect the original Job as directed. An
+  interrupted initialization may already have changed state.
 
 The Job UID identifies the initialization, not a later API operation. If an API
 attempt had an uncertain outcome, reconcile that original attempt before another
-write. Confirm removal of temporary access with its owner, then use the
-[workload checks](#verify-the-deployed-workflow) below.
+write; do not replay the uncertain operation. Confirm removal of temporary
+access with its owner, then use the [workload checks](#verify-the-deployed-workflow)
+below.
 
 ## Choose the first workflow
 

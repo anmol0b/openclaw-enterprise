@@ -135,8 +135,8 @@ characters, excluding `.` and the `..` prefix. Bootstrap receives authentication
 administrator, Installation and output settings.
 
 For [handoff](../guides/deploy/production-handoff.md#resume-an-installation-in-progress),
-record the persisted Job UID. Helm reuses its name; `occ installation doctor
---expect-job-uid` checks that Job’s completion, not runtime readiness.
+record the Job UID: Helm reuses its name. Terminal status does not attest execution
+or runtime readiness.
 
 `scripts/migrate-production.mjs:1`, `scripts/migration-history.mjs:migrateWithHistory`
 
