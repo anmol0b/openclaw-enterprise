@@ -19,6 +19,11 @@ func TestInstallationDoctor(t *testing.T) {
 		t.Skip("requires kubectl")
 	}
 	const job = `{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"demo-initialization","namespace":"operations","uid":"id","labels":{"app.kubernetes.io/instance":"demo","app.kubernetes.io/name":"openclaw-enterprise","app.kubernetes.io/component":"initialization","app.kubernetes.io/managed-by":"Helm"},"annotations":{"helm.sh/hook":"pre-install,pre-upgrade"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migration","args":["scripts/migrate-production.mjs"]}],"containers":[{"name":"bootstrap","args":["scripts/bootstrap-installation.mjs"]}]}}},"status":{"succeeded":1,"conditions":[{"type":"Complete","status":"True"}]}}`
+	const migration = `"scripts/migrate-production.mjs"`
+	guarded := strings.Replace(job, migration, migration+`, "--expect-empty"`, 1)
+	asUpgrade := func(job string) string {
+		return strings.Replace(job, `"initContainers":[`, `"initContainers":[{"name":"installation-check"},`, 1)
+	}
 	for _, tc := range []struct {
 		name       string
 		status     int
@@ -27,7 +32,10 @@ func TestInstallationDoctor(t *testing.T) {
 		uid        string
 	}{
 		{"install", 200, job, "Initialization Job (install hook): complete", true, ""},
-		{"upgrade", 200, strings.Replace(job, `"initContainers":[`, `"initContainers":[{"name":"installation-check"},`, 1), "upgrade hook): complete", true, ""},
+		{"guarded-install", 200, guarded, "Initialization Job (install hook): complete", true, ""},
+		{"upgrade", 200, asUpgrade(job), "upgrade hook): complete", true, ""},
+		{"guarded-upgrade", 200, asUpgrade(guarded), "steps do not match", false, ""},
+		{"extra-install-arg", 200, strings.Replace(guarded, `"--expect-empty"`, `"--expect-empty","unexpected"`, 1), "steps do not match", false, ""},
 		{"wrong-release", 200, strings.Replace(job, `io/instance":"demo"`, `io/instance":"other"`, 1), "did not identify", false, ""},
 		{"deleting", 200, strings.Replace(job, `"uid":"id"`, `"uid":"id","deletionTimestamp":"now"`, 1), "did not identify", false, ""},
 		{"no-condition", 200, strings.Replace(job, "Complete", "SuccessCriteriaMet", 1), "completion not established", false, ""},
@@ -73,7 +81,7 @@ contexts: [{name: read, context: {cluster: test}}]
 				}
 				expected := []string{tc.want, "Do not replay", "removal unknown", "not qualified"}
 				if action == "plan" {
-					first := map[string]string{"denied": "permission to get", "missing": "first-install intent", "install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Resume after migration", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "permission to get"}[tc.name]
+					first := map[string]string{"denied": "permission to get", "missing": "first-install intent", "install": "1. Establish whether", "guarded-install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Resume after migration", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "permission to get"}[tc.name]
 					expected = []string{tc.want, first, "2. If an API operation was attempted", "3. Verify temporary access", "4. Qualify useful work"}
 				}
 				if tc.success {

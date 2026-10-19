@@ -171,10 +171,13 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	if len(init) == 2 && init[0].Name == "installation-check" {
 		init, hook = init[1:], "upgrade"
 	}
-	is := func(cs []container, name, script string) bool {
-		return len(cs) == 1 && cs[0].Name == name && len(cs[0].Command) == 0 && slices.Equal(cs[0].Args, []string{"scripts/" + script + ".mjs"})
+	is := func(cs []container, name string, args ...string) bool {
+		return len(cs) == 1 && cs[0].Name == name && len(cs[0].Command) == 0 && slices.Equal(cs[0].Args, args)
 	}
-	if !is(init, "migration", "migrate-production") || !is(p.Containers, "bootstrap", "bootstrap-installation") {
+	// First installs may carry the empty-database guard; upgrades and older installs do not.
+	const migrate = "scripts/migrate-production.mjs"
+	migrationMatches := is(init, "migration", migrate) || (hook == "install" && is(init, "migration", migrate, "--expect-empty"))
+	if !migrationMatches || !is(p.Containers, "bootstrap", "scripts/bootstrap-installation.mjs") {
 		return "Initialization: unknown. Job steps do not match the supported chart.", initializationUnresolved
 	}
 	// Helm reuses the name; the UID identifies this Job, not an API attempt.
