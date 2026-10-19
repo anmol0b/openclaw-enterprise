@@ -232,20 +232,23 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	}
 	err := json.Unmarshal(data, &job)
 	m := job.Metadata
-	l := m.Labels
-	p := job.Spec.Template.Spec
-	if err != nil || job.Kind != "Job" || job.APIVersion != "batch/v1" || m.UID == "" || m.Name != name ||
-		m.Namespace != namespace || m.DeletionTimestamp != nil || l["app.kubernetes.io/instance"] != release ||
-		l["app.kubernetes.io/name"] != "openclaw-enterprise" || l["app.kubernetes.io/component"] != "initialization" ||
-		l["app.kubernetes.io/managed-by"] != "Helm" || m.Annotations["helm.sh/hook"] != "pre-install,pre-upgrade" {
-		return "Initialization: unknown. The response did not identify a retained initialization Job for this release.", initializationUnresolved
+	const unrecognized = "Initialization: unknown. The response did not identify a retained initialization Job for this release."
+	if err != nil || job.Kind != "Job" || job.APIVersion != "batch/v1" || m.Name != name || m.Namespace != namespace || m.UID == "" {
+		return unrecognized, initializationUnresolved
 	}
 	if expectedUID != "" && m.UID != expectedUID {
 		return fmt.Sprintf("Initialization Job %s/%s: expected UID %+q, observed UID %+q. This is a different Job; the original outcome remains unknown.", namespace, name, expectedUID, m.UID), initializationOriginalNotFound
 	}
+	l := m.Labels
+	if m.DeletionTimestamp != nil || l["app.kubernetes.io/instance"] != release ||
+		l["app.kubernetes.io/name"] != "openclaw-enterprise" || l["app.kubernetes.io/component"] != "initialization" ||
+		l["app.kubernetes.io/managed-by"] != "Helm" || m.Annotations["helm.sh/hook"] != "pre-install,pre-upgrade" {
+		return unrecognized, initializationUnresolved
+	}
 	if job.Spec.ManagedBy != nil && *job.Spec.ManagedBy != "kubernetes.io/job-controller" {
 		return "Initialization: unknown. The Job uses an unsupported Job controller.", initializationUnresolved
 	}
+	p := job.Spec.Template.Spec
 	init := p.InitContainers
 	// A native sidecar only has to start before the next container runs.
 	// The Job can complete without that initialization step ever succeeding.

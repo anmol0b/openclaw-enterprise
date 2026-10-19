@@ -81,7 +81,8 @@ it to that earlier attempt. Interpret the result at this target:
   and bootstrap checkpoint; do not rerun initialization or expand this reader's
   named-Job permission.
 - **Recorded Job replaced or missing.** Recover the original installation record.
-  A later Job with the same name cannot establish what happened to that attempt.
+  A later Job with the same name and a different UID cannot establish what happened
+  to that attempt, even if its chart labels have changed.
 - **Not found, no UID recorded.** Confirm with the database, identity, and volume owners whether
   this is a first installation. A missing Job is not permission to bootstrap again.
 - **Failed.** With a matching Job UID, `plan` shows a Pod lookup for an operator

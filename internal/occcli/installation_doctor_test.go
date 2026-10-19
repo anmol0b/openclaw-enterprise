@@ -27,6 +27,7 @@ func TestInstallationDoctor(t *testing.T) {
 	const job = `{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"demo-initialization","namespace":"operations","uid":"id","labels":{"app.kubernetes.io/instance":"demo","app.kubernetes.io/name":"openclaw-enterprise","app.kubernetes.io/component":"initialization","app.kubernetes.io/managed-by":"Helm"},"annotations":{"helm.sh/hook":"pre-install,pre-upgrade"}},"spec":{"template":{"spec":{"initContainers":[{"name":"migration","args":["scripts/migrate-production.mjs"]}],"containers":[{"name":"bootstrap","args":["scripts/bootstrap-installation.mjs"]}]}}},"status":{"succeeded":1,"conditions":[{"type":"Complete","status":"True"}]}}`
 	const migration = `"scripts/migrate-production.mjs"`
 	failed := strings.Replace(strings.Replace(job, `"type":"Complete"`, `"type":"Failed"`, 1), `"succeeded":1`, `"failed":1`, 1)
+	wrongRelease := strings.Replace(job, `io/instance":"demo"`, `io/instance":"other"`, 1)
 	guarded := strings.Replace(job, migration, migration+`, "--expect-empty"`, 1)
 	checkScript, err := os.ReadFile("../../deploy/helm/openclaw-enterprise/files/check-installation.mjs")
 	if err != nil {
@@ -57,8 +58,8 @@ func TestInstallationDoctor(t *testing.T) {
 		{"wrong-upgrade-check", 200, strings.Replace(asUpgrade(job), string(checkArg), `"process.exit(0)"`, 1), "steps do not match", false, ""},
 		{"guarded-upgrade", 200, asUpgrade(guarded), "steps do not match", false, ""},
 		{"extra-install-arg", 200, strings.Replace(guarded, `"--expect-empty"`, `"--expect-empty","unexpected"`, 1), "steps do not match", false, ""},
-		{"wrong-release", 200, strings.Replace(job, `io/instance":"demo"`, `io/instance":"other"`, 1), "did not identify", false, ""},
-		{"deleting", 200, strings.Replace(job, `"uid":"id"`, `"uid":"id","deletionTimestamp":"now"`, 1), "did not identify", false, ""},
+		{"wrong-release", 200, wrongRelease, "did not identify", false, "id"},
+		{"deleting", 200, strings.Replace(job, `"uid":"id"`, `"uid":"id","deletionTimestamp":"now"`, 1), "did not identify", false, "id"},
 		{"external-controller", 200, strings.Replace(job, `"spec":{"template"`, `"spec":{"managedBy":"example.invalid/handoff-readback","template"`, 1), "unsupported Job controller", false, "id"},
 		{"no-condition", 200, strings.Replace(job, "Complete", "SuccessCriteriaMet", 1), "completion not established", false, ""},
 		{"wrong-steps", 200, strings.Replace(job, "migrate-production.mjs", "sensitive-detail", 1), "do not match", false, ""},
@@ -70,6 +71,11 @@ func TestInstallationDoctor(t *testing.T) {
 		{"pinned-missing", 404, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":"jobs.batch \"demo-initialization\" not found"}`, "original outcome remains unknown", false, "old"},
 		{"pinned", 200, job, "matches the recorded UID", true, "id"},
 		{"replaced", 200, job, `expected UID "old", observed UID "id"`, false, "old"},
+		{"replaced-wrong-release", 200, wrongRelease, `expected UID "old", observed UID "id"`, false, "old"},
+		{"wrong-name", 200, strings.Replace(job, `"name":"demo-initialization"`, `"name":"other-initialization"`, 1), "did not identify", false, "old"},
+		{"wrong-namespace", 200, strings.Replace(job, `"namespace":"operations"`, `"namespace":"other"`, 1), "did not identify", false, "old"},
+		{"wrong-kind", 200, strings.Replace(job, `"kind":"Job"`, `"kind":"CronJob"`, 1), "did not identify", false, "old"},
+		{"wrong-api-version", 200, strings.Replace(job, `"apiVersion":"batch/v1"`, `"apiVersion":"batch/v1beta1"`, 1), "did not identify", false, "old"},
 		{"pinned-failed", 200, failed, "Initialization Job: failed", false, "id"},
 		{"pinned-failing", 200, strings.Replace(failed, "Failed", "FailureTarget", 1), "completion not established", false, "id"},
 		{"pinned-active-failed", 200, strings.Replace(failed, `"failed":1`, `"failed":1,"active":1`, 1), "completion not established", false, "id"},
@@ -125,6 +131,9 @@ func TestInstallationDoctor(t *testing.T) {
 				expected := []string{tc.want, "Do not replay", "removal unknown", "not qualified"}
 				if action == "plan" {
 					first := map[string]string{"login": "1. Confirm the cluster target", "denied": "1. Confirm the cluster target and intended reader", "missing": "first-install intent", "install": "1. Establish whether", "guarded-install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Continue from the completed migration and bootstrap for the recorded Job", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "1. Confirm the cluster target and intended reader", "server-marker": "1. Confirm the cluster target"}[tc.name]
+					if tc.name == "replaced-wrong-release" {
+						first = "1. Recover the original installation record"
+					}
 					expected = []string{tc.want, first, "2. If an API operation was attempted", "3. Verify temporary access", "4. Qualify useful work"}
 					switch tc.status {
 					case 401:

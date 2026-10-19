@@ -173,5 +173,16 @@ test(
     assert.notEqual(second, first);
     handoff("plan", 1, /1\. Recover the original installation record/, "--expect-job-uid", first);
     handoff("doctor", 1, /completion not established/, "--expect-job-uid", second);
+
+    // A replacement's chart labels cannot change which Job the original UID identifies.
+    await admin("label", "job", name, "app.kubernetes.io/instance=other", "--overwrite");
+    handoff("plan", 1, /1\. Recover the original installation record/, "--expect-job-uid", first);
+    handoff(
+      "doctor",
+      1,
+      /did not identify a retained initialization Job/,
+      "--expect-job-uid",
+      second,
+    );
   },
 );
