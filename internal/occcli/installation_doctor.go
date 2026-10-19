@@ -137,15 +137,17 @@ func (r initializationResult) next() string {
 // The selector finds candidates; controller ownership, not the label, ties a Pod to the Job.
 func failedJobPodLookup(ns, uid string) string {
 	const inspect = "Ask an operator who can already list Pods in this namespace to find Pods controlled by this Job."
-	const verify = "Use only rows whose CONTROLLER_UID equals the recorded Job UID. An empty result cannot establish whether a Pod ran. " +
-		"Check migration and bootstrap exit status; if needed, share only a short, redacted diagnostic."
+	const verify = "Use only Pods whose controlling owner UID equals the recorded Job UID before interpreting exit codes. " +
+		"Neither an empty result nor an unreported current exit code proves that no Pod ran or no effects occurred."
+	const diagnostic = " If needed, share only a short, redacted diagnostic."
 	// Kubernetes normally assigns a UUID. Keep the guidance for unfamiliar UIDs,
 	// but do not print a copyable command.
 	if !dns1123Label(uid) {
-		return inspect + " " + verify
+		return inspect + " " + verify + diagnostic
 	}
-	command := fmt.Sprintf(`kubectl --kubeconfig="${POD_READER_KUBECONFIG:?select your Pod-reader kubeconfig}" --context="${POD_READER_CONTEXT:?select its matching context}" --namespace=%s get pods --selector=batch.kubernetes.io/controller-uid=%s -o 'custom-columns=POD:.metadata.name,CONTROLLER_UID:.metadata.ownerReferences[?(@.controller==true)].uid'`, ns, uid)
-	return inspect + " Set POD_READER_KUBECONFIG and POD_READER_CONTEXT in that operator's shell before running:\n   " + command + "\n   " + verify
+	command := fmt.Sprintf(`kubectl --kubeconfig="${POD_READER_KUBECONFIG:?select your Pod-reader kubeconfig}" --context="${POD_READER_CONTEXT:?select its matching context}" --namespace=%s get pods --selector=batch.kubernetes.io/controller-uid=%s -o 'custom-columns=POD:.metadata.name,CONTROLLER_UID:.metadata.ownerReferences[?(@.controller==true)].uid,MIGRATION_EXIT_CODE:.status.initContainerStatuses[?(@.name=="migration")].state.terminated.exitCode,BOOTSTRAP_EXIT_CODE:.status.containerStatuses[?(@.name=="bootstrap")].state.terminated.exitCode'`, ns, uid)
+	return inspect + " Set POD_READER_KUBECONFIG and POD_READER_CONTEXT in that operator's shell before running:\n   " + command + "\n   " + verify +
+		" <none> means no current terminated exit code was reported. The selected columns limit what is printed, not what Kubernetes authorizes or returns." + diagnostic
 }
 
 func readInitialization(ctx context.Context, config, kctx, ns, name, release, expectedUID string) initializationResult {

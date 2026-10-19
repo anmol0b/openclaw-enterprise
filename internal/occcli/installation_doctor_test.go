@@ -437,7 +437,7 @@ func TestFailedJobPodLookupShellArguments(t *testing.T) {
 	got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
 	want := []string{"--kubeconfig=" + config, "--context=" + kctx, "--namespace=operations",
 		"get", "pods", "--selector=batch.kubernetes.io/controller-uid=abc-123", "-o",
-		"custom-columns=POD:.metadata.name,CONTROLLER_UID:.metadata.ownerReferences[?(@.controller==true)].uid"}
+		`custom-columns=POD:.metadata.name,CONTROLLER_UID:.metadata.ownerReferences[?(@.controller==true)].uid,MIGRATION_EXIT_CODE:.status.initContainerStatuses[?(@.name=="migration")].state.terminated.exitCode,BOOTSTRAP_EXIT_CODE:.status.containerStatuses[?(@.name=="bootstrap")].state.terminated.exitCode`}
 	if !slices.Equal(got, want) {
 		t.Fatalf("arguments: %q, want %q", got, want)
 	}
