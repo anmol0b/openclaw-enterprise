@@ -108,7 +108,7 @@ func (s initializationState) next(expectUID bool) string {
 // Called only for a failed Job whose observed UID matched --expect-job-uid.
 // The selector finds candidates; controller ownership, not the label, ties a Pod to the Job.
 func failedJobPodLookup(config, kctx, ns, uid string) string {
-	const inspect = "Ask an operator who already has Pod read access to find Pods controlled by this Job."
+	const inspect = "Ask an operator who can already list Pods in this namespace to find Pods controlled by this Job."
 	const verify = "Use only rows whose CONTROLLER_UID equals the recorded Job UID. An empty result cannot establish whether a Pod ran. " +
 		"Check migration and bootstrap exit status; if needed, share only a short, redacted diagnostic."
 	// Kubernetes normally assigns a UUID. For unfamiliar UIDs or terminal control

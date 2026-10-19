@@ -42,7 +42,7 @@ to that earlier attempt. Interpret the result at this target:
 - **Not found, no UID recorded.** Confirm with the database, identity, and volume owners whether
   this is a first installation. A missing Job is not permission to bootstrap again.
 - **Failed.** With a matching Job UID, `plan` shows a Pod lookup for an operator
-  who already has that access; it does not list Pods itself. Match the Pod's
+  who can already list Pods in that namespace; it does not list Pods itself. Match the Pod's
   controlling owner UID to the recorded Job UID. A label alone is insufficient,
   and no result does not establish that no Pod ran. Ask for migration and bootstrap
   termination states, exit codes and nonsecret error codes separately, not raw logs
