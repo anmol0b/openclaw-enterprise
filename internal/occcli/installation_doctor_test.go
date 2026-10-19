@@ -82,15 +82,7 @@ func TestInstallationDoctor(t *testing.T) {
 				fmt.Fprint(w, tc.body)
 			}))
 			defer s.Close()
-			config := filepath.Join(t.TempDir(), "kubeconfig")
-			contents := fmt.Sprintf(`apiVersion: v1
-kind: Config
-clusters: [{name: test, cluster: {server: %s}}]
-contexts: [{name: read, context: {cluster: test}}]
-`, s.URL)
-			if err := os.WriteFile(config, []byte(contents), 0600); err != nil {
-				t.Fatal(err)
-			}
+			config := installationDoctorKubeconfig(t, s.URL)
 			for _, action := range []string{"doctor", "plan"} {
 				requests.Store(0)
 				args := []string{"installation", action, "--kubeconfig", config, "--context", "read", "--kube-namespace", "operations", "--release", "demo"}
@@ -121,6 +113,49 @@ contexts: [{name: read, context: {cluster: test}}]
 			}
 		})
 	}
+
+	t.Run("rate-limited read observes replacement", func(t *testing.T) {
+		var requests atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.RequestURI() != "/apis/batch/v1/namespaces/operations/jobs/demo-initialization" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if requests.Add(1) == 1 {
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				fmt.Fprint(w, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"TooManyRequests","message":"too many requests","details":{"retryAfterSeconds":1},"code":429}`)
+				return
+			}
+			fmt.Fprint(w, strings.Replace(job, `"uid":"id"`, `"uid":"replacement"`, 1))
+		}))
+		defer server.Close()
+
+		out, stderr, err := runHelp(t, "installation", "plan", "--kubeconfig", installationDoctorKubeconfig(t, server.URL),
+			"--context", "read", "--kube-namespace", "operations", "--release", "demo", "--expect-job-uid", "id", "--timeout-seconds", "5")
+		if err == nil || stderr != "" || requests.Load() < 2 {
+			t.Fatalf("out=%s stderr=%s err=%v requests=%d", out, stderr, err, requests.Load())
+		}
+		for _, want := range []string{`expected UID "id", observed UID "replacement"`, "original outcome remains unknown", "1. Recover the original installation record"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("want %q in %s", want, out)
+			}
+		}
+	})
+}
+
+func installationDoctorKubeconfig(t *testing.T, serverURL string) string {
+	t.Helper()
+	config := filepath.Join(t.TempDir(), "kubeconfig")
+	contents := fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters: [{name: test, cluster: {server: %s}}]
+contexts: [{name: read, context: {cluster: test}}]
+`, serverURL)
+	if err := os.WriteFile(config, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return config
 }
 
 func TestInstallationDoctorRejectsEmptyExpectedUID(t *testing.T) {

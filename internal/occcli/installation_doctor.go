@@ -125,7 +125,8 @@ func failedJobPodLookup(config, kctx, ns, uid string) string {
 }
 
 func readInitialization(ctx context.Context, config, kctx, ns, name, release, expectedUID string) (string, initializationState) {
-	// get --raw skips discovery and needs only get on this named Job.
+	// get --raw skips discovery and needs only get on this named Job. kubectl may
+	// retry the read within the deadline; the evidence reflects the successful response.
 	// Never relay the Job, stderr, credentials or exec-plugin diagnostics.
 	path := "/apis/batch/v1/namespaces/" + ns + "/jobs/" + name
 	cmd := exec.CommandContext(ctx, "kubectl", "--kubeconfig="+config, "--context="+kctx, "get", "--raw="+path)
