@@ -68,6 +68,7 @@ test("Codex runtime gates startup and readiness on a successful native authentic
         }),
       ],
       expect: loginFailure("AUTHENTICATION_FAILED"),
+      loginClasses: ["http_401_403"],
     },
     {
       name: "verifier-only app server starts without exposing either token input",
@@ -148,12 +149,14 @@ test("Codex runtime gates startup and readiness on a successful native authentic
       loginMode: "codex_pat",
       native: [login({ status: null, error: { code: "ENOENT" } })],
       expect: loginFailure(),
+      loginClasses: ["empty"],
     },
     {
       name: "access-token login refusal is not retried",
       loginMode: "codex_pat",
       native: [login({ status: 1 })],
       expect: loginFailure(),
+      loginClasses: ["empty"],
     },
     {
       // Native text observed from codex-cli 0.154 with a revoked access token.
@@ -167,30 +170,36 @@ test("Codex runtime gates startup and readiness on a successful native authentic
         }),
       ],
       expect: loginFailure("AUTHENTICATION_FAILED"),
+      loginClasses: ["http_401_403"],
     },
     {
-      name: "access-token login transport error remains a login failure",
+      // Finding 2017: a transport error is a reliability failure, retried before it is held.
+      name: "access-token login transport error is retried, then held as a login failure",
       loginMode: "codex_pat",
-      native: [
+      native: Array.from({ length: 3 }, () =>
         login({
           status: 1,
           stderr:
             "Error logging in with access token: failed to request personal access token metadata: error sending request for url (https://auth.openai.com/)\n",
         }),
-      ],
+      ),
       expect: loginFailure(),
+      loginClasses: ["network", "network", "network"],
+      loginPauses: [1000, 2000],
     },
     {
       name: "access-token login recovers one timeout before probing",
       loginMode: "codex_pat",
       native: [login(timedOut), login(), probe(completedTurn())],
       expect: ready,
+      loginClasses: ["timeout"],
     },
     {
       name: "access-token login stops after three timeouts",
       loginMode: "codex_pat",
-      native: [login(timedOut), login(timedOut), login(timedOut)],
+      native: [login(timedOut, 30000), login(timedOut, 30000), login(timedOut, 30000)],
       expect: loginFailure(),
+      loginClasses: ["timeout", "timeout", "timeout"],
     },
     {
       name: "service account token uses native access-token login before probe and clears credentials",
@@ -948,6 +957,236 @@ test("Codex runtime retries a transient startup model probe failure once", async
   }
 });
 
+// Owner rule (finding 2017): a reliability failure (network, timeout, provider or proxy
+// 5xx) of the native login or the model check is retried within the step's existing time
+// budget; a security failure (a credential rejection, 401 or 403, another 4xx, TLS) or
+// unclassified output is held at once, as before.
+test("Codex runtime retries a reliability failure of its login or model check, never a security failure", async (t) => {
+  const started = { type: "turn.started" };
+  const assistant = { type: "item.completed", item: { type: "agent_message", text: "READY" } };
+  const completed = { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } };
+  const success = probe([started, assistant, completed]);
+  const pat = { loginMode: "codex_pat" };
+  const loginFailed = (stderr, elapsed) => login({ status: 1, stderr }, undefined, elapsed);
+  const network = "failed to request personal access token metadata: error sending request for url";
+  const serverError = "personal access token metadata request failed with status 503";
+  // Codex exits 1 before printing any event: the 2017 model check shape.
+  const exited = (stderr, result) => probe([], { status: 1, stderr, ...result });
+  const exitCause = (detail) => ({ kind: "PROCESS_EXIT", detail });
+  const exitFailure = (detail) => probeFailure(exitCause(detail));
+  const loginScenarios = [
+    {
+      name: "a login network failure then success retries once",
+      native: [loginFailed(network), login(), success],
+      expect: ready,
+      loginClasses: ["network"],
+      loginPauses: [1000],
+    },
+    {
+      name: "a login 5xx then success retries once",
+      native: [loginFailed(serverError), login(), success],
+      expect: ready,
+      loginClasses: ["http_5xx"],
+      loginPauses: [1000],
+    },
+    {
+      name: "a login network failure then a 5xx then success backs off twice",
+      native: [loginFailed(network), loginFailed(serverError), login(), success],
+      expect: ready,
+      loginClasses: ["network", "http_5xx"],
+      loginPauses: [1000, 2000],
+    },
+    {
+      // A timed-out attempt waited 30 s already, so only the fast failure backs off.
+      name: "a login timeout then a network failure then success waits only after the fast failure",
+      native: [login(timedOut, 30000), loginFailed(network), login(undefined, 30000), success],
+      expect: ready,
+      loginClasses: ["timeout", "network"],
+      loginPauses: [2000],
+    },
+    {
+      name: "login network failures are held after three attempts with the same status shape",
+      native: [loginFailed(network), loginFailed(network), loginFailed(network)],
+      expect: loginFailure(),
+      loginClasses: ["network", "network", "network"],
+      loginPauses: [1000, 2000],
+    },
+    {
+      name: "a login network failure then a credential rejection is held at once",
+      native: [loginFailed(network), loginFailed("request failed with status 401 Unauthorized")],
+      expect: loginFailure("AUTHENTICATION_FAILED"),
+      loginClasses: ["network", "http_401_403"],
+      loginPauses: [1000],
+    },
+    {
+      // Jitter spreads retries by up to half of the base delay.
+      name: "a login retry waits at most half again its base delay",
+      random: 0.999,
+      native: [loginFailed(network), loginFailed(network), login(), success],
+      expect: ready,
+      loginClasses: ["network", "network"],
+      loginPauses: [1500, 2999],
+    },
+    {
+      // Three attempts keep the 90 s the three 30 s attempts always had.
+      name: "a login retry gets only the remaining budget",
+      native: [loginFailed(network, 59500), login(timedOut, 29500)],
+      expect: loginFailure(),
+      loginClasses: ["network", "timeout"],
+      loginPauses: [1000],
+    },
+    {
+      name: "a login network failure with no budget left for a retry is held at once",
+      native: [loginFailed(network, 89000)],
+      expect: loginFailure(),
+      loginClasses: ["network"],
+    },
+    ...[
+      ["a login 401", "request failed with status 401 Unauthorized", "http_401_403", "AUTHENTICATION_FAILED"],
+      ["a login 403", "request failed with status 403 Forbidden", "http_401_403", "AUTHENTICATION_FAILED"],
+      // A credential rejection Codex quotes beside network text still names the credential.
+      [
+        "a login credential rejection beside network text",
+        'error sending request: "status 401 Unauthorized"',
+        "network",
+        "AUTHENTICATION_FAILED",
+      ],
+      ["a login rate limit", "last status: 429 Too Many Requests", "http_other"],
+      ["a login TLS failure", "invalid peer certificate: UnknownIssuer", "tls"],
+      ["a login TLS failure beside network text", "error sending request: tls handshake eof", "tls"],
+      ["unrecognized login output", "something else went wrong", "unknown"],
+      ["a silent login failure", "", "empty"],
+    ].map(([description, stderr, failureClass, code]) => ({
+      name: `${description} is held at once`,
+      native: [loginFailed(stderr)],
+      expect: loginFailure(code),
+      loginClasses: [failureClass],
+    })),
+    {
+      name: "a login timeout whose output names a credential rejection is held at once",
+      native: [login({ ...timedOut, stderr: "status 401 Unauthorized" })],
+      expect: loginFailure(),
+      loginClasses: ["http_401_403"],
+    },
+  ].map((scenario) => ({ ...pat, ...scenario }));
+  const probeScenarios = [
+    {
+      name: "a model check that exits with a network failure then succeeds retries once",
+      native: [login(), exited("Error: error sending request for url"), success],
+      retryAfterMs: 1000,
+      expect: ready,
+      probeCodes: ["MODEL_PROBE_FAILED", "READY"],
+      probeFailureClasses: ["network", undefined],
+    },
+    {
+      name: "a model check that exits with a 5xx then succeeds retries once",
+      native: [login(), exited("Error: unexpected status 503 Service Unavailable"), success],
+      retryAfterMs: 1000,
+      expect: ready,
+      probeCodes: ["MODEL_PROBE_FAILED", "READY"],
+      probeFailureClasses: ["http_5xx", undefined],
+    },
+    {
+      name: "a model check that exits with a network failure twice holds the second exit",
+      native: [login(), exited("connection refused"), exited("connection refused")],
+      retryAfterMs: 1000,
+      expect: exitFailure("exit-1-attempt2"),
+      lastProbeCause: exitCause("exit-1"),
+      probeCodes: ["MODEL_PROBE_FAILED", "MODEL_PROBE_FAILED"],
+      probeFailureClasses: ["network", "network"],
+    },
+    {
+      name: "a model check retry waits at most half again its base delay",
+      random: 0.999,
+      native: [login(), exited("connection reset by peer"), success],
+      retryAfterMs: 1500,
+      retryDelayMs: 1500,
+      expect: ready,
+      probeCodes: ["MODEL_PROBE_FAILED", "READY"],
+    },
+    {
+      // The jittered delay must fit in the 61 s budget too.
+      name: "a model check with less than its jittered delay left is held at once",
+      random: 0.999,
+      native: [login(), probe([], { status: 1, stderr: "connection refused" }, undefined, 59600)],
+      expect: exitFailure("exit-1"),
+    },
+    ...[
+      ["a 401", "Error: unexpected status 401 Unauthorized", "http_401_403"],
+      ["a 403", "Error: unexpected status 403 Forbidden", "http_401_403"],
+      ["a rate limit", "Error: last status: 429 Too Many Requests", "http_other"],
+      ["a TLS failure", "invalid peer certificate: UnknownIssuer", "tls"],
+      ["a TLS failure beside network text", "error sending request: tls handshake eof", "tls"],
+      ["unrecognized output", "something else went wrong", "unknown"],
+      ["no output", "", "empty"],
+    ].map(([description, stderr, failureClass]) => ({
+      name: `a model check that exits with ${description} is held at once`,
+      native: [login(), exited(stderr)],
+      expect: exitFailure("exit-1"),
+      probeFailureClasses: [failureClass],
+    })),
+    {
+      // Only a Codex exit is classified this way; a wrapper-side process error is not.
+      name: "a model check whose output overflowed is held at once, whatever its class",
+      native: [login(), exited("connection refused", { status: null, error: { code: "ENOBUFS" } })],
+      expect: exitFailure("error-ENOBUFS"),
+      probeFailureClasses: ["network"],
+    },
+    // A security class vetoes the timeout and transient retries too.
+    {
+      name: "a model check timeout whose output names a 401 is held at once",
+      native: [login(), probe([], { ...timedOut, stderr: "unexpected status 401 Unauthorized" }, 30000)],
+      expect: probeTimeout,
+      probeFailureClasses: ["http_401_403"],
+    },
+    {
+      name: "a transient model check failure whose output names a 403 is held at once",
+      native: [
+        login(),
+        probe([started, failedTurn("unexpected status 502: upstream")], {
+          status: 1,
+          stderr: "unexpected status 403 Forbidden",
+        }),
+      ],
+      expect: probeFailure({ kind: "PROBE_STATUS", detail: "turn-failed" }, { status: 502 }),
+      probeFailureClasses: ["http_401_403"],
+    },
+    {
+      name: "a model check timeout then a network exit holds without a second retry",
+      native: [login(), probe([], timedOut, 30000), exited("connection refused")],
+      retryAfterMs: 1000,
+      expect: exitFailure("exit-1-attempt2"),
+      lastProbeCause: exitCause("exit-1"),
+      probeCodes: ["MODEL_PROBE_TIMEOUT", "MODEL_PROBE_FAILED"],
+    },
+  ];
+  for (const scenario of [...loginScenarios, ...probeScenarios]) {
+    await t.test(scenario.name, (t) => {
+      checkCodexStartup(t, scenario);
+    });
+  }
+});
+
+test("the Codex retry classes split the failure output classes", () => {
+  const context = vm.createContext({});
+  vm.runInContext(
+    `${CODEX_FAILURE_OUTPUT_CLASS_HELPER}
+    this.reliability = CODEX_RELIABILITY_FAILURE_CLASSES;
+    this.security = CODEX_SECURITY_FAILURE_CLASSES;`,
+    context,
+  );
+  const reliability = Array.from(context.reliability);
+  const security = Array.from(context.security);
+  assert.deepEqual(reliability, ["network", "timeout", "http_5xx"]);
+  assert.deepEqual(security, ["http_401_403", "http_other", "tls"]);
+  // Every class is reliability, security or unclassified, never two at once.
+  const unclassified = CODEX_FAILURE_OUTPUT_CLASSES.filter(
+    (failureClass) => !reliability.includes(failureClass) && !security.includes(failureClass),
+  );
+  assert.deepEqual(unclassified, ["empty", "unknown"]);
+  assert.equal(reliability.filter((failureClass) => security.includes(failureClass)).length, 0);
+});
+
 // Finding 2017: a failed login or model check logs only the class of Codex's error output.
 // Fake credentials, a JWT, a bearer header and a URL with a query string in that output
 // must never reach the held status or any log line.
@@ -992,41 +1231,60 @@ test("Codex runtime logs a failed login or model check's output class, never the
   // The 2017 shape: Codex exits 1 before printing any event.
   const exited = (stderr) => probe([], { status: 1, stderr });
   const pat = { loginMode: "codex_pat" };
+  // A reliability class is retried (finding 2017): three attempts, each logging its class.
+  const thrice = (step) => [step, step, step];
+  const retried = (failureClass) => ({
+    loginClasses: [failureClass, failureClass, failureClass],
+    loginPauses: [1000, 2000],
+  });
+  // The model check retries a reliability class once and holds the second exit.
+  const probeExitRetried = {
+    ...probeExit,
+    cause: { kind: "PROCESS_EXIT", detail: "exit-1-attempt2" },
+  };
+  const probeRetried = {
+    retryAfterMs: 1000,
+    lastProbeCause: { kind: "PROCESS_EXIT", detail: "exit-1" },
+    probeCodes: ["MODEL_PROBE_FAILED", "MODEL_PROBE_FAILED"],
+  };
   const scenarios = [
     {
       name: "a login transport error is network",
       ...pat,
-      native: [
+      native: thrice(
         login({
           status: 1,
           stderr: secretOutput(
             "Error logging in with access token: failed to request personal access token metadata: error sending request for url",
           ),
         }),
-      ],
+      ),
       expect: loginFailed(),
       failureClass: "network",
+      ...retried("network"),
     },
     {
       name: "a login DNS failure is network",
       ...pat,
-      native: [
+      native: thrice(
         login({
           status: 1,
           stderr: secretOutput("dns error: failed to lookup address information"),
         }),
-      ],
+      ),
       expect: loginFailed(),
       failureClass: "network",
+      ...retried("network"),
     },
     {
       name: "a login provider 5xx is http_5xx",
       ...pat,
-      native: [
+      native: thrice(
         login({ status: 1, stderr: secretOutput("unexpected status 503 Service Unavailable") }),
-      ],
+      ),
       expect: loginFailed(),
       failureClass: "http_5xx",
+      ...retried("http_5xx"),
     },
     {
       name: "a login credential rejection is http_401_403",
@@ -1041,6 +1299,7 @@ test("Codex runtime logs a failed login or model check's output class, never the
       ],
       expect: loginFailed("AUTHENTICATION_FAILED"),
       failureClass: "http_401_403",
+      loginClasses: ["http_401_403"],
     },
     {
       name: "another login 4xx is http_other",
@@ -1048,6 +1307,7 @@ test("Codex runtime logs a failed login or model check's output class, never the
       native: [login({ status: 1, stderr: secretOutput("last status: 429 Too Many Requests") })],
       expect: loginFailed(),
       failureClass: "http_other",
+      loginClasses: ["http_other"],
     },
     {
       name: "a rejected proxy certificate is tls",
@@ -1057,6 +1317,7 @@ test("Codex runtime logs a failed login or model check's output class, never the
       ],
       expect: loginFailed(),
       failureClass: "tls",
+      loginClasses: ["tls"],
     },
     {
       name: "three login timeouts are timeout",
@@ -1064,6 +1325,7 @@ test("Codex runtime logs a failed login or model check's output class, never the
       native: [login(timedOut), login(timedOut), login(timedOut)],
       expect: loginFailed(),
       failureClass: "timeout",
+      loginClasses: ["timeout", "timeout", "timeout"],
     },
     {
       name: "a silent login failure is empty",
@@ -1071,6 +1333,7 @@ test("Codex runtime logs a failed login or model check's output class, never the
       native: [login({ status: 1, stderr: "" })],
       expect: loginFailed(),
       failureClass: "empty",
+      loginClasses: ["empty"],
     },
     {
       name: "unrecognized login output is unknown",
@@ -1078,18 +1341,29 @@ test("Codex runtime logs a failed login or model check's output class, never the
       native: [login({ status: 1, stderr: secretOutput("something else went wrong") })],
       expect: loginFailed(),
       failureClass: "unknown",
+      loginClasses: ["unknown"],
     },
     {
       name: "a probe that exits before any event with a transport error is network",
-      native: [login(), exited(secretOutput("Error: error sending request for url"))],
-      expect: probeExit,
+      native: [
+        login(),
+        exited(secretOutput("Error: error sending request for url")),
+        exited(secretOutput("Error: error sending request for url")),
+      ],
+      expect: probeExitRetried,
       failureClass: "network",
+      ...probeRetried,
     },
     {
       name: "a probe that exits before any event with a provider 5xx is http_5xx",
-      native: [login(), exited(secretOutput("Error: unexpected status 502 Bad Gateway"))],
-      expect: probeExit,
+      native: [
+        login(),
+        exited(secretOutput("Error: unexpected status 502 Bad Gateway")),
+        exited(secretOutput("Error: unexpected status 502 Bad Gateway")),
+      ],
+      expect: probeExitRetried,
       failureClass: "http_5xx",
+      ...probeRetried,
     },
     {
       name: "a probe that exits before any event with a 403 is http_401_403",

@@ -3369,6 +3369,18 @@ function codexProbeFailureClass(stderr, events, error) {
   // Both classes are list members, so the fallback is only defensive.
   return CODEX_FAILURE_OUTPUT_PRECEDENCE.find((failureClass) => classes.includes(failureClass)) ?? "unknown";
 }
+// Owner rule (finding 2017): a failed login or model check whose output names a
+// reliability class (a failed or dropped connection, a timeout, a provider or proxy
+// 5xx) may pass on its own, so the step tries again within its time budget. A security
+// class (a 401 or 403, another 4xx such as a rate limit, TLS) never retries, and output
+// that names no class (empty, unknown) keeps the step's own rule.
+const CODEX_RELIABILITY_FAILURE_CLASSES = ["network", "timeout", "http_5xx"];
+const CODEX_SECURITY_FAILURE_CLASSES = ["http_401_403", "http_other", "tls"];
+// The wait before retry n: 1 s, doubling, plus up to half again at random so runtimes
+// that failed together (a restarted gateway) do not all retry at the same moment.
+function codexRetryDelay(retry) {
+  return Math.round(1000 * 2 ** (retry - 1) * (1 + Math.random() / 2));
+}
 `;
 
 export const AGENT_RUNTIME_ENTRYPOINT = String.raw`
@@ -3552,19 +3564,38 @@ if (loginMode === "chatgptAuthTokens") {
     if (temporary !== undefined) rmSync(temporary, { recursive: true, force: true });
   }
 } else {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Access-token login validates the credential remotely before saving it, so a
+  // timeout or a reliability failure may recover: up to three attempts within the 90 s
+  // that three 30 s attempts always had, waiting codexRetryDelay after a fast failure (a
+  // timed-out attempt has waited already). A rejected credential, a security class or
+  // unclassified output is held at once. API-key login only saves the key. Each failed
+  // attempt logs its number and output class, never the output.
+  const loginDeadline = performance.now() + 90000;
+  for (let attempt = 1; ; attempt++) {
+    const attemptStartedAt = performance.now();
     login = spawnSync("codex", loginArguments, {
       input: loginMode === "api_key" ? apiKey : accessToken,
       env: codexChildEnvironment(),
       encoding: "utf8",
       stdio: ["pipe", "ignore", "pipe"],
-      timeout: 30000, killSignal: "SIGKILL", maxBuffer: 262144,
+      timeout: Math.min(30000, Math.floor(loginDeadline - attemptStartedAt)), killSignal: "SIGKILL", maxBuffer: 262144,
     });
-    // Access-token login validates the same credential remotely before saving it.
-    // A cold-node login timeout may recover; model probing has its own bounded retry.
-    if (loginMode === "api_key" || login.error?.code !== "ETIMEDOUT") {
-      break;
-    }
+    if (loginMode === "api_key" || (login.status === 0 && !login.error)) break;
+    const timedOut = login.error?.code === "ETIMEDOUT";
+    const failureClass = codexFailureOutputClass(login.stderr, login.error);
+    console.error(JSON.stringify({
+      event: "codex.login",
+      attempt,
+      elapsedMs: Math.round(performance.now() - attemptStartedAt),
+      exitCode: Number.isInteger(login.status) ? login.status : null,
+      failureClass,
+    }));
+    const delay = timedOut ? 0 : codexRetryDelay(attempt);
+    if (attempt >= 3 || codexAuthenticationRejected(login.stderr) ||
+        CODEX_SECURITY_FAILURE_CLASSES.includes(failureClass) ||
+        !(timedOut || CODEX_RELIABILITY_FAILURE_CLASSES.includes(failureClass)) ||
+        loginDeadline - performance.now() - delay < 1000) break;
+    if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
   }
 }
 // A failed native login names the class of its error output, never the output.
@@ -3774,6 +3805,18 @@ function probeCodexAuthentication(timeout) {
   }
 }
 
+// The model check gets one retry (a held cause says "-attempt2"). A timeout, a transient
+// failure the check named, or a Codex exit with no conclusive event whose output names a
+// reliability class may pass on its own (owner rule, finding 2017). A credential
+// rejection or a security class never retries; every other failure is deterministic
+// and held at once. This is the one retry decision for the check.
+function codexProbeRetryable(result) {
+  if (result.code === "AUTHENTICATION_FAILED" || CODEX_SECURITY_FAILURE_CLASSES.includes(result.failureClass)) return false;
+  return result.code === "MODEL_PROBE_TIMEOUT" || result.transient === true ||
+    (result.cause?.kind === "PROCESS_EXIT" && result.cause.detail?.startsWith("exit-") === true &&
+      CODEX_RELIABILITY_FAILURE_CLASSES.includes(result.failureClass));
+}
+
 // A single startup budget includes both process attempts and the retry delay.
 // No signal handler is installed before app-server starts, so under tini
 // SIGTERM ends the probe, its backoff or a held failure at once.
@@ -3798,14 +3841,9 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     providerCode: result.providerCode,
     failureClass: result.failureClass,
   }));
-  if (result.code === "MODEL_PROBE_TIMEOUT" && attempt === 1 && performance.now() + 1000 < deadline) {
-    setTimeout(() => startAuthenticatedCodex(2, deadline), 1000);
-    return;
-  }
-  // A transient failure gets the same single retry; every other failure is
-  // deterministic and held at once.
-  if (result.transient === true && attempt === 1 && performance.now() + 1000 < deadline) {
-    setTimeout(() => startAuthenticatedCodex(2, deadline), 1000);
+  const delay = codexRetryDelay(1);
+  if (attempt === 1 && codexProbeRetryable(result) && performance.now() + delay < deadline) {
+    setTimeout(() => startAuthenticatedCodex(2, deadline), delay);
     return;
   }
   if (result.code !== undefined) {
