@@ -6,7 +6,7 @@ status: Proposed
 
 # Credential Proxy and credential lifecycle
 
-**RFC-0022** · [Proposal #1530](https://github.com/openclaw/openclaw-enterprise/pull/1530) · [Interfaces and records](contracts.md) · [Protocol](protocol.md) · [Security and migration](security.md)
+**RFC-0023** · [Proposal #1530](https://github.com/openclaw/openclaw-enterprise/pull/1530) · [Interfaces and records](contracts.md) · [Protocol](protocol.md) · [Security and migration](security.md)
 
 ## Decision
 
