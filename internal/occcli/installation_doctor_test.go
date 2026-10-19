@@ -73,7 +73,7 @@ contexts: [{name: read, context: {cluster: test}}]
 				}
 				expected := []string{tc.want, "Do not replay", "removal unknown", "not qualified"}
 				if action == "plan" {
-					first := map[string]string{"denied": "permission to get", "missing": "first-install intent", "install": "Resume after migration", "upgrade": "Resume after migration", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "permission to get"}[tc.name]
+					first := map[string]string{"denied": "permission to get", "missing": "first-install intent", "install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Resume after migration", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "permission to get"}[tc.name]
 					expected = []string{tc.want, first, "2. If an API operation was attempted", "3. Verify temporary access", "4. Qualify useful work"}
 				}
 				if tc.success {

@@ -40,7 +40,7 @@ func (app *application) installationHandoffCommand(action string) *cobra.Command
 			out := cmd.OutOrStdout()
 			fmt.Fprintln(out, message)
 			if action == "plan" {
-				fmt.Fprintf(out, "Resume in order:\n1. %s\n", state.next())
+				fmt.Fprintf(out, "Resume in order:\n1. %s\n", state.next(expectedUID != ""))
 				fmt.Fprintln(out, "2. If an API operation was attempted, inspect that original attempt before another write. Never replay an uncertain operation.")
 				fmt.Fprintln(out, "3. Verify temporary access was removed, separately with the access owner.")
 				fmt.Fprintln(out, "4. Qualify useful work from the installed Agent.")
@@ -81,7 +81,7 @@ const (
 	initializationComplete
 )
 
-func (s initializationState) next() string {
+func (s initializationState) next(expectUID bool) string {
 	switch s {
 	case initializationUnreadable:
 		return "Confirm the cluster target and obtain permission to get this named Job, then check again."
@@ -90,7 +90,10 @@ func (s initializationState) next() string {
 	case initializationOriginalNotFound:
 		return "Recover the original installation record and reconcile that attempt. Do not replay initialization or substitute the current Job UID."
 	case initializationComplete:
-		return "Resume after migration and bootstrap. Confirm this retained Job corresponds to the attempt you are handing off."
+		if expectUID {
+			return "Resume after migration and bootstrap for the recorded Job."
+		}
+		return "Establish whether this retained Job is the original. Without that link, the original outcome remains unknown."
 	default:
 		return "Resolve the identity, progress and effects of this initialization Job before considering another attempt."
 	}

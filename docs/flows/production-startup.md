@@ -136,6 +136,14 @@ and `executionCluster.kubeconfigKey` must be Secret keys at most 253 characters,
 not `.` or a `..` prefix.
 Bootstrap receives auth, administrator, Installation and output settings.
 
+For an [operator handoff](../guides/deploy/production-handoff.md#resume-an-installation-in-progress),
+record the UID of the persisted Job. Helm can replace it under the same name.
+`occ installation doctor` and `plan` need only permission to get that named Job;
+pass `--expect-job-uid` to require the recorded identity. Exit zero means this
+Job reports completion, including bootstrap that verified an existing Installation.
+Missing, unreadable, replaced or incomplete evidence exits nonzero. Reconcile any
+original API attempt, verify temporary access removal and qualify runtime separately.
+
 `scripts/migrate-production.mjs:1`, `scripts/migration-history.mjs:migrateWithHistory`
 
 Migration verifies the complete SQL source manifest, checks the

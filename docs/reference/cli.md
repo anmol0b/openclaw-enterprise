@@ -134,6 +134,21 @@ unauthorized resource. JSON and YAML output include each Agent's desired runtime
 state, execution mode, active revision, and whether deployment work is queued or
 claimed.
 
+## Installation handoff
+
+`occ installation doctor` reads the Helm initialization Job. `occ installation plan`
+reads the same Job and orders the handoff checks without executing them. Supply
+`--kubeconfig`, `--context`, `--kube-namespace` and `--release`. Both commands
+need only Kubernetes permission to get that named Job; neither uses an OCC
+service key nor reads Secrets or logs.
+
+Exit zero means the retained chart Job reports completion, not that the
+installation or runtime is ready. Helm reuses the name. To check identity, pass
+`--expect-job-uid` with the UID recorded from the persisted Job during the
+original installation. A different UID, a missing or unreadable Job, or
+unconfirmed completion exits nonzero. In particular, denied access means
+unknown, not absent. See the [handoff procedure](../guides/deploy/production-handoff.md#resume-an-installation-in-progress).
+
 ## Runtime status and logs
 
 `occ agent runtime AGENT_ID` and `occ agent logs AGENT_ID` read the

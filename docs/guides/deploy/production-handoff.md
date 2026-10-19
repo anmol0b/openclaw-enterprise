@@ -18,7 +18,9 @@ only permission to get the named Job, normally `<release>-initialization`.
 target=(--kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT"
         --kube-namespace "$NAMESPACE" --release "$RELEASE")
 # If recorded, use the UID of the Job persisted during the original installation.
-target+=(--expect-job-uid "$RECORDED_JOB_UID")
+if [[ -n ${RECORDED_JOB_UID:-} ]]; then
+  target+=(--expect-job-uid "$RECORDED_JOB_UID")
+fi
 go run ./cmd/occ installation doctor "${target[@]}"
 go run ./cmd/occ installation plan "${target[@]}"
 ```
