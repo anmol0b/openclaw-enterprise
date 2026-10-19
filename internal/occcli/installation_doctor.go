@@ -37,15 +37,11 @@ func (app *application) installationHandoffCommand(action string) *cobra.Command
 			name = strings.TrimSuffix(name[:min(63, len(name))], "-")
 			ctx, cancel := context.WithTimeout(cmd.Context(), app.parsedTimeout)
 			defer cancel()
-			message, state := readInitialization(ctx, kubeconfig, kubeContext, namespace, name, release, expectedUID)
+			result := readInitialization(ctx, kubeconfig, kubeContext, namespace, name, release, expectedUID)
 			out := cmd.OutOrStdout()
-			fmt.Fprintln(out, message)
+			fmt.Fprintln(out, result.message)
 			if action == "plan" {
-				next := state.next(expectedUID != "")
-				if state == initializationFailed && expectedUID != "" {
-					next = failedJobPodLookup(namespace, expectedUID)
-				}
-				fmt.Fprintf(out, "Resume in order:\n1. %s\n", next)
+				fmt.Fprintf(out, "Resume in order:\n1. %s\n", result.next())
 				fmt.Fprintln(out, "2. If an API operation was attempted, inspect that original attempt before another write. Never replay an uncertain operation.")
 				fmt.Fprintln(out, "3. Verify temporary access was removed, separately with the access owner.")
 				fmt.Fprintln(out, "4. Qualify useful work from the installed Agent.")
@@ -54,7 +50,7 @@ func (app *application) installationHandoffCommand(action string) *cobra.Command
 				fmt.Fprintln(out, "Temporary access: removal unknown. Verify separately with the access owner.")
 				fmt.Fprintln(out, "Runtime: not qualified by this check.")
 			}
-			if state != initializationComplete {
+			if result.state != initializationComplete {
 				return &ExitStatusError{Code: 1}
 			}
 			return nil
@@ -88,6 +84,17 @@ func helmReleaseName(name string) bool {
 	return true
 }
 
+type initializationResult struct {
+	message string
+	state   initializationState
+	// Present only after the observed Job matches the recorded UID and supported chart.
+	original *initializationJobIdentity
+}
+
+type initializationJobIdentity struct {
+	namespace, uid string
+}
+
 type initializationState int
 
 const (
@@ -101,8 +108,8 @@ const (
 	initializationComplete
 )
 
-func (s initializationState) next(expectUID bool) string {
-	switch s {
+func (r initializationResult) next() string {
+	switch r.state {
 	case initializationUnreadable:
 		return "Confirm the cluster target, kubectl and connectivity before checking this named Job again."
 	case initializationLoginReported:
@@ -113,14 +120,17 @@ func (s initializationState) next(expectUID bool) string {
 		return "Confirm first-install intent and preflight with the database, identity and volume owners. Establish what already exists before considering bootstrap."
 	case initializationOriginalNotFound:
 		return "Recover the original installation record and reconcile that attempt. Do not replay initialization or substitute the current Job UID."
+	case initializationFailed:
+		if r.original != nil {
+			return failedJobPodLookup(r.original.namespace, r.original.uid)
+		}
 	case initializationComplete:
-		if expectUID {
+		if r.original != nil {
 			return "Continue from the completed migration and bootstrap for the recorded Job. Ask the release operator to check the Helm release status and whether its API and worker Deployments rolled out and are ready. Do not rerun initialization."
 		}
 		return "Establish whether this retained Job is the original. Without that link, the original outcome remains unknown."
-	default:
-		return "Resolve the identity, progress and effects of this initialization Job before considering another attempt."
 	}
+	return "Resolve the identity, progress and effects of this initialization Job before considering another attempt."
 }
 
 // Called only for a failed Job whose observed UID matched --expect-job-uid.
@@ -138,7 +148,7 @@ func failedJobPodLookup(ns, uid string) string {
 	return inspect + " Set POD_READER_KUBECONFIG and POD_READER_CONTEXT in that operator's shell before running:\n   " + command + "\n   " + verify
 }
 
-func readInitialization(ctx context.Context, config, kctx, ns, name, release, expectedUID string) (string, initializationState) {
+func readInitialization(ctx context.Context, config, kctx, ns, name, release, expectedUID string) initializationResult {
 	// Let one kubectl invocation resolve the server, TLS settings and credentials
 	// together. Reading the server first and passing it back with --server can
 	// send credentials to the wrong cluster if kubeconfig changes between reads.
@@ -154,19 +164,19 @@ func readInitialization(ctx context.Context, config, kctx, ns, name, release, ex
 		if completeDiagnostic && strings.TrimSpace(diagnostic.buf.String()) ==
 			fmt.Sprintf("Error from server (NotFound): jobs.batch %q not found", name) {
 			if expectedUID != "" {
-				return fmt.Sprintf("Initialization Job: not found at this target; expected UID %+q. The original outcome remains unknown.", expectedUID), initializationOriginalNotFound
+				return initializationResult{state: initializationOriginalNotFound, message: fmt.Sprintf("Initialization Job: not found at this target; expected UID %+q. The original outcome remains unknown.", expectedUID)}
 			}
-			return "Initialization Job: not found at the selected target. For a first install, confirm the intended database, identity and volume state with their owners. Absence does not establish a new database or authorize bootstrap or retry.", initializationAbsent
+			return initializationResult{state: initializationAbsent, message: "Initialization Job: not found at the selected target. For a first install, confirm the intended database, identity and volume state with their owners. Absence does not establish a new database or authorize bootstrap or retry."}
 		}
 		if completeDiagnostic {
 			switch reportedKubectlReadProblem(diagnostic.buf.String()) {
 			case initializationLoginReported:
-				return "Initialization: unknown. kubectl reported a login problem while reading the named Job. Do not assume it is absent.", initializationLoginReported
+				return initializationResult{state: initializationLoginReported, message: "Initialization: unknown. kubectl reported a login problem while reading the named Job. Do not assume it is absent."}
 			case initializationRefusalReported:
-				return "Initialization: unknown. kubectl reported a refusal while reading the named Job. Do not assume it is absent.", initializationRefusalReported
+				return initializationResult{state: initializationRefusalReported, message: "Initialization: unknown. kubectl reported a refusal while reading the named Job. Do not assume it is absent."}
 			}
 		}
-		return "Initialization: unknown. Could not read the named Job; check target, kubectl and connectivity. Do not assume it is absent.", initializationUnreadable
+		return initializationResult{state: initializationUnreadable, message: "Initialization: unknown. Could not read the named Job; check target, kubectl and connectivity. Do not assume it is absent."}
 	}
 	return initializationEvidence(out.buf.Bytes(), ns, name, release, expectedUID)
 }
@@ -206,7 +216,7 @@ type initializationJobStatus struct {
 	Conditions                     []struct{ Type, Status string }
 }
 
-func initializationEvidence(data []byte, namespace, name, release, expectedUID string) (string, initializationState) {
+func initializationEvidence(data []byte, namespace, name, release, expectedUID string) initializationResult {
 	type container struct {
 		Name, RestartPolicy string
 		Command, Args       []string
@@ -228,21 +238,21 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	}
 	err := json.Unmarshal(data, &job)
 	m := job.Metadata
-	const unrecognized = "Initialization: unknown. The response did not identify a retained initialization Job for this release."
+	unrecognized := initializationResult{state: initializationUnresolved, message: "Initialization: unknown. The response did not identify a retained initialization Job for this release."}
 	if err != nil || job.Kind != "Job" || job.APIVersion != "batch/v1" || m.Name != name || m.Namespace != namespace || m.UID == "" {
-		return unrecognized, initializationUnresolved
+		return unrecognized
 	}
 	if expectedUID != "" && m.UID != expectedUID {
-		return fmt.Sprintf("Initialization Job %s/%s: expected UID %+q, observed UID %+q. This is a different Job; the original outcome remains unknown.", namespace, name, expectedUID, m.UID), initializationOriginalNotFound
+		return initializationResult{state: initializationOriginalNotFound, message: fmt.Sprintf("Initialization Job %s/%s: expected UID %+q, observed UID %+q. This is a different Job; the original outcome remains unknown.", namespace, name, expectedUID, m.UID)}
 	}
 	l := m.Labels
 	if m.DeletionTimestamp != nil || l["app.kubernetes.io/instance"] != release ||
 		l["app.kubernetes.io/name"] != "openclaw-enterprise" || l["app.kubernetes.io/component"] != "initialization" ||
 		l["app.kubernetes.io/managed-by"] != "Helm" || m.Annotations["helm.sh/hook"] != "pre-install,pre-upgrade" {
-		return unrecognized, initializationUnresolved
+		return unrecognized
 	}
 	if job.Spec.ManagedBy != nil && *job.Spec.ManagedBy != "kubernetes.io/job-controller" {
-		return "Initialization: unknown. The Job uses an unsupported Job controller.", initializationUnresolved
+		return initializationResult{state: initializationUnresolved, message: "Initialization: unknown. The Job uses an unsupported Job controller."}
 	}
 	p := job.Spec.Template.Spec
 	init := p.InitContainers
@@ -250,7 +260,7 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	// The Job can complete without that initialization step ever succeeding.
 	for _, step := range init {
 		if step.RestartPolicy == "Always" {
-			return "Initialization: unknown. The Job runs an initialization step as a sidecar; Job completion does not show that step succeeded.", initializationUnresolved
+			return initializationResult{state: initializationUnresolved, message: "Initialization: unknown. The Job runs an initialization step as a sidecar; Job completion does not show that step succeeded."}
 		}
 	}
 	hook := "install"
@@ -269,7 +279,7 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	const migrate = "scripts/migrate-production.mjs"
 	migrationMatches := is(init, "migration", migrate) || (hook == "install" && is(init, "migration", migrate, "--expect-empty"))
 	if !migrationMatches || !is(p.Containers, "bootstrap", "scripts/bootstrap-installation.mjs") {
-		return "Initialization: unknown. Job steps do not match the supported chart.", initializationUnresolved
+		return initializationResult{state: initializationUnresolved, message: "Initialization: unknown. Job steps do not match the supported chart."}
 	}
 	state := job.Status.state()
 	message := "Initialization Job: completion not established. Inspect this attempt before any retry."
@@ -281,12 +291,14 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	}
 	// Helm reuses the name; the UID identifies this Job, not an API attempt.
 	message += fmt.Sprintf("\nObserved Job %s/%s, UID %+q", namespace, name, m.UID)
+	var original *initializationJobIdentity
 	if expectedUID != "" {
 		message += " matches the recorded UID. This identifies only this Job; it does not establish an API attempt, its effects or permission to retry."
+		original = &initializationJobIdentity{namespace: m.Namespace, uid: m.UID}
 	} else {
 		message += " (compare with the installation record)."
 	}
-	return message, state
+	return initializationResult{state: state, message: message, original: original}
 }
 
 func (status initializationJobStatus) state() initializationState {

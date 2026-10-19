@@ -143,6 +143,10 @@ func TestInstallationDoctor(t *testing.T) {
 					}
 				}
 				wantLookup := action == "plan" && tc.name == "pinned-failed"
+				wantPodGuidance := action == "plan" && (tc.name == "pinned-failed" || tc.name == "unsafe-uid-failed")
+				if strings.Contains(out, "Ask an operator who can already list Pods") != wantPodGuidance {
+					t.Errorf("want operator Pod guidance %v in %s", wantPodGuidance, out)
+				}
 				if strings.Contains(out, "get pods") != wantLookup {
 					t.Errorf("want operator Pod lookup %v in %s", wantLookup, out)
 				}
@@ -389,9 +393,9 @@ func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	message, state := readInitialization(context.Background(), "unused", "read", "operations", "demo-initialization", "demo", "")
-	if state != initializationUnreadable || !strings.Contains(message, "unknown. Could not read") || strings.Contains(message, "refusal") {
-		t.Fatalf("message=%q state=%v", message, state)
+	result := readInitialization(context.Background(), "unused", "read", "operations", "demo-initialization", "demo", "")
+	if result.state != initializationUnreadable || !strings.Contains(result.message, "unknown. Could not read") || strings.Contains(result.message, "refusal") {
+		t.Fatalf("result=%+v", result)
 	}
 
 	// An exact-looking NotFound line cannot establish absence when the other
@@ -403,12 +407,12 @@ func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
 	if err := os.WriteFile(kubectl, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	message, state = readInitialization(context.Background(), "unused", "read", "operations", "demo-initialization", "demo", "")
+	result = readInitialization(context.Background(), "unused", "read", "operations", "demo-initialization", "demo", "")
 	if _, err := os.Stat(kubectl + ".done"); err != nil {
 		t.Fatalf("kubectl fixture did not finish: %v", err)
 	}
-	if state != initializationUnreadable || !strings.Contains(message, "unknown. Could not read") || strings.Contains(message, "not found at the selected target") {
-		t.Fatalf("message=%q state=%v", message, state)
+	if result.state != initializationUnreadable || !strings.Contains(result.message, "unknown. Could not read") || strings.Contains(result.message, "not found at the selected target") {
+		t.Fatalf("result=%+v", result)
 	}
 }
 
