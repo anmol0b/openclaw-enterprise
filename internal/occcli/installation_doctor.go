@@ -93,6 +93,8 @@ type initializationState int
 
 const (
 	initializationUnreadable initializationState = iota
+	initializationLoginReported
+	initializationRefusalReported
 	initializationAbsent
 	initializationOriginalNotFound
 	initializationUnresolved
@@ -103,7 +105,11 @@ const (
 func (s initializationState) next(expectUID bool) string {
 	switch s {
 	case initializationUnreadable:
-		return "Confirm the cluster target and obtain permission to get this named Job, then check again."
+		return "Confirm the cluster target, kubectl and connectivity before checking this named Job again."
+	case initializationLoginReported:
+		return "Confirm the cluster target, then check this named Job with a separately authorized read-only session."
+	case initializationRefusalReported:
+		return "Confirm the cluster target and intended reader with the access owner. Do not restore temporary privilege or request broader access."
 	case initializationAbsent:
 		return "Confirm first-install intent and preflight with the database, identity and volume owners. Establish what already exists before considering bootstrap."
 	case initializationOriginalNotFound:
@@ -147,23 +153,52 @@ func readInitialization(ctx context.Context, config, kctx, ns, name, release, ex
 	cmd.Stdout, cmd.Stderr = &out, &diagnostic
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(diagnostic.buf.String()) ==
+		completeDiagnostic := errors.As(err, &exit) && exit.ExitCode() == 1 && ctx.Err() == nil && !out.overflow && !diagnostic.overflow
+		if completeDiagnostic && strings.TrimSpace(diagnostic.buf.String()) ==
 			fmt.Sprintf("Error from server (NotFound): jobs.batch %q not found", name) {
 			if expectedUID != "" {
 				return fmt.Sprintf("Initialization Job: not found at this target; expected UID %+q. The original outcome remains unknown.", expectedUID), initializationOriginalNotFound
 			}
 			return "Initialization Job: not found at the selected target. For a first install, confirm the intended database, identity and volume state with their owners. Absence does not establish a new database or authorize bootstrap or retry.", initializationAbsent
 		}
-		return "Initialization: unknown. Could not read the named Job; check target, kubectl, connectivity and permission to get that Job. Do not assume it is absent.", initializationUnreadable
+		if completeDiagnostic {
+			switch reportedKubectlReadProblem(diagnostic.buf.String()) {
+			case initializationLoginReported:
+				return "Initialization: unknown. kubectl reported a login problem while reading the named Job. Do not assume it is absent.", initializationLoginReported
+			case initializationRefusalReported:
+				return "Initialization: unknown. kubectl reported a refusal while reading the named Job. Do not assume it is absent.", initializationRefusalReported
+			}
+		}
+		return "Initialization: unknown. Could not read the named Job; check target, kubectl and connectivity. Do not assume it is absent.", initializationUnreadable
 	}
 	return initializationEvidence(out.buf.Bytes(), ns, name, release, expectedUID)
 }
 
+// These single-line kubectl prefixes only guide the operator. They do not
+// establish the HTTP status, cause of a login problem, or Job state.
+func reportedKubectlReadProblem(stderr string) initializationState {
+	line := strings.TrimSuffix(strings.TrimSuffix(stderr, "\n"), "\r")
+	if strings.ContainsAny(line, "\r\n") {
+		return initializationUnreadable
+	}
+	if strings.HasPrefix(line, "error: You must be logged in to the server (") && strings.HasSuffix(line, ")") {
+		return initializationLoginReported
+	}
+	if strings.HasPrefix(line, "Error from server (Forbidden): ") && len(line) > len("Error from server (Forbidden): ") {
+		return initializationRefusalReported
+	}
+	return initializationUnreadable
+}
+
 // Bound both streams even when an auth plugin or endpoint misbehaves.
-type doctorBuffer struct{ buf bytes.Buffer }
+type doctorBuffer struct {
+	buf      bytes.Buffer
+	overflow bool
+}
 
 func (b *doctorBuffer) Write(p []byte) (int, error) {
 	if len(p) > (4<<20)-b.buf.Len() {
+		b.overflow = true
 		return 0, errors.New("kubectl output too large")
 	}
 	return b.buf.Write(p)

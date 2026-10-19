@@ -52,10 +52,13 @@ it to that earlier attempt. Interpret the result at this target:
   or credentials. Ask the database and storage owners for current state and output
   provenance; treat unverified state or provenance as unknown. Preserve the attempt
   and do not retry.
-- **Unknown or incomplete.** A denied read leaves the outcome unknown; it does
-  not mean the Job is absent. `FailureTarget` alone does not establish terminal
-  failure. Verify read access or inspect the original Job as directed. An
-  interrupted initialization may already have changed state.
+- **Unknown or incomplete.** An unreadable Job remains unknown, even if kubectl
+  reports a login problem or refusal; it is not evidence that the Job is absent.
+  Confirm the target. For a reported login problem, use a separately authorized
+  read-only session. For a reported refusal, confirm the intended reader with the
+  access owner without restoring temporary privilege or requesting broader access.
+  `FailureTarget` alone does not establish terminal failure. An interrupted
+  initialization may already have changed state.
 
 The Job UID identifies the initialization, not a later API operation. If an API
 attempt had an uncertain outcome, reconcile that original attempt before another

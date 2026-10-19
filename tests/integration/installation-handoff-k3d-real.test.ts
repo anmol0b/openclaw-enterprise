@@ -101,7 +101,8 @@ test(
       assert.equal(result.status, status, result.stderr + result.stdout);
       assert.match(result.stdout, expected);
     }
-    handoff("doctor", 1, /unknown. Could not read/);
+    handoff("doctor", 1, /unknown. kubectl reported a refusal/);
+    handoff("plan", 1, /Confirm the cluster target and intended reader with the access owner/);
     await admin(
       "create",
       "role",

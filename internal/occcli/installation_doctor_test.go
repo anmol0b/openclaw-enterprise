@@ -1,7 +1,10 @@
 package occcli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -54,8 +57,10 @@ func TestInstallationDoctor(t *testing.T) {
 		{"no-condition", 200, strings.Replace(job, "Complete", "SuccessCriteriaMet", 1), "completion not established", false, ""},
 		{"wrong-steps", 200, strings.Replace(job, "migrate-production.mjs", "sensitive-detail", 1), "do not match", false, ""},
 		{"missing", 404, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":"jobs.batch \"demo-initialization\" not found"}`, "not found at the selected target", false, ""},
-		{"denied", 403, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403,"message":"sensitive-detail"}`, "unknown. Could not read", false, ""},
-		{"pinned-denied", 403, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403,"message":"sensitive-detail"}`, "unknown. Could not read", false, "old"},
+		{"login", 401, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Unauthorized","code":401,"message":"sensitive-detail"}`, "kubectl reported a login problem", false, ""},
+		{"denied", 403, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403,"message":"sensitive-detail"}`, "kubectl reported a refusal", false, ""},
+		{"pinned-denied", 403, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","code":403,"message":"sensitive-detail"}`, "kubectl reported a refusal", false, "old"},
+		{"server-marker", 500, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"InternalError","code":500,"message":"sensitive-detail; error: You must be logged in to the server; Error from server (Forbidden): refused"}`, "unknown. Could not read", false, ""},
 		{"pinned-missing", 404, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":"jobs.batch \"demo-initialization\" not found"}`, "original outcome remains unknown", false, "old"},
 		{"pinned", 200, job, "matches the recorded UID", true, "id"},
 		{"replaced", 200, job, `expected UID "old", observed UID "id"`, false, "old"},
@@ -90,13 +95,28 @@ func TestInstallationDoctor(t *testing.T) {
 					args = append(args, "--expect-job-uid", tc.uid)
 				}
 				out, stderr, err := runHelp(t, args...)
-				if (err == nil) != tc.success || stderr != "" || requests.Load() != 1 || strings.Contains(out, "sensitive-detail") {
+				var exit *ExitStatusError
+				if (err == nil) != tc.success || (!tc.success && (!errors.As(err, &exit) || exit.Code != 1)) ||
+					stderr != "" || requests.Load() != 1 || strings.Contains(out, "sensitive-detail") {
 					t.Errorf("out=%s stderr=%s err=%v requests=%d", out, stderr, err, requests.Load())
+				}
+				if tc.status == 401 || tc.status == 403 || tc.status == 500 {
+					for _, unwanted := range []string{"obtain permission", "first-install intent", "not found at the selected target"} {
+						if strings.Contains(out, unwanted) {
+							t.Errorf("unexpected %q in %s", unwanted, out)
+						}
+					}
 				}
 				expected := []string{tc.want, "Do not replay", "removal unknown", "not qualified"}
 				if action == "plan" {
-					first := map[string]string{"denied": "permission to get", "missing": "first-install intent", "install": "1. Establish whether", "guarded-install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Resume after migration", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "permission to get"}[tc.name]
+					first := map[string]string{"login": "1. Confirm the cluster target", "denied": "1. Confirm the cluster target and intended reader", "missing": "first-install intent", "install": "1. Establish whether", "guarded-install": "1. Establish whether", "upgrade": "1. Establish whether", "pinned": "1. Resume after migration", "replaced": "1. Recover the original installation record", "pinned-missing": "1. Recover the original installation record", "pinned-denied": "1. Confirm the cluster target and intended reader", "server-marker": "1. Confirm the cluster target"}[tc.name]
 					expected = []string{tc.want, first, "2. If an API operation was attempted", "3. Verify temporary access", "4. Qualify useful work"}
+					switch tc.status {
+					case 401:
+						expected = append(expected, "separately authorized read-only session")
+					case 403:
+						expected = append(expected, "Do not restore temporary privilege or request broader access")
+					}
 				}
 				wantLookup := action == "plan" && tc.name == "pinned-failed"
 				if strings.Contains(out, "get pods") != wantLookup {
@@ -162,6 +182,57 @@ func TestInstallationDoctorRejectsEmptyExpectedUID(t *testing.T) {
 	_, _, err := runHelp(t, "installation", "doctor", "--kubeconfig", "unused", "--context", "unused", "--kube-namespace", "demo", "--release", "demo", "--expect-job-uid=")
 	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestReportedKubectlReadProblemRequiresAnUnwrappedDiagnostic(t *testing.T) {
+	for _, tc := range []struct {
+		name, diagnostic string
+		want             initializationState
+	}{
+		{"login", "error: You must be logged in to the server (details)\n", initializationLoginReported},
+		{"refusal", "Error from server (Forbidden): details\n", initializationRefusalReported},
+		{"warning", "Warning: unrelated\nError from server (Forbidden): details\n", initializationUnreadable},
+		{"wrapped", "error: exec plugin failed: error: You must be logged in to the server (details)\n", initializationUnreadable},
+		{"localized", "Error del servidor (Forbidden): details\n", initializationUnreadable},
+		{"embedded", "Error from server (InternalError): Error from server (Forbidden): details\n", initializationUnreadable},
+		{"empty-refusal", "Error from server (Forbidden): \n", initializationUnreadable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reportedKubectlReadProblem(tc.diagnostic); got != tc.want {
+				t.Errorf("classification = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInstallationDoctorIgnoresIncompleteKubectlDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	kubectl := filepath.Join(dir, "kubectl")
+	if err := os.WriteFile(kubectl, []byte("#!/bin/sh\nprintf '%s\\n' 'Error from server (Forbidden): details' >&2\nexit 2\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	message, state := readInitialization(context.Background(), "unused", "read", "operations", "demo-initialization", "demo", "")
+	if state != initializationUnreadable || !strings.Contains(message, "unknown. Could not read") || strings.Contains(message, "refusal") {
+		t.Fatalf("message=%q state=%v", message, state)
+	}
+
+	// An exact-looking NotFound line cannot establish absence when the other
+	// output stream exceeded the read bound.
+	if err := os.WriteFile(kubectl+".data", bytes.Repeat([]byte("x"), (4<<20)+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' 'Error from server (NotFound): jobs.batch \"demo-initialization\" not found' >&2\ncat \"$0.data\"\ntouch \"$0.done\"\nexit 1\n"
+	if err := os.WriteFile(kubectl, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	message, state = readInitialization(context.Background(), "unused", "read", "operations", "demo-initialization", "demo", "")
+	if _, err := os.Stat(kubectl + ".done"); err != nil {
+		t.Fatalf("kubectl fixture did not finish: %v", err)
+	}
+	if state != initializationUnreadable || !strings.Contains(message, "unknown. Could not read") || strings.Contains(message, "not found at the selected target") {
+		t.Fatalf("message=%q state=%v", message, state)
 	}
 }
 
