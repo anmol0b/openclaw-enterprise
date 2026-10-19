@@ -18,6 +18,8 @@ Replace `CredentialGatewayDriver` with the `credential_proxy` Installation capab
 
 [Diagram source](assets/overview.mmd)
 
+[Proposed GitHub installation-wide access](github-installation-access.md) describes an opt-in authority for ordinary Git and GitHub API work through the same online sender.
+
 ## Two deployment modes
 
 The deployment selects an egress implementation; it does not separately select an authentication mechanism. Protection is an explicit admission decision, independent of how many credentials are configured.
