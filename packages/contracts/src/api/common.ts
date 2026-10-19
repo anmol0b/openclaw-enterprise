@@ -545,6 +545,7 @@ export const PermissionActionSchema = Type.Union([
   Type.Literal("operate"),
   Type.Literal("administer"),
   Type.Literal("read_logs"),
+  Type.Literal("manage_policy"),
 ]);
 
 export const ResourceKindSchema = Type.Union([
@@ -557,6 +558,7 @@ export const ResourceKindSchema = Type.Union([
   Type.Literal("agent"),
   Type.Literal("agent_revision"),
   Type.Literal("credential_source"),
+  Type.Literal("sandbox_policy"),
 ]);
 
 export const NamespacePolicyResourceKindSchema = Type.Union([
@@ -565,6 +567,7 @@ export const NamespacePolicyResourceKindSchema = Type.Union([
   Type.Literal("agent_revision"),
   Type.Literal("configuration"),
   Type.Literal("credential_source"),
+  Type.Literal("sandbox_policy"),
   Type.Literal("preset"),
   Type.Literal("secret"),
   Type.Literal("service_account"),
@@ -755,6 +758,23 @@ export const ProvisionAgentBody = Type.Object(
     pluginApprovers: Type.Optional(Type.Ref("PluginApprovers")),
     repositoryBindings: Type.Optional(RepositoryBindingRequestsSchema),
     repositoryAccess: Type.Optional(RepositoryAccessSchema),
+  },
+  { additionalProperties: false },
+);
+
+export const ValidateAgentCreateBody = Type.Object(
+  {
+    initialWorkspaceFiles: Type.Optional(CreateAgentBody.properties.initialWorkspaceFiles),
+    configuration: Type.Object(
+      { kind: ConfigurationKindSchema, values: ConfigurationValues },
+      {
+        additionalProperties: false,
+        description: "The Agent Configuration the caller will save, not yet saved.",
+      },
+    ),
+    executionMode: Type.Optional(HarnessExecutionModeSchema),
+    plugins: Type.Optional(Type.Ref("PluginDesiredState")),
+    pluginApprovers: Type.Optional(Type.Ref("PluginApprovers")),
   },
   { additionalProperties: false },
 );

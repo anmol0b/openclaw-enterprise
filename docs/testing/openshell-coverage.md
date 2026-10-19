@@ -48,6 +48,36 @@ These checks require the selected upstream OpenClaw source to implement setup
 issuance/status, signed device authentication and retained-worker revocation.
 Source inspection and ordinary CI do not establish that this live case ran.
 
+## Agent network policy
+
+The policy scenario uses the production HTTP admission path, PostgreSQL worker,
+and real OpenShell policy RPCs. It exercises a Python denial, an explicitly
+applied grant, removal, and isolation from a second Agent. Denial logs and native
+recommendations are checked separately.
+
+It revokes each required permission after work is queued and checks failure
+before `UpdateConfig`, unchanged loaded provider state, and attributable audit
+evidence. A test barrier also interrupts the worker after the real native write
+succeeds but before OCC records its receipt. A restarted worker must confirm
+the loaded policy without issuing the write again. These cases require the
+real runtime; local wire fixtures do not establish their outcomes.
+
+The scope check temporarily enables OIDC on the real Namespace gateway using
+the disposable HTTPS Keycloak issuer. Signed identities with `sandbox:read`,
+`config:read`, `config:write`, or no scope exercise policy status, recommendations,
+and `UpdateConfig`. Missing authentication and insufficient scopes must fail;
+rejected writes must preserve provider state. An authorized writer resubmits
+the loaded policy, which OpenShell may deduplicate. This checks RPC scopes in
+authentication-only role mode; it does not qualify Workspace role isolation.
+It runs last because changing gateway authentication restarts the service router;
+continuity of existing service routes across that configuration change is unqualified.
+
+CI preparation supplies `OCC_TEST_OPENSHELL_POLICY_MIGRATION_DATABASE_URL` for
+the same disposable database as `OCC_TEST_DATABASE_URL`. Direct file runs must
+set it to that database's `occ_migrator` URL. Only fixture setup uses it to
+insert and remove IAM Restrictions; the API, worker, and observer retain the
+application role.
+
 ## Credential route
 
 After the egress turn, the test writes a probe script into the shared workspace
@@ -80,8 +110,9 @@ Next, the Codex scenario takes each dependency away and restores it before
 asserting:
 
 - **Tool upstream.** The echo Service selects no Pod. OpenShell must end the
-  request without a response (curl exit 52), and the upstream must receive the
-  source's own token again once the Service is restored.
+  request without a response (curl exit 52), or hold it until curl's bounded
+  timeout (exit 28). The upstream must receive the source's own token again once
+  the Service is restored.
 - **Model provider.** For a DNS endpoint, cluster DNS sends the model host to a
   Service with no endpoints. The turn must fail without exposing the model
   credential, and the same revision must serve the next turn once DNS is
@@ -116,6 +147,6 @@ the second Agent still receives its token. The scenario then checks that:
 The Codex scenario then updates the source through the API, withdraws it from
 the running Agent, waits for `revoked`, and expects the next model turn in the
 same process to fail. It accepts any turn failure, so it does not yet tell a
-credential rejection from a transport error or a restarted process. Full
-manual integration lanes run from `main`; trusted pull requests also run the
-OpenShell advisory job described in [Tests in each workflow](ci.md#tests-in-each-workflow).
+credential rejection from a transport error or a restarted process. The
+[complete OpenShell advisory lane](ci.md#qa-matrix) runs on every push to `main` and on
+trusted pull requests when a maintainer requests it with the `full-qa` label.

@@ -31,11 +31,13 @@ import {
   openShellAgentName,
   openShellGatewayName,
   openshellHash as hash,
+  failedRecoveryDiagnostic,
   outageAttemptRead,
   registerOpenShellInstallationCleanups,
 } from "../helpers/openshell-kubernetes-real.mjs";
 import {
   boundedTeardown,
+  deleteNamespaceExplained,
   diagnosticDeadlineMs,
   diagnosticDeadlinePassed,
   diagnosticRequestTimeout,
@@ -912,6 +914,8 @@ function createIntegrationSandboxDriverFactory(
 ) {
   const gatewayState = new Map();
   const endpointClients = new Map();
+  const policyWrites = [];
+  let policyWriteBarrier;
   let backendDrivers;
 
   function clientForEndpoint(endpoint) {
@@ -930,7 +934,14 @@ function createIntegrationSandboxDriverFactory(
         }
         return async (...args) => {
           try {
-            return await value.apply(target, args);
+            if (property === "updatePolicy") {
+              policyWrites.push({ sandbox: args[0].sandbox, requestId: args[0].requestId });
+            }
+            const result = await value.apply(target, args);
+            if (property === "updatePolicy") {
+              await policyWriteBarrier?.(args[1]);
+            }
+            return result;
           } catch (error) {
             process.stderr.write(
               `OpenShell gateway ${String(property)} failed: ${error?.code ?? ""} ${error?.details ?? error?.message}\n`,
@@ -1145,6 +1156,42 @@ function createIntegrationSandboxDriverFactory(
       capability: "sandbox",
       implementation: selection.implementation,
       facets: Object.freeze(["networking", "filesystem", "process"]),
+      networkPolicy: { live: true, wildcards: true, portRanges: true },
+      admitNetworkPolicy(additions, version, defaults) {
+        return new OpenShellSandboxDriver(selection.configuration, {
+          id: selection.id,
+          implementation: "openshell",
+          backend: backendFor(undefined),
+        }).admitNetworkPolicy(additions, version, defaults);
+      },
+      async observeNetworkPolicy(context, snapshot) {
+        return delegate(
+          undefined,
+          context.namespace.name,
+          existingEndpointForNamespace(context),
+        ).observeNetworkPolicy(context, snapshot);
+      },
+      async applyNetworkPolicy(context, input) {
+        return delegate(
+          undefined,
+          context.namespace.name,
+          existingEndpointForNamespace(context),
+        ).applyNetworkPolicy(context, input);
+      },
+      async readPolicyRecommendations(context, limit) {
+        return delegate(
+          undefined,
+          context.namespace.name,
+          existingEndpointForNamespace(context),
+        ).readPolicyRecommendations(context, limit);
+      },
+      async readSandboxLogs(context, query) {
+        return delegate(
+          undefined,
+          context.namespace.name,
+          existingEndpointForNamespace(context),
+        ).readSandboxLogs(context, query);
+      },
       harnessHome: configurationDriver.harnessHome,
       configureAgent(configuration, harness) {
         return configurationDriver.configureAgent(configuration, harness);
@@ -1214,13 +1261,6 @@ function createIntegrationSandboxDriverFactory(
           context,
         ).harnessStatus(context);
       },
-      async readSandboxLogs(context, request) {
-        const endpoint = existingEndpointForNamespace(context);
-        return await delegate(undefined, context.namespace.name, endpoint).readSandboxLogs(
-          context,
-          request,
-        );
-      },
       // Compute drops a native worker's exposure once its node has enrolled (finding 1657).
       async withdrawHarnessExposure(context) {
         // Sweeps also call this hook without provisioning requirements.
@@ -1252,11 +1292,18 @@ function createIntegrationSandboxDriverFactory(
       },
     };
   };
+  createDriver.policyWrites = policyWrites;
+  createDriver.setPolicyWriteBarrier = (barrier) => {
+    policyWriteBarrier = barrier;
+  };
   createDriver.createBackend = createBackend;
   // An independent read of the Namespace gateway's own state, for assertions.
-  createDriver.gatewayClientForNamespace = (namespaceName) => {
+  createDriver.gatewayClientForNamespace = (namespaceName, auth) => {
     const state = gatewayState.get(namespaceName);
     assert.ok(state, `OpenShell gateway for namespace ${namespaceName} was not initialized.`);
+    if (auth !== undefined) {
+      return new GrpcOpenShellGatewayClient({ endpoint: state.endpoint, auth });
+    }
     return clientForEndpoint(state.endpoint);
   };
   // After the Namespace gateway Pod is replaced, its port-forward has ended. A new one keeps the
@@ -1339,6 +1386,18 @@ async function prepareProductionInstallation(
   { harnessId = "codex", controllerPort } = {},
 ) {
   const kubeconfig = await validateOpenShellPrerequisites();
+  const policyFixtureUrl = process.env.OCC_TEST_OPENSHELL_POLICY_MIGRATION_DATABASE_URL;
+  if (harnessId === "codex") {
+    assert.ok(
+      policyFixtureUrl,
+      "The policy revocation fixture requires its same-database migrator URL.",
+    );
+    const app = new URL(databaseUrl);
+    const migrator = new URL(policyFixtureUrl);
+    assert.equal(migrator.host, app.host);
+    assert.equal(migrator.pathname, app.pathname);
+    assert.equal(migrator.username, "occ_migrator");
+  }
   const identifier = randomUUID();
   const platformNamespace = `oce-openshell-${hash(identifier)}`;
   await kubectl("create", "namespace", platformNamespace);
@@ -1438,6 +1497,12 @@ async function prepareProductionInstallation(
           waitFor,
           startPortForwardTarget: fixture.startPortForwardTarget,
           image: process.env.OCC_TEST_KEYCLOAK_IMAGE ?? defaultKeycloakImage,
+          scopedClients: {
+            "policy-reader": ["sandbox:read"],
+            "policy-recommender": ["config:read"],
+            "policy-writer": ["config:write"],
+            "policy-no-scopes": [],
+          },
         })
       : undefined;
   // A cluster-internal echo service stands in for a protected non-model API. Only curl may
@@ -1542,6 +1607,18 @@ async function prepareProductionInstallation(
     connectionTimeoutMillis: observerPoolConnectionTimeoutMs,
     statement_timeout: diagnosticQueryTimeoutMs,
   });
+  let policyFixturePool;
+  if (harnessId === "codex") {
+    // IAM Restrictions have no mutation API and the application role cannot write them.
+    // Only fixture setup uses the migrator; the API and worker keep the restricted role.
+    policyFixturePool = new pg.Pool({
+      connectionString: policyFixtureUrl,
+      max: 1,
+      connectionTimeoutMillis: observerPoolConnectionTimeoutMs,
+      statement_timeout: diagnosticQueryTimeoutMs,
+    });
+    context.after(() => policyFixturePool.end());
+  }
   let workerPool;
   let worker;
   let productionApp;
@@ -1565,14 +1642,7 @@ async function prepareProductionInstallation(
     observerPool: () => observerPool.end(),
     workloadNamespace: async () => {
       if (placement !== undefined) {
-        await kubectl(
-          "delete",
-          "namespace",
-          placement,
-          "--ignore-not-found=true",
-          "--wait=true",
-          "--timeout=120s",
-        );
+        await deleteNamespaceExplained(kubectl, placement);
       }
     },
     temporaryDirectory: () => rm(directory, { recursive: true, force: true }),
@@ -1929,11 +1999,33 @@ async function prepareProductionInstallation(
 
   const sandbox = await waitForSandbox(placement, deployed.data);
   if (harnessId === "codex") {
-    const initialFile = await request(
-      "GET",
-      `/namespaces/${namespaceId}/agents/${agent.data.id}/workspace/files/AGENTS.md`,
-    );
-    assert.equal(initialFile.status, 200, JSON.stringify(initialFile.error));
+    const initialFilePath = `/namespaces/${namespaceId}/agents/${agent.data.id}/workspace/files/AGENTS.md`;
+    const initialFile = await request("GET", initialFilePath);
+    if (initialFile.status !== 200) {
+      const secrets = failureSecrets([
+        process.env,
+        {
+          APP_SERVER_TOKEN: transport.appServerToken,
+          GATEWAY_API_KEY: workspaceGateway.apiKey,
+        },
+      ]);
+      const detail = await withinDiagnosticDeadline(
+        () =>
+          workspaceReadFailureDiagnostic({
+            request,
+            path: initialFilePath,
+            agentId: agent.data.id,
+            gatewayPlacement,
+            secrets,
+          }),
+        {
+          timedOut: `\nWorkspace read diagnostic timed out after ${diagnosticDeadlineMs / 1_000} s`,
+        },
+      );
+      assert.fail(
+        `The first Workspace read answered ${initialFile.status} ${JSON.stringify(initialFile.error)}${detail}`,
+      );
+    }
     assert.equal(initialFile.data.content, "# Initialized OpenShell workspace\n");
   }
   const harnessPod = await waitForProviderHarnessPod(placement, deployed.data);
@@ -2074,9 +2166,12 @@ async function prepareProductionInstallation(
     ...(toolSources === undefined ? {} : { toolSources, tokenEcho }),
     ...(untrustedTls === undefined ? {} : { untrustedTls, untrustedTlsSource }),
     ...(refreshSources === undefined ? {} : { refreshSources, keycloak }),
-    gatewayClient: () => createSandboxDriver.gatewayClientForNamespace(placement),
+    policyWrites: createSandboxDriver.policyWrites,
+    setPolicyWriteBarrier: createSandboxDriver.setPolicyWriteBarrier,
+    gatewayClient: (auth) => createSandboxDriver.gatewayClientForNamespace(placement, auth),
     restartGatewayForward: () => createSandboxDriver.restartGatewayForward(placement),
     observerPool,
+    policyFixturePool,
     pauseWorker,
     resumeWorker: startWorker,
     provisioningFailure: (revisionId) => createSandboxDriver.provisioningFailures.get(revisionId),
@@ -2640,6 +2735,7 @@ async function assertRefreshCredentialSources(topology) {
   const revisionId = current.data.activeRevisionId;
   const harness = await waitForProviderHarnessPod(topology.placement, { id: revisionId, agentId });
   const sourcePath = (source) => `/namespaces/${namespaceId}/credential-sources/${source.id}`;
+  const secrets = turnFailureSecrets(topology);
   const readRefresh = async (source) => {
     const read = await request("GET", sourcePath(source));
     assert.equal(read.status, 200, JSON.stringify(read.error));
@@ -2664,13 +2760,17 @@ async function assertRefreshCredentialSources(topology) {
       .filter(({ method }) => method === "item/completed")
       .map(({ params }) => params?.item)
       .filter((item) => item?.type === "commandExecution");
+    // Output that is not the echo's JSON (finding 1883) is kept, redacted and bounded, so a
+    // failed check shows what the command printed. It has no `placeholder` or `jwt`, so every
+    // check below treats it as a missing token.
     const echoed = (source) => {
       const echo = commands.find(({ command }) => String(command).includes(source.url));
       assert.ok(echo, `the Harness must call ${source.url}`);
+      const output = String(echo.aggregatedOutput ?? "").trim();
       try {
-        return JSON.parse(String(echo.aggregatedOutput ?? "").trim());
+        return JSON.parse(output);
       } catch {
-        return undefined;
+        return { unparsed: redactLogLine(output, secrets, 1_000) };
       }
     };
     return { cc: echoed(clientCredentials), rt: echoed(refreshToken) };
@@ -2689,7 +2789,13 @@ async function assertRefreshCredentialSources(topology) {
     }
   };
   const assertIssued = (observed, source) => {
-    assert.equal(observed?.placeholder, false, `${source.type} must arrive substituted`);
+    assert.equal(
+      observed?.placeholder,
+      false,
+      observed?.unparsed === undefined
+        ? `${source.type} must arrive substituted`
+        : `${source.type} must arrive substituted; the echo call printed ${JSON.stringify(observed.unparsed)}`,
+    );
     assert.equal(observed?.jwt?.valid, true, `${source.type} must carry a valid Keycloak token`);
     assert.equal(observed.jwt.iss, keycloak.issuer);
     assert.equal(observed.jwt.azp, source.clientId);
@@ -3621,6 +3727,79 @@ async function openShellSupervisorPod(topology) {
   return supervisors[0];
 }
 
+// Finding 1882: the first Workspace read once answered 503 DEPENDENCY_UNAVAILABLE right after
+// the Sandbox was ready. The API keeps the cause out of its answer. The read reaches the Agent
+// Gateway through the Envoy Gateway and the host relay; a failed read records the Agent Gateway
+// hop (its Pods, and its log including the Workspace identity's own connect lines), then how a
+// second read answered after them (still failed, or a delay that passed). The test fails either
+// way: a 503 right after "ready" may be a real readiness bug, so the read is not retried.
+async function workspaceReadFailureDiagnostic({
+  request,
+  path,
+  agentId,
+  gatewayPlacement,
+  secrets,
+}) {
+  const shown = (value, limit) =>
+    redactLogLine(typeof value === "string" ? value : JSON.stringify(value), secrets, limit);
+  const sections = [];
+  try {
+    const pods = (await diagnosticResources("pods", gatewayPlacement)).filter(
+      (pod) =>
+        pod.metadata.labels?.["openclaw.dev/workload-role"] === "gateway" &&
+        pod.metadata.labels?.["openclaw.dev/agent"] === agentId,
+    );
+    const states = pods.map((pod) => ({
+      name: pod.metadata.name,
+      phase: pod.status?.phase,
+      deleting: pod.metadata.deletionTimestamp !== undefined,
+      conditions: (pod.status?.conditions ?? []).map(({ type, status, reason }) => ({
+        type,
+        status,
+        reason,
+      })),
+      containers: (pod.status?.containerStatuses ?? []).map((status) => ({
+        name: status.name,
+        ready: status.ready,
+        restartCount: status.restartCount,
+        state: status.state,
+      })),
+    }));
+    sections.push(`Agent Gateway Pods: ${shown(states, 2_000)}`);
+    for (const pod of pods.slice(0, 2)) {
+      const logs = await diagnosticKubectl(
+        "logs",
+        pod.metadata.name,
+        "--namespace",
+        gatewayPlacement,
+        "--tail=500",
+        "--timestamps",
+      );
+      sections.push(
+        `Agent Gateway ${pod.metadata.name} log:\n${newestMatchingLogLines(logs, secrets, {
+          pattern: /error|warn|fail|workspace|ready|listen|start|connect|hello|auth|denied|close/iu,
+          budget: 4_000,
+          lineChars: turnDiagnosticLineChars,
+        })}`,
+      );
+    }
+  } catch (error) {
+    sections.push(
+      `Agent Gateway diagnostics unavailable: ${shown(error?.message ?? String(error), 300)}`,
+    );
+  }
+  try {
+    const again = await request("GET", path);
+    sections.push(
+      `A second read after these diagnostics answered ${again.status}` +
+        (again.status === 200 ? "" : ` ${shown(again.error, 300)}`),
+    );
+  } catch (error) {
+    sections.push(`A second read failed: ${shown(error?.message ?? String(error), 300)}`);
+  }
+  return `\n${sections.join("\n")}`;
+}
+
 function turnFailureSecrets(topology, gatewayPassword) {
   return failureSecrets([
     process.env,
@@ -4324,6 +4503,487 @@ async function holdNativeOpenClawDemo(context, topology) {
   }
 }
 
+async function assertAuthenticatedNativePolicyScopes(topology) {
+  const current = await topology.request(
+    "GET",
+    `/namespaces/${topology.namespaceId}/agents/${topology.agent.id}`,
+  );
+  assert.equal(current.status, 200, JSON.stringify(current.error));
+  assert.ok(current.data.activeRevisionId);
+  const activeSandbox = await waitForSandbox(topology.placement, {
+    id: current.data.activeRevisionId,
+    agentId: topology.agent.id,
+  });
+  const nativeRequest = {
+    workspace: topology.placement,
+    sandbox: activeSandbox.metadata.name,
+  };
+  const before = await topology
+    .gatewayClient()
+    .getPolicyStatus(nativeRequest, AbortSignal.timeout(10_000));
+  const sandbox = await topology
+    .gatewayClient()
+    .getSandbox(
+      { workspace: nativeRequest.workspace, name: nativeRequest.sandbox },
+      AbortSignal.timeout(10_000),
+    );
+  assert.ok(sandbox?.resourceVersion);
+  const directory = await mkdtemp(join(tmpdir(), "oce-policy-scopes-"));
+  const clients = [];
+  const release = `openshell-${hash(topology.placement, 10)}`;
+  const originalPath = join(directory, "original-values.json");
+  const authenticatedPath = join(directory, "authenticated-values.json");
+  let savedValues = false;
+  const configureAuthentication = async (enabled) => {
+    await executeFile(
+      openShellHelmPath,
+      [
+        "upgrade",
+        release,
+        openShellHelmChart,
+        "--namespace",
+        topology.placement,
+        "--kubeconfig",
+        kubeconfigPath,
+        "--kube-context",
+        kubernetesContext,
+        "--reset-values",
+        "--values",
+        enabled ? authenticatedPath : originalPath,
+        "--wait",
+        "--timeout",
+        "240s",
+      ],
+      { timeout: 300_000, maxBuffer: 8 * 1024 * 1024 },
+    );
+    await waitForOpenShellGateway(topology.placement);
+    await topology.restartGatewayForward();
+  };
+  await topology.pauseWorker();
+  try {
+    const original = await executeFile(
+      openShellHelmPath,
+      [
+        "get",
+        "values",
+        release,
+        "--output=json",
+        "--namespace",
+        topology.placement,
+        "--kubeconfig",
+        kubeconfigPath,
+        "--kube-context",
+        kubernetesContext,
+      ],
+      { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 },
+    );
+    await writeFile(originalPath, original.stdout, { mode: 0o600 });
+    savedValues = true;
+    const values = JSON.parse(original.stdout);
+    values.gatewayConfig = {
+      ...values.gatewayConfig,
+      "openshell.gateway.auth": { allow_unauthenticated_users: false },
+      // Legacy chart values omit empty roles and retain OpenShell's nonempty defaults.
+      "openshell.gateway.oidc": {
+        issuer: topology.keycloak.issuer,
+        audience: "openshell-cli",
+        admin_role: "",
+        user_role: "",
+        scopes_claim: "oce_scopes",
+      },
+    };
+    values.server.oidc = { ...values.server.oidc, caConfigMapName: "oce-gateway-extra-trust" };
+    await writeFile(authenticatedPath, JSON.stringify(values), { mode: 0o600 });
+    // Replace the unauthenticated management configuration with the real HTTPS issuer.
+    // Role-free OIDC mode still enforces each RPC's independently declared scopes.
+    await configureAuthentication(true);
+    const scopedClient = async (name) => {
+      const path = join(directory, name);
+      await writeFile(path, await topology.keycloak.scopedClientToken(name), { mode: 0o600 });
+      const client = topology.gatewayClient({ mode: "bearerTokenFile", path });
+      clients.push(client);
+      return client;
+    };
+    const reader = await scopedClient("policy-reader");
+    const recommender = await scopedClient("policy-recommender");
+    const writer = await scopedClient("policy-writer");
+    const noScopes = await scopedClient("policy-no-scopes");
+    const read = (client) => client.getPolicyStatus(nativeRequest, AbortSignal.timeout(10_000));
+    const recommendations = (client) =>
+      client.getPolicyDrafts(nativeRequest, AbortSignal.timeout(10_000));
+    const update = (client) =>
+      client.updatePolicy(
+        {
+          ...nativeRequest,
+          policy: before.policy,
+          expectedResourceVersion: sandbox.resourceVersion,
+          requestId: randomUUID(),
+        },
+        AbortSignal.timeout(10_000),
+      );
+    await assert.rejects(read(topology.gatewayClient()), { code: 16 });
+    assert.deepEqual(await read(reader), before);
+    await assert.rejects(read(noScopes), { code: 7 });
+    await assert.rejects(recommendations(reader), { code: 7 });
+    await assert.rejects(recommendations(noScopes), { code: 7 });
+    const suggested = await recommendations(recommender);
+    assert.ok(Array.isArray(suggested.chunks));
+    await assert.rejects(read(recommender), { code: 7 });
+    await assert.rejects(update(reader), { code: 7 });
+    await assert.rejects(update(noScopes), { code: 7 });
+    await assert.rejects(read(writer), { code: 7 });
+    assert.deepEqual(await read(reader), before, "rejected writes must preserve native state");
+    // OpenShell deduplicates an unchanged loaded policy. A writer may resubmit it,
+    // while the reader independently confirms that enforcement remains loaded.
+    await update(writer);
+    const loaded = await waitFor(
+      "authenticated native policy update to load",
+      async () => {
+        const current = await read(reader);
+        return current.version >= before.version &&
+          current.activeVersion === current.version &&
+          current.state === "POLICY_STATUS_LOADED"
+          ? current
+          : undefined;
+      },
+      30_000,
+    );
+    assert.deepEqual(loaded.policy, before.policy);
+    process.stderr.write(
+      "OpenShell integration: authenticated sandbox:read, config:read and config:write policy boundaries passed.\n",
+    );
+  } finally {
+    for (const client of clients) {
+      client.close();
+    }
+    try {
+      if (savedValues) {
+        await configureAuthentication(false);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await topology.resumeWorker();
+    }
+  }
+}
+
+async function assertAgentNetworkPolicyLifecycle(topology) {
+  const base = `/namespaces/${topology.namespaceId}/agents/${topology.agent.id}`;
+  const policyPath = `${base}/sandbox-policy/networking`;
+  const grant = {
+    id: "python-demo",
+    binary: "/usr/bin/python3.11",
+    host: "example.org",
+    ports: [{ from: 443, to: 443 }],
+  };
+  const python = async (agentId = topology.agent.id) => {
+    const pods = await resources("pods", topology.gatewayPlacement);
+    const gateway = pods.find(
+      (pod) =>
+        pod.metadata.labels?.["openclaw.dev/agent"] === agentId &&
+        pod.metadata.labels?.["openclaw.dev/workload-role"] === "gateway",
+    );
+    assert.ok(gateway);
+    // HTTP error responses still prove connectivity; sandbox refusal remains an uncaught URLError.
+    const command = `/usr/bin/python3.11 - <<'PYTHON'
+import urllib.request, urllib.error
+try:
+    response = urllib.request.urlopen("https://example.org", timeout=20)
+except urllib.error.HTTPError as error:
+    response = error
+print("HTTP", response.code)
+print(response.read(160).decode("utf-8", errors="replace"))
+PYTHON`;
+    const result = await requestCodexTurnFromGatewayPod({
+      namespace: topology.gatewayPlacement,
+      gatewayPod: gateway.metadata.name,
+      providerModel,
+      prompt: `Run exactly this command once through the exec tool, without changing it or attempting other network tools. Report its exit status and output: ${command}`,
+    });
+    const executed = result.items
+      .filter(({ method }) => method === "item/completed")
+      .map(({ params }) => params?.item)
+      .find(
+        (item) => item?.type === "commandExecution" && item.command?.includes("urllib.request"),
+      );
+    assert.ok(executed, "the real Agent must execute the Python command");
+    return executed;
+  };
+  // Before any additions, enforcement denies the actual interpreter request.
+  const denied = await python();
+  assert.notEqual(denied.exitCode, 0);
+  assert.match(denied.aggregatedOutput ?? "", /Permission denied|Errno 13/);
+  const logs = await topology.request(
+    "GET",
+    `${base}/deployments/${topology.revision.id}/runtime/logs?source=sandbox&tailLines=1000`,
+  );
+  assert.equal(logs.status, 200, JSON.stringify(logs.error));
+  assert.ok(
+    logs.data.records.some(
+      (row) => row.decision?.decision === "denied" && row.decision.host === grant.host,
+    ),
+  );
+  const suggestions = await topology.request(
+    "GET",
+    `${base}/revisions/${topology.revision.id}/sandbox-policy/networking/recommendations`,
+  );
+  assert.equal(suggestions.status, 200, JSON.stringify(suggestions.error));
+  const initial = await topology.request("GET", policyPath);
+  assert.equal(initial.data.editingEnabled, false);
+  assert.equal(
+    (
+      await topology.request("PUT", policyPath, {
+        expectedVersion: initial.data.policy.version,
+        additions: [grant],
+      })
+    ).status,
+    409,
+  );
+  assert.equal(
+    (await topology.request("PATCH", `${policyPath}/editing`, { enabled: true })).status,
+    200,
+  );
+  let version = initial.data.policy.version;
+  // Native state and actual dispatches are independent of OCC's application record.
+  // Restrictions revoke the original caller's exact authority after admission.
+  const providerPolicy = () =>
+    topology
+      .gatewayClient()
+      .getPolicyStatus(
+        { workspace: topology.placement, sandbox: topology.sandbox.metadata.name },
+        AbortSignal.timeout(10_000),
+      );
+  for (const [action, kind, id] of [
+    ["manage_policy", "agent", topology.agent.id],
+    ["update", "sandbox_policy", initial.data.policy.id],
+  ]) {
+    const saved = await topology.request("PUT", policyPath, {
+      expectedVersion: version,
+      additions: [grant],
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.error));
+    version = saved.data.version;
+    const before = await providerPolicy();
+    const writes = topology.policyWrites.length;
+    const restriction = `restriction-${randomUUID()}`;
+    const revoke = () =>
+      topology.policyFixturePool.query(
+        "INSERT INTO occ.iam_restrictions (id,namespace_id,action,resource_kind,resource_id,effect) VALUES ($1,$2,$3,$4,$5,'deny')",
+        [restriction, topology.namespaceId, action, kind, id],
+      );
+    const restore = () =>
+      topology.policyFixturePool.query("DELETE FROM occ.iam_restrictions WHERE id=$1", [
+        restriction,
+      ]);
+    let admissionDenials;
+    await topology.pauseWorker();
+    try {
+      await revoke();
+      const forbidden = await topology.request("POST", `${policyPath}/apply`, {
+        expectedVersion: version,
+        revisionId: topology.revision.id,
+      });
+      assert.equal(forbidden.status, 403, JSON.stringify(forbidden.error));
+      admissionDenials = await topology.observerPool.query(
+        "SELECT id FROM occ.audit_events WHERE kind='authorization_denial' AND action='openclaw.agents.sandbox_policy.apply' AND resource_id=$1",
+        [id],
+      );
+      await restore();
+      const queued = await topology.request("POST", `${policyPath}/apply`, {
+        expectedVersion: version,
+        revisionId: topology.revision.id,
+      });
+      assert.equal(queued.status, 202, JSON.stringify(queued.error));
+      await revoke();
+    } finally {
+      await topology.resumeWorker();
+    }
+    try {
+      const failed = await waitFor(
+        "queued policy rejected after exact authority revocation",
+        async () => {
+          const view = await topology.request("GET", policyPath);
+          assert.equal(view.status, 200, JSON.stringify(view.error));
+          return view.data.policy.application?.state === "failed"
+            ? view.data.policy.application
+            : undefined;
+        },
+        30_000,
+      );
+      assert.equal(failed.reason, "AUTHORIZATION_DENIED");
+      assert.equal(
+        topology.policyWrites.length,
+        writes,
+        "forbidden authority must be rejected before native UpdateConfig dispatch",
+      );
+      assert.deepEqual(
+        await providerPolicy(),
+        before,
+        "native enforcement must preserve its loaded policy and version",
+      );
+      const denial = await topology.observerPool.query(
+        "SELECT id, actor_id FROM occ.audit_events WHERE kind='authorization_denial' AND action='openclaw.agents.sandbox_policy.apply' AND resource_id=$1",
+        [id],
+      );
+      assert.ok(
+        denial.rows.some(
+          (event) =>
+            event.actor_id === failed.requestedBy &&
+            !admissionDenials.rows.some((previous) => previous.id === event.id),
+        ),
+        "the worker must audit the revoked requester's exact denied authority",
+      );
+      process.stderr.write(
+        `OpenShell integration: revoked ${kind}/${action} refused before native UpdateConfig.\n`,
+      );
+    } finally {
+      await restore();
+    }
+  }
+  const change = async (additions, interruptAfterWrite = false) => {
+    const saved = await topology.request("PUT", policyPath, {
+      expectedVersion: version,
+      additions,
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.error));
+    version = saved.data.version;
+    const writes = topology.policyWrites.length;
+    let wrote = false;
+    if (interruptAfterWrite) {
+      // The real UpdateConfig has committed. Withhold its receipt until worker shutdown
+      // aborts the in-flight pass; no provider behavior or policy result is replaced.
+      topology.setPolicyWriteBarrier(async (signal) => {
+        topology.setPolicyWriteBarrier(undefined);
+        wrote = true;
+        await new Promise((_, reject) => {
+          if (signal.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      });
+    }
+    // Stage the application while the real worker is stopped, then prove durable recovery
+    // through a new worker and database pool before any provider effect occurs.
+    await topology.pauseWorker();
+    try {
+      const applied = await topology.request("POST", `${policyPath}/apply`, {
+        expectedVersion: version,
+        revisionId: topology.revision.id,
+      });
+      assert.equal(applied.status, 202, JSON.stringify(applied.error));
+      assert.equal(applied.data.application.state, "pending");
+    } finally {
+      await topology.resumeWorker();
+    }
+    if (interruptAfterWrite) {
+      await waitFor(
+        "native UpdateConfig before interruption",
+        async () => (wrote ? true : undefined),
+        30_000,
+      );
+      await topology.pauseWorker();
+      await topology.resumeWorker();
+    }
+    await waitFor(
+      "matching loaded live network policy",
+      async () => {
+        const view = await topology.request("GET", policyPath);
+        assert.equal(view.status, 200, JSON.stringify(view.error));
+        assert.notEqual(
+          view.data.policy.application?.state,
+          "failed",
+          JSON.stringify(view.data.policy.application),
+        );
+        return view.data.policy.application?.state === "applied" ? view.data : undefined;
+      },
+      120_000,
+    );
+    topology.setPolicyWriteBarrier(undefined);
+    if (interruptAfterWrite) {
+      assert.equal(
+        topology.policyWrites.length,
+        writes + 1,
+        "recovery must confirm the committed native write without issuing it again",
+      );
+      process.stderr.write(
+        "OpenShell integration: interrupted native policy write recovered without a duplicate UpdateConfig.\n",
+      );
+    }
+  };
+  await change([grant], true);
+  const allowed = await python();
+  assert.equal(allowed.exitCode, 0, "a confirmed grant must permit the same real Python request");
+  assert.match(allowed.aggregatedOutput ?? "", /HTTP [1-5][0-9]{2}/);
+  const allowedLogs = await topology.request(
+    "GET",
+    `${base}/deployments/${topology.revision.id}/runtime/logs?source=sandbox&tailLines=1000`,
+  );
+  assert.equal(allowedLogs.status, 200, JSON.stringify(allowedLogs.error));
+  assert.ok(
+    allowedLogs.data.records.some(
+      (row) => row.decision?.decision === "allowed" && row.decision.host === grant.host,
+    ),
+    "the provider confirms the real connection was allowed",
+  );
+  const unchanged = await topology.request("GET", base);
+  assert.equal(
+    unchanged.data.activeRevisionId,
+    topology.revision.id,
+    "live application must not redeploy",
+  );
+  const snapshot = await topology.observerPool.query(
+    "SELECT admitted_spec->'sandbox_policy' AS policy FROM occ.agent_revisions WHERE id=$1",
+    [topology.revision.id],
+  );
+  assert.deepEqual(
+    snapshot.rows[0].policy.additions,
+    [],
+    "live changes must preserve immutable revision evidence",
+  );
+  // A second ordinary Agent shares the Installation defaults but receives no addition.
+  const second = await deployAdditionalCredentialAgent(
+    topology,
+    topology.agent.harnessAuth.sourceId,
+    [],
+  );
+  const isolated = await python(second.agent.id);
+  assert.notEqual(isolated.exitCode, 0, "another Agent must remain denied");
+  assert.match(isolated.aggregatedOutput ?? "", /Permission denied|Errno 13/);
+  // Release the shared credential reference before the later credential-revocation scenarios.
+  const deleted = await topology.request("DELETE", second.path);
+  assert.equal(deleted.status, 202, JSON.stringify(deleted.error));
+  await waitFor(
+    "isolated policy Agent deletion",
+    async () => {
+      const remaining = await topology.observerPool.query(
+        "SELECT 1 FROM occ.agents WHERE id = $1",
+        [second.agent.id],
+      );
+      return remaining.rowCount === 0 ? true : undefined;
+    },
+    120_000,
+  );
+  assert.equal(
+    (await topology.request("PATCH", `${policyPath}/editing`, { enabled: false })).status,
+    200,
+  );
+  assert.equal((await python()).exitCode, 0, "disabling editing must preserve approved access");
+  assert.equal(
+    (await topology.request("PUT", policyPath, { expectedVersion: version, additions: [] })).status,
+    409,
+  );
+  assert.equal(
+    (await topology.request("PATCH", `${policyPath}/editing`, { enabled: true })).status,
+    200,
+  );
+  await change([]);
+  const revoked = await python();
+  assert.notEqual(revoked.exitCode, 0, "explicit removal must restore enforcement");
+  assert.match(revoked.aggregatedOutput ?? "", /Permission denied|Errno 13/);
+}
+
 async function assertOpenShellToolFilesystemAndNetworkEnforcement(topology) {
   const nonce = `openshell-boundary-${randomUUID()}`;
   const providerWorkspaceVariable = topology.gatewayPod.spec.containers
@@ -4591,6 +5251,21 @@ const sandboxProbeFunction = [
   '  printf "%s_EXIT=%s\\n%s_OUT=%s\\n" "$name" "$code" "$name" "$out"; }',
 ];
 
+// Like probe, with a host: after curl's "could not resolve host" (exit 6) only, it prints what
+// the resolver returns for the host as NAME_RESOLVER and the first exit as NAME_FIRST_EXIT, then
+// runs the command once more (finding 1981). Any other exit is final.
+const sandboxResolvingProbeFunction = [
+  "probe_resolving() { local name=$1 host=$2; shift 2; local out code answer resolved;",
+  '  out=$("$@" 2>/dev/null); code=$?;',
+  '  if [ "$code" -eq 6 ]; then',
+  '    answer=$(getent ahosts "$host" 2>&1); resolved=$?;',
+  "    answer=$(printf '%s' \"$answer\" | tr '\\n' ' ' | cut -c1-400);",
+  '    printf "%s_RESOLVER=exit %s: %s\\n" "$name" "$resolved" "$answer";',
+  '    printf "%s_FIRST_EXIT=%s\\n" "$name" "$code"; sleep 2; out=$("$@" 2>/dev/null); code=$?;',
+  "  fi;",
+  '  printf "%s_EXIT=%s\\n%s_OUT=%s\\n" "$name" "$code" "$name" "$out"; }',
+];
+
 /**
  * Writes a probe script into the shared workspace and has Codex run it, so each command is a
  * Sandbox process behind OpenShell's proxy and the model never composes a credentialed command.
@@ -4713,6 +5388,7 @@ async function assertCredentialRouteEnforcement(topology) {
     'printf "PLACEHOLDER_FOUND=%s\\n" "$([ -n "$model" ] && echo yes || echo no)"',
     `printf "PLACEHOLDER_INHERITED=%s\\n" "$([ -n "$${modelCredentialVariable}" ] && echo yes || echo no)"`,
     ...sandboxProbeFunction,
+    ...sandboxResolvingProbeFunction,
     // The model placeholder sent to a tool host that curl may reach.
     `probe FOREIGN curl -sS -o "$body" -w '%{http_code}' --max-time 20 ` +
       `-H "Authorization: Bearer $model" ${toolA.url}`,
@@ -4734,9 +5410,13 @@ async function assertCredentialRouteEnforcement(topology) {
     // Direct connections that skip the proxy, by name and by address.
     // OpenShell may intercept these transparently, so a host the policy allows can still answer;
     // a host it denies must not.
-    `probe BYPASS_ALLOWED curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 ` +
+    // A one-off DNS miss on this path is not the policy's answer, so each host gets a second
+    // try after exit 6 (finding 1995). The bare address needs no lookup and gets one try.
+    `probe_resolving BYPASS_ALLOWED www.openclaw.org ` +
+      `curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 ` +
       `https://www.openclaw.org`,
-    `probe BYPASS_DENIED curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 ` +
+    `probe_resolving BYPASS_DENIED acme.com ` +
+      `curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 10 ` +
       `https://acme.com`,
     `probe BYPASS_ADDRESS curl --noproxy '*' -sSk -o /dev/null -w '%{http_code}' --max-time 10 ` +
       `https://${publicAddress}`,
@@ -4826,7 +5506,12 @@ async function assertCredentialRouteEnforcement(topology) {
     },
     proxyBypass: {
       allowedHostExitCode: exitCode("BYPASS_ALLOWED"),
+      // Both null unless the first try could not resolve the host (exit 6).
+      allowedHostFirstExitCode: exitCode("BYPASS_ALLOWED_FIRST"),
+      allowedHostResolver: value("BYPASS_ALLOWED_RESOLVER"),
       deniedHostExitCode: exitCode("BYPASS_DENIED"),
+      deniedHostFirstExitCode: exitCode("BYPASS_DENIED_FIRST"),
+      deniedHostResolver: value("BYPASS_DENIED_RESOLVER"),
       addressExitCode: exitCode("BYPASS_ADDRESS"),
       sandboxDns: exitCode("DNS") === 0 ? "resolved" : "failed",
     },
@@ -4871,17 +5556,25 @@ async function assertCredentialRouteEnforcement(topology) {
   assert.equal(
     observed.proxyBypass.allowedHostExitCode,
     0,
-    "a host the policy allows must stay reachable for the denied checks to mean anything.",
+    `a host the policy allows must stay reachable for the denied checks to mean anything: ${JSON.stringify(
+      observed.proxyBypass,
+    )}`,
   );
-  assert.notEqual(
+  // OpenShell refuses these connections, and curl reports that as exit 7 (could not connect).
+  // Another failure, such as 6 (could not resolve host), may never have reached the policy, so it
+  // proves nothing about it (findings 1981 and 1995). If OpenShell ever drops these connections
+  // instead (curl exit 28) or refuses them during TLS setup (35), update this check deliberately.
+  assert.equal(
     observed.proxyBypass.deniedHostExitCode,
-    0,
-    "the Sandbox must not reach a denied host by skipping its proxy.",
+    7,
+    `the Sandbox must not reach a denied host by skipping its proxy: ${JSON.stringify(
+      observed.proxyBypass,
+    )}`,
   );
-  assert.notEqual(
+  assert.equal(
     observed.proxyBypass.addressExitCode,
-    0,
-    "the Sandbox must not reach a public address directly.",
+    7,
+    `the Sandbox must not reach a public address directly: ${JSON.stringify(observed.proxyBypass)}`,
   );
   // The provider-fenced Pod has no public egress of its own outside the Sandbox.
   assert.notEqual(podNetwork.address, "connected", "the Harness Pod must not reach the Internet.");
@@ -5607,6 +6300,14 @@ async function assertOpenShellGatewayOutage(topology) {
   } catch (error) {
     failure = error;
   }
+  // Finding 2017: a held deployment that ends failed (RUNTIME_LOGIN_FAILED) says why.
+  const recoveryDiagnostic = activated
+    ? ""
+    : await failedRecoveryDiagnostic({
+        readWorker: () => topology.diagnoseRevision(redeployed.data.id),
+        describe: (worker) => replacementActivationDiagnostic(topology, redeployed.data, worker),
+        failure,
+      });
   const work = await observerPool.query(
     "SELECT state, reason_code, attempt_count FROM occ.controller_work WHERE idempotency_key = $1",
     [`agent_revision:${redeployed.data.id}:reconcile`],
@@ -5699,7 +6400,11 @@ async function assertOpenShellGatewayOutage(topology) {
   assert.equal(observed.redeployDuringOutage.status, "queued");
   assert.equal(observed.redeployDuringOutage.activeRevisionUnchanged, true);
   // Once the gateway is back, the held deployment proceeds without operator action.
-  assert.equal(observed.recovery.redeployActivated, true, JSON.stringify(observed.recovery));
+  assert.equal(
+    observed.recovery.redeployActivated,
+    true,
+    `${JSON.stringify(observed.recovery)}${recoveryDiagnostic}`,
+  );
   assert.equal(observed.recovery.sourceState, "ready");
   assert.equal(observed.recovery.turn, true, "the new revision must serve a model turn.");
   for (const { type, afterRestart, rotated } of observed.recovery.refresh) {
@@ -6047,6 +6752,24 @@ test(
         "OpenShell integration: regular Gateway shell turns passed; testing actual filesystem and network enforcement.\n",
       );
       await assertOpenShellToolFilesystemAndNetworkEnforcement(topology);
+      process.stderr.write("OpenShell integration: testing Agent network policy lifecycle.\n");
+      try {
+        await assertAgentNetworkPolicyLifecycle(topology);
+      } catch (error) {
+        // Teardown may take minutes; preserve the failure before removing its resources.
+        const message = redactLogLine(
+          String(error?.message),
+          failureSecrets([
+            process.env,
+            { modelCredential, appServerToken: topology.appServerToken },
+          ]),
+          2000,
+        );
+        process.stderr.write(
+          `OpenShell integration: Agent network policy lifecycle failed: ${message}\n`,
+        );
+        throw error;
+      }
       process.stderr.write(
         "OpenShell integration: tool filesystem and egress verified; testing the credential route.\n",
       );
@@ -6091,6 +6814,10 @@ test(
         "OpenShell integration: withdrawal recorded and post-withdrawal turn did not complete; testing embedded fail-closed.\n",
       );
       await assertEmbeddedOpenShellFailsClosed(topology);
+      // Changing gateway authentication restarts its service router. Keep this configuration
+      // boundary last so it cannot disrupt the Agent workflow whose behavior is tested above.
+      process.stderr.write("OpenShell integration: testing authenticated native policy scopes.\n");
+      await assertAuthenticatedNativePolicyScopes(topology);
       return;
     }
   },

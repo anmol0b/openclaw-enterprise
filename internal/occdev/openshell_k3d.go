@@ -52,7 +52,7 @@ func validDevelopmentCodexSeccompResult(mode, profileName string) bool {
 	}
 }
 
-func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result error) {
+func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolicies []any, ceiling []any) (result error) {
 	r := newRunner(opts)
 	if len(opts.ComposeArgs) != 0 {
 		return fmt.Errorf("the Kubernetes-only profile does not accept Compose options")
@@ -105,19 +105,21 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 		return err
 	}
 	state := &developmentState{
-		Version:           3,
-		Repository:        opts.Repository,
-		ComputeDriver:     "kubernetes",
-		SandboxDriver:     sandboxDriver,
-		DeploymentMode:    "k3d",
-		PlatformNamespace: r.setting("OCC_DEVELOPMENT_KUBERNETES_NAMESPACE", "oce-system"),
-		APIPort:           apiPort,
-		BrowserPort:       browserPort,
-		Cluster:           r.setting("OCC_DEVELOPMENT_KUBERNETES_CLUSTER", "occ-dev-"+strings.ToLower(rand.Text()[:10])),
-		KeyPath:           opts.KeyOutput,
-		KeyOwned:          opts.KeyOutput == "",
-		SignIn:            signIn,
-		directory:         directory,
+		SandboxNetworkPolicies:      networkPolicies,
+		SandboxNetworkPolicyCeiling: ceiling,
+		Version:                     3,
+		Repository:                  opts.Repository,
+		ComputeDriver:               "kubernetes",
+		SandboxDriver:               sandboxDriver,
+		DeploymentMode:              "k3d",
+		PlatformNamespace:           r.setting("OCC_DEVELOPMENT_KUBERNETES_NAMESPACE", "oce-system"),
+		APIPort:                     apiPort,
+		BrowserPort:                 browserPort,
+		Cluster:                     r.setting("OCC_DEVELOPMENT_KUBERNETES_CLUSTER", "occ-dev-"+strings.ToLower(rand.Text()[:10])),
+		KeyPath:                     opts.KeyOutput,
+		KeyOwned:                    opts.KeyOutput == "",
+		SignIn:                      signIn,
+		directory:                   directory,
 	}
 	if err := validateClusterName(state.Cluster); err != nil {
 		return err
@@ -389,7 +391,7 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 	}
 	if state.BrowserPort != 0 {
 		consoleHost, _, _ := developmentBrowserHosts(state.Cluster)
-		fmt.Fprintf(r.opts.Out, "Browser console: https://%s:%d/console/\nBrowser CA certificate: %s\n", consoleHost, state.BrowserPort, filepath.Join(directory, "browser-ca.crt"))
+		fmt.Fprintf(r.opts.Out, "Browser console: %s/console/\nBrowser CA certificate: %s\n", developmentBrowserOrigin(consoleHost, state.BrowserPort), filepath.Join(directory, "browser-ca.crt"))
 		fmt.Fprintln(r.opts.Out, "Browser CA trust: required before sign-in. See docs/guides/operate/troubleshooting.md#the-local-console-reports-a-certificate-error.")
 	} else {
 		fmt.Fprintf(r.opts.Out, "Console: %s/console/\n", apiURL)
@@ -702,7 +704,7 @@ func (r *runner) installKubernetesControlPlane(ctx context.Context, state *devel
 			if err := r.writeAndApply(ctx, state, "browser-tls", browserSecret); err != nil {
 				return err
 			}
-			values["auth"] = map[string]string{"baseUrl": fmt.Sprintf("https://%s:%d", consoleHost, state.BrowserPort)}
+			values["auth"] = map[string]string{"baseUrl": developmentBrowserOrigin(consoleHost, state.BrowserPort)}
 			// OpenShell-owned Harnesses do not serve the native admin UI.
 			if state.SandboxDriver == "none" {
 				values["agentNativeAdmin"] = map[string]any{"enabled": true, "domain": agentDomain, "sharedCookieDomain": cookieDomain}

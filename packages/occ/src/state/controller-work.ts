@@ -71,6 +71,12 @@ export function deploymentProgressForWork(
       message =
         "The cluster has no room for this Agent's Pods yet; they are waiting to be scheduled.";
       break;
+    case "REVISION_IMAGE_PULL_FAILED":
+      // Fixed copy: never the image reference or the registry's response.
+      code = attempt.code;
+      message =
+        "Kubernetes cannot pull a container image for this Agent and keeps retrying. Ask an administrator to check the runtime image reference and that the cluster's nodes can pull from its registry.";
+      break;
     case "NAMESPACE_POD_QUOTA_EXCEEDED":
       // Fixed copy: never the quota's numbers or name (finding 1617).
       code = attempt.code;
@@ -229,7 +235,7 @@ export interface ControllerWork {
   readonly namespaceTarget?: "ready" | "deleted";
   /** See `CREDENTIAL_WITHDRAWAL_TARGET` for the revision-scoped target. */
   readonly agentTarget?:
-    "stopped" | "deleted" | "provisioned" | typeof CREDENTIAL_WITHDRAWAL_TARGET;
+    "stopped" | "deleted" | "provisioned" | "sandbox_policy" | typeof CREDENTIAL_WITHDRAWAL_TARGET;
   readonly state: ControllerWorkState;
   readonly availableAt: Date;
   readonly attemptCount: number;
@@ -280,7 +286,7 @@ export interface EnqueueWork {
   readonly namespaceTarget?: "ready" | "deleted";
   /** See `CREDENTIAL_WITHDRAWAL_TARGET` for the revision-scoped target. */
   readonly agentTarget?:
-    "stopped" | "deleted" | "provisioned" | typeof CREDENTIAL_WITHDRAWAL_TARGET;
+    "stopped" | "deleted" | "provisioned" | "sandbox_policy" | typeof CREDENTIAL_WITHDRAWAL_TARGET;
   readonly availableAt?: Date | string;
 }
 

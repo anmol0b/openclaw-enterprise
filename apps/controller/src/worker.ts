@@ -1,3 +1,4 @@
+import { reconcileSandboxPolicy, failAbandonedSandboxPolicies } from "./worker/sandbox-policy.ts";
 import { isSecretHarnessAuth, isServiceAccountHarnessAuth } from "@openclaw-enterprise/contracts";
 import { isPositiveSafeInteger } from "@openclaw-enterprise/utils";
 import { randomUUID } from "node:crypto";
@@ -165,6 +166,7 @@ const REVISION_READINESS_RECHECK_AGE_DIVISOR = 40;
 // Pending reason codes for an unready revision. Compute may say why it waits.
 const REVISION_PENDING_CODES: Readonly<Record<string, string>> = Object.freeze({
   WORKLOAD_UNSCHEDULABLE: "REVISION_UNSCHEDULABLE",
+  WORKLOAD_IMAGE_PULL_FAILED: "REVISION_IMAGE_PULL_FAILED",
   NAMESPACE_POD_QUOTA_EXCEEDED: "NAMESPACE_POD_QUOTA_EXCEEDED",
   WORKSPACE_NODE_PENDING: "WORKSPACE_NODE_PENDING",
   WORKSPACE_SETUP_RETRYING: "WORKSPACE_SETUP_RETRYING",
@@ -960,6 +962,7 @@ export class ControllerWorker {
    */
   private refusalWait: { readonly idempotencyKey: string; readonly refusal: string } | undefined;
   private readonly state: PostgresPlatformState;
+  private readonly policyCeiling: readonly import("@openclaw-enterprise/contracts").SandboxNetworkGrant[];
   private readonly queue: PostgresWorkQueue;
   private readonly compute: ComputeDriver;
   private readonly configuration: ConfigurationDriver | undefined;
@@ -1047,6 +1050,7 @@ export class ControllerWorker {
       "Worker convergence timeout",
     );
     const drivers = options.drivers;
+    this.policyCeiling = drivers?.installation.sandboxNetworkPolicyCeiling ?? [];
     this.configuredServiceAccountDriverId = drivers?.installation.drivers.service_account?.id;
     this.nativeWorkerSupport = drivers?.installation.runtime?.nativeWorkerSupport;
     if (this.mode === "production" && drivers === undefined) {
@@ -1180,6 +1184,7 @@ export class ControllerWorker {
     this.attachLifecycleDrivers(this.iam);
     const provisioning = new OpenClawController(installation, {
       state: this.state,
+      sandboxNetworkPolicyCeiling: this.policyCeiling,
       backends: this.backends,
       recordOperations: true,
       ...(this.configuredServiceAccountDriverId === undefined
@@ -1245,7 +1250,11 @@ export class ControllerWorker {
       this.progress();
       let claimed: ClaimedWork | undefined;
       try {
-        const recovery = await this.queue.recoverStale();
+        const recovery = await this.state.transactWithQueue(async (unit, queue) => {
+          const recovered = await queue.recoverStale();
+          await failAbandonedSandboxPolicies(unit, this.installation!.id, recovered.failed);
+          return recovered;
+        }, this.queueOptions);
         await this.scheduleRecoveredCredentialWithdrawals(recovery.failed);
         // A sweep step asks the Sandbox gateway, up to its deadline: it runs on passes that
         // follow an empty claim, so queued work is not delayed by a gateway that does not
@@ -1281,6 +1290,8 @@ export class ControllerWorker {
             let kind: WorkKind = "namespace_ensure";
             if (claim.kind === "provisioning") {
               kind = "agent_provisioning";
+            } else if (claim.agentTarget === "sandbox_policy") {
+              kind = "agent_sandbox_policy";
             } else if (claim.agentTarget === "deleted") {
               kind = "agent_delete";
             } else if (claim.agentTarget === "stopped") {
@@ -1971,6 +1982,25 @@ export class ControllerWorker {
   private async process(claim: ClaimedWork): Promise<void> {
     if (claim.kind === "provisioning") {
       await this.processAgentProvisioning(claim);
+      return;
+    }
+    if (claim.agentTarget === "sandbox_policy") {
+      this.passOutcome = await reconcileSandboxPolicy(
+        {
+          state: this.state,
+          queueOptions: this.queueOptions,
+          driver: this.sandbox,
+          compute: this.compute,
+          iam: this.iam,
+          installationId: this.installation!.id,
+          ceiling: this.policyCeiling,
+          signal: this.abort.signal,
+          maxAttempts: this.maxAttempts,
+          deadlineMs: this.convergenceTimeoutMs,
+          leaseDurationMs: this.leaseDurationMs,
+        },
+        claim,
+      );
       return;
     }
     if (isRepositoryCleanupWork(claim)) {
