@@ -71,6 +71,8 @@ export function createCodexStartup(
     transportToken: tokenMode = "raw",
     // The retry jitter's Math.random() value, fixed so a retry's delay is exact.
     random = 0,
+    // How much later than asked a login retry wait wakes (a throttled or stopped process).
+    lateWakeMs = 0,
   },
 ) {
   const directory = mkdtempSync(join(tmpdir(), "openclaw-plugin-ready-"));
@@ -103,7 +105,7 @@ export function createCodexStartup(
     Atomics: {
       wait(array, index, value, milliseconds) {
         loginPauses.push(milliseconds);
-        clock += milliseconds;
+        clock += milliseconds + lateWakeMs;
         return "timed-out";
       },
     },

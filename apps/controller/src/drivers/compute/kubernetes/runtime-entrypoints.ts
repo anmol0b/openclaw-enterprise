@@ -3376,6 +3376,16 @@ function codexProbeFailureClass(stderr, events, error) {
 // that names no class (empty, unknown) keeps the step's own rule.
 const CODEX_RELIABILITY_FAILURE_CLASSES = ["network", "timeout", "http_5xx"];
 const CODEX_SECURITY_FAILURE_CLASSES = ["http_401_403", "http_other", "tls"];
+// The class names the most specific status or transport text, so a 401 beside network
+// text, or a proxy 5xx naming a certificate, can still class as reliability. Output that
+// names a credential, a 401, 403 or 429, a rate or usage limit, a certificate or a host
+// name that cannot resolve fails the same way again (the model check's event rules hold
+// these too), so it vetoes a retry whatever its class. The text is capped by the native
+// process's output limit and the pattern has no nested repetition: matching is linear.
+const CODEX_NO_RETRY_MARKERS = /unauthori[sz]ed|forbidden|credential|api.?key|\b40[13]\b|\b429\b|too many requests|rate.?limit|usage.?limit|quota|certificate|name does not resolve|name has no usable address/i;
+function codexNoRetryOutput(...texts) {
+  return texts.some((text) => typeof text === "string" && CODEX_NO_RETRY_MARKERS.test(text));
+}
 // The wait before retry n: 1 s, doubling, plus up to half again at random so runtimes
 // that failed together (a restarted gateway) do not all retry at the same moment.
 function codexRetryDelay(retry) {
@@ -3565,9 +3575,10 @@ if (loginMode === "chatgptAuthTokens") {
   }
 } else {
   // Access-token login validates the credential remotely before saving it, so a
-  // timeout or a reliability failure may recover: up to three attempts within the 90 s
-  // that three 30 s attempts always had, waiting codexRetryDelay after a fast failure (a
-  // timed-out attempt has waited already). A rejected credential, a security class or
+  // timeout or a reliability failure may recover: up to five attempts within the 90 s
+  // that three 30 s attempts always had, waiting codexRetryDelay (1, 2, 4, 8 s) after a
+  // fast failure so a restarting gateway gets about 15 s (a timed-out attempt has waited
+  // already). A rejected credential, a security class or marker, a process error or
   // unclassified output is held at once. API-key login only saves the key. Each failed
   // attempt logs its number and output class, never the output.
   const loginDeadline = performance.now() + 90000;
@@ -3591,11 +3602,13 @@ if (loginMode === "chatgptAuthTokens") {
       failureClass,
     }));
     const delay = timedOut ? 0 : codexRetryDelay(attempt);
-    if (attempt >= 3 || codexAuthenticationRejected(login.stderr) ||
+    if (attempt >= 5 || codexAuthenticationRejected(login.stderr) || codexNoRetryOutput(login.stderr) ||
         CODEX_SECURITY_FAILURE_CLASSES.includes(failureClass) ||
-        !(timedOut || CODEX_RELIABILITY_FAILURE_CLASSES.includes(failureClass)) ||
+        !(timedOut || (login.error === undefined && CODEX_RELIABILITY_FAILURE_CLASSES.includes(failureClass))) ||
         loginDeadline - performance.now() - delay < 1000) break;
     if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    // A late wake must not leave the next attempt without a timeout.
+    if (loginDeadline - performance.now() < 1000) break;
   }
 }
 // A failed native login names the class of its error output, never the output.
@@ -3677,6 +3690,10 @@ function probeCodexAuthentication(timeout) {
     // error events), never the output.
     ...(failure !== undefined && result !== undefined
       ? { failureClass: codexProbeFailureClass(result.stderr, parsedEvents, result.error) } : {}),
+    // Never logged: whether the output names something no retry can change.
+    ...(failure !== undefined && result !== undefined && (codexAuthenticationRejected(result.stderr) ||
+      codexNoRetryOutput(result.stderr, Array.isArray(parsedEvents) ? codexFailureEventText(parsedEvents) : undefined))
+      ? { noRetry: true } : {}),
     exitCode: Number.isInteger(result?.status) ? result.status : null,
     signal: ["SIGKILL", "SIGTERM", "SIGINT"].includes(result?.signal) ? result.signal : null,
   });
@@ -3808,10 +3825,11 @@ function probeCodexAuthentication(timeout) {
 // The model check gets one retry (a held cause says "-attempt2"). A timeout, a transient
 // failure the check named, or a Codex exit with no conclusive event whose output names a
 // reliability class may pass on its own (owner rule, finding 2017). A credential
-// rejection or a security class never retries; every other failure is deterministic
-// and held at once. This is the one retry decision for the check.
+// rejection, a security class or a no-retry marker never retries; every other failure
+// is deterministic and held at once. This is the one retry decision for the check.
 function codexProbeRetryable(result) {
-  if (result.code === "AUTHENTICATION_FAILED" || CODEX_SECURITY_FAILURE_CLASSES.includes(result.failureClass)) return false;
+  if (result.code === "AUTHENTICATION_FAILED" || result.noRetry === true ||
+    CODEX_SECURITY_FAILURE_CLASSES.includes(result.failureClass)) return false;
   return result.code === "MODEL_PROBE_TIMEOUT" || result.transient === true ||
     (result.cause?.kind === "PROCESS_EXIT" && result.cause.detail?.startsWith("exit-") === true &&
       CODEX_RELIABILITY_FAILURE_CLASSES.includes(result.failureClass));
@@ -3841,8 +3859,9 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     providerCode: result.providerCode,
     failureClass: result.failureClass,
   }));
+  // The second attempt gets at least one second after the delay.
   const delay = codexRetryDelay(1);
-  if (attempt === 1 && codexProbeRetryable(result) && performance.now() + delay < deadline) {
+  if (attempt === 1 && codexProbeRetryable(result) && deadline - performance.now() - delay >= 1000) {
     setTimeout(() => startAuthenticatedCodex(2, deadline), delay);
     return;
   }

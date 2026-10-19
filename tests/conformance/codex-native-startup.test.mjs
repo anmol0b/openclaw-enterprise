@@ -176,7 +176,7 @@ test("Codex runtime gates startup and readiness on a successful native authentic
       // Finding 2017: a transport error is a reliability failure, retried before it is held.
       name: "access-token login transport error is retried, then held as a login failure",
       loginMode: "codex_pat",
-      native: Array.from({ length: 3 }, () =>
+      native: Array.from({ length: 5 }, () =>
         login({
           status: 1,
           stderr:
@@ -184,8 +184,8 @@ test("Codex runtime gates startup and readiness on a successful native authentic
         }),
       ),
       expect: loginFailure(),
-      loginClasses: ["network", "network", "network"],
-      loginPauses: [1000, 2000],
+      loginClasses: ["network", "network", "network", "network", "network"],
+      loginPauses: [1000, 2000, 4000, 8000],
     },
     {
       name: "access-token login recovers one timeout before probing",
@@ -1005,11 +1005,35 @@ test("Codex runtime retries a reliability failure of its login or model check, n
       loginPauses: [2000],
     },
     {
-      name: "login network failures are held after three attempts with the same status shape",
-      native: [loginFailed(network), loginFailed(network), loginFailed(network)],
+      name: "login network failures are held after five attempts with the same status shape",
+      native: Array.from({ length: 5 }, () => loginFailed(network)),
       expect: loginFailure(),
-      loginClasses: ["network", "network", "network"],
-      loginPauses: [1000, 2000],
+      loginClasses: ["network", "network", "network", "network", "network"],
+      loginPauses: [1000, 2000, 4000, 8000],
+    },
+    {
+      // Each wait follows a fast failure; the attempts and waits stay inside 90 s.
+      name: "login backoff ends at the 90-second budget",
+      random: 0.999,
+      native: [
+        loginFailed(network, 20000),
+        loginFailed(network, 20000),
+        loginFailed(network, 20000),
+        loginFailed(network, 10000),
+      ],
+      expect: loginFailure(),
+      loginClasses: ["network", "network", "network", "network"],
+      // 20 + 1.5 + 20 + 3 + 20 + 6 + 10 s leaves under 10 s: the 12 s fourth wait does not fit.
+      loginPauses: [1500, 2999, 5998],
+    },
+    {
+      // A wait that wakes late must not start an attempt without a timeout.
+      name: "a login retry wait that wakes too late is held at once",
+      lateWakeMs: 1000,
+      native: [loginFailed(network, 87500)],
+      expect: loginFailure(),
+      loginClasses: ["network"],
+      loginPauses: [1000],
     },
     {
       name: "a login network failure then a credential rejection is held at once",
@@ -1068,6 +1092,25 @@ test("Codex runtime retries a reliability failure of its login or model check, n
         "error sending request: tls handshake eof",
         "tls",
       ],
+      // The class names the most specific text; a no-retry marker still vetoes the retry.
+      [
+        "a login proxy 5xx naming a certificate",
+        "unexpected status 502 Bad Gateway: upstream certificate verify failed",
+        "http_5xx",
+      ],
+      [
+        "a login 401 beside a transport timeout",
+        "HTTP status client error (401 Unauthorized) for url: operation timed out",
+        "network",
+      ],
+      [
+        "a login rate limit beside a closed connection",
+        "Rate limit reached, connection closed",
+        "network",
+      ],
+      ["a login invalid key beside a broken pipe", "invalid api key; broken pipe", "network"],
+      ["a login 5xx naming a credential", "status 503: credential unavailable", "http_5xx"],
+      ["an unresolvable login host", "dns error: Name does not resolve", "network"],
       ["unrecognized login output", "something else went wrong", "unknown"],
       ["a silent login failure", "", "empty"],
     ].map(([description, stderr, failureClass, code]) => ({
@@ -1076,6 +1119,13 @@ test("Codex runtime retries a reliability failure of its login or model check, n
       expect: loginFailure(code),
       loginClasses: [failureClass],
     })),
+    {
+      // A wrapper-side process error is not a reliability failure, whatever the output says.
+      name: "a login whose output overflowed is held at once",
+      native: [login({ status: null, error: { code: "ENOBUFS" }, stderr: network })],
+      expect: loginFailure(),
+      loginClasses: ["network"],
+    },
     {
       name: "a login timeout whose output names a credential rejection is held at once",
       native: [login({ ...timedOut, stderr: "status 401 Unauthorized" })],
@@ -1120,9 +1170,9 @@ test("Codex runtime retries a reliability failure of its login or model check, n
     },
     {
       // The jittered delay must fit in the 61 s budget too.
-      name: "a model check with less than its jittered delay left is held at once",
+      name: "a model check without a second left after its jittered delay is held at once",
       random: 0.999,
-      native: [login(), probe([], { status: 1, stderr: "connection refused" }, undefined, 59600)],
+      native: [login(), probe([], { status: 1, stderr: "connection refused" }, undefined, 58600)],
       expect: exitFailure("exit-1"),
     },
     ...[
@@ -1131,6 +1181,21 @@ test("Codex runtime retries a reliability failure of its login or model check, n
       ["a rate limit", "Error: last status: 429 Too Many Requests", "http_other"],
       ["a TLS failure", "invalid peer certificate: UnknownIssuer", "tls"],
       ["a TLS failure beside network text", "error sending request: tls handshake eof", "tls"],
+      [
+        "a proxy 5xx naming a certificate",
+        "Error: unexpected status 502 Bad Gateway: upstream certificate verify failed",
+        "http_5xx",
+      ],
+      [
+        "a quoted credential rejection beside network text",
+        'error sending request: "status 401 Unauthorized"',
+        "network",
+      ],
+      [
+        "an unresolvable host",
+        "failed to lookup address information: Name does not resolve",
+        "network",
+      ],
       ["unrecognized output", "something else went wrong", "unknown"],
       ["no output", "", "empty"],
     ].map(([description, stderr, failureClass]) => ({
@@ -1169,6 +1234,24 @@ test("Codex runtime retries a reliability failure of its login or model check, n
       probeFailureClasses: ["http_401_403"],
     },
     {
+      name: "a transient model check failure whose output names a usage limit is held at once",
+      native: [
+        login(),
+        probe([started, failedTurn("unexpected status 503")], {
+          status: 1,
+          stderr: "usage limit reached",
+        }),
+      ],
+      expect: probeFailure({ kind: "PROBE_STATUS", detail: "turn-failed" }, { status: 503 }),
+      probeFailureClasses: ["http_5xx"],
+    },
+    {
+      // The second attempt must get at least a second after the delay.
+      name: "a model check with less than a second left after its delay is held at once",
+      native: [login(), probe([], { status: 1, stderr: "connection refused" }, undefined, 59100)],
+      expect: exitFailure("exit-1"),
+    },
+    {
       name: "a model check timeout then a network exit holds without a second retry",
       native: [login(), probe([], timedOut, 30000), exited("connection refused")],
       retryAfterMs: 1000,
@@ -1202,6 +1285,48 @@ test("the Codex retry classes split the failure output classes", () => {
   );
   assert.deepEqual(unclassified, ["empty", "unknown"]);
   assert.equal(reliability.filter((failureClass) => security.includes(failureClass)).length, 0);
+});
+
+test("a no-retry marker anywhere in the output vetoes a retry, whatever its class", () => {
+  const context = vm.createContext({});
+  vm.runInContext(
+    `${CODEX_FAILURE_OUTPUT_CLASS_HELPER}\nthis.noRetry = codexNoRetryOutput;`,
+    context,
+  );
+  for (const text of [
+    "401 Unauthorized: invalid token; connection reset",
+    "status code 401; connection closed",
+    '{"status":403} error sending request',
+    "Forbidden by policy",
+    "invalid api key; broken pipe",
+    "the API_KEY was revoked",
+    "the credential was withdrawn",
+    "429 then connection reset",
+    "Too Many Requests",
+    "Rate limit reached, connection closed",
+    "usage_limit_reached",
+    "exceeded your current quota",
+    "upstream certificate verify failed",
+    "failed to lookup address information: Name does not resolve",
+    "Name has no usable address",
+    // A marker far before the classifier's 8 KiB window still counts.
+    `status 401 Unauthorized${" ".repeat(16384)}connection refused`,
+  ]) {
+    assert.equal(context.noRetry(text), true, text);
+  }
+  for (const text of [
+    "failed to request personal access token metadata: error sending request for url (https://auth.openai.com/)",
+    "connection refused",
+    "unexpected status 503 Service Unavailable",
+    "failed to lookup address information: Try again",
+    "operation timed out",
+    "port 4010 closed",
+    "",
+  ]) {
+    assert.equal(context.noRetry(text), false, text);
+  }
+  assert.equal(context.noRetry(undefined, "connection reset", "Unauthorized"), true);
+  assert.equal(context.noRetry(undefined, null), false);
 });
 
 // Finding 2017: a failed login or model check logs only the class of Codex's error output.
@@ -1248,11 +1373,12 @@ test("Codex runtime logs a failed login or model check's output class, never the
   // The 2017 shape: Codex exits 1 before printing any event.
   const exited = (stderr) => probe([], { status: 1, stderr });
   const pat = { loginMode: "codex_pat" };
-  // A reliability class is retried (finding 2017): three attempts, each logging its class.
-  const thrice = (step) => [step, step, step];
+  // A reliability class is retried (finding 2017): five attempts, each logging its class.
+  const attempts = 5;
+  const everyAttempt = (step) => Array.from({ length: attempts }, () => step);
   const retried = (failureClass) => ({
-    loginClasses: [failureClass, failureClass, failureClass],
-    loginPauses: [1000, 2000],
+    loginClasses: Array.from({ length: attempts }, () => failureClass),
+    loginPauses: [1000, 2000, 4000, 8000],
   });
   // The model check retries a reliability class once and holds the second exit.
   const probeExitRetried = {
@@ -1268,7 +1394,7 @@ test("Codex runtime logs a failed login or model check's output class, never the
     {
       name: "a login transport error is network",
       ...pat,
-      native: thrice(
+      native: everyAttempt(
         login({
           status: 1,
           stderr: secretOutput(
@@ -1283,7 +1409,7 @@ test("Codex runtime logs a failed login or model check's output class, never the
     {
       name: "a login DNS failure is network",
       ...pat,
-      native: thrice(
+      native: everyAttempt(
         login({
           status: 1,
           stderr: secretOutput("dns error: failed to lookup address information"),
@@ -1296,7 +1422,7 @@ test("Codex runtime logs a failed login or model check's output class, never the
     {
       name: "a login provider 5xx is http_5xx",
       ...pat,
-      native: thrice(
+      native: everyAttempt(
         login({ status: 1, stderr: secretOutput("unexpected status 503 Service Unavailable") }),
       ),
       expect: loginFailed(),

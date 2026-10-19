@@ -332,7 +332,7 @@ model turn.
   label. Private HTTP readiness returns `503` until native, plugin,
   authentication, or identity gates pass. Dedicated Codex clears its plugin
   marker at process start to reject stale readiness. Access-token login retries timeouts,
-  `network` and `http_5xx` failures: three attempts, 90 seconds. Exhausted startup remains unready
+  `network` and `http_5xx` failures: five attempts, 90 seconds. Exhausted startup remains unready
   until an explicit restart; see the
   [authentication probe contract](../harness-execution.md#harness-authentication)
   for model-probe retries and sanitized attempt logs.
