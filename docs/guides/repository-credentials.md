@@ -155,9 +155,9 @@ kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$CONTEXT" \
 
 The gateway retains its model credential; the TUI client unsets its copy.
 
-Git commit author identity is separate from repository authorization. A successful
-authenticated clone does not configure `user.name` or `user.email`; set them in
-the cloned repository before committing, as shown below.
+`user.name` and `user.email` identify the commit author; they do not change the
+managed GitHub App identity used to authorize a push. A successful authenticated
+clone does not configure these values; set them before committing, as shown below.
 
 The Agent works in `/home/node/.openclaw/workspace` without manual session-opening:
 
