@@ -73,7 +73,11 @@ export default defineConfig(
     ".agents/**",
   ]),
   {
-    files: ["{apps,packages,scripts,tests}/**/*.{js,mjs,cjs,ts}", "*.{js,mjs,cjs,ts}"],
+    files: [
+      "{apps,packages,scripts,tests}/**/*.{js,mjs,cjs,ts}",
+      "{scripts,tests}/**/*.{mts,cts}",
+      "*.{js,mjs,cjs,ts}",
+    ],
     extends: [js.configs.recommended],
     languageOptions: { globals: globals.node },
     plugins: { "@stylistic": stylistic },
@@ -108,7 +112,7 @@ export default defineConfig(
     // catch-alls (`/[a-z]/`, `(e) => !!e`) pass; and `assert` handed to a helper, taken from `t`
     // under another name, or reached as `t.assert.strict.X`, `t["assert"].X` or
     // assert[`X`] escapes the rule.
-    files: ["tests/**/*.{js,mjs,cjs,ts}"],
+    files: ["tests/**/*.{js,mjs,cjs,ts,mts,cts}"],
     rules: {
       "no-restricted-syntax": [
         "error",
@@ -122,7 +126,7 @@ export default defineConfig(
     },
   },
   {
-    files: ["**/*.ts"],
+    files: ["**/*.ts", "{scripts,tests}/**/*.{mts,cts}"],
     extends: [tseslint.configs.recommended],
     rules: {
       "@typescript-eslint/no-unused-vars": [

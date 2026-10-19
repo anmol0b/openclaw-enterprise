@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "tsBuildInfoFile": "./.build/tsconfig.node.tsbuildinfo"
+  },
+  "include": [
+    "scripts",
+    "tests/browser",
+    "tests/conformance",
+    "tests/docs",
+    "tests/helpers",
+    "tests/integration"
+  ]
+}
