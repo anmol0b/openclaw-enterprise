@@ -155,12 +155,12 @@ reaches its model over Responses WebSocket by default (embedded OpenClaw uses
 HTTP streaming), so an egress proxy or firewall before that model host must
 allow the WebSocket upgrade. Compatible endpoints use HTTPS Responses streaming, including the probe.
 Secret-backed Codex uses [Compute configuration](drivers/kubernetes-compute.md#configuration);
-OpenShell sources supply their own endpoint. Dedicated Codex retries a confirmed
-subprocess timeout once after one second. Each attempt has a 30-second cap within
-one 61-second budget, including the delay. A transient failure (provider 5xx or
-overload, dropped stream or connection, external kill) shares that one retry;
-other failures do not retry. Under `tini`, termination during a probe, delay or
-held failure exits at once. Exhausted or nonretryable failure
+OpenShell sources supply their own endpoint. Dedicated Codex retries timeouts,
+transient failures (provider 5xx or overload, dropped stream or connection,
+external kill) and `network` or `http_5xx` exits once after 1-1.5 seconds;
+credential, TLS and other failures never retry. Each attempt has a 30-second cap
+within one 61-second budget, including the delay. Under `tini`, termination
+during a probe, delay or held failure exits at once. Exhausted or nonretryable failure
 holds the process unready until restart or Pod stop; readiness polling never
 starts another model call.
 
@@ -170,8 +170,8 @@ final code (`READY`, `MODEL_PROBE_TIMEOUT`, `MODEL_PROBE_FAILED`,
 `AUTHENTICATION_FAILED`, or `UNAVAILABLE`). Both probe logs add a
 `MODEL_PROBE_FAILED` [cause](agents/deployment.md#model-check-failure-cause)
 (`causeKind` and `causeDetail` in `occ agent logs` and the console Logs tab) and
-omit credentials and raw provider output; a failed Codex probe or login logs only
-its closed `failureClass`, such as `network`. The runtime failure status is
+omit credentials and raw provider output; a failed Codex probe or login attempt
+(`codex.login`) logs only its closed `failureClass`, such as `network`. The runtime failure status is
 published only after retries end.
 
 `AUTHENTICATION_FAILED` means the provider rejected the credential: OpenClaw
