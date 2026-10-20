@@ -2239,6 +2239,54 @@ test("production Compute refuses protected admission and release, including empt
   );
 });
 
+test("protected admission refuses an Agent's network policy additions instead of dropping them", async (t) => {
+  // The protected profile is the Sandbox's exact policy, so Agent additions cannot ride on it.
+  // Admission says so at deploy time; it must not silently admit a revision without them.
+  const grant = {
+    id: "python-demo",
+    binary: "/usr/bin/python3.11",
+    host: "example.org",
+    ports: [{ from: 443, to: 443 }],
+  };
+  const f = await staticEgressFixture(t, {
+    admitRevision: false,
+    appFactory: (context, options) =>
+      createConsoleAppFixture(context, { ...options, sandboxNetworkPolicyCeiling: [grant] }),
+  });
+  const savePolicy = (additions) =>
+    f.controller.transact(async (unit) => {
+      const policy = await unit.sandboxPolicies.find(f.namespace.id, f.agent.id);
+      assert.ok(policy, "every Agent owns a sandbox policy");
+      const saved = await unit.sandboxPolicies.save(
+        { ...policy, additions, version: policy.version + 1 },
+        policy.version,
+      );
+      assert.ok(saved);
+    });
+  await savePolicy([grant]);
+  const refused = await f.request(
+    "POST",
+    `/namespaces/${f.namespace.id}/agents/${f.agent.id}/deploy`,
+  );
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error.code, "RESOURCE_CONFLICT");
+  assert.match(refused.body.error.message, /network policy additions/);
+  assert.deepEqual(
+    await f.controller.transact((unit) => unit.revisions.listRevisions(f.namespace.id, f.agent.id)),
+    [],
+  );
+  // Without additions the same Agent admits a protected revision whose Sandbox policy
+  // carries the Driver defaults only; the protected profile replaces them at provisioning.
+  await savePolicy([]);
+  const metadata = await f.deployAgent(f.namespace.id, f.agent.id);
+  const revision = await f.controller.transact((unit) =>
+    unit.revisions.findRevision(f.namespace.id, f.agent.id, metadata.id),
+  );
+  assert.equal(revision.executionAdmission.mode, "protected");
+  assert.ok(revision.egressPlan);
+  assert.deepEqual(revision.sandboxPolicy?.additions ?? [], []);
+});
+
 test("an unavailable protected egress provider fails the deployment with an operator message", () => {
   const error = deploymentErrorForWork({
     state: "failed_permanent",
