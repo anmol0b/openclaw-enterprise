@@ -127,6 +127,9 @@ interface Entry {
   reconnected?: { readonly since: number } | undefined;
   /** The loss of material the route had was reported (on the first request it refused). */
   materialLost?: true | undefined;
+  /** Since when observe() has answered the verified installation while the provider
+   * environment waits for the supervisor (finding 2146); reported once it overstays. */
+  environmentLag?: { readonly since: number; reported?: true } | undefined;
   /** The route has been open at least once: a later install is a restoration. */
   opened?: true | undefined;
   material?: MaterialIdentity;
@@ -181,6 +184,9 @@ const REFRESH_INTERVAL_MS = 10_000;
 // A failed read is observed again after 1 s, doubling to this cap. A replaced OpenShell
 // Gateway Pod answers again within about 30 s; the route is back on the next read after that.
 const OBSERVE_BACKOFF_CAP_MS = 10_000;
+// A supervisor installs a moved provider environment on its next settings poll, seconds later.
+// Past this, the verified installation is no longer taken as current: the route waits.
+const ENVIRONMENT_LAG_LIMIT_MS = 60_000;
 
 /** One of the runtime's own verifications failed: the installation no longer verifies. */
 class OpenShellGitRouteError extends Error {
@@ -765,6 +771,25 @@ export class OpenShellGitRuntime {
     );
     if (!observed) {
       return;
+    }
+    if (observed === entry.installed) {
+      // Only the provider environment moved and the supervisor has not installed it yet: the
+      // verified installation stands, for a bounded time (finding 2146).
+      const lag = (entry.environmentLag ??= { since: performance.now() });
+      if (performance.now() - lag.since > ENVIRONMENT_LAG_LIMIT_MS) {
+        if (!lag.reported) {
+          lag.reported = true;
+          this.emit?.({
+            event: "worker.openshell-git-route-warning",
+            status: "pending",
+            reason: "environment_not_installed",
+            ...this.identity(entry),
+          });
+        }
+        return;
+      }
+    } else {
+      entry.environmentLag = undefined;
     }
     const previous = entry.supervisor;
     if (previous === undefined) {

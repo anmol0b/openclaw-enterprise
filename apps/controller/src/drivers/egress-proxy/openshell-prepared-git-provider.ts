@@ -482,9 +482,14 @@ export class OpenShellPreparedGitProvider {
       }
       if (observed.providerEnvRevision !== desired.providerEnvRevision) {
         // The Gateway reports this as pending (snapshot mismatch) until the supervisor's next
-        // settings poll installs the new environment. This provider's id, resource version and
-        // profile version are pinned above, and the attachment, configuration and policy are
-        // unchanged, so only another attached provider moved.
+        // settings poll installs the new environment. In OpenShell 0.1.4 (`5a7728c3`) the
+        // revision hashes, per attached provider, its resource version, credential key names and
+        // expiry times, refresh states and profile revision, then the policy's credential
+        // bindings and any global policy (policy.rs,
+        // compute_provider_env_revision_from_records_and_policy_bindings). For this provider
+        // those are pinned above (resource version, profile version; its profile has no
+        // refresh) or by the unchanged policy hash, so only another attached provider moved.
+        // Re-check this list when the pinned OpenShell changes.
         return installed !== undefined &&
           status.state === "PROVIDER_READINESS_STATE_PENDING" &&
           status.reason === "PROVIDER_READINESS_REASON_SNAPSHOT_MISMATCH" &&

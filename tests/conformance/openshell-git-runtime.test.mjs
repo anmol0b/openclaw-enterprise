@@ -78,7 +78,7 @@ function fixture() {
     networkInstanceId: "network-one",
     attachmentEpoch: "epoch-one",
   };
-  const calls = { getSandbox: 0, observe: 0, rotate: 0, material: 0 };
+  const calls = { getSandbox: 0, observe: 0, rotate: 0, material: 0, observedWith: [] };
   const faults = {
     gateway: undefined,
     material: undefined,
@@ -86,6 +86,7 @@ function fixture() {
     onRead: undefined,
     observe: undefined,
     observeAfterRotate: undefined,
+    environmentLag: undefined,
   };
   const client = {
     getProvider: async () => ({ type: "openai", profileWorkspace: "" }),
@@ -102,8 +103,14 @@ function fixture() {
     },
   };
   const provider = {
-    observe: async (binding, sandboxId) => {
+    observe: async (binding, sandboxId, _signal, installed) => {
       calls.observe += 1;
+      calls.observedWith.push(installed);
+      if (faults.environmentLag) {
+        // Like the real observe(): only the provider environment moved and the supervisor has
+        // not installed it yet, so the verified installation (if any) is answered unchanged.
+        return installed;
+      }
       if (faults.observe) {
         // The provider status does not verify yet (observe() answers undefined, never throws).
         return undefined;
@@ -565,6 +572,45 @@ test("another Agent's deploy leaves a running Agent's Git route open", async () 
   assert.deepEqual(f.denials(), []);
   assert.equal(f.calls.rotate, 1);
   assert.deepEqual(f.errors(), []);
+
+  // Before the supervisor installs the moved environment, observe() answers the verified
+  // installation (it is handed the one the route admitted), for a bounded time.
+  const lag = fixture();
+  await lag.reconcile();
+  const admittedInstall = lag.entry.installed;
+  lag.faults.environmentLag = true;
+  assert.equal((await lag.lookup())?.executionId, lag.revision.id);
+  assert.equal(lag.calls.observedWith.at(-1), admittedInstall);
+  await lag.reconcile();
+  assert.deepEqual(lag.runtime.route(lag.revision.id), { state: "installed" });
+  assert.equal(lag.entry.installed, admittedInstall);
+  // A supervisor that never installs it: after the limit the route waits, said once.
+  lag.entry.environmentLag = { since: performance.now() - 61_000 };
+  assert.equal(await lag.lookup(), undefined);
+  assert.equal(lag.denials().at(-1).reason, "installation_changed");
+  await lag.reconcile();
+  assert.deepEqual(lag.runtime.route(lag.revision.id), { state: "pending", reason: "unverified" });
+  const warnings = lag.events.filter(
+    (event) => event.event === "worker.openshell-git-route-warning",
+  );
+  assert.deepEqual(
+    warnings.map((event) => [event.status, event.reason, event.revisionId]),
+    [["pending", "environment_not_installed", "rev-one"]],
+  );
+  lag.faults.environmentLag = undefined;
+  await lag.reconcile();
+  assert.deepEqual(lag.runtime.route(lag.revision.id), { state: "installed" });
+  assert.equal(lag.entry.environmentLag, undefined);
+  assert.deepEqual(lag.errors(), []);
+
+  // A credential rotation's verifying read is never handed the old installation.
+  const rotation = fixture();
+  await rotation.reconcile();
+  rotation.owner.material = { ...rotation.owner.material, materialVersion: "version-two" };
+  rotation.calls.observedWith.length = 0;
+  await rotation.reconcile();
+  assert.equal(rotation.calls.rotate, 2);
+  assert.equal(rotation.calls.observedWith.at(-1), undefined);
 
   // The installation itself still has to read the same: a changed policy or configuration
   // closes the route until the reconcile verifies it again.
