@@ -1,5 +1,5 @@
 diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/server.required-placement-scopes.test.ts
-index 38fc452..7cc1460 100644
+index 38fc452..e44c9eb 100644
 --- a/src/gateway/server.required-placement-scopes.test.ts
 +++ b/src/gateway/server.required-placement-scopes.test.ts
 @@ -2,11 +2,11 @@
@@ -21,7 +21,7 @@ index 38fc452..7cc1460 100644
  import * as placementDispatch from "./worker-environments/placement-dispatch.js";
 +import type { WorkerSessionPlacementRecord } from "./worker-environments/placement-record.js";
  import * as workerEnvironmentService from "./worker-environments/service.js";
-@@ -115,196 +116,282 @@
+@@ -115,196 +116,289 @@
    },
  );
  
@@ -222,6 +222,13 @@ index 38fc452..7cc1460 100644
 -        setupCalls.push("prepareProjectIntent");
 -        return prepareProjectIntent(...args);
 +      const adminWs = await connect(admin, ["operator.admin"]);
++      // Measure the ordering of disconnect and placement, without charging the first RPC's
++      // response deadline for loading the lazy sessions.create handler in the test runner.
++      const [{ coreGatewayHandlers }, { prepareGatewayRequestHandler }] = await Promise.all([
++        import("./server-methods/core-handlers.js"),
++        import("./server-methods/lazy-core-handlers.js"),
++      ]);
++      await prepareGatewayRequestHandler(coreGatewayHandlers["sessions.create"]!);
 +      const commitConfigPatch = async (patch: Record<string, unknown>) => {
 +        const current = await rpcReq<{ hash: string }>(adminWs, "config.get", {});
 +        expect(current.ok, JSON.stringify(current.error)).toBe(true);
