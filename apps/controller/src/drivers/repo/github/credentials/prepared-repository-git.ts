@@ -89,6 +89,8 @@ export interface PreparedRepositoryGitSource {
     profile: "git-ref-write" | "git-ref-draft-pr";
     pushRef: string;
   };
+  /** The registry's opt-out of the one-draft limit; honored on the OpenShell route only. */
+  readonly draftPullLimit?: "none";
 }
 type Policy = (session: PreparedRepositorySession) => PreparedRepositoryGitSource | undefined;
 
@@ -361,6 +363,10 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     }
     // Authority and live-session locks above apply equally to reads of an existing receipt.
     const grant = source.grant;
+    // The operator's opt-out (finding 2147): on the OpenShell route every authorized draft create
+    // is allowed, and the grant's row keeps the latest one's receipt. The broker route keeps its
+    // one replayable receipt per grant.
+    const unlimited = installed !== undefined && source.draftPullLimit === "none";
     let scope: PullRow["scope"] | undefined;
     if (q.operation === "create-draft-pull") {
       const pull = q.pull;
@@ -381,7 +387,9 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
       scope = { operationId, apiOrigin, repository, head, base, repositoryId: q.repositoryId };
       const {
         rows: [prior],
-      } = await c.query(`SELECT * FROM ${pulls} WHERE grant_id=$1`, [q.grantId]);
+      } = unlimited
+        ? { rows: [] }
+        : await c.query(`SELECT * FROM ${pulls} WHERE grant_id=$1`, [q.grantId]);
       if (prior) {
         if (installed) {
           throw new DraftAlreadyOpened();
@@ -438,10 +446,20 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     if (scope) {
       // The primary key admits only ONE create for this repository/ref/base grant,
       // across process or session replacement. Unknown/expired permits are never reissued.
+      // Opted out, the latest create replaces the grant's receipt instead.
       const claim = await c.query(
         `INSERT INTO ${pulls}
          (grant_id,operation_id,receipt_id,admission_id,attempt_id,material_version,request_digest_sha256,scope,send_start_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (grant_id) DO NOTHING RETURNING receipt_id`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (grant_id) ${
+           unlimited
+             ? `DO UPDATE SET operation_id=EXCLUDED.operation_id, receipt_id=EXCLUDED.receipt_id,
+               admission_id=EXCLUDED.admission_id, attempt_id=EXCLUDED.attempt_id,
+               material_version=EXCLUDED.material_version,
+               request_digest_sha256=EXCLUDED.request_digest_sha256, scope=EXCLUDED.scope,
+               admitted_at=clock_timestamp(), send_start_by=EXCLUDED.send_start_by,
+               settled_at=NULL, outcome='outcome_unknown', projection=NULL`
+             : "DO NOTHING"
+         } RETURNING receipt_id`,
         [
           q.grantId,
           scope.operationId,

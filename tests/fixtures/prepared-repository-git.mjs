@@ -33,6 +33,7 @@ export async function fixture(
   {
     openBroker,
     draftPull = false,
+    draftPullLimit,
     draftResponse,
     dnsIssuer = false,
     sessionLifetimeMs = 3_600_000,
@@ -81,6 +82,7 @@ export async function fixture(
             ...(draftPull
               ? { transport: "git-and-draft-pr", pullRequestBase: "main" }
               : { transport: "git-only" }),
+            ...(draftPullLimit === undefined ? {} : { draftPullLimit }),
             pushRefAllowlist: [pushRef],
           },
         ],

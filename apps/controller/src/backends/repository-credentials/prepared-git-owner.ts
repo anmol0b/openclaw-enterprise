@@ -165,6 +165,7 @@ export async function startPreparedGitHubGitOwner(options: Options) {
         ...(base ? { pullRequestBase: base } : {}),
         pushRef,
       },
+      ...(base && policy?.draftPullLimit === "none" ? { draftPullLimit: "none" as const } : {}),
     };
   });
   const stop = new AbortController();

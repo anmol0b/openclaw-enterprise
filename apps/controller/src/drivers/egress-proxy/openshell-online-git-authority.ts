@@ -58,8 +58,10 @@ export interface OpenShellOnlineGitAuthorityOptions extends Omit<
     signal: AbortSignal,
   ) => Promise<OpenShellOnlineGitBinding | undefined>;
   /** Check live session/grant/material in one transaction. For draft creates, durably consume
-   * ONE submission per grant before returning true, including uncertain/expired permits. Never
-   * retry on a lost acknowledgement. This records possible use, not a provider outcome. */
+   * ONE submission per grant before returning true, including uncertain/expired permits, and
+   * answer "draft_already_opened" once it is spent (unless the registry opts the grant out of
+   * the limit). Never retry on a lost acknowledgement. This records possible use, not a
+   * provider outcome. */
   readonly approve: (
     request: PreparedGitHubUseRequest,
     expectedInstalled: OpenShellOnlineGitBinding["installed"],

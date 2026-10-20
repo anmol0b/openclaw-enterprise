@@ -187,6 +187,12 @@ reply on this route, so it records no pull request number; find the draft at Git
 For another draft, enroll a new review branch in the registry and bind it: a
 redeploy or rebind with the same branch does not reset the limit.
 
+Known limit, with an opt-out: to trust the Agent instead, set
+`draftPullLimit: "none"` beside `pullRequestBase` in the registry's namespace
+policy. It changes the grant, so redeploy the Agent. Every draft create is then
+allowed, still draft-only from the review branch to the base, and the grant keeps
+only the latest create's receipt. The native broker route keeps one draft per grant.
+
 During the accepted trial, use an authorized test repository to verify clone,
 pull of an independently known commit, push to the allowed branch, and draft
 creation from the same admitted Agent. Independently

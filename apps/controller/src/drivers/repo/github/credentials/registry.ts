@@ -28,6 +28,9 @@ export interface GitHubRepositoryRegistration {
     pushRefAllowlist?: readonly string[];
     transport?: "git-only" | "git-and-draft-pr";
     pullRequestBase?: string;
+    /** Operator opt-out of the one-draft-per-grant limit on the OpenShell Git route
+     * (finding 2147). Absent means one draft per grant. */
+    draftPullLimit?: "none";
   }>[];
 }
 
@@ -131,6 +134,7 @@ export function validateGitHubRepositoryRegistry(
         "pushRefAllowlist",
         "transport",
         "pullRequestBase",
+        "draftPullLimit",
       ]);
       const profiles = array(policy.profiles, 3).map(profile).sort();
       unique(profiles);
@@ -162,6 +166,14 @@ export function validateGitHubRepositoryRegistry(
       ) {
         return invalid();
       }
+      // Only a draft grant has a draft limit; "one-per-grant" is the default and is not stored.
+      const { draftPullLimit } = policy;
+      if (
+        Object.hasOwn(policy, "draftPullLimit") &&
+        (!draft || (draftPullLimit !== "one-per-grant" && draftPullLimit !== "none"))
+      ) {
+        return invalid();
+      }
       // An explicit empty list denies ref updates. Never turn a missing allowlist into an unrestricted push.
       if (
         transport !== undefined &&
@@ -179,6 +191,7 @@ export function validateGitHubRepositoryRegistry(
         ...(pushRefAllowlist === undefined ? {} : { pushRefAllowlist }),
         ...(transport === undefined ? {} : { transport }),
         ...(base === undefined ? {} : { pullRequestBase: base }),
+        ...(draftPullLimit === "none" ? { draftPullLimit: "none" as const } : {}),
       });
     });
     unique(namespaces.map((policy) => policy.namespaceId));
@@ -247,6 +260,7 @@ export function resolveGitHubRepositoryBinding(
         ...(policy.pullRequestBase === undefined
           ? {}
           : { pullRequestBase: policy.pullRequestBase }),
+        ...(policy.draftPullLimit === undefined ? {} : { draftPullLimit: policy.draftPullLimit }),
         permissions: permissionsForProfile(
           policy.transport === "git-only"
             ? "git-ref-write"

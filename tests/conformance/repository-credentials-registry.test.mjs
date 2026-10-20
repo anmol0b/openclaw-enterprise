@@ -247,6 +247,41 @@ test("Git-only registry policy binds its transport and exact ref before opening 
   );
 });
 
+test("a draft policy's operator opt-out of the one-draft limit is its own grant", () => {
+  // Finding 2147 (owner 10-20): an operator may drop the one-draft-per-grant limit for one
+  // namespace's draft policy. The default stays enforced and keeps its grant; the opt-out
+  // changes the grant, and only a draft transport accepts it.
+  const input = registryInput();
+  const policy = input.repositories[0].namespaces[0];
+  policy.profiles = ["git-write"];
+  policy.pushRefAllowlist = ["refs/heads/review/exact"];
+  policy.transport = "git-and-draft-pr";
+  policy.pullRequestBase = "main";
+  const registry = () => validateGitHubRepositoryRegistry(input);
+  const grant = () =>
+    resolveGitHubRepositoryBinding(registry(), {
+      namespaceId: "namespace-a",
+      repositoryRef: "application",
+    }).grant.grantId;
+  const enforced = grant();
+  policy.draftPullLimit = "one-per-grant";
+  assert.equal(grant(), enforced, "the explicit default is the same grant");
+  assert.equal(Object.hasOwn(registry().repositories[0].namespaces[0], "draftPullLimit"), false);
+  policy.draftPullLimit = "none";
+  assert.equal(registry().repositories[0].namespaces[0].draftPullLimit, "none");
+  assert.notEqual(grant(), enforced, "the opt-out is a new grant");
+  for (const value of ["", "unlimited", false, null, 2]) {
+    policy.draftPullLimit = value;
+    assert.throws(registry, /invalid-repository-registry/, String(value));
+  }
+  policy.draftPullLimit = "none";
+  policy.transport = "git-only";
+  delete policy.pullRequestBase;
+  assert.throws(registry, /invalid-repository-registry/, "a Git-only policy has no drafts");
+  delete policy.transport;
+  assert.throws(registry, /invalid-repository-registry/, "nor does a legacy policy");
+});
+
 test("push-ref policy normalizes branch refs and changes grant identity", () => {
   const request = { namespaceId: "namespace-a", repositoryRef: "application" };
   const resolvePolicy = (policy) => {
