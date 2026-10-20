@@ -4,7 +4,7 @@ rfc: index.md
 
 # Interfaces and records
 
-[RFC-0021](index.md) defines the proposed components and their records here. The
+[RFC-0023](index.md) defines the proposed components and their records here. The
 [protocol](protocol.md) specifies their ordering and failure behavior; [security and
 migration](security.md) define qualification and retirement requirements. These are
 behavioral contracts, not a prescribed wire format.

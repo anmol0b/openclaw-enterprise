@@ -4,7 +4,7 @@ rfc: index.md
 
 # Security, verification and retirement of the Credential Gateway
 
-[RFC-0021](index.md) lets a potentially compromised Agent use an approved provider operation without
+[RFC-0023](index.md) lets a potentially compromised Agent use an approved provider operation without
 receiving the provider credential. The security principal is the **whole admitted Agent execution**.
 If a repository read is allowed, the Agent, its child process and code it downloads can all make
 that read and see the permitted response. Another execution, even of the same Agent, has no claim

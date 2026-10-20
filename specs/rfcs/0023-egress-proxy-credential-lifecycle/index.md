@@ -6,7 +6,7 @@ status: Proposed
 
 # Credential Proxy and credential lifecycle
 
-**RFC-0021** · [Proposal #1530](https://github.com/openclaw/openclaw-enterprise/pull/1530) · [Interfaces and records](contracts.md) · [Protocol](protocol.md) · [Security and migration](security.md)
+**RFC-0023** · [Proposal #1530](https://github.com/openclaw/openclaw-enterprise/pull/1530) · [Interfaces and records](contracts.md) · [Protocol](protocol.md) · [Security and migration](security.md)
 
 ## Decision
 
@@ -17,6 +17,8 @@ Replace `CredentialGatewayDriver` with the `credential_proxy` Installation capab
 ![Proposed protected egress: Sandbox prevents bypass; a trusted sender checks current authority, resolves a credential if needed, and sends the request](assets/overview.svg)
 
 [Diagram source](assets/overview.mmd)
+
+[GitHub installation-wide access](github-installation-access.md) describes an opt-in authority for ordinary Git and GitHub API work through the same online sender.
 
 ## Two deployment modes
 

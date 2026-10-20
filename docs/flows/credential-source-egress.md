@@ -321,7 +321,7 @@ selected installation, with independent observations at the origin and caller.
 - [Credential source lifecycle](credential-source-lifecycle.md)
 - [Protected static inference](../reference/credential-sources/protected-inference.md)
 - [OpenShell Sandbox provisioning](openshell-sandbox-provisioning.md)
-- [RFC 0021 proposal](../../specs/rfcs/0021-egress-proxy-credential-lifecycle/index.md)
+- [RFC 0023 proposal](../../specs/rfcs/0023-egress-proxy-credential-lifecycle/index.md)
 
 ## Manual Notes
 
