@@ -30,6 +30,7 @@
     "tests/integration/postgres-repository-transactions.test.mjs",
     "tests/integration/postgres-controller-work-targets.test.mjs",
     "tests/integration/postgres-transaction-commit.test.mjs",
+    "tests/integration/postgres-agent-sandbox-policy.test.mjs",
     "tests/integration/postgres-static-egress.test.mjs",
     "tests/integration/postgres-prepared-github-lifecycle.test.mjs",
     "tests/integration/postgres-prepared-repository-git-broker.test.mjs",
@@ -296,6 +297,13 @@
       "path": "tests/integration/postgres-protected-credential-free.test.mjs",
       "expectedTests": [
         "explicit protected credential-free metadata: both gates, false selections, lost COMMIT and last withdrawal"
+      ]
+    },
+    {
+      "path": "tests/integration/postgres-agent-sandbox-policy.test.mjs",
+      "expectedTests": [
+        "Agent policy HTTP admission persists bounded grants without changing an admitted revision",
+        "interrupted terminal policy recovery rolls back queue failure and a restarted worker finalizes it"
       ]
     }
   ]

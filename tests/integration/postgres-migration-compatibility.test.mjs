@@ -1191,6 +1191,15 @@ async function assertCompletedHistory(db, previous = []) {
     expectedEntries.map(({ sha256, when }) => [sha256, when]),
   );
   assert.equal(catalogDigest(await migrationCatalog(db.migrator)), manifest.catalogs.completed);
+  // Pre-existing Agents receive one empty owned policy and keep delegated editing disabled.
+  const policies = await db.app.query(`SELECT bool_and(
+    NOT agent.sandbox_policy_editing AND policy.namespace_id=agent.namespace_id
+    AND policy.version=1 AND policy.document->'additions'='[]'::jsonb
+  ) AS valid, count(policy.id)::integer AS policies, count(agent.id)::integer AS agents
+  FROM occ.agents agent LEFT JOIN occ.sandbox_policies policy ON policy.agent_id=agent.id`);
+  assert.notEqual(policies.rows[0].valid, false);
+  assert.equal(policies.rows[0].policies, policies.rows[0].agents);
+
   assert.equal(
     (
       await db.app.query(
@@ -1213,7 +1222,9 @@ async function assertCompletedHistory(db, previous = []) {
     WHERE n.nspname='occ' AND p.prosecdef ORDER BY identity`)
     ).rows,
     [
+      ["occ.create_agent_sandbox_policy()", false, "search_path=pg_catalog, occ"],
       ["occ.finalize_agent_deletion(text,text,text,uuid)", true],
+      ["occ.remove_sandbox_policy_access()", false, "search_path=pg_catalog, occ"],
       ["occ.retry_failed_agent_deletion(text,text,text,text)", true],
       ["occ.retry_failed_namespace_deletion(text,text,text)", true],
       // The Agent trigger keeps the credential-source join table exact; occ_app cannot write it.
@@ -1221,10 +1232,10 @@ async function assertCompletedHistory(db, previous = []) {
       ["occ.validate_access_binding_scope()", false],
       ["occ.validate_group_membership()", false],
       ["occ.validate_restriction_scope()", false],
-    ].map(([identity, app_execute]) => ({
+    ].map(([identity, app_execute, searchPath = "search_path=pg_catalog, occ, pg_temp"]) => ({
       identity,
       owner: "occ_migrator",
-      proconfig: ["search_path=pg_catalog, occ, pg_temp"],
+      proconfig: [searchPath],
       app_execute,
     })),
   );
@@ -1598,6 +1609,7 @@ async function canonicalData(db) {
               "harness_auth_credential_source_id",
               "plugin_approvers",
               "credential_sources",
+              "sandbox_policy_editing",
             ]
           : table === "controller_work"
             ? ["work_kind"]
@@ -1682,6 +1694,8 @@ test(
       [54, "preComputeRevisionAdmission"],
       [55, "preHeldAuthenticationSession"],
       [56, "preCanonicalHarnessAuth"],
+      [57, "preSandboxPolicies"],
+      [58, "preSandboxPolicyAdministrator"],
       [57, "preStaticEgress"],
       [58, "preSendReceipts"],
       [59, "prePreparedGitHubCustody"],
@@ -2089,6 +2103,8 @@ test(
       [54, "preComputeRevisionAdmission"],
       [55, "preHeldAuthenticationSession"],
       [56, "preCanonicalHarnessAuth"],
+      [57, "preSandboxPolicies"],
+      [58, "preSandboxPolicyAdministrator"],
       [57, "preStaticEgress"],
       [58, "preSendReceipts"],
       [59, "prePreparedGitHubCustody"],
@@ -2182,6 +2198,7 @@ test(
       [54, "preComputeRevisionAdmission"],
       [55, "preHeldAuthenticationSession"],
       [56, "preCanonicalHarnessAuth"],
+      [57, "preSandboxPolicies"],
       [57, "preStaticEgress"],
       [58, "preSendReceipts"],
       [59, "prePreparedGitHubCustody"],
@@ -2212,6 +2229,7 @@ test(
           [62, "ALTER TABLE"],
           [61, "CREATE FUNCTION"],
           [57, "GRANT"],
+          [57, "CREATE TABLE"],
           [56, "CREATE FUNCTION"],
           [55, "CREATE TRIGGER"],
           [54, "ALTER TABLE"],

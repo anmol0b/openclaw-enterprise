@@ -2380,14 +2380,17 @@ function useRoutedGateway(candidate) {
 }
 
 function enrolledNodeSecret(driver, candidate, namespace) {
+  const manifest = driver.manifest(
+    "v1",
+    "Secret",
+    driver.workspaceNodeName(candidate),
+    driver.pluginRuntimeOwnership(candidate),
+    { name: namespace, plane: "execution" },
+  );
   return {
-    ...driver.manifest(
-      "v1",
-      "Secret",
-      driver.workspaceNodeName(candidate),
-      driver.pluginRuntimeOwnership(candidate),
-      { name: namespace, plane: "execution" },
-    ),
+    ...manifest,
+    // Like the API server, the stored object carries a resource version.
+    metadata: { ...manifest.metadata, uid: "workspace-node-secret-uid", resourceVersion: "1" },
     data: {
       deviceId: Buffer.from("fixture-node").toString("base64"),
       // A current setup code, as preparation keeps renewing it.
@@ -2438,6 +2441,8 @@ test("embedded plugin preparation applies runtime egress before gateway readines
         credentialObjects.set(`${body.metadata.namespace}:${body.metadata.name}`, observed);
         return observed;
       },
+      // The connected readiness check records the enrolled revision in the node Secret.
+      replaceNamespacedSecret: async ({ body }) => body,
       createNamespacedConfigMap: async ({ body }) => {
         configMaps.set(body.metadata.name, {
           ...structuredClone(body),
@@ -4961,6 +4966,8 @@ test("Kubernetes dedicated successor readiness preserves the stable Agent Servic
         credentialObjects.set(`${body.metadata.namespace}:${body.metadata.name}`, observed);
         return observed;
       },
+      // The connected readiness check records the enrolled revision in the node Secret.
+      replaceNamespacedSecret: async ({ body }) => body,
       createNamespacedConfigMap: async () => ({}),
       patchNamespacedConfigMap: async () => ({}),
       listNamespacedPod: async () => ({ apiVersion: "v1", kind: "PodList", items: [] }),

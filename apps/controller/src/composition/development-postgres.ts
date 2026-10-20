@@ -236,6 +236,7 @@ export async function composePostgresDevelopment(
 
     const loggingLevel = config.logging?.level ?? drivers?.installation.logging.level;
     const controller = new OpenClawController(persistedInstallation, {
+      sandboxNetworkPolicyCeiling: drivers?.installation.sandboxNetworkPolicyCeiling ?? [],
       state,
       recordOperations: true,
       defaultPresets: drivers?.defaultPresets ?? [],

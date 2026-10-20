@@ -12,6 +12,8 @@ import {
   egressAuthorityConfiguration,
   type EgressAuthorityConfiguration,
 } from "./egress-authority.ts";
+import { validateSandboxNetworkGrants } from "@openclaw-enterprise/contracts";
+import type { SandboxNetworkGrant } from "@openclaw-enterprise/contracts";
 import { readFile } from "node:fs/promises";
 import { X509Certificate } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -104,6 +106,7 @@ export interface SelectedDriverConfiguration<T = ConfigurationRecord> {
 }
 
 export interface InstallationStartupConfiguration {
+  readonly sandboxNetworkPolicyCeiling?: readonly SandboxNetworkGrant[];
   readonly occ: { readonly cluster: string };
   readonly logging: LoggingConfiguration;
   readonly presets?: { readonly includeDefaults: boolean; readonly files?: readonly string[] };
@@ -549,6 +552,10 @@ export async function loadInstallationConfiguration(options: {
   const occ = object(configuration.occ, "occ");
   closed(occ, ["cluster"], "occ");
   const cluster = nonempty(occ.cluster, "occ.cluster");
+  const sandboxNetworkPolicyCeiling = configuration.sandboxNetworkPolicyCeiling;
+  if (sandboxNetworkPolicyCeiling !== undefined) {
+    validateSandboxNetworkGrants(sandboxNetworkPolicyCeiling);
+  }
   const observability = observabilityConfiguration(configuration.observability);
   const runtime = runtimeConfiguration(configuration.runtime);
   const drivers = object(configuration.drivers, "drivers");
@@ -903,6 +910,7 @@ export async function loadInstallationConfiguration(options: {
   }
   const installation = Object.freeze({
     occ: Object.freeze({ cluster }),
+    ...(sandboxNetworkPolicyCeiling === undefined ? {} : { sandboxNetworkPolicyCeiling }),
     presets: Object.freeze({ includeDefaults }),
     logging,
     ...(observability === undefined ? {} : { observability }),

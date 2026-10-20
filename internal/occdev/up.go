@@ -42,11 +42,19 @@ func Up(ctx context.Context, opts Options) (result error) {
 	if _, err := r.selectedDevelopmentDatabase(controlPlane); err != nil {
 		return err
 	}
+	networkPolicies, err := r.loadSandboxNetworkPolicies(ctx, sandboxDriver)
+	if err != nil {
+		return err
+	}
+	ceiling, err := r.loadSandboxNetworkPolicyCeiling(ctx, sandboxDriver)
+	if err != nil {
+		return err
+	}
 	if _, err := developmentSignIn(r.env); err != nil {
 		return err
 	}
 	if controlPlane == "kubernetes" {
-		return upK3d(ctx, opts, sandboxDriver)
+		return upK3d(ctx, opts, sandboxDriver, networkPolicies, ceiling)
 	}
 	openShellImages, err := r.selectOpenShellImages(sandboxDriver)
 	if err != nil {
@@ -69,6 +77,8 @@ func Up(ctx context.Context, opts Options) (result error) {
 		return err
 	}
 	state := &developmentState{Repository: opts.Repository, Version: 3, ComputeDriver: "kubernetes", SandboxDriver: sandboxDriver, ComposeProject: r.setting("OCC_DEVELOPMENT_COMPOSE_PROJECT", "openclaw-enterprise-development-kubernetes"), Cluster: r.setting("OCC_DEVELOPMENT_KUBERNETES_CLUSTER", "occ-dev-"+strings.ToLower(rand.Text()[:10])), directory: directory, KeyPath: opts.KeyOutput, KeyOwned: opts.KeyOutput == ""}
+	state.SandboxNetworkPolicies = networkPolicies
+	state.SandboxNetworkPolicyCeiling = ceiling
 	if sandboxDriver == "openshell" {
 		browserPort, err := positiveSetting(r, "OCC_DEVELOPMENT_BROWSER_PORT", 8443, 65535)
 		if err != nil {
@@ -79,7 +89,7 @@ func Up(ctx context.Context, opts Options) (result error) {
 		}
 		consoleHost, agentDomain, cookieDomain := developmentBrowserHosts(state.Cluster)
 		state.BrowserPort = browserPort
-		state.BrowserOrigin = fmt.Sprintf("https://%s:%d", consoleHost, browserPort)
+		state.BrowserOrigin = developmentBrowserOrigin(consoleHost, browserPort)
 		state.NativeAdminDomain = agentDomain
 		r.env["OCC_DEVELOPMENT_BROWSER_PORT"] = strconv.Itoa(browserPort)
 		r.env["OCC_DEVELOPMENT_BROWSER_ORIGIN"] = state.BrowserOrigin

@@ -1,7 +1,7 @@
 # Repository credentials
 
-Repository bindings grant bounded Git HTTPS and GitHub API access. OCC freezes
-grants into a revision; the worker prepares material. The credential service
+Repository bindings restrict Git HTTPS and GitHub API access by repository and operation. OCC saves
+grants in each version; the worker prepares material. The credential service
 retains App keys, JWTs and installation tokens. Agents receive gateway bearers,
 client configuration and CA trust. Start with the
 [operator guide](../guides/repository-credentials.md). For a dedicated Agent
@@ -11,7 +11,7 @@ In that profile the worker, not the repository service, holds the App signing ke
 
 Kubernetes supports embedded OpenClaw (`api_key`) or dedicated Codex (API key or
 ChatGPT service account), without a Sandbox Driver. Unsupported Sandbox
-combinations reject repository-bearing revisions. Helm's `Recreate` strategy prevents overlapping
+combinations reject repository-bearing versions. Helm's `Recreate` strategy prevents overlapping
 worker/credential-service owners.
 
 Only the consumer receives repository and model credentials; dedicated Slack
@@ -29,9 +29,9 @@ exclude signing and service modules.
 
 ## Repo Driver contract
 
-The optional `repo` capability uses `RepoDriver extends Driver`, with the bundled
-`GitHubRepoDriver`. Trusted Installation `drivers.repo` and GitHub Backend
-`drivers.repo` select the same configured Driver ID. The
+The optional `repo` capability uses `RepoDriver extends Driver` and bundled
+`GitHubRepoDriver`. Installation `drivers.repo` and GitHub Backend
+`drivers.repo` select the same Driver ID. The
 [shared contract](../../packages/contracts/src/repo.ts) exposes:
 
 - `listOptions` returns Namespace-approved opaque references, names, profiles
@@ -46,30 +46,30 @@ The optional `repo` capability uses `RepoDriver extends Driver`, with the bundle
   promising remote revocation or runtime termination.
 
 Public status contains only `sessionId`, `state`, `deadlineWallMs` and `binding`
-(`providerInstanceId`, `repositoryId`, `grantId`). Each response is an immutable
-snapshot after complete private validation. Cleanup counters and configuration
-decoding remain private. Status cannot regenerate the closed-schema Git/gh files.
+(`providerInstanceId`, `repositoryId`, `grantId`). Responses are immutable
+snapshots after private validation. Cleanup counters and configuration
+decoding stay private. Status cannot regenerate the closed-schema Git/gh files.
 
 `maintenanceIntervalMs` schedules worker reconciliation and retries of incomplete
 repository cleanup; it is not a measured withdrawal bound. Configured IDs, `AgentRevision.repositoryCredentials` and
 persisted `admitted_spec.repository_credentials` retain their meaning.
 
 State derives immutable Driver, Backend, profile and grant context from the
-admitted revision. After Agent deletion it retains the original Namespace, Agent,
-revision, admission and session identities and deadlines, without bearers or tokens.
+saved version. After Agent deletion it retains Namespace, Agent,
+Agent revision, admission and session identities and deadlines, without bearers or tokens.
 
 Agent deletion retires Compute without waiting for repository-session cleanup:
 pending, missing, unknown and `invalidated` sessions block neither deletion
-admission nor completion. Retained attempts and cleanup Work survive and
-continue independently; new requests share Work by revision and purpose.
+admission nor completion. Retained attempts and cleanup Work
+continue independently; new requests share Work by version and purpose.
 Deletion, invalidation and elapsed deadlines do not prove disposal or provider
 revocation. Evidence pruning and durable token recovery are unimplemented.
 
 Worker restart can retain surviving sessions and Compute material. A broker can
 recover the original broker's committed `DISPOSED` observation; active or uncertain
-sessions without one remain unknown. Missing exposed sessions fail the revision
+sessions without one remain unknown. Missing exposed sessions fail the version
 and retain cleanup; closing sessions block replacement until disposal. A new
-authorized revision neither settles old cleanup nor replays Git/API mutations.
+authorized version neither settles old cleanup nor replays Git/API mutations.
 
 ## Configuration
 
@@ -123,6 +123,7 @@ the [installation procedure](../guides/deploy/production-installation.md).
 `GET /namespaces/:namespaceId/agents/repository-options` requires Agent `create`;
 the exact-Agent editing route requires `update`. Both return approved
 `repositoryRef`, `displayName`, `allowedProfiles` and optional `description`.
+Descriptions allow 512 Unicode code points.
 `descriptionRefs` accepts up to 20 unique, comma-separated refs;
 `meta.descriptionsPending` signals background work, and missing descriptions never
 block selection. Authorized discovery failure yields
@@ -130,8 +131,8 @@ block selection. Authorized discovery failure yields
 yields 409. Only success or that outage permits a fresh ordinary draft; editing
 requires success. Writes reauthorize and resolve.
 
-The service rechecks approved refs and fetches metadata with a private,
-repository-scoped Metadata-read token, validating GitHub's numeric repository ID;
+The service rechecks approval and fetches metadata with repository-scoped
+Metadata-read tokens, verifying GitHub's numeric repository ID;
 the Driver checks provider, App, installation and repository IDs. Lookups share
 provider capacity and token cleanup with sessions and are cached for five minutes.
 Descriptions never grant access.
@@ -251,9 +252,9 @@ credentials and remain with attempt history. Journal failure prevents new bound
 admission and cannot establish absence or disposal.
 
 Unseen IDs must be under 60 seconds old and never future-dated. Process-local
-correlations are bounded to twice the session limit and can return `overloaded`;
-unresolved cleanup survives that window. Standalone correlations do not survive
-restart. No correlation recovers a bearer.
+correlations stop at twice the session limit and can return `overloaded`;
+unresolved cleanup survives that window. Restart loses standalone correlations.
+No correlation recovers a bearer.
 
 Session duration is independent of token lifetime. Replacement uses the original
 grant and must cover the remaining exchange budget plus safety margin. Idle
@@ -285,14 +286,14 @@ cleanup material counts against session capacity and shutdown's
 requires verified identity and no actual trailers before releasing `{ id, full_name }`.
 Joined OpenShell enforcement still needs proof.
 
-Bounded REST JSON responses omit `temp_clone_token` from the repository object,
+REST JSON responses below the size limit omit `temp_clone_token` from the repository object,
 its `parent` and `source` relationships, and pull-request `head.repo` and
 `base.repo`. GraphQL selecting `tempCloneToken` gets 400.
 
 Rewrite only validated pagination and followed links passing origin, repository,
 route and profile checks. Translate `/repositories/<id>` only for the configured
-ID, to its admitted `/repos/OWNER/REPO` route. Pagination accepts bounded `after`
-and `before`; direct ID-route requests remain unsupported. Preserve other links,
+ID, to its admitted `/repos/OWNER/REPO` route. Pagination checks `after`
+and `before` cursor format and length; direct ID-route requests remain unsupported. Preserve other links,
 human text and unrelated metadata.
 
 ## Client routing and limits
