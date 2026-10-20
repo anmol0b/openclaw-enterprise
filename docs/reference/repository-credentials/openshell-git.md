@@ -128,7 +128,9 @@ Those hosts, and every other name under `github.com` (GitHub's other front ends,
 such as `ssh.github.com`, `codeload.github.com` and `uploads.github.com`), come only
 from this route: if another Sandbox Driver network policy (`policy.networkPolicies`,
 such as a `source-control` policy) also allows one, the Installation refuses to
-start and names that policy. `githubusercontent.com` hosts are not covered. The Driver still needs at
+start and names that policy. This includes `gist.github.com`, `docs.github.com` and
+GitHub Packages registries (`*.pkg.github.com`); `ghcr.io` and
+`githubusercontent.com` hosts are not covered. The Driver still needs at
 least one policy, such as the model endpoint's. An Agent network grant for those
 hosts on any port is refused the same way: saving it for an Agent with a repository
 binding, adding the binding beside it, deploy and live application each fail with a
