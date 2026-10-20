@@ -46,6 +46,27 @@ const NOT_CONNECTED = new Set([
   "ENETUNREACH",
 ]);
 
+/** What the Agent can do about each worker refusal (finding 2149); Git itself shows only 403. */
+const ROUTE_REFUSALS: ReadonlyMap<string, string> = new Map([
+  [
+    "request_not_allowed",
+    "This repository binding does not allow this create; do not retry it. Ask an operator if the branch or base should change.",
+  ],
+  [
+    "access_withdrawn",
+    "Repository access for this Agent version has ended; do not retry. Ask an operator to bind the repository and deploy.",
+  ],
+  [
+    "credential_unavailable",
+    "The repository credential is unavailable; retrying will not help. Ask an operator to check the worker log.",
+  ],
+  [
+    "route_blocked",
+    "The repository route is closed for this Agent version; ask an operator to deploy a new version.",
+  ],
+  ["route_not_ready", "The repository route is not ready yet; retry in a minute."],
+]);
+
 /**
  * Classifies a reply OpenShell or GitHub gave instead of a created draft. OpenShell marks a
  * refusal made before forwarding with `layer: "l7"` (request-phase middleware and L7 policy);
@@ -67,9 +88,10 @@ function openShellRefusal(status: number | undefined, result: Record<string, unk
           "this repository binding already opened its draft pull request (one per review branch and base); GitHub did not receive this one. Find the earlier draft at GitHub; for another draft, ask an operator for a new review branch.",
         );
       }
+      const advice = reason === undefined ? undefined : ROUTE_REFUSALS.get(reason);
       return new DraftPullFailure(
         "not-created",
-        `the repository route refused it${reason ? ` (${reason})` : ""}; GitHub did not receive it.`,
+        `the repository route refused it${reason ? ` (${reason})` : ""}; GitHub did not receive it.${advice ? ` ${advice}` : ""}`,
       );
     }
     if (result.error === "middleware_failed") {

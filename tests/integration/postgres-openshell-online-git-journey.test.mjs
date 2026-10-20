@@ -143,11 +143,17 @@ test(
     await evaluate(discovery("upload-pack"), "advertise-upload-pack");
     await evaluate(command("upload-pack", bodies.fetch), "upload-pack");
     await evaluate(discovery("receive-pack"), "advertise-receive-pack");
-    await evaluate(command("receive-pack", bodies.mixed));
+    // Each refusal names what the Agent can do (finding 2149): a mixed-ref push is not allowed.
+    await evaluate(
+      command("receive-pack", bodies.mixed),
+      undefined,
+      sandboxId,
+      "request_not_allowed",
+    );
     await evaluate(command("receive-pack", bodies.push), "receive-pack");
     await evaluate(discovery("upload-pack"), undefined, `unknown-sandbox-${randomUUID()}`);
     mapping = { ...mapping, installed: { ...installed, materialVersion: randomUUID() } };
-    await evaluate(discovery("upload-pack"));
+    await evaluate(discovery("upload-pack"), undefined, sandboxId, "route_not_ready");
     mapping = { ...mapping, installed };
     await evaluate(discovery("upload-pack"), "advertise-upload-pack");
 
@@ -182,7 +188,7 @@ test(
     // fixture still accepts its issued token before AND after a fresh request with signed identity.
     await f.withdraw();
     assert.equal(await f.providerStatus(held.value), 200);
-    await evaluate(discovery("upload-pack"));
+    await evaluate(discovery("upload-pack"), undefined, sandboxId, "access_withdrawn");
     assert.equal(await f.providerStatus(held.value), 200);
     assert.equal(f.gh.issuesOfTokens.length, 1);
     assert.deepEqual(f.gh.errors, []);

@@ -752,12 +752,20 @@ test("an open Git route that loses its material says so once and names it in eac
   });
   assert.equal(f.entry.blocked, undefined);
   assert.deepEqual(warnings(f), []);
-  assert.equal(await f.lookup(), undefined);
+  const codes = [];
+  assert.equal(
+    await f.runtime.lookup(f.identity, AbortSignal.timeout(2_000), (code) => codes.push(code)),
+    undefined,
+  );
+  // The Agent is told the credential is unavailable (finding 2149), and the log says the same.
+  assert.deepEqual(codes, ["credential_unavailable"]);
+  assert.equal(f.denials().at(-1).reasonCode, "credential_unavailable");
   assert.deepEqual(warnings(f), [
     {
       event: "worker.openshell-git-route-warning",
       status: "pending",
       reason: "material_unavailable",
+      reasonCode: "credential_unavailable",
       namespaceId: "namespace-a",
       agentId: "agent-one",
       revisionId: "rev-one",
@@ -783,6 +791,25 @@ test("an open Git route that loses its material says so once and names it in eac
   assert.equal(restored.length, 1);
   assert.equal(restored[0].reason, undefined);
   assert.ok(Number.isFinite(restored[0].durationMs) && restored[0].durationMs >= 0);
+
+  // Lost because the session ended (the binding was removed, or the version replaced): the
+  // denial and the warning say access was withdrawn, not that the credential is unavailable.
+  const w = fixture();
+  await w.reconcile();
+  w.owner.material = { absent: "withdrawn" };
+  await w.reconcile();
+  assert.deepEqual(w.runtime.route(w.revision.id), {
+    state: "pending",
+    reason: "material_unavailable",
+  });
+  assert.equal(await w.lookup(), undefined);
+  assert.equal(w.denials().at(-1).reason, "material_unavailable");
+  assert.equal(w.denials().at(-1).reasonCode, "access_withdrawn");
+  assert.equal(warnings(w).at(-1).reasonCode, "access_withdrawn");
+  w.owner.material = { absent: "unprepared" };
+  await w.reconcile();
+  assert.equal(await w.lookup(), undefined);
+  assert.equal(w.denials().at(-1).reasonCode, "credential_unavailable");
 
   // Lost again after the restoration: reported again, once.
   f.owner.material = undefined;
@@ -819,6 +846,7 @@ test("an open Git route that loses its material says so once and names it in eac
   });
   assert.equal(await g.lookup(), undefined);
   assert.equal(g.denials().at(-1).reason, "route_pending");
+  assert.equal(g.denials().at(-1).reasonCode, "route_not_ready");
   assert.deepEqual(warnings(g), []);
 });
 
@@ -842,6 +870,8 @@ test("the Git route tombstone stays for a replaced execution, an unknown write a
     assert.deepEqual(f.runtime.route(f.revision.id), { state: "blocked", reason });
     assert.equal(await f.lookup(), undefined);
     assert.equal(f.denials().at(-1).reason, "route_blocked");
+    // The Agent is told a new version is needed (finding 2149).
+    assert.equal(f.denials().at(-1).reasonCode, "route_blocked");
     assert.equal(f.errors().length, 1);
     // The next preparation pass fails with the typed cause Compute turns into held
     // runtime-failure evidence, instead of a retry that can never succeed.
@@ -952,6 +982,7 @@ test("the Git route tombstone stays for a replaced execution, an unknown write a
   assert.deepEqual(f.errors(), []);
   assert.equal(await f.lookup(), undefined);
   assert.equal(f.denials().at(-1).reason, "route_blocked");
+  assert.equal(f.denials().at(-1).reasonCode, "access_withdrawn");
 });
 
 test("the Git route reports bootstrap, material and binding states for Compute readiness", async () => {
@@ -996,6 +1027,8 @@ test("the Git route reports bootstrap, material and binding states for Compute r
     undefined,
   );
   assert.equal(f.denials().at(-1).reason, "execution_mismatch");
+  // Not this route's Sandbox: it is not told why.
+  assert.equal(f.denials().at(-1).reasonCode, undefined);
   assert.equal(f.denials().at(-1).requestId, "request-two");
   // A binding this worker never prepared.
   assert.equal(

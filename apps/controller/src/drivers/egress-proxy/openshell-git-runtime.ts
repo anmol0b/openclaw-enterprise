@@ -38,6 +38,7 @@ import {
   createOpenShellOnlineGitAuthority,
   type OpenShellOnlineGitBinding,
   type OpenShellOnlineGitIdentity,
+  type OpenShellOnlineGitReasonCode,
 } from "./openshell-online-git-authority.ts";
 import { bindOpenShellEgressAuthority } from "./openshell-authority.ts";
 
@@ -183,6 +184,8 @@ interface Entry {
   unverified?: true | undefined;
   /** The snapshot last persisted for this fence, so the row is written only on change. */
   persisted?: OpenShellGitRouteSnapshot | undefined;
+  /** Why the owner last had no material: the session is gone, or none is usable (finding 2149). */
+  absent?: "withdrawn" | "unprepared" | undefined;
 }
 interface EntryState {
   entry?: Entry;
@@ -280,6 +283,26 @@ function refusedIdentity(error: unknown): boolean {
 
 /** Runs a read. A failure that is not one of the runtime's own verifications is unavailable
  * evidence (the provider's observe() treats its reads the same way), never a verdict. */
+/**
+ * What the Agent is told for a lookup denial of one of this worker's routes (finding 2149). A
+ * request from another Sandbox than the route's stays generic: it is not this route's Agent.
+ */
+function lookupReasonCode(reason: string, entry: Entry): OpenShellOnlineGitReasonCode | undefined {
+  switch (reason) {
+    case "execution_mismatch":
+      return undefined;
+    case "route_blocked":
+      return entry.blocked === "withdrawn" ? "access_withdrawn" : "route_blocked";
+    case "material_unavailable":
+      // The route had material and lost it: the session ended, or the owner retired the
+      // material and cannot prepare more (for example a rejected App key).
+      return entry.absent === "withdrawn" ? "access_withdrawn" : "credential_unavailable";
+    default:
+      // Pending, unobserved, rotated, expired, changed installation or an aborted lookup.
+      return "route_not_ready";
+  }
+}
+
 async function read<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
   try {
     return await operation();
@@ -1330,7 +1353,8 @@ export class OpenShellGitRuntime {
         () => owner.readOpenShellMaterial(entry.revision.id, signal),
         signal,
       );
-      if (!material) {
+      if (!material || "absent" in material) {
+        entry.absent = material?.absent;
         if (entry.material || entry.materialRef) {
           // The route lost the material it had: the owner retired it (the App key was
           // rotated or rejected and preparation is quarantined, access was withdrawn, or a
@@ -1343,6 +1367,7 @@ export class OpenShellGitRuntime {
         await this.persist(entry, signal);
         return;
       }
+      entry.absent = undefined;
       let scope: ReturnType<OpenShellGitRuntime["scope"]>;
       try {
         scope = this.scope(entry.revision);
@@ -1437,9 +1462,15 @@ export class OpenShellGitRuntime {
     }
   }
 
+  /**
+   * The live binding for a request, or undefined with one `worker.openshell-git-denied` line.
+   * `refused` is told the reason code the Agent is shown when the denial is attributed to one
+   * of this worker's routes (finding 2149); an unattributed request stays generic.
+   */
   async lookup(
     identity: OpenShellOnlineGitIdentity,
     signal: AbortSignal,
+    refused?: (reasonCode: OpenShellOnlineGitReasonCode) => void,
   ): Promise<OpenShellOnlineGitBinding | undefined> {
     if (!this.owner || this.stopped.signal.aborted || signal.aborted) {
       return;
@@ -1482,6 +1513,7 @@ export class OpenShellGitRuntime {
             event: "worker.openshell-git-route-warning",
             status: "pending",
             reason: "material_unavailable",
+            reasonCode: lookupReasonCode(reason, entry),
             ...this.identity(entry),
           });
         }
@@ -1552,10 +1584,15 @@ export class OpenShellGitRuntime {
       }
     }
     // One line per denial the worker decides (finding 2133); the supervisor's own log only
-    // says the middleware denied.
+    // says the middleware denied. It names the reason code the Agent sees (finding 2149).
+    const reasonCode = denied && lookupReasonCode(reason, denied);
+    if (reasonCode !== undefined) {
+      refused?.(reasonCode);
+    }
     this.emit?.({
       event: "worker.openshell-git-denied",
       reason,
+      ...(reasonCode === undefined ? {} : { reasonCode }),
       sandboxId: identity.sandboxId,
       requestId: identity.requestId,
       ...(denied === undefined ? {} : this.identity(denied)),
@@ -1593,7 +1630,13 @@ export class OpenShellGitRuntime {
         keyId: config.keyId,
         publicKey,
       },
-      lookupBinding: (identity, signal) => this.lookup(identity, signal),
+      lookupBinding: async (identity, signal) => {
+        let refused: OpenShellOnlineGitReasonCode | undefined;
+        const binding = await this.lookup(identity, signal, (code) => {
+          refused = code;
+        });
+        return binding ?? (refused === undefined ? undefined : { refused });
+      },
       approve: (request, installed, signal) =>
         owner.authorizeOpenShellRequest(request, installed, signal),
       onDeny: (denial) => {

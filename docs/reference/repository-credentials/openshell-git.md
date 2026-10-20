@@ -178,7 +178,8 @@ sends its one draft-create request to `api.github.com` and OpenShell routes it
 through the middleware; the helper ignores proxy variables. It accepts explicit `--body` text, not `--body-file`, and
 records a local attempt ID before sending. A local ID does not make GitHub
 creation idempotent. If a push or draft-create response is lost, inspect GitHub
-for the commit or draft before any new attempt. Do not retry another way.
+for the commit or draft before any new attempt. Do not retry another way. A
+refused request answers 403 with a [reason code](openshell-git-refusals.md).
 
 The draft limit belongs to the grant (repository, review branch and base): every
 Agent version bound to it shares one draft, and closing or merging the draft does
@@ -302,10 +303,9 @@ version had and lost (`status: pending`, `reason: material_unavailable`), and
 restoration with the outage's `durationMs` (`reason: supervisor_reconnected` when
 it reopened on a new supervisor session, `reason: worker_restarted` when a restarted
 worker reopened it: that duration counts from the adoption, not from the restart).
-Each request the worker refuses logs one
-`worker.openshell-git-denied` line with its `reason` (`route_unobserved`,
-`material_unavailable`, `route_blocked`, `store_unavailable`, `ref_not_allowed`,
-`approval_denied`, and so on), the Sandbox ID and the request ID the supervisor's own log shows.
+Each request the worker refuses logs one `worker.openshell-git-denied` line;
+[OpenShell Git refusals](openshell-git-refusals.md) lists its reason codes and what
+the Agent sees.
 
 ## GitHub App key rotated or revoked
 

@@ -45,6 +45,15 @@ class DraftAlreadyOpened extends Error {
   }
 }
 
+/** No live session for the request: the binding was removed, the version replaced or stopped,
+ * or the session ended. The Agent is told its access was withdrawn (finding 2149). */
+class SessionClosed extends Error {
+  constructor() {
+    super("PREPARED_REPOSITORY_SESSION_CLOSED");
+    this.name = "SessionClosed";
+  }
+}
+
 const adoption = "prepared_repository_git";
 const families = "occ.prepared_github_families";
 const attempts = "occ.prepared_github_attempts";
@@ -94,6 +103,20 @@ export interface PreparedRepositoryGitSource {
 }
 type Policy = (session: PreparedRepositorySession) => PreparedRepositoryGitSource | undefined;
 
+/** Why a revision has no OpenShell material: no live admitted session (`withdrawn`), or a live
+ * session with no usable committed material (`unprepared`). */
+export interface OpenShellMaterialAbsence {
+  readonly absent: "withdrawn" | "unprepared";
+}
+
+/** A family of an earlier issuer authority that discovery retired without revoking. */
+export interface PreparedRepositoryGitForeignRetirement {
+  readonly namespaceId: string;
+  readonly revisionId: string;
+  readonly repositoryRef: string;
+  readonly providerExpiresAt: string;
+}
+
 /** Private worker-plane material. Never serialize this through a workload-facing service. */
 export interface OpenShellRepositoryMaterial {
   readonly value: string;
@@ -119,24 +142,46 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     this.policy = policy;
   }
 
-  /** Background discovery only. Admission and key lookup are not reachable from use(). */
-  async discover(): Promise<PreparedRepositoryGitSource[]> {
-    return this.transaction(async (c) => {
+  /** Background discovery only. Admission and key lookup are not reachable from use().
+   * `onForeignRetired` is told, after commit, of each family of an earlier issuer authority
+   * (another GitHub API origin or CA) retired in this pass: its token cannot be revoked here. */
+  async discover(
+    onForeignRetired?: (retired: PreparedRepositoryGitForeignRetirement) => void,
+  ): Promise<PreparedRepositoryGitSource[]> {
+    const { sources, foreign } = await this.transaction(async (c) => {
       // Denial doesn't depend on this cleanup. Keep attempts, including unknown issuance, for recovery.
-      await c.query(
+      // Families of every issuer authority retire once their session is no longer live: after
+      // the registry moves to another App or CA, the previous authority's families for replaced
+      // versions would otherwise stay enabled with current material (finding 2150). Revocation
+      // (takeRetirement) still never sends a token to an authority other than its own.
+      const { rows: retired } = await c.query(
         `WITH stopped AS (
         UPDATE ${families} f SET enabled=false
-        WHERE enabled AND source->>'adoption'=$1 AND admission->>'issuerAuthority'=$2 AND NOT ${live}
-        RETURNING source_id)
-        UPDATE ${attempts} a SET custody='retire' FROM stopped s
-        WHERE a.source_id=s.source_id AND custody='current'`,
+        WHERE enabled AND source->>'adoption'=$1 AND NOT ${live}
+        RETURNING source_id, source, admission->>'issuerAuthority' IS DISTINCT FROM $2 AS foreign),
+        moved AS (UPDATE ${attempts} a SET custody='retire' FROM stopped s
+        WHERE a.source_id=s.source_id AND custody='current' RETURNING a.source_id, a.provider_expires_at)
+        SELECT s.source->'session' AS session, m.provider_expires_at
+        FROM stopped s JOIN moved m USING (source_id) WHERE s.foreign`,
         [adoption, this.authority],
       );
       const { rows } = await c.query(sessions);
-      return (rows as { session: PreparedRepositorySession }[]).flatMap(
-        ({ session }) => this.policy(session) ?? [],
-      );
+      return {
+        sources: (rows as { session: PreparedRepositorySession }[]).flatMap(
+          ({ session }) => this.policy(session) ?? [],
+        ),
+        foreign: retired as { session: PreparedRepositorySession; provider_expires_at: Date }[],
+      };
     });
+    for (const { session, provider_expires_at: expires } of foreign) {
+      onForeignRetired?.({
+        namespaceId: session.namespaceId,
+        revisionId: session.revisionId,
+        repositoryRef: session.binding.repositoryRef,
+        providerExpiresAt: expires.toISOString(),
+      });
+    }
+    return sources;
   }
 
   async claimGit(
@@ -188,8 +233,10 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
   async readOpenShellMaterial(
     revisionId: string,
     signal: AbortSignal,
-  ): Promise<OpenShellRepositoryMaterial | undefined> {
+  ): Promise<OpenShellRepositoryMaterial | OpenShellMaterialAbsence | undefined> {
     let bytes: Buffer | undefined;
+    const withdrawn: OpenShellMaterialAbsence = Object.freeze({ absent: "withdrawn" });
+    const unprepared: OpenShellMaterialAbsence = Object.freeze({ absent: "unprepared" });
     try {
       signal.throwIfAborted();
       const result = await this.transaction(async (c) => {
@@ -198,6 +245,10 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
           (${sessions} AND s.live_revision_id=$1 FOR SHARE OF s,b,g) l`,
           [revisionId],
         );
+        if (rows.length === 0) {
+          // No live session: the binding was removed, or the version is not (or no longer) active.
+          return withdrawn;
+        }
         // A revision with multiple eligible repository sessions has no single installation
         // target. Do not select whichever row the database happens to return first.
         if (rows.length !== 1) {
@@ -206,7 +257,8 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
         const current = rows[0] as { session: PreparedRepositorySession; end_ms: string };
         const source = this.policy(current.session);
         if (!source) {
-          return undefined;
+          // The registry no longer admits this binding.
+          return withdrawn;
         }
         const { rows: found } = await c.query(
           `SELECT a.id,a.admission,a.material_version,a.usable_until,a.sealed
@@ -219,7 +271,7 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
           [source.key.source.id, source, this.authority],
         );
         if (found.length !== 1) {
-          return undefined;
+          return unprepared;
         }
         const material = found[0] as {
           id: string;
@@ -237,7 +289,7 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
           !Number.isFinite(until) ||
           Date.now() >= until
         ) {
-          return undefined;
+          return unprepared;
         }
         bytes = this.open(material.sealed, material.admission, material.id);
         return {
@@ -255,8 +307,11 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
         };
       });
       signal.throwIfAborted();
-      if (!result || !bytes || Date.now() >= Date.parse(result.expiresAt)) {
-        return undefined;
+      if (!result || "absent" in result) {
+        return result;
+      }
+      if (!bytes || Date.now() >= Date.parse(result.expiresAt)) {
+        return unprepared;
       }
       return Object.freeze({ ...result, value: bytes.toString("utf8") });
     } finally {
@@ -271,25 +326,30 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     q: PreparedGitHubUseRequest,
     installed: { preparationAttemptId: string; materialVersion: string },
     signal: AbortSignal,
-  ): Promise<boolean | "draft_already_opened"> {
+  ): Promise<boolean | "draft_already_opened" | "access_withdrawn"> {
     if (!installed?.preparationAttemptId || !installed.materialVersion) {
       return false;
     }
-    // transaction() replaces every error with a redacted one, so the spent draft is noted here.
-    let spent = false;
+    // transaction() replaces every error with a redacted one, so the refusal class is noted here.
+    let refused: "draft_already_opened" | "access_withdrawn" | false = false;
     try {
       const result = await this.transaction(async (c) => {
         try {
           return await this.recordUse(c, q, signal, installed);
         } catch (error) {
-          spent = error instanceof DraftAlreadyOpened;
+          refused =
+            error instanceof DraftAlreadyOpened
+              ? "draft_already_opened"
+              : error instanceof SessionClosed
+                ? "access_withdrawn"
+                : false;
           throw error;
         }
       });
       return !("kind" in result) && !signal.aborted && Date.now() < Date.parse(result.sendStartBy);
     } catch {
       // A lost commit acknowledgment may leave a receipt. Never retry or turn it into an allow.
-      return spent ? "draft_already_opened" : false;
+      return refused;
     }
   }
 
@@ -349,6 +409,10 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     );
     const current = rows[0] as { session: PreparedRepositorySession; end_ms: string } | undefined;
     const source = current && this.policy(current.session);
+    if (installed && (!current || !source)) {
+      // OpenShell route only: the session ended or the registry no longer admits it.
+      throw new SessionClosed();
+    }
     if (
       !source ||
       !current ||

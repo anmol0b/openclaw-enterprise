@@ -121,17 +121,19 @@ test(
       requestId: send.context.request_id,
     });
     assert.ok(Date.parse(q.deadlineAt) > Date.now());
-    // A new request using the same valid supervisor token must ask the owner again.
+    // A new request using the same valid supervisor token must ask the owner again. A refusal
+    // of the installed material, or no answer, tells the Agent to retry (finding 2149).
     current = false;
     assert.deepEqual(denials, []);
-    assert.equal(await evaluate(pushRequest()), 2);
+    const notReady = { decision: 2, reason_code: "route_not_ready" };
+    assert.deepEqual(await invoke(client, "EvaluateHttpRequest", pushRequest(), bearer), notReady);
     assert.equal(
       await evaluate({ ...fetch, context: { ...fetch.context, request_id: randomUUID() } }),
       2,
     );
     current = true;
     unavailable = true;
-    assert.equal(await evaluate(pushRequest()), 2);
+    assert.deepEqual(await invoke(client, "EvaluateHttpRequest", pushRequest(), bearer), notReady);
     // Each denial the authority decides is reported once, with its reason class and the
     // request's identity, never its content (finding 2133).
     assert.deepEqual(
@@ -163,6 +165,11 @@ test(
       ],
     );
     assert.ok(denials.every((denial) => typeof denial.requestId === "string" && denial.requestId));
+    // The worker log names the code the Agent was shown.
+    assert.deepEqual(
+      denials.map(({ reasonCode }) => reasonCode),
+      ["route_not_ready", "route_not_ready", "route_not_ready"],
+    );
   },
 );
 
@@ -208,9 +215,23 @@ test(
       },
       { ...baseline, phase: 2 },
     ];
+    const codes = [];
     for (const q of cases) {
-      assert.equal(await evaluate(q), 2);
+      const result = await invoke(client, "EvaluateHttpRequest", q, bearer);
+      assert.equal(result.decision, 2);
+      codes.push(result.reason_code);
     }
+    // The Agent is told a policy refusal is final (finding 2149). A request the view rejects
+    // (oversized, wrong context) or whose identity does not match its binding stays generic.
+    assert.deepEqual(codes, [
+      ...Array(3).fill("request_not_allowed"),
+      ...Array(5).fill("online_authorization_denied"),
+      "request_not_allowed",
+      "request_not_allowed",
+      "online_authorization_denied",
+      ...Array(4).fill("request_not_allowed"),
+      "online_authorization_denied",
+    ]);
     // The reasons an operator reads for the inspected refusals above, in their order.
     assert.deepEqual(denials.slice(0, 3), [
       "ref_not_allowed",
@@ -284,8 +305,15 @@ test(
       JSON.stringify(payload, null, 2),
       { ...payload, body: "x".repeat(64 * 1024) },
     ]) {
-      assert.equal(await evaluate(draft(value)), 2);
+      assert.deepEqual(await invoke(client, "EvaluateHttpRequest", draft(value), bearer), {
+        decision: 2,
+        reason_code: "request_not_allowed",
+      });
     }
+    assert.deepEqual(
+      new Set(denials.map(({ reason, reasonCode }) => `${reason}:${reasonCode}`)),
+      new Set(["draft_rejected:request_not_allowed"]),
+    );
     assert.equal(approvals.length, 0);
     const q = draft(payload);
     assert.equal(await evaluate(q), 1);
@@ -314,9 +342,17 @@ test(
     assert.equal(first.requestDigestSha256, approvals[1].requestDigestSha256);
     assert.deepEqual(await invoke(client, "EvaluateHttpRequest", q, bearer), {
       decision: 2,
-      reason_code: "online_authorization_denied",
+      reason_code: "route_not_ready",
     });
     assert.equal(denials.at(-1).reason, "approval_denied");
+    // The session ended (binding removed, version replaced or stopped): finding 2149.
+    allow = "access_withdrawn";
+    assert.deepEqual(await invoke(client, "EvaluateHttpRequest", q, bearer), {
+      decision: 2,
+      reason_code: "access_withdrawn",
+    });
+    assert.equal(denials.at(-1).reason, "session_closed");
+    assert.equal(denials.at(-1).reasonCode, "access_withdrawn");
     // Finding 2147: the grant's one draft was already claimed. The supervisor gets a reason
     // code the helper can name; the worker log says the same.
     allow = "draft_already_opened";
@@ -325,7 +361,54 @@ test(
       reason_code: "draft_already_opened",
     });
     assert.equal(denials.at(-1).reason, "draft_already_opened");
+    assert.equal(denials.at(-1).reasonCode, "draft_already_opened");
     assert.equal(denials.at(-1).operation, "create-draft-pull");
+  },
+);
+
+test(
+  "a lookup refusal reaches the Agent as its reason code; an unattributed request stays generic",
+  { timeout: 10000 },
+  async (t) => {
+    // Finding 2149: the worker's lookup names why it refused one of its own routes (and logs
+    // it there); the authority passes only that code on, with no approval and no second line.
+    let lookup;
+    let approvals = 0;
+    const denials = [];
+    const { client, keys } = await openShellOnlineGitWire(t, {
+      lookupBinding: async () => lookup,
+      approve: async () => {
+        approvals++;
+        return true;
+      },
+      onDeny: (denial) => denials.push(denial),
+    });
+    const bearer = token(keys, "supervisor", binding.sandboxId);
+    for (const code of [
+      "access_withdrawn",
+      "credential_unavailable",
+      "route_blocked",
+      "route_not_ready",
+    ]) {
+      lookup = { refused: code };
+      assert.deepEqual(await invoke(client, "EvaluateHttpRequest", pushRequest(), bearer), {
+        decision: 2,
+        reason_code: code,
+      });
+    }
+    lookup = undefined;
+    assert.deepEqual(await invoke(client, "EvaluateHttpRequest", pushRequest(), bearer), {
+      decision: 2,
+      reason_code: "online_authorization_denied",
+    });
+    // A code outside OpenShell's reason grammar is never forwarded.
+    lookup = { refused: "Not A Code" };
+    assert.deepEqual(await invoke(client, "EvaluateHttpRequest", pushRequest(), bearer), {
+      decision: 2,
+      reason_code: "online_authorization_denied",
+    });
+    assert.equal(approvals, 0);
+    assert.deepEqual(denials, []);
   },
 );
 

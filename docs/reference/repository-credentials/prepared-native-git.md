@@ -73,3 +73,15 @@ To withdraw access, remove the repository binding on the running Agent. Confirm 
 new authenticated fetch is denied and chat still works. Withdrawal cannot erase
 an existing clone or recall a push already sent. If the outcome of a push is
 unknown, inspect the remote ref before deciding what to do; do not replay it.
+
+## Change the issuer
+
+Changing the worker's GitHub API origin or issuer CA (`issuerCaPath`), for example
+from a test fixture to `github.com`, starts a new issuer. OCE never sends a token
+to an issuer other than the one that prepared it. The active version gets no new
+token until a new version deploys. When a version holding a token from the previous
+issuer is replaced or withdrawn, the worker retires that token without revoking it
+and logs `worker.error` with `PREPARED_GITHUB_RETIRED_UNREVOKED`
+(`reason: issuer_authority_changed`, the Namespace, revision, `repositoryRef` and
+`providerExpiresAt`). The token stays valid at GitHub until that time, at most an
+hour. A worker with the previous setting revokes it.

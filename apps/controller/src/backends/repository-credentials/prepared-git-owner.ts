@@ -39,7 +39,10 @@ interface Options extends Omit<PreparedRepositoryGitConfiguration, "issuerCaPath
   registry: GitHubRepositoryRegistry;
   /** `context` names the affected revision and repository binding, never a credential. */
   report?: (
-    code: "PREPARED_GITHUB_RECOVERY_REQUIRED" | "PREPARED_GITHUB_MAINTENANCE_FAILED",
+    code:
+      | "PREPARED_GITHUB_RECOVERY_REQUIRED"
+      | "PREPARED_GITHUB_MAINTENANCE_FAILED"
+      | "PREPARED_GITHUB_RETIRED_UNREVOKED",
     context?: Readonly<Record<string, string>>,
   ) => void;
   startWorker?: boolean;
@@ -181,7 +184,16 @@ export async function startPreparedGitHubGitOwner(options: Options) {
   );
   async function maintain() {
     stop.signal.throwIfAborted();
-    const sources = await store.discover();
+    // A replaced version's token from an earlier issuer authority (another App origin or CA) is
+    // retired, but revoking it would send it to this authority: it lives out its hour at the
+    // provider instead, and the operator is told once (finding 2150).
+    const sources = await store.discover(({ providerExpiresAt, ...context }) =>
+      options.report?.("PREPARED_GITHUB_RETIRED_UNREVOKED", {
+        reason: "issuer_authority_changed",
+        ...context,
+        providerExpiresAt,
+      }),
+    );
     await retirePreparedGitHubToken(store, null, stop.signal, apiOrigin, ca, clock);
     if (!sources.length) {
       return;

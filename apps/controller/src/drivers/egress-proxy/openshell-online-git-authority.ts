@@ -12,6 +12,7 @@ import { classifyRoute } from "../repo/github/credentials/routes/classification.
 import { allowsReceivePackInput } from "../repo/github/credentials/routes/receive-pack.ts";
 import {
   createOpenShellOnlineHttpAuthority,
+  type OpenShellOnlineDecision,
   type OpenShellOnlineHttpAuthorityOptions,
   type OpenShellOnlineHttpRequest,
 } from "./openshell-online-authority.ts";
@@ -56,20 +57,49 @@ export interface OpenShellOnlineGitAuthorityOptions extends Omit<
   readonly lookupBinding: (
     identity: OpenShellOnlineGitIdentity,
     signal: AbortSignal,
-  ) => Promise<OpenShellOnlineGitBinding | undefined>;
+  ) => Promise<OpenShellOnlineGitBinding | OpenShellOnlineGitRefusal | undefined>;
   /** Check live session/grant/material in one transaction. For draft creates, durably consume
    * ONE submission per grant before returning true, including uncertain/expired permits, and
    * answer "draft_already_opened" once it is spent (unless the registry opts the grant out of
-   * the limit). Never retry on a lost acknowledgement. This records possible use, not a
-   * provider outcome. */
+   * the limit). Answer "access_withdrawn" when the session is no longer live. Never retry on
+   * a lost acknowledgement. This records possible use, not a provider outcome. */
   readonly approve: (
     request: PreparedGitHubUseRequest,
     expectedInstalled: OpenShellOnlineGitBinding["installed"],
     signal: AbortSignal,
-  ) => Promise<boolean | "draft_already_opened">;
+  ) => Promise<boolean | "draft_already_opened" | "access_withdrawn">;
   /** Told once per request the authority itself refuses, with the reason class (finding 2133).
    * A request with no live binding is the lookup's to report. Never the request's content. */
   readonly onDeny?: (denial: OpenShellOnlineGitDenial) => void;
+}
+
+/**
+ * The reason the Agent's tool is shown for a refusal (finding 2149): OpenShell returns it as
+ * `reason_code` in the 403 body, the draft helper prints it, and the worker log names it as
+ * `reasonCode`. Each one names what the Agent can do, never a token, installation or host:
+ * - `request_not_allowed`: the binding does not admit this request (another branch, ref or
+ *   repository, a non-draft or other-base pull request, an API call). Do not retry it.
+ * - `draft_already_opened`: the grant's one draft was already created (finding 2147).
+ * - `access_withdrawn`: this Agent version's repository access ended (binding removed,
+ *   version replaced or stopped). Do not retry; an operator rebinds and deploys.
+ * - `credential_unavailable`: the route lost its credential (for example the App key was
+ *   rejected). Retrying does not help until an operator recovers it.
+ * - `route_blocked`: the worker closed this version's route for good; a new version reopens it.
+ * - `route_not_ready`: the route is starting, verifying or briefly unavailable. Retry shortly.
+ * A request the worker cannot attribute to a live binding keeps the generic
+ * `online_authorization_denied`.
+ */
+export type OpenShellOnlineGitReasonCode =
+  | "request_not_allowed"
+  | "draft_already_opened"
+  | "access_withdrawn"
+  | "credential_unavailable"
+  | "route_blocked"
+  | "route_not_ready";
+
+/** A lookup refusal for a request the worker attributed to one of its bindings. */
+export interface OpenShellOnlineGitRefusal {
+  readonly refused: OpenShellOnlineGitReasonCode;
 }
 
 /** Why the authority refused a request it could attribute to a live binding, or a request
@@ -88,10 +118,35 @@ export type OpenShellOnlineGitDenialReason =
   | "approval_denied"
   | "approval_failed"
   | "draft_already_opened"
+  | "session_closed"
   | "aborted";
+
+/** What the Agent is told for each authority denial; binding_mismatch stays generic. */
+const reasonCodes: Readonly<
+  Record<OpenShellOnlineGitDenialReason, OpenShellOnlineGitReasonCode | undefined>
+> = {
+  binding_mismatch: undefined,
+  request_invalid: "request_not_allowed",
+  encoding_unsupported: "request_not_allowed",
+  draft_rejected: "request_not_allowed",
+  origin_mismatch: "request_not_allowed",
+  route_unsupported: "request_not_allowed",
+  discovery_body: "request_not_allowed",
+  body_empty: "request_not_allowed",
+  body_too_large: "request_not_allowed",
+  ref_not_allowed: "request_not_allowed",
+  // The owner refused the installed material (rotated, expired or past its deadline).
+  approval_denied: "route_not_ready",
+  approval_failed: "route_not_ready",
+  draft_already_opened: "draft_already_opened",
+  session_closed: "access_withdrawn",
+  aborted: "route_not_ready",
+};
 
 export interface OpenShellOnlineGitDenial {
   readonly reason: OpenShellOnlineGitDenialReason;
+  /** The reason code the supervisor shows the Agent, when it is not the generic one. */
+  readonly reasonCode?: OpenShellOnlineGitReasonCode;
   readonly sandboxId: string;
   readonly requestId: string;
   readonly revisionId: string;
@@ -245,7 +300,13 @@ function operation(
     if (head.contentEncoding !== "identity") {
       return { denied: "encoding_unsupported" };
     }
-    const pull = draftScope(request, binding, head);
+    let pull: PreparedGitHubPullScope | undefined;
+    try {
+      pull = draftScope(request, binding, head);
+    } catch {
+      // Invalid UTF-8 or ambiguous JSON members: refused and logged like any other bad draft.
+      pull = undefined;
+    }
     return pull
       ? { selected: { operation: "create-draft-pull", pull } }
       : { denied: "draft_rejected" };
@@ -314,18 +375,24 @@ export function createOpenShellOnlineGitAuthority(
       if (!binding) {
         return "deny";
       }
+      if ("refused" in binding) {
+        // The lookup reported this denial with its own reason; tell the Agent the class.
+        return { reasonCode: binding.refused };
+      }
       const deny = (
         reason: OpenShellOnlineGitDenialReason,
         selected?: PreparedGitHubUseRequest["operation"],
-      ): "deny" => {
+      ): OpenShellOnlineDecision => {
+        const reasonCode = reasonCodes[reason];
         options.onDeny?.({
           reason,
+          ...(reasonCode === undefined ? {} : { reasonCode }),
           sandboxId,
           requestId,
           revisionId: binding.executionId,
           ...(selected === undefined ? {} : { operation: selected }),
         });
-        return "deny";
+        return reasonCode === undefined ? "deny" : { reasonCode };
       };
       if (signal.aborted) {
         return deny("aborted");
@@ -370,7 +437,7 @@ export function createOpenShellOnlineGitAuthority(
         .update(Buffer.from([0]))
         .update(request.body)
         .digest("hex");
-      let allowed: boolean | "draft_already_opened";
+      let allowed: Awaited<ReturnType<OpenShellOnlineGitAuthorityOptions["approve"]>>;
       try {
         allowed = await options.approve(
           {
@@ -394,14 +461,16 @@ export function createOpenShellOnlineGitAuthority(
         // The owner did not answer; nothing was recorded as possible use, so deny.
         return deny("approval_failed", selected.operation);
       }
-      if (allowed === "draft_already_opened") {
+      if (allowed === "draft_already_opened" || allowed === "access_withdrawn") {
         if (signal.aborted) {
           return deny("aborted", selected.operation);
         }
-        // The grant's one draft create was already used (finding 2147). The helper says so
-        // instead of the generic refusal; nothing about the earlier draft is disclosed.
-        deny("draft_already_opened", selected.operation);
-        return { reasonCode: "draft_already_opened" };
+        // The grant's one draft create was already used (finding 2147), or the session ended.
+        // The Agent is told which; nothing about the earlier draft or the session is disclosed.
+        return deny(
+          allowed === "access_withdrawn" ? "session_closed" : "draft_already_opened",
+          selected.operation,
+        );
       }
       if (allowed !== true) {
         return deny("approval_denied", selected.operation);

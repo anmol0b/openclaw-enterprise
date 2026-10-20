@@ -20,7 +20,8 @@ test(
     const f = await fixture(t, { draftPull: true, sessionLifetimeMs: 120_000 });
     const signal = new AbortController().signal;
     const read = (revisionId = f.revision.id) => f.owner.readOpenShellMaterial(revisionId, signal);
-    assert.equal(await read(), undefined);
+    // Absent material says why (finding 2149): a live session with nothing prepared yet.
+    assert.deepEqual(await read(), { absent: "unprepared" });
     assert.equal(f.gh.issuesOfTokens.length, 0, "cold material reads must not issue");
     assert.deepEqual(
       (
@@ -34,7 +35,7 @@ test(
     );
     await prepare(f);
     const before = f.gh.trace.length;
-    assert.equal(await read("rev_" + randomUUID()), undefined);
+    assert.deepEqual(await read("rev_" + randomUUID()), { absent: "withdrawn" });
     await assert.rejects(f.owner.readOpenShellMaterial(f.revision.id, AbortSignal.abort()), {
       name: "AbortError",
     });
@@ -72,7 +73,11 @@ test(
     assert.equal(await f.providerStatus(material.value), 200);
     assert.equal(await f.owner.authorizeOpenShellRequest(f.request(), material, signal), true);
     await f.withdraw();
-    assert.equal(await read(), undefined, "withdrawal denies before background retirement");
+    assert.deepEqual(
+      await read(),
+      { absent: "withdrawn" },
+      "withdrawal denies before background retirement",
+    );
     assert.equal(await f.providerStatus(material.value), 200);
   },
 );
@@ -254,13 +259,14 @@ for (const change of ["repository binding withdrawn", "revision superseded", "se
         });
       }
       await assertUseGuarded(f);
-      assert.equal(
+      // The OpenShell route tells the Agent its access ended (finding 2149).
+      assert.deepEqual(
         await f.owner.readOpenShellMaterial(f.revision.id, new AbortController().signal),
-        undefined,
+        { absent: "withdrawn" },
       );
       assert.equal(
         await store.authorizeOpenShellRequest(f.request(), installed, new AbortController().signal),
-        false,
+        "access_withdrawn",
       );
       assert.equal(
         await f.providerStatus(installed.value),
@@ -336,8 +342,16 @@ test(
         "a mismatched installation must not consume an exchange",
       );
     }
+    // A session that is not live reads as withdrawn access (finding 2149).
+    assert.equal(
+      await store.authorizeOpenShellRequest(
+        f.request({ sessionId: `session-${randomUUID()}` }),
+        installed,
+        signal,
+      ),
+      "access_withdrawn",
+    );
     for (const changes of [
-      { sessionId: `session-${randomUUID()}` },
       { pushRef: "refs/heads/forbidden" },
       { repositoryId: "other-repository" },
       { providerInstanceId: "other-provider" },
@@ -369,7 +383,10 @@ test(
       "authorization must not contact the issuer or provider",
     );
     await f.withdraw();
-    assert.equal(await store.authorizeOpenShellRequest(f.request(), installed, signal), false);
+    assert.equal(
+      await store.authorizeOpenShellRequest(f.request(), installed, signal),
+      "access_withdrawn",
+    );
     assert.equal(
       await f.providerStatus(installed.value),
       200,
@@ -420,7 +437,9 @@ test(
       [replacement.preparationAttemptId],
     );
     assert.equal(await store.authorizeOpenShellRequest(f.request(), replacement, signal), false);
-    assert.equal(await f.owner.readOpenShellMaterial(f.revision.id, signal), undefined);
+    assert.deepEqual(await f.owner.readOpenShellMaterial(f.revision.id, signal), {
+      absent: "unprepared",
+    });
   },
 );
 
@@ -602,5 +621,84 @@ test(
     const native = await f.owner.use(create());
     assert.equal(native.kind, "recorded");
     assert.equal(native.status, 409);
+  },
+);
+
+test(
+  "discovery retires a replaced version's family from an earlier issuer authority without revoking it elsewhere",
+  { ...requiresPostgres, timeout: 60_000 },
+  async (t) => {
+    // Finding 2150: after the registry moved to another GitHub App origin or CA, the previous
+    // authority's family for a replaced version stayed enabled with its token current forever.
+    // Discovery under the new authority now retires it; revocation still never sends a token
+    // to an authority other than the one that issued it, so the operator is told instead.
+    const f = await fixture(t, { dnsIssuer: true });
+    await prepare(f);
+    const used = await f.owner.use(f.request());
+    const reports = [];
+    // The same fixture provider under another origin spelling: another issuer authority.
+    const next = await f.startOwner({
+      apiOrigin: f.gh.origin,
+      report: (code, context) => reports.push({ code, ...context }),
+    });
+    const state = async () =>
+      (
+        await f.pool.query(
+          `SELECT f.enabled, a.custody, a.sealed IS NOT NULL AS sealed
+           FROM occ.prepared_github_families f JOIN occ.prepared_github_attempts a USING (source_id)
+           WHERE f.source_id=$1`,
+          [f.familyId],
+        )
+      ).rows;
+    // While the version is live, its earlier-authority family is left alone: it cannot be
+    // used under the new authority, and an overlapping earlier worker may still serve it.
+    await next.maintain();
+    assert.deepEqual(await state(), [{ enabled: true, custody: "current", sealed: true }]);
+    assert.deepEqual(reports, []);
+    const issued = f.gh.issuesOfTokens.length;
+    // A new version replaces it.
+    await f.state.transact(async (unit) => {
+      const id = "rev_" + randomUUID();
+      await unit.revisions.createRevision({ ...f.revision, id, revision: 2 });
+      assert.ok(
+        await unit.agents.compareAndSetActiveRevision(
+          f.agent.namespaceId,
+          f.agent.id,
+          f.revision.id,
+          id,
+        ),
+      );
+    });
+    const before = f.gh.trace.length;
+    await next.maintain();
+    assert.deepEqual(await state(), [{ enabled: false, custody: "retire", sealed: true }]);
+    const {
+      rows: [{ provider_expires_at: expires }],
+    } = await f.pool.query(
+      "SELECT provider_expires_at FROM occ.prepared_github_attempts WHERE id=$1",
+      [used.preparationAttemptId],
+    );
+    assert.deepEqual(reports, [
+      {
+        code: "PREPARED_GITHUB_RETIRED_UNREVOKED",
+        reason: "issuer_authority_changed",
+        namespaceId: f.agent.namespaceId,
+        revisionId: f.revision.id,
+        repositoryRef: f.binding.repositoryRef,
+        providerExpiresAt: expires.toISOString(),
+      },
+    ]);
+    assert.equal(f.gh.trace.length, before, "the new authority never sends the old token");
+    assert.equal(await f.providerStatus(used.value), 200);
+    // Reported once: a later pass finds nothing new to retire and still sends nothing.
+    await next.maintain();
+    assert.equal(reports.length, 1);
+    assert.equal(f.gh.trace.length, before);
+    // The issuing authority, if it comes back, revokes it as usual.
+    await f.owner.maintain();
+    assert.equal(await f.providerStatus(used.value), 401);
+    assert.deepEqual(await state(), [{ enabled: false, custody: "revoked", sealed: false }]);
+    assert.equal(f.gh.issuesOfTokens.length, issued, "retirement never issues");
+    assert.deepEqual(f.gh.errors, []);
   },
 );

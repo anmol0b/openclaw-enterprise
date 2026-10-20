@@ -213,6 +213,40 @@ tls.connect = (options, ...rest) => connect({ ...options, host: "127.0.0.1", por
         },
         "Draft not created: this repository binding already opened its draft pull request (one per review branch and base); GitHub did not receive this one. Find the earlier draft at GitHub; for another draft, ask an operator for a new review branch.",
       ],
+      // Finding 2149: each worker refusal says what the Agent can do about it.
+      ...[
+        [
+          "request_not_allowed",
+          "This repository binding does not allow this create; do not retry it. Ask an operator if the branch or base should change.",
+        ],
+        [
+          "access_withdrawn",
+          "Repository access for this Agent version has ended; do not retry. Ask an operator to bind the repository and deploy.",
+        ],
+        [
+          "credential_unavailable",
+          "The repository credential is unavailable; retrying will not help. Ask an operator to check the worker log.",
+        ],
+        [
+          "route_blocked",
+          "The repository route is closed for this Agent version; ask an operator to deploy a new version.",
+        ],
+        ["route_not_ready", "The repository route is not ready yet; retry in a minute."],
+        // A code the helper does not know, including an inherited property name, adds nothing.
+        ["constructor", undefined],
+      ].map(([code, advice]) => [
+        `route refusal ${code}`,
+        {
+          status: 403,
+          body: {
+            error: "middleware_denied",
+            middleware: "oce-prepared-git",
+            reason_code: code,
+            layer: "l7",
+          },
+        },
+        `Draft not created: the repository route refused it (${code}); GitHub did not receive it.${advice ? ` ${advice}` : ""}`,
+      ]),
       [
         "route failure",
         { status: 503, body: { error: "middleware_failed", detail: "unavailable", layer: "l7" } },

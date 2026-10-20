@@ -172,7 +172,7 @@ export async function fixture(
       );
     });
   await admit(sessionId, attempt.admissionId);
-  owner = await startPreparedGitHubGitOwner({
+  const ownerOptions = {
     pool,
     controlSocket: join(directory, "control.sock"),
     driverId,
@@ -184,8 +184,19 @@ export async function fixture(
     apiOrigin: dnsIssuer ? gh.origin.replace("127.0.0.1", "localhost") : gh.origin,
     ca: gh.tls.ca,
     startWorker: false,
-  });
+  };
+  owner = await startPreparedGitHubGitOwner(ownerOptions);
   return {
+    /** Another worker owner on the same database, such as one after an issuer change. */
+    async startOwner(overrides) {
+      const other = await startPreparedGitHubGitOwner({
+        ...ownerOptions,
+        controlSocket: join(directory, `control-${randomUUID().slice(0, 8)}.sock`),
+        ...overrides,
+      });
+      t.after(() => other.close());
+      return other;
+    },
     pool,
     broker,
     permissions,
