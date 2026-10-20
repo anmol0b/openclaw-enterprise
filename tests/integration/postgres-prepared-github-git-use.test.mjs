@@ -544,12 +544,12 @@ for (const loseCommitAcknowledgment of [false, true]) {
 }
 
 test(
-  "an operator's opt-out lets every OpenShell draft create through and keeps the latest receipt",
+  "an operator's opt-out lets every OpenShell draft create through and keeps the first receipt",
   { ...requiresPostgres, timeout: 60_000 },
   async (t) => {
     // Finding 2147 (owner 10-20): with draftPullLimit "none" the OpenShell route admits each
     // draft create its live session, grant and material authorize; the draft-only, head and base
-    // checks are unchanged. The grant's row keeps the latest receipt. The broker route keeps its
+    // checks are unchanged. The grant's row keeps the first receipt. The broker route keeps its
     // one replayable receipt per grant.
     const f = await fixture(t, { draftPull: true, draftPullLimit: "none" });
     await prepare(f);
@@ -580,7 +580,7 @@ test(
     const second = create();
     assert.equal(await store.authorizeOpenShellRequest(second, installed, signal), true);
     assert.deepEqual(await rows(second.grantId), [
-      { receipt_id: second.exchangeId, outcome: "outcome_unknown", settled_at: null },
+      { receipt_id: first.exchangeId, outcome: "outcome_unknown", settled_at: null },
     ]);
     // The other checks still hold: another base or a stale material is refused, writing nothing.
     const otherBase = create();
@@ -596,7 +596,7 @@ test(
     );
     assert.deepEqual(
       (await rows(second.grantId)).map((row) => row.receipt_id),
-      [second.exchangeId],
+      [first.exchangeId],
     );
     // The broker route does not honor the opt-out: a new operation conflicts with the receipt.
     const native = await f.owner.use(create());

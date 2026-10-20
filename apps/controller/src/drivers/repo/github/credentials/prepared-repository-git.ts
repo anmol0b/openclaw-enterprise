@@ -364,8 +364,9 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     // Authority and live-session locks above apply equally to reads of an existing receipt.
     const grant = source.grant;
     // The operator's opt-out (finding 2147): on the OpenShell route every authorized draft create
-    // is allowed, and the grant's row keeps the latest one's receipt. The broker route keeps its
-    // one replayable receipt per grant.
+    // is allowed. The grant's row keeps the first create's receipt (the application role may not
+    // rewrite it, and a broker receipt sharing the grant stays intact); OpenShell's own log records
+    // each later request. The broker route keeps its one replayable receipt per grant.
     const unlimited = installed !== undefined && source.draftPullLimit === "none";
     let scope: PullRow["scope"] | undefined;
     if (q.operation === "create-draft-pull") {
@@ -446,20 +447,11 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     if (scope) {
       // The primary key admits only ONE create for this repository/ref/base grant,
       // across process or session replacement. Unknown/expired permits are never reissued.
-      // Opted out, the latest create replaces the grant's receipt instead.
+      // Opted out, a create after the first is allowed without a receipt of its own.
       const claim = await c.query(
         `INSERT INTO ${pulls}
          (grant_id,operation_id,receipt_id,admission_id,attempt_id,material_version,request_digest_sha256,scope,send_start_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (grant_id) ${
-           unlimited
-             ? `DO UPDATE SET operation_id=EXCLUDED.operation_id, receipt_id=EXCLUDED.receipt_id,
-               admission_id=EXCLUDED.admission_id, attempt_id=EXCLUDED.attempt_id,
-               material_version=EXCLUDED.material_version,
-               request_digest_sha256=EXCLUDED.request_digest_sha256, scope=EXCLUDED.scope,
-               admitted_at=clock_timestamp(), send_start_by=EXCLUDED.send_start_by,
-               settled_at=NULL, outcome='outcome_unknown', projection=NULL`
-             : "DO NOTHING"
-         } RETURNING receipt_id`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (grant_id) DO NOTHING RETURNING receipt_id`,
         [
           q.grantId,
           scope.operationId,
@@ -472,7 +464,7 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
           sendStartBy,
         ],
       );
-      if (!claim.rowCount) {
+      if (!claim.rowCount && !unlimited) {
         return fail();
       }
     } else {

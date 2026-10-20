@@ -185,8 +185,8 @@ creation idempotent. If a push or draft-create response is lost, inspect GitHub
 for the commit or draft before any new attempt. Do not retry another way.
 
 The draft limit belongs to the grant: the repository, review branch and base. Every
-version and every Agent bound to that grant shares it, and closing or merging the
-draft does not reset it. A second create from any of them is refused before GitHub,
+version of every Agent in the namespace bound to that repository shares it, and
+closing or merging the draft does not reset it. A second create from any of them is refused before GitHub,
 and the helper says the binding already opened its draft. OCE does not see GitHub's
 reply on this route, so it records no pull request number; find the draft at GitHub.
 For another draft, enroll a new review branch in the registry and bind it: a
@@ -195,8 +195,9 @@ redeploy or rebind with the same branch does not reset the limit.
 Known limit, with an opt-out: to trust the Agent instead, set
 `draftPullLimit: "none"` beside `pullRequestBase` in the registry's namespace
 policy. It changes the grant, so redeploy the Agent. Every draft create is then
-allowed, still draft-only from the review branch to the base, and the grant keeps
-only the latest create's receipt. The native broker route keeps one draft per grant.
+allowed, still draft-only from the review branch to the base. OCE keeps the first
+create's receipt; OpenShell's log records each later one. The native broker route
+keeps one draft per grant.
 
 During the accepted trial, use an authorized test repository to verify clone,
 pull of an independently known commit, push to the allowed branch, and draft
