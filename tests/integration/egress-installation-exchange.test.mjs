@@ -203,6 +203,64 @@ test("A resolves, authorizes and receives the protected actual reply on its acce
   assert.doesNotMatch(returned.response.body.toString(), /Bearer/);
 });
 
+// The supervisor reports stream progress on the same exchange; the lease carries the
+// permitted operation past the 20-second fixture deadline until the complete response.
+test("a permitted response stream renews its lease on progress across the operation deadline", async (t) => {
+  let elapsed = 0;
+  const f = await staticEgressFixture(t, { now: () => new Date(Date.now() + elapsed) });
+  const peer = f.metadata({ exp: Math.floor(Date.now() / 1000) + 3600 });
+  const captured = f.capture();
+  const { ready } = await f.resolve(captured, peer);
+  assert.ok(ready);
+  assert.ok((await f.authorize(f.permitRequest(captured, ready))).allowed);
+  const deadline = Number(captured.deadline.seconds) * 1000;
+  elapsed = 15_000;
+  const before = Date.now();
+  const first = await f.progress(captured, { head_received: true, body_bytes: "0" });
+  const after = Date.now();
+  const renewBy = Number(first.renew_by.seconds) * 1000 + Number(first.renew_by.nanos) / 1e6;
+  assert.ok(
+    before + elapsed + 300_000 <= renewBy && renewBy <= after + elapsed + 300_000,
+    "the lease renews on the idle horizon",
+  );
+  assert.ok(renewBy > deadline, "the lease outlives the operation deadline");
+  elapsed = 60_000;
+  assert.ok(Date.now() + elapsed > deadline);
+  const second = await f.progress(captured, { head_received: true, body_bytes: "2048" });
+  assert.ok(Number(second.renew_by.seconds) * 1000 > renewBy, "new bytes extend the lease");
+  assert.equal(second.expires_at.seconds, first.expires_at.seconds, "the ceiling is fixed");
+  elapsed = 120_000;
+  const returned = await f.protect(captured, await f.send(captured, ready));
+  assert.equal(returned.response_complete, true);
+  assert.equal(returned.body.toString(), JSON.stringify({ output: "fixture answer" }));
+  assert.equal(f.providerRequests.length, 1);
+});
+
+test("without progress the operation deadline still bounds the first response byte", async (t) => {
+  let elapsed = 0;
+  const f = await staticEgressFixture(t, { now: () => new Date(Date.now() + elapsed) });
+  const peer = f.metadata({ exp: Math.floor(Date.now() / 1000) + 3600 });
+  const late = f.capture();
+  const { ready } = await f.resolve(late, peer);
+  assert.ok((await f.authorize(f.permitRequest(late, ready))).allowed);
+  elapsed = 25_000;
+  assert.deepEqual(
+    await f.progress(late, { head_received: true, body_bytes: "1" }),
+    { refused: true },
+    "a first progress frame after the deadline is refused",
+  );
+  elapsed = 0;
+  const early = f.capture();
+  const resolved = (await f.resolve(early)).ready;
+  assert.ok(resolved);
+  assert.deepEqual(
+    await f.progress(early, { head_received: true, body_bytes: "1" }),
+    { refused: true },
+    "progress before the send permit is refused",
+  );
+  assert.equal(f.providerRequests.length, 0);
+});
+
 test("a real credentialed selection cannot be changed into a credential-free send", async (t) => {
   const f = await staticEgressFixture(t);
   const captured = f.capture();

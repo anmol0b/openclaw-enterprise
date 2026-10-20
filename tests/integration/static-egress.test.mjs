@@ -11,7 +11,13 @@ import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { EgressSendReceipts } from "../../packages/occ/src/egress-send-receipts.ts";
 import { InMemoryPlatformState } from "../../packages/occ/src/state/platform-state.ts";
 import { OpenShellEgressIdentity } from "../../apps/controller/src/drivers/egress-proxy/openshell-identity.ts";
-import { CredentialProxy, egressInjectionDigest } from "../../packages/occ/src/credential-proxy.ts";
+import {
+  CredentialProxy,
+  STREAM_LEASE_CEILING_MS,
+  STREAM_LEASE_IDLE_MS,
+  STREAM_LEASE_RECHECK_MS,
+  egressInjectionDigest,
+} from "../../packages/occ/src/credential-proxy.ts";
 import { deploymentErrorForWork } from "../../packages/occ/src/state/controller-work.ts";
 import {
   pluginRuntimeSpecForRevision,
@@ -1935,6 +1941,223 @@ for (const stage of ["check", "read"]) {
     assert.equal(f.arrivals, 0);
   });
 }
+
+// A permitted model stream outlives the 30-second operation deadline only through the
+// renewable lease: progress renews it, idling and the ceiling end it, and current
+// policy is checked again at every renewal. The test clock advances; nothing sleeps.
+async function leasedStreamFixture(t, overrides = () => ({}), peerLifetimeMs = 3_600_000) {
+  const receipts = new EgressSendReceipts(new InMemoryPlatformState());
+  const f = await syntheticDispatchFixture(t, receipts);
+  const peer = await f.ports.exchangeOwner.verify("synthetic-peer");
+  const longLived = { ...peer, expiresAt: new Date(f.ports.now() + peerLifetimeMs).toISOString() };
+  const proxy = new CredentialProxy({
+    ...f.ports,
+    exchangeOwner: { ...f.ports.exchangeOwner, verify: async () => longLived },
+    ...overrides(f),
+  });
+  const sandboxId = f.association.installation.sandboxId;
+  const signal = new AbortController().signal;
+  const ready = await proxy.resolve("synthetic-peer", sandboxId, f.request, signal);
+  assert.equal(ready.kind, "ready");
+  const decision = await proxy.authorizeSend(
+    "synthetic-peer",
+    sandboxId,
+    f.request.id,
+    ready.handle,
+    ready.evidence,
+    ready.injectionDigest,
+    f.request.deadlineAt,
+    signal,
+  );
+  assert.equal(decision.kind, "allow");
+  const safeBody = JSON.stringify({ output: "fixture answer" });
+  return {
+    f,
+    receipts,
+    createdAt: Date.parse(f.startedAt),
+    deadline: Date.parse(f.request.deadlineAt),
+    renew: (bodyBytes, headReceived = true) =>
+      proxy.renewResponse("synthetic-peer", sandboxId, f.request.id, { headReceived, bodyBytes }),
+    async complete() {
+      const handle = await proxy.beginResponse("synthetic-peer", sandboxId, f.request.id);
+      if (!handle) {
+        return undefined;
+      }
+      const response = await proxy.protectResponse(
+        handle,
+        {
+          status: 200,
+          headers: [["content-type", "application/json"]],
+          body: Buffer.from(safeBody),
+          trailers: [],
+        },
+        signal,
+        true,
+      );
+      return response && Buffer.from(response.body).toString();
+    },
+    safeBody,
+    async observation() {
+      const stored = await receipts.recover(f.sender, {
+        sender: f.sender,
+        instanceId: peer.instanceId,
+        useId: f.request.id,
+        attemptId: f.request.id,
+        material: ready.evidence,
+        deadlineAt: f.request.deadlineAt,
+      });
+      return stored?.observation;
+    },
+  };
+}
+
+test("a renewed model stream completes after the operation deadline", async (t) => {
+  const s = await leasedStreamFixture(t);
+  s.f.advance(20_000);
+  const first = await s.renew(0);
+  assert.deepEqual(first, {
+    renewBy: new Date(s.f.ports.now() + STREAM_LEASE_IDLE_MS).toISOString(),
+    expiresAt: new Date(s.createdAt + STREAM_LEASE_CEILING_MS).toISOString(),
+  });
+  s.f.advance(40_000);
+  assert.ok(s.f.ports.now() > s.deadline, "the stream is now past the original deadline");
+  const second = await s.renew(1024);
+  assert.equal(second.renewBy, new Date(s.f.ports.now() + STREAM_LEASE_IDLE_MS).toISOString());
+  s.f.advance(100_000);
+  assert.equal(await s.complete(), s.safeBody, "the complete stream is released after 160 s");
+  assert.deepEqual(await s.observation(), { kind: "response", dispatch: "confirmed", status: 200 });
+  assert.equal(await s.renew(2048), undefined, "a released operation has nothing to renew");
+});
+
+test("without progress the operation deadline still bounds the first response byte", async (t) => {
+  const s = await leasedStreamFixture(t);
+  s.f.advance(s.deadline - s.f.ports.now());
+  assert.equal(await s.renew(0), undefined, "no renewal starts at the deadline");
+  assert.equal(await s.complete(), undefined);
+  assert.equal(await s.observation(), null);
+  const headless = await leasedStreamFixture(t);
+  headless.f.advance(10_000);
+  assert.equal(await headless.renew(0, false), undefined, "progress needs the response head");
+  assert.equal(await headless.complete(), undefined, "a head-less frame discards the operation");
+});
+
+test("a model stream idle past the lease horizon expires", async (t) => {
+  const s = await leasedStreamFixture(t);
+  s.f.advance(10_000);
+  assert.ok(await s.renew(10));
+  s.f.advance(STREAM_LEASE_IDLE_MS + 1);
+  assert.equal(await s.renew(20), undefined);
+  assert.equal(await s.complete(), undefined);
+  assert.equal(await s.observation(), null, "expiry settles nothing; the attempt stays uncertain");
+});
+
+test("progress without new bytes keeps the lease but cannot extend it", async (t) => {
+  const s = await leasedStreamFixture(t);
+  s.f.advance(10_000);
+  const lease = await s.renew(100);
+  s.f.advance(200_000);
+  assert.deepEqual(await s.renew(100), lease, "the same byte count returns the unchanged lease");
+  assert.deepEqual(await s.renew(99), lease);
+  s.f.advance(STREAM_LEASE_IDLE_MS - 200_000 + 1);
+  assert.equal(await s.renew(200), undefined, "the unextended lease expired");
+  assert.equal(await s.complete(), undefined);
+});
+
+test("the stream ceiling holds against continued progress", async (t) => {
+  const s = await leasedStreamFixture(t);
+  const ceiling = s.createdAt + STREAM_LEASE_CEILING_MS;
+  let bytes = 0;
+  let lease;
+  s.f.advance(10_000);
+  while (s.f.ports.now() < ceiling) {
+    lease = await s.renew(++bytes);
+    assert.ok(lease, `progress at ${(s.f.ports.now() - s.createdAt) / 1000} s renews`);
+    assert.ok(Date.parse(lease.renewBy) <= ceiling);
+    assert.equal(Date.parse(lease.expiresAt), ceiling);
+    s.f.advance(Math.min(250_000, ceiling - s.f.ports.now()));
+  }
+  assert.equal(Date.parse(lease.renewBy), ceiling, "the last lease ends at the ceiling");
+  assert.equal(await s.renew(bytes + 1), undefined, "no progress extends past the ceiling");
+  assert.equal(await s.complete(), undefined);
+});
+
+test("the stream ceiling is also the peer's expiry", async (t) => {
+  const s = await leasedStreamFixture(t, () => ({}), 120_000);
+  s.f.advance(10_000);
+  const lease = await s.renew(1);
+  assert.equal(Date.parse(lease.renewBy), s.createdAt + 120_000);
+  assert.equal(Date.parse(lease.expiresAt), s.createdAt + 120_000);
+});
+
+test("progress sooner than the recheck interval keeps the lease unchanged", async (t) => {
+  let checks = 0;
+  const s = await leasedStreamFixture(t, (f) => ({
+    check: async (...args) => {
+      checks += args[2] ? 1 : 0;
+      return f.ports.check(...args);
+    },
+  }));
+  s.f.advance(10_000);
+  const lease = await s.renew(1);
+  assert.equal(checks, 1);
+  s.f.advance(STREAM_LEASE_RECHECK_MS - 1);
+  assert.deepEqual(await s.renew(2), lease, "no second policy check inside the interval");
+  assert.equal(checks, 1);
+  s.f.advance(1);
+  const extended = await s.renew(3);
+  assert.equal(checks, 2);
+  assert.ok(Date.parse(extended.renewBy) > Date.parse(lease.renewBy));
+});
+
+test("an unavailable authority leaves the lease unchanged instead of cutting the stream", async (t) => {
+  let outage = false;
+  const s = await leasedStreamFixture(t, (f) => ({
+    check: async (...args) => {
+      if (outage && args[2]) {
+        throw new Error("synthetic policy outage");
+      }
+      return f.ports.check(...args);
+    },
+  }));
+  s.f.advance(10_000);
+  const lease = await s.renew(1);
+  outage = true;
+  s.f.advance(STREAM_LEASE_RECHECK_MS);
+  assert.deepEqual(await s.renew(2), lease, "the bound stands; it is not extended");
+  assert.equal(await s.observation(), null);
+  outage = false;
+  s.f.advance(STREAM_LEASE_RECHECK_MS);
+  assert.ok(Date.parse((await s.renew(3)).renewBy) > Date.parse(lease.renewBy));
+  assert.equal(await s.complete(), s.safeBody);
+});
+
+test("a withdrawal cuts a model stream at its next renewal", async (t) => {
+  let withdrawn = false;
+  const s = await leasedStreamFixture(t, (f) => ({
+    check: async (use, evidence, stream) =>
+      withdrawn && stream
+        ? { kind: "denied", code: "withdrawn" }
+        : f.ports.check(use, evidence, stream),
+  }));
+  s.f.advance(10_000);
+  assert.ok(await s.renew(0));
+  withdrawn = true;
+  s.f.advance(20_000);
+  assert.equal(await s.renew(100), undefined);
+  assert.equal(await s.complete(), undefined, "the withdrawn stream releases no bytes");
+  assert.deepEqual(await s.observation(), {
+    kind: "response_blocked",
+    dispatch: "confirmed",
+    code: "response_policy",
+  });
+});
+
+test("stream progress beyond the response bound is refused", async (t) => {
+  const s = await leasedStreamFixture(t);
+  s.f.advance(10_000);
+  assert.equal(await s.renew(4 * 1024 * 1024 + 1), undefined);
+  assert.equal(await s.complete(), undefined);
+});
 
 test("authenticated sender receipts survive authority restart without replay permission and distinguish observations", async (t) => {
   const f = await staticEgressFixture(t);

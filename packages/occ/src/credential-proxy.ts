@@ -58,10 +58,15 @@ export interface EgressAuthorityPorts {
   readonly now: () => number;
   installation(peer: EgressPeer): Promise<EgressInstallation | undefined>;
   provider(route: EgressRoute): CredentialProviderDefinition | undefined;
-  /** Each call must open a new policy unit, independent of the capture and Secret read. */
+  /**
+   * Each call must open a new policy unit, independent of the capture and Secret read.
+   * With `stream`, the check runs during a leased response: it is bounded by the lease,
+   * not the original deadline, and material evidence is not re-evaluated.
+   */
   check(
     use: CapturedEgressUse,
     material?: EgressSelectionEvidence,
+    stream?: { readonly until: string },
   ): Promise<ProtectedEgressSource | EgressRefusal>;
   read(
     source: StaticEgressSource,
@@ -92,6 +97,30 @@ export type EgressSendDecision =
       readonly noMaterialRequired: boolean;
     };
 
+/** Supervisor-reported progress on the accepted response stream; it carries no bytes. */
+export interface EgressStreamProgress {
+  readonly headReceived: boolean;
+  readonly bodyBytes: number;
+}
+
+/** The permitted operation stays claimable until renewBy, and never past expiresAt. */
+export interface EgressStreamLease {
+  readonly renewBy: string;
+  readonly expiresAt: string;
+}
+
+/**
+ * A permitted response stream is renewed on progress only. The operation deadline still
+ * bounds the first response byte; the idle horizon matches the client's own stream idle
+ * timeout so the authority never gives up a turn the client is still waiting for.
+ */
+export const STREAM_LEASE_IDLE_MS = 300_000;
+/** Hard ceiling from UUIDv7 creation; no progress extends a stream past it. */
+export const STREAM_LEASE_CEILING_MS = 15 * 60_000;
+/** Progress sooner than this after the last policy check keeps the lease unchanged. */
+export const STREAM_LEASE_RECHECK_MS = 15_000;
+const maximumStreamBodyBytes = 4 * 1024 * 1024;
+
 // One global slot is shared by the live handle and every still-running phase.
 interface OperationCharge {
   holds: number;
@@ -107,7 +136,10 @@ interface OperationRecord {
   readonly digest: string;
   readonly association: AcceptedEgressAssociation;
   value: string | undefined;
-  phase: "resolved" | "checking" | "permitted" | "protecting" | "observing";
+  phase: "resolved" | "checking" | "permitted" | "renewing" | "protecting" | "observing";
+  /** Liveness bound: the request deadline until the first stream renewal. */
+  expiresAt: number;
+  stream?: { readonly bodyBytes: number; readonly ceiling: number; readonly checkedAt: number };
   timer?: ReturnType<typeof setTimeout>;
   release?: () => void;
 }
@@ -180,7 +212,7 @@ export class CredentialProxy {
   private prune(): void {
     const now = this.ports.now();
     for (const [handle, record] of this.records) {
-      if (Date.parse(record.use.request.deadlineAt) <= now) {
+      if (record.expiresAt <= now) {
         this.discard(handle, record);
       }
     }
@@ -366,18 +398,14 @@ export class CredentialProxy {
         }),
         value: material.value,
         phase: "resolved",
+        expiresAt: deadline,
       };
       charge.holds += 1;
       this.records.set(handle, record);
       const closed = () => this.discard(handle, record);
       signal.addEventListener("abort", closed, { once: true });
       record.release = () => signal.removeEventListener("abort", closed);
-      record.timer = setTimeout(
-        () => {
-          this.discard(handle, record);
-        },
-        Math.max(1, deadline - this.ports.now()),
-      ).unref();
+      this.expireAt(handle, record, deadline);
       return evidence.kind === "no_material_required"
         ? { kind: "ready_without_material", handle }
         : { kind: "ready", handle, evidence, headers, injectionDigest: digest };
@@ -505,6 +533,16 @@ export class CredentialProxy {
     });
 
     return { value: material.value, evidence };
+  }
+
+  private expireAt(handle: string, record: OperationRecord, at: number): void {
+    clearTimeout(record.timer);
+    record.timer = setTimeout(
+      () => {
+        this.discard(handle, record);
+      },
+      Math.max(1, at - this.ports.now()),
+    ).unref();
   }
 
   private owns(association: AcceptedEgressAssociation, use: CapturedEgressUse): boolean {
@@ -694,12 +732,12 @@ export class CredentialProxy {
     };
   }
 
-  /** Claim exactly one authenticated response stream before its preflight decision. */
-  async beginResponse(
+  /** The one permitted operation this authenticated stream may still claim, if any. */
+  private async permitted(
     authorization: string,
     sandboxId: string,
     requestId: string,
-  ): Promise<string | undefined> {
+  ): Promise<{ peer: EgressPeer; handle: string; record: OperationRecord } | undefined> {
     this.prune();
     const peer = await this.ports.exchangeOwner.verify(authorization);
     if (!peer || peer.sandboxId !== sandboxId || Date.parse(peer.expiresAt) <= this.ports.now()) {
@@ -708,19 +746,130 @@ export class CredentialProxy {
     const entry = [...this.records].find(
       ([, record]) =>
         record.phase === "permitted" &&
-        this.owns(record.association, record.use) &&
         record.use.request.id === requestId &&
         record.use.peer.sandboxId === sandboxId &&
         record.use.peer.instanceId === peer.instanceId &&
         record.use.peer.exchangeId === peer.exchangeId &&
-        isDeepStrictEqual(record.use.peer.sender, peer.sender),
+        isDeepStrictEqual(record.use.peer.sender, peer.sender) &&
+        this.owns(record.association, record.use),
     );
-    if (!entry) {
+    return entry ? { peer, handle: entry[0], record: entry[1] } : undefined;
+  }
+
+  /** Claim exactly one authenticated response stream before its preflight decision. */
+  async beginResponse(
+    authorization: string,
+    sandboxId: string,
+    requestId: string,
+  ): Promise<string | undefined> {
+    const claimed = await this.permitted(authorization, sandboxId, requestId);
+    if (!claimed) {
       return undefined;
     }
-    const [handle, record] = entry;
-    record.phase = "protecting";
-    return handle;
+    claimed.record.phase = "protecting";
+    return claimed.handle;
+  }
+
+  /**
+   * Renew the permitted operation while the origin's response streams. Only progress
+   * renews: the first frame needs the response head (within the operation deadline) and
+   * each later frame more body bytes. Current policy is checked again on a renewal (at
+   * most every STREAM_LEASE_RECHECK_MS), so a withdrawal cuts the stream within that
+   * window; an unavailable authority keeps the current bound without extending it. A lost
+   * owner (custody or peer expiry) cuts without an observation: there is no stream left
+   * to observe for. Nothing here releases bytes.
+   */
+  async renewResponse(
+    authorization: string,
+    sandboxId: string,
+    requestId: string,
+    progress: EgressStreamProgress,
+  ): Promise<EgressStreamLease | undefined> {
+    const claimed = await this.permitted(authorization, sandboxId, requestId);
+    if (!claimed) {
+      return undefined;
+    }
+    const { peer, handle, record } = claimed;
+    const createdAt = operationCreatedAt(record.use.request.id);
+    if (
+      record.use.operation.kind !== "inference" ||
+      createdAt === undefined ||
+      !progress.headReceived ||
+      !Number.isSafeInteger(progress.bodyBytes) ||
+      progress.bodyBytes < 0 ||
+      progress.bodyBytes > maximumStreamBodyBytes
+    ) {
+      this.discard(handle, record);
+      return undefined;
+    }
+    const lease = (): EgressStreamLease => ({
+      renewBy: new Date(record.expiresAt).toISOString(),
+      expiresAt: new Date(record.stream?.ceiling ?? record.expiresAt).toISOString(),
+    });
+    // A frame without new bytes, or sooner than the recheck interval, keeps the
+    // current bound; it cannot extend it.
+    if (
+      record.stream &&
+      (progress.bodyBytes <= record.stream.bodyBytes ||
+        this.ports.now() - record.stream.checkedAt < STREAM_LEASE_RECHECK_MS)
+    ) {
+      return lease();
+    }
+    record.phase = "renewing";
+    // Capacity stays charged until the policy check and any observation settle.
+    record.charge.holds += 1;
+    try {
+      let decision: ProtectedEgressSource | EgressRefusal;
+      try {
+        decision = await this.ports.check(record.use, undefined, {
+          until: new Date(record.expiresAt).toISOString(),
+        });
+      } catch {
+        decision = { kind: "unavailable", code: "authority" };
+      }
+      const now = this.ports.now();
+      if (
+        this.records.get(handle) !== record ||
+        record.phase !== "renewing" ||
+        record.expiresAt <= now ||
+        !this.owns(record.association, record.use)
+      ) {
+        this.discard(handle, record);
+        return undefined;
+      }
+      record.phase = "permitted";
+      if (
+        "key" in decision ? !isDeepStrictEqual(decision, record.source) : decision.kind === "denied"
+      ) {
+        // The origin already answered: record the cut like any other blocked response.
+        this.discard(handle, record);
+        try {
+          await this.ports.receipts.observe(record.use.peer.sender, record.attempt, {
+            kind: "response_blocked",
+            dispatch: "confirmed",
+            code: "response_policy",
+          });
+        } catch {
+          // The stream is already cut; a lost observation cannot release bytes.
+        }
+        return undefined;
+      }
+      if (!("key" in decision)) {
+        return lease();
+      }
+      const ceiling = Math.min(createdAt + STREAM_LEASE_CEILING_MS, Date.parse(peer.expiresAt));
+      const renewBy = Math.min(now + STREAM_LEASE_IDLE_MS, ceiling);
+      if (renewBy <= now) {
+        this.discard(handle, record);
+        return undefined;
+      }
+      record.expiresAt = renewBy;
+      record.stream = { bodyBytes: progress.bodyBytes, ceiling, checkedAt: now };
+      this.expireAt(handle, record, renewBy);
+      return lease();
+    } finally {
+      this.releaseCharge(record.charge);
+    }
   }
 
   /** Store only observation metadata. Returning policy bytes is not supplier application proof. */
@@ -743,7 +892,7 @@ export class CredentialProxy {
         record.evidence.kind !== "no_material_required" &&
         record.provider.credentialRejected(response);
       const safe =
-        inspect && !signal.aborted && Date.parse(record.use.request.deadlineAt) > this.ports.now()
+        inspect && !signal.aborted && record.expiresAt > this.ports.now()
           ? record.provider.protectResponse(
               response,
               record.value,
@@ -768,7 +917,7 @@ export class CredentialProxy {
       // Persistence may outlive the original deadline or cancellation. Never release late bytes.
       return this.records.get(handle) === record &&
         !signal.aborted &&
-        Date.parse(record.use.request.deadlineAt) > this.ports.now() &&
+        record.expiresAt > this.ports.now() &&
         this.owns(record.association, record.use)
         ? safe
         : undefined;

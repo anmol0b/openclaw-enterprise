@@ -262,8 +262,13 @@ to repeat the business request.
 
 The registry binds the complete response to the accepted peer, request and
 exchange, then removes headers outside its allowlist. Nothing is streamed to the
-caller before the decision. The original deadline, 4 MiB and 16,384-event limits
-bound this check; an unsupported response is refused, not approximated.
+caller before the decision. The original deadline bounds the first response byte;
+`renewResponse` then keeps the permitted operation alive on supervisor progress
+(five-minute idle horizon, fifteen-minute ceiling from creation, current policy
+rechecked on renewal at most every 15 seconds, so withdrawal cuts the stream
+within that window; an unavailable authority leaves the bound unchanged). The lease,
+4 MiB and 16,384-event limits bound this check; an unsupported response is
+refused, not approximated.
 
 For Responses, inspect the text clients actually assemble: SDK output-part
 snapshots; assistant text joined across parts, items or deltas; and Codex's

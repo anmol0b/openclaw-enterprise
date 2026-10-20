@@ -883,6 +883,21 @@ export async function staticEgressFixture(
       clearTimeout(timer);
     }
   }
+  // The supervisor's stream-progress frame; the reply is a lease or a refused stream.
+  async function progress(captured, frame) {
+    const exchange = exchangeByRequest.get(captured);
+    exchange.stream.write({ progress: frame });
+    try {
+      const { lease } = await exchange.next();
+      assert.ok(lease, "a progress frame is answered with a lease or a refusal");
+      return lease;
+    } catch (error) {
+      if (error.code !== grpc.status.PERMISSION_DENIED) {
+        throw error;
+      }
+      return { refused: true };
+    }
+  }
   async function protect(captured, response) {
     const exchange = exchangeByRequest.get(captured);
     exchange.stream.write({ response });
@@ -932,6 +947,7 @@ export async function staticEgressFixture(
     capture,
     permitRequest,
     send,
+    progress,
     protect,
     async restartAuthority() {
       authority.forceShutdown();

@@ -150,9 +150,9 @@ counterparts, withholds response bytes until protection completes, and prevents
 workload bypass. Use the [OpenShell qualification contract](../reference/drivers/openshell-sandbox.md#qualification-contract)
 and [real runtime procedures](kubernetes.md). The bundled legacy release is not
 qualified by these tests. Indefinite streaming, WebSockets and dynamic credentials
-remain unsupported.
-Finite SSE must finish within the original 30 seconds and 4 MiB before any bytes
-are released. Fresh revisions with matching gateway/supervisor candidates are the
+remain unsupported. Finite SSE is released only complete and under 4 MiB; the
+30-second deadline bounds its first byte, then supervisor progress renews a lease
+(idle five minutes, ceiling fifteen). Fresh revisions with matching candidates are the
 intended installed scope; mixed-version hot upgrades are unsupported and
 no-bypass networking requires separate runtime proof. There is no successful installed native model-turn
 evidence in this consumer suite.

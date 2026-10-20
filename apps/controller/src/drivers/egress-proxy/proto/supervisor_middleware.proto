@@ -709,6 +709,8 @@ message RequestContext {
   // 48 bits encode creation milliseconds; deadline <= creation + 30000 ms.
   // Verifiers allow at most 1000 ms future clock skew and retain replay state
   // through that fixed horizon, even when a caller submits an earlier deadline.
+  // The deadline bounds access, send start and the first response byte; a
+  // permitted response stream then lives under the installation exchange lease.
   string request_id = 1;
   // Sandbox id that originated the request.
   string sandbox_id = 2;
@@ -872,11 +874,34 @@ message InstallationExchangeResponse {
   // Required true, including when there were no trailers. Legacy absence fails closed.
   bool response_complete = 5;
 }
+// Progress on the permitted send's response stream. It carries no bytes: the
+// complete response still follows as one InstallationExchangeResponse. Send it
+// when the origin's response head arrives (before the operation deadline) and
+// then whenever more body bytes have arrived, at most once per second. The
+// exchange is not pipelined: wait for the lease reply before the next event,
+// including the final response. Only new bytes renew, and policy is rechecked
+// at most every 15 seconds; other frames are answered with the unchanged lease.
+message InstallationExchangeProgress {
+  // True once the origin's status line and headers were received.
+  bool head_received = 1;
+  // Body bytes received so far, monotonic; at most the 4 MiB response bound.
+  uint64 body_bytes = 2;
+}
+// The authority discards the permitted operation at renew_by unless more
+// progress arrives first, and at expires_at regardless: fifteen minutes after
+// the request's creation, or the exchange credential's expiry if sooner. A
+// refused renewal ends the exchange; the supervisor then drops the response
+// without releasing bytes.
+message InstallationExchangeLease {
+  google.protobuf.Timestamp renew_by = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
 message InstallationExchangeRequest {
   oneof event {
     InstallationExchangeOpen open = 1;
     HttpCredentialAuthorizeSendRequest authorize = 2;
     InstallationExchangeResponse response = 3;
+    InstallationExchangeProgress progress = 4;
   }
 }
 message InstallationExchangeReply {
@@ -885,5 +910,6 @@ message InstallationExchangeReply {
     HttpCredentialResolveResponse resolved = 2;
     HttpCredentialAuthorizeSendResponse authorized = 3;
     InstallationExchangeResponse response = 4;
+    InstallationExchangeLease lease = 5;
   }
 }

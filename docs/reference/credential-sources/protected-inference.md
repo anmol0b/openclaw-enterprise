@@ -67,7 +67,14 @@ requires an unbound source and an explicitly admitted new binding. Leave an exis
 approved copy available until its owner can make that transition safely.
 
 The supervisor withholds the complete bounded response, including the last trailer,
-until Credential Proxy permits its release. Policy can remove or block provider bytes even
+until Credential Proxy permits its release. The 30-second operation deadline bounds
+the first response byte. While a model response streams, the supervisor reports
+progress on the exchange; each report with new bytes renews the lease for five
+minutes, up to fifteen minutes after the request was created (or the exchange
+credential's expiry, if sooner). Policy is checked again on renewal, at most every
+15 seconds, so a withdrawal cuts the stream within that window. A stream that
+idles past its lease or reaches the ceiling is discarded; nothing is released.
+Policy can remove or block provider bytes even
 after the origin acted. A positive credential rejection fences only that material
 version. An observed response or a decision to release bytes does not prove delivery
 to the Agent and cannot authorize a replay.

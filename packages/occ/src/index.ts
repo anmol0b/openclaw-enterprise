@@ -29,13 +29,20 @@ import {
 } from "./credential-proxy.ts";
 
 export type { AcceptedEgressAssociation, AuthorizedSend } from "./egress-send-receipts.ts";
-export { CredentialProxy } from "./credential-proxy.ts";
+export {
+  CredentialProxy,
+  STREAM_LEASE_CEILING_MS,
+  STREAM_LEASE_IDLE_MS,
+  STREAM_LEASE_RECHECK_MS,
+} from "./credential-proxy.ts";
 export type {
   CapturedEgressUse,
   EgressExchangeOwner,
   EgressPeer,
   EgressResolution,
   EgressSendDecision,
+  EgressStreamLease,
+  EgressStreamProgress,
 } from "./credential-proxy.ts";
 import type { CredentialProxyDriver } from "@openclaw-enterprise/contracts";
 import type {
@@ -4827,7 +4834,7 @@ export class OpenClawController {
             )
           : undefined;
       },
-      check: (use, material) => this.checkEgressUse(use, material),
+      check: (use, material, stream) => this.checkEgressUse(use, material, stream),
       read: async (source, lifetime) => {
         const secret = await this.state.read((state) =>
           state.secrets.findSecret(source.secret.namespaceId, source.secret.id),
@@ -4930,6 +4937,7 @@ export class OpenClawController {
   private async checkEgressUse(
     use: CapturedEgressUse,
     material?: EgressSelectionEvidence,
+    stream?: { readonly until: string },
   ): Promise<ProtectedEgressSource | EgressRefusal> {
     // Never borrow an enclosing controller/IAM snapshot. The two RPCs each establish a new
     // platform unit and the native IAM Driver loads policy within that exact fresh unit.
@@ -4959,7 +4967,11 @@ export class OpenClawController {
           outcome: "denied",
           details: {
             code,
-            phase: material === undefined ? "before_access" : "before_send",
+            phase: stream
+              ? "during_response"
+              : material === undefined
+                ? "before_access"
+                : "before_send",
             requestId: use.id,
             revisionId: execution.revisionId,
           },
@@ -5034,7 +5046,9 @@ export class OpenClawController {
       ) {
         return deny("stale_configuration");
       }
-      const remaining = Date.parse(use.request.deadlineAt) - this.clock().getTime();
+      // A leased response stream is bounded by its lease, not the operation deadline.
+      const remaining =
+        Date.parse(stream?.until ?? use.request.deadlineAt) - this.clock().getTime();
       if (remaining <= 0) {
         return { kind: "deadline_exceeded" };
       }

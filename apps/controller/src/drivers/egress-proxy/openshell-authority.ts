@@ -13,7 +13,7 @@ import {
   type ServerDuplexStream,
 } from "@grpc/grpc-js";
 import type { EgressMaterialEvidence, EgressRefusal } from "@openclaw-enterprise/contracts";
-import type { OpenClawController } from "@openclaw-enterprise/occ";
+import { STREAM_LEASE_IDLE_MS, type OpenClawController } from "@openclaw-enterprise/occ";
 import { asRecord } from "@openclaw-enterprise/utils";
 import { OpenShellEgressIdentity } from "./openshell-identity.ts";
 import {
@@ -354,7 +354,13 @@ export function createOpenShellEgressAuthority(
       let context: Wire = {};
       let phase: "open" | "authorize" | "response" | "done" = "open";
       let busy = false;
-      const timer = setTimeout(() => fail(), 30_000).unref();
+      // One bound for the whole exchange until the response streams; each renewed
+      // lease re-arms it to the idle horizon (the authority refuses the rest).
+      let timer = setTimeout(() => fail(), 30_000).unref();
+      const rearm = (ms: number) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fail(), ms).unref();
+      };
       const close = () => {
         clearTimeout(timer);
         releaseOpening();
@@ -382,6 +388,7 @@ export function createOpenShellEgressAuthority(
           return;
         }
         let request: Wire;
+        let progress: Wire | undefined;
         if (phase === "open" && event.open !== undefined) {
           const opening = record(event.open);
           const encoded = bytes(opening.resolve_request);
@@ -413,6 +420,9 @@ export function createOpenShellEgressAuthority(
           request = record(event.authorize);
         } else if (phase === "response" && event.response !== undefined) {
           request = record(event.response);
+        } else if (phase === "response" && event.progress !== undefined) {
+          request = record(event.progress);
+          progress = request;
         } else {
           fail();
           return;
@@ -440,6 +450,33 @@ export function createOpenShellEgressAuthority(
             }
             phase = result.allowed ? "response" : "done";
             call.write({ authorized: result });
+          } else if (progress !== undefined) {
+            const lease = await forwarder.renewResponse(
+              capability!,
+              string(context.sandbox_id),
+              string(context.request_id),
+              {
+                headReceived: progress.head_received === true,
+                // uint64 arrives as a decimal string (longs: String); unsafe values are refused.
+                bodyBytes: progress.body_bytes === undefined ? 0 : Number(progress.body_bytes),
+              },
+            );
+            if (!lease || signal.signal.aborted) {
+              fail();
+              return;
+            }
+            rearm(
+              Math.min(
+                STREAM_LEASE_IDLE_MS,
+                Math.max(1000, Date.parse(lease.renewBy) - Date.now()),
+              ),
+            );
+            call.write({
+              lease: {
+                renew_by: wireTimestamp(lease.renewBy),
+                expires_at: wireTimestamp(lease.expiresAt),
+              },
+            });
           } else {
             const handle = await forwarder.beginResponse(
               capability!,
