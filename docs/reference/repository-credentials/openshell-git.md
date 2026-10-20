@@ -124,12 +124,11 @@ OCE advertises the request-phase binding; policy admission calls `ValidateConfig
 The registration name must match `drivers.repo.openShell.registrationName`.
 OCE attaches the selected binding to the sandbox policy with `on_error: fail_closed`
 for `github.com` and `api.github.com`. Do not hand-author its binding identifier.
-Those hosts, and every other name under `github.com` (GitHub's other front ends,
-such as `ssh.github.com`, `codeload.github.com` and `uploads.github.com`), come only
-from this route: if another Sandbox Driver network policy (`policy.networkPolicies`,
-such as a `source-control` policy) also allows one, the Installation refuses to
-start and names that policy. This includes `gist.github.com`, `docs.github.com` and
-GitHub Packages registries (`*.pkg.github.com`); `ghcr.io` and
+Those hosts, and every other name under `github.com` (such as `ssh.github.com`,
+`codeload.github.com`, `gist.github.com`, `docs.github.com` and `*.pkg.github.com`),
+come only from this route: if another Sandbox Driver network policy
+(`policy.networkPolicies`, such as a `source-control` policy) also allows one, the
+Installation refuses to start and names that policy. `ghcr.io` and
 `githubusercontent.com` hosts are not covered. The Driver still needs at
 least one policy, such as the model endpoint's. An Agent network grant for those
 hosts on any port is refused the same way: saving it for an Agent with a repository
@@ -137,8 +136,7 @@ binding, adding the binding beside it, deploy and live application each fail wit
 `409` that names the grant. IP-address hosts (IPv4, IPv6 or a range, private and
 loopback included) may lead to GitHub, so both checks refuse them too; use DNS names,
 such as a Service name. The checks compare names only: a DNS name that resolves to
-a GitHub address, such as a wildcard-IP service name or your own record, is not
-detected, so do not add one.
+GitHub (a wildcard-IP name or your own record) is not detected; do not add one.
 Retain HTTPS, hostname verification and authenticated Gateway JWTs; do not enable
 `allow_insecure_transport`. This policy attachment still has the stock enforcement
 and origin-TLS limits stated above.
@@ -152,10 +150,8 @@ The App installation needs the corresponding repository contents and pull reques
 permissions. GitHub permissions themselves are broader than the middleware's
 branch and draft checks; keep independent GitHub branch protection.
 
-The Agent may force-push and delete its own review branch: both are admitted for
-that one ref. Deleting the branch closes its draft pull request. OCE does not block
-either; to stop them, protect the review branch on GitHub (branch protection or a
-ruleset).
+The Agent may force-push or delete its own review branch; OCE admits both.
+Deleting it closes its draft. To stop either, protect the branch on GitHub.
 
 [Codex OAuth](../../testing/openshell-oauth.md) does not grant Git access. OpenShell Git
 binds a live revision to its installed credential and authorizes each request; other
@@ -184,20 +180,18 @@ records a local attempt ID before sending. A local ID does not make GitHub
 creation idempotent. If a push or draft-create response is lost, inspect GitHub
 for the commit or draft before any new attempt. Do not retry another way.
 
-The draft limit belongs to the grant: the repository, review branch and base. Every
-version of every Agent in the namespace bound to that grant shares it, and closing
-or merging the draft does not reset it. A second create from any of them is
-refused before GitHub, and the helper says the binding already opened its draft. OCE does not see GitHub's
-reply on this route, so it records no pull request number; find the draft at GitHub.
-For another draft, enroll a new review branch in the registry and bind it: a
-redeploy or rebind with the same branch does not reset the limit.
+The draft limit belongs to the grant (repository, review branch and base): every
+Agent version bound to it shares one draft, and closing or merging the draft does
+not reset it. A second create is refused before GitHub, and the helper says the
+binding already opened its draft. OCE never sees GitHub's reply here, so it records
+no pull request number. For another draft, enroll and bind a new review branch; a
+redeploy or rebind does not reset it.
 
-Known limit, with an opt-out: to trust the Agent instead, set
-`draftPullLimit: "none"` beside `pullRequestBase` in the registry's namespace
-policy. It changes the grant, so redeploy the Agent. Every draft create is then
-allowed, still draft-only from the review branch to the base. OCE keeps a receipt
-for the first create only; the Agent supervisor's OpenShell HTTP log records each
-request, including later creates. The native broker route keeps one draft per grant.
+Known limit, with an opt-out: to trust the Agent, set `draftPullLimit: "none"`
+beside `pullRequestBase` in the registry's namespace policy and redeploy (it changes
+the grant). Creates are then unlimited but still draft-only, review branch to base.
+OCE keeps the first create's receipt; the supervisor's OpenShell HTTP log records
+later ones. The broker route keeps one per grant.
 
 During the accepted trial, use an authorized test repository to verify clone,
 pull of an independently known commit, push to the allowed branch, and draft
