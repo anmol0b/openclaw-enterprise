@@ -153,11 +153,18 @@ The worker emits fixed operational event classes through the same logger:
   stop work carry no deployment timing.
 - `worker.error`: reports `CLAIM_LOST` or `WORKER_UNAVAILABLE` without exposing
   credentials. A deployment pass that cannot read its stored refusal adds the work
-  identity and `cause`, then leaves its claim to lease recovery. The repository
+  identity and `cause`, then leaves its claim to lease recovery. A claim lost around
+  an external effect adds the work identity and `cause`: `CLAIM_RENEWAL_REFUSED`,
+  `CLAIM_RENEWAL_LATE`, `CLAIM_RENEWAL_FAILED`, or `CLAIM_LEASE_LAPSED` (no renewal
+  was confirmed within the lease). The repository
   credential codes `OPENSHELL_GIT_RECONCILIATION_REQUIRED` and
   `PREPARED_GITHUB_RECOVERY_REQUIRED` add a `reason` class and the affected
   Namespace, revision and `repositoryRef` (see
   [Git through OpenShell](repository-credentials/openshell-git.md#route-state-restarts-and-recovery)).
+- `worker.claim-renewal-warning`: a lease renewal that succeeded but answered after
+  the lease could have run out, at warn level with the work identity, code
+  `CLAIM_RENEWAL_LATE` and the renewal's `durationMs`. The worker stops that work,
+  because another worker may already own it.
 - `worker.pass-interrupted`: a graceful shutdown aborted the pass in flight, at
   info level with `cause` `WorkerStopping`; another worker resumes the work once
   its lease expires, unless that was its last attempt (`LEASE_EXPIRED`).

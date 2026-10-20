@@ -1731,6 +1731,7 @@ export const scenarios = {
       "Review the Driver-specific policy fields supplied by the capability descriptor.",
       "Expand Create event, change a tool setting, then click Done and inspect Plugin selections JSON.",
       "Reopen Configure plugins, click inside its padding, then click the gray backdrop. Only the backdrop closes it; selections remain and focus returns to Configure plugins.",
+      "In a frame 1100 px wide or narrower (Components / Dialogs / Plugins (tablet) is 1024 px), the catalog and detail stack: choose Calendar to see only its detail, then Back to plugins to return to the catalog. Wider, both panes show side by side.",
     ],
     gap: pluginPreviewGap,
   },
@@ -2986,7 +2987,8 @@ export const scenarios = {
       "The session already knows this member does not administer the Installation, so after the Agent saves the form sends no IAM read for its credential grant. It names the administrator step at once and offers Open saved Agent, with no Retry credential access.",
     steps: [
       "Read the alert: giving the Agent access to its Secrets needs Installation administration access.",
-      "The request log shows no /iam/ request, and only Cancel and Start over remain beside the saved-resources line.",
+      "The saved-resources line identifies the Configuration and Agent, offers Open saved Agent, and does not promise a retry.",
+      "The request log shows no /iam/ request. Only Cancel and Start over remain beside the saved-resources line.",
     ],
   },
   createRestricted: {
@@ -3453,12 +3455,15 @@ export const scenarios = {
     deployed: true,
     revisionHistory: 8,
     revisionPageSize: 3,
+    // Each older page takes 1.5 s, so its loading state can be seen.
+    rules: [{ suffix: "/revisions", queryParam: "cursor", delayMs: 1500 }],
     description:
       "Versions list one page at a time, newest first. Older versions load on request, and nothing is pruned.",
     steps: [
-      "Check that v8, v7, and v6 are listed with Show older versions below them.",
-      "Select Show older versions until v1 is listed and the button is gone.",
-      "With the keyboard, Tab into the list: focus lands on v8. Down and Up move between versions and wrap at either end; Home and End jump to v8 and v1. Tab leaves the list in one press, and Shift+Tab returns to v8, not the version the arrows last reached.",
+      "Check that v8, v7, and v6 are listed with Show older versions below the list.",
+      "With the keyboard, Tab into the list (focus lands on v8), then Tab once more to Show older versions and press Enter. For about 1.5 s it reads Loading older versions…, looks disabled and keeps focus; pressing Enter again loads nothing more. When v5, v4, and v3 appear, focus is still on Show older versions.",
+      "Press Enter again. When v2 and v1 load, the button is gone and focus moves to v2, the first version that loaded, scrolled into view in the list.",
+      "Tab out of the list and Shift+Tab back: focus lands on v8. Down and Up move between versions and wrap at either end; Home and End jump to v8 and v1. Tab leaves the list in one press, and Shift+Tab returns to v8, not the version the arrows last reached.",
       "Press Down twice, to v6, then Enter. v6 opens, and the next Tab into the list lands on v6, the viewed version.",
     ],
     gap: "The fixture uses three versions per page; the API default is 50.",
@@ -3524,7 +3529,7 @@ export const scenarios = {
   agentSharingHoldsNavigation: {
     group: "Pages/Agent detail",
     name: "Sharing holds navigation",
-    path: `${draft}&tab=access`,
+    path: `${draft}&tab=configuration`,
     deployed: true,
     rules: [
       {
@@ -3534,13 +3539,18 @@ export const scenarios = {
         once: true,
       },
     ],
-    actions: [...shareExistingPerson, { selector: 'a[data-nav="agents"]', click: true }],
+    actions: [
+      { selector: 'button[aria-label^="View version v1"]', click: true },
+      click("Access"),
+      ...shareExistingPerson,
+      { selector: 'a[data-nav="agents"]', click: true },
+    ],
     description:
-      "The story shares the Agent, then selects Agents in the sidebar while the first grant is pending. The page stays, and a note at the top of the tab panel says why until both grants are written, about 4 s later.",
+      "The story opens a version from the draft, shares the Agent, then selects Agents in the sidebar while the first grant is pending. The page stays, and a note at the top of the tab panel says why until both grants are written, about 4 s later.",
     steps: [
       "While the note “This page stays open until sharing finishes.” shows, check that the versions in the Versions rail are disabled, and that ← Agents and Refresh keep the page. Select Reset story to replay the hold.",
-      "Switch to Plugins and back to Access while the note shows: tabs still switch, and the share keeps running.",
-      "When the grants are written, the note goes, Direct Agent grants lists the new binding, and the versions and Agents in the sidebar work again.",
+      "Open the preview in its own tab to try browser Back. While sharing, Back opens Configuration. Back again keeps that version open and explains why.",
+      "When the grants are written, the note goes, Direct Agent grants lists the new binding, and navigation is available again. If you tried Back above, Back now reaches the draft and Forward returns through Configuration to Access.",
     ],
   },
   agentSharingRemoved: {
@@ -3628,6 +3638,8 @@ export const scenarios = {
       "Change a draft setting. Focus Save Configuration and press Enter; “Checking Configuration…” takes focus while Save is disabled.",
       "If you stay in the editor, focus returns to Edit Configuration with “Configuration saved.” as its description.",
       "Edit and save once more. Move focus to the Agents link before the save finishes; focus stays on the link.",
+      "Visit Plugins, then Channels, then Configuration. Edit and save a setting, then use browser Back while the save is in progress. Configuration stays open to show the result.",
+      "After “Configuration saved.”, use Back once to return to Channels. Forward returns to Configuration without saving again.",
     ],
   },
   configurationSaveRefused: {
@@ -3980,6 +3992,10 @@ export const scenarios = {
     ],
     description:
       "Reopening the desired configuration keeps the Agent default and each explicit override. Saving changes updates the draft; admitted revisions retain their prior access.",
+    steps: [
+      "Visit Channels, return to Repositories, change a selection, then press browser Back. The selection stays, with a note to save or cancel before leaving.",
+      "Cancel the edit. Back returns to Channels; Forward opens Repositories with the saved selection.",
+    ],
   },
   repositoryEditorNotConfigured: {
     group: "Pages/Agent detail",
@@ -4103,7 +4119,8 @@ export const scenarios = {
       "v7 is deploying while v6 stays selected, then the next status poll records success and selects v7. Its notice goes from Deploying version to Current version without showing Historical version in between. The deployment and activation are simulated.",
     steps: [
       'On arrival the notice begins "Deploying version" and Selected version reads v6.',
-      'Within about 5 s the notice begins "Current version" and Selected version reads v7.',
+      "Before the status poll lands, Tab into the Versions list (focus lands on v7, the viewed version) and press Down to v6.",
+      'Within about 5 s the notice begins "Current version" and Selected version reads v7. The Versions list is rebuilt with v7 marked Current, and focus stays on v6; Tab out and back lands on v6.',
     ],
   },
   deploymentCompletesRereadFails: {
@@ -4525,6 +4542,8 @@ export const scenarios = {
       "Recovery comes first: v7 failed its startup model check, while selected v6 may have stopped. The detailed record preserves the reported cause without assuming a credential problem.",
     steps: [
       "Open v7 Logs and confirm the failed version, then go Back. Open Configuration goes to the draft without deploying, scrolls it into view and focuses its Configuration tab.",
+      "From the draft, open Channels, then Repositories. Select example/application without saving, then follow Open Configuration in the recovery card.",
+      "Focus returns to Repositories with your selection intact and a reminder to save or cancel. Choose Cancel, then go Back once to Channels and Forward to Repositories.",
       "At phone width, the failure, both recovery links, and selected version are still near the top.",
     ],
   },
