@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { createOpenShellOnlineGitAuthority } from "../../apps/controller/src/drivers/egress-proxy/openshell-online-git-authority.ts";
 import { openShellOnlineGitWire } from "../helpers/openshell-online-git-wire.mjs";
 import { invoke, token } from "../helpers/openshell-online-wire.mjs";
@@ -264,6 +265,93 @@ test(
     assert.notEqual(first.pull.operationId, approvals[1].pull.operationId);
     assert.notEqual(first.exchangeId, approvals[1].exchangeId);
     assert.equal(first.requestDigestSha256, approvals[1].requestDigestSha256);
+  },
+);
+
+test(
+  "stock Git admits gzip only on the upload-pack negotiation, which it never inspects",
+  { timeout: 10000 },
+  async (t) => {
+    const approvals = [];
+    const { client, keys } = await openShellOnlineGitWire(t, {
+      lookupBinding: async () => binding,
+      approve: async (q) => {
+        approvals.push(q);
+        return true;
+      },
+    });
+    const bearer = token(keys, "supervisor", binding.sandboxId);
+    const evaluate = async (q) => (await invoke(client, "EvaluateHttpRequest", q, bearer)).decision;
+    // Git's remote-curl gzips every upload-pack body over 1024 bytes (a clone of a repository
+    // with ~20+ refs, or a fetch with a longer have list); stock OpenShell shows the header.
+    const negotiation = Buffer.concat([
+      ...Array.from({ length: 30 }, (_, i) => packet(`want ${i.toString(16).padStart(40, "0")}\n`)),
+      Buffer.from("0000"),
+      packet("done\n"),
+    ]);
+    assert.ok(negotiation.length > 1024);
+    const fetch = (encoding, body = gzipSync(negotiation)) =>
+      request("/example/project.git/git-upload-pack", "POST", body, [
+        { name: "user-agent", value: "git/2.56.0" },
+        { name: "accept", value: "application/x-git-upload-pack-result" },
+        { name: "accept-encoding", value: "deflate, gzip, br, zstd" },
+        { name: "content-type", value: "application/x-git-upload-pack-request" },
+        ...[encoding].flat().map((value) => ({ name: "content-encoding", value })),
+      ]);
+    const plain = fetch([], negotiation);
+    assert.equal(await evaluate(plain), 1);
+    assert.equal(approvals.at(-1).operation, "upload-pack");
+    for (const encoding of ["gzip", "GZip"]) {
+      assert.equal(await evaluate(fetch(encoding)), 1);
+      assert.equal(approvals.at(-1).operation, "upload-pack");
+    }
+    // The body is opaque to this route: a declared gzip body is not decoded or validated here.
+    assert.equal(await evaluate(fetch("gzip", Buffer.from("not gzip"))), 1);
+    // The digest binds the declared encoding, so it differs from the identical plain bytes.
+    const digests = new Set(approvals.map((q) => q.requestDigestSha256));
+    assert.equal(digests.size, approvals.length);
+    const granted = approvals.length;
+    const discovery = request("/example/project.git/info/refs", "GET", Buffer.alloc(0), [
+      { name: "content-encoding", value: "gzip" },
+    ]);
+    discovery.target.query = "service=git-upload-pack";
+    const send = pushRequest();
+    const draft = request(
+      "/repos/example/project/pulls",
+      "POST",
+      Buffer.from(
+        JSON.stringify({
+          title: "Review task",
+          head: "review/task",
+          base: "main",
+          body: "Ready for review.",
+          draft: true,
+          maintainer_can_modify: false,
+        }),
+      ),
+      [{ name: "content-type", value: "application/json" }],
+    );
+    draft.target.host = "api.github.com";
+    assert.equal(await evaluate(draft), 1);
+    const denied = [
+      ...["br", "deflate", "x-gzip", "identity", "gzip, gzip", "gzip,gzip", " gzip", ""].map(
+        (encoding) => fetch(encoding),
+      ),
+      fetch(["gzip", "gzip"]),
+      fetch("gzip", Buffer.alloc(1024 * 1024 + 1)),
+      discovery,
+      { ...send, headers: [...send.headers, { name: "content-encoding", value: "gzip" }] },
+      {
+        ...send,
+        body: gzipSync(send.body),
+        headers: [...send.headers, { name: "content-encoding", value: "gzip" }],
+      },
+      { ...draft, headers: [...draft.headers, { name: "content-encoding", value: "gzip" }] },
+    ];
+    for (const q of denied) {
+      assert.equal(await evaluate(q), 2);
+    }
+    assert.equal(approvals.length, granted + 1);
   },
 );
 

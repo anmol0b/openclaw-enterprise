@@ -114,6 +114,7 @@ function requestHead(request: OpenShellOnlineHttpRequest): RequestHead | undefin
     "accept",
     "accept-encoding",
     "accept-language",
+    "content-encoding",
     "content-type",
     "git-protocol",
     "pragma",
@@ -124,7 +125,9 @@ function requestHead(request: OpenShellOnlineHttpRequest): RequestHead | undefin
       !allowed.includes(name) ||
       Object.hasOwn(headers, name) ||
       (name === "accept-language" && value.length > 256) ||
-      (name === "pragma" && value !== "no-cache")
+      (name === "pragma" && value !== "no-cache") ||
+      // Exactly one gzip layer; operation() admits it only where the body is never inspected.
+      (name === "content-encoding" && value.toLowerCase() !== "gzip")
     ) {
       return undefined;
     }
@@ -135,7 +138,7 @@ function requestHead(request: OpenShellOnlineHttpRequest): RequestHead | undefin
     rawTarget: request.target.path + (request.target.query ? "?" + request.target.query : ""),
     headers,
     receivedMonoMs: performance.now(),
-    contentEncoding: "identity",
+    contentEncoding: headers["content-encoding"] === undefined ? "identity" : "gzip",
     // These lengths describe the complete buffered view, never the omitted original framing.
     framing: { kind: "length", bytes: request.body.byteLength },
   };
@@ -204,6 +207,9 @@ function operation(
   head: RequestHead,
 ): Pick<PreparedGitHubUseRequest, "operation" | "pull"> | undefined {
   if (request.target.path.startsWith("/repos/")) {
+    if (head.contentEncoding !== "identity") {
+      return undefined;
+    }
     const pull = draftScope(request, binding, head);
     return pull ? { operation: "create-draft-pull", pull } : undefined;
   }
@@ -219,7 +225,14 @@ function operation(
     targetBytes: 8192,
     graphql: "deny",
   });
-  if (!route || route.kind === "api") {
+  // Git gzips upload-pack bodies over 1024 bytes. That body is opaque here (only its size is
+  // bounded, and the digest binds the encoded bytes), so gzip is admitted there alone. Discovery
+  // has no body; receive-pack and draft create bodies are inspected, so they stay identity.
+  if (
+    !route ||
+    route.kind === "api" ||
+    (head.contentEncoding !== "identity" && route.kind !== "git-fetch")
+  ) {
     return undefined;
   }
   if (route.kind === "git-discovery") {
@@ -234,6 +247,7 @@ function operation(
     return undefined;
   }
   if (route.kind === "git-fetch") {
+    // Never parse or trust this body: it may be gzip, and the upstream decides what it means.
     return request.body.byteLength <= 1024 * 1024 ? { operation: "upload-pack" } : undefined;
   }
   return allowsReceivePackInput([binding.pushRef])(request.body) === true
