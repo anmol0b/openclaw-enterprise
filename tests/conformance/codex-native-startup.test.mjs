@@ -982,9 +982,7 @@ test("Codex runtime retries a transient startup model probe failure once", async
     },
   ];
   for (const scenario of scenarios) {
-    await t.test(scenario.name, (t) => {
-      checkCodexStartup(t, scenario);
-    });
+    await t.test(scenario.name, (t) => checkCodexStartup(t, scenario));
   }
 });
 
@@ -1145,8 +1143,8 @@ test("Codex runtime logs a failed login or model check's output class, never the
     },
   ];
   for (const scenario of scenarios) {
-    await t.test(scenario.name, (t) => {
-      const { status, diagnostics } = checkCodexStartup(t, scenario);
+    await t.test(scenario.name, async (t) => {
+      const { status, diagnostics } = await checkCodexStartup(t, scenario);
       assert.doesNotMatch(JSON.stringify(status) + diagnostics.join("\n"), leaked);
       // The held status keeps its existing shape: the class is a log field only.
       assert.equal(JSON.stringify(status).includes("failureClass"), false);
@@ -1401,8 +1399,8 @@ test("Codex runtime classifies a failed model check's stdout error events, never
     },
   ];
   for (const scenario of scenarios) {
-    await t.test(scenario.name, (t) => {
-      const { status, diagnostics } = checkCodexStartup(t, scenario);
+    await t.test(scenario.name, async (t) => {
+      const { status, diagnostics } = await checkCodexStartup(t, scenario);
       assert.doesNotMatch(JSON.stringify(status) + diagnostics.join("\n"), leaked);
       assert.equal(JSON.stringify(status).includes("failureClass"), false);
     });
