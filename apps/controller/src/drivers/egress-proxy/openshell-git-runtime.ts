@@ -126,6 +126,8 @@ interface Entry {
   reconnected?: { readonly since: number } | undefined;
   /** The loss of material the route had was reported (on the first request it refused). */
   materialLost?: true | undefined;
+  /** The route has been open at least once: a later install is a restoration. */
+  opened?: true | undefined;
   material?: MaterialIdentity;
   installed?: OpenShellPreparedGitInstalled | undefined;
   blocked?: OpenShellGitRouteBlockReason;
@@ -718,7 +720,7 @@ export class OpenShellGitRuntime {
           "OpenShell Git supervisor was replaced.",
         );
       }
-      if (adopt && entry.material !== undefined) {
+      if (adopt && entry.opened) {
         // Reported once the route is open again; a route that never opened has nothing to restore.
         entry.reconnected ??= { since: entry.closedAt ?? performance.now() };
       }
@@ -747,6 +749,7 @@ export class OpenShellGitRuntime {
     entry.unobserved = undefined;
     entry.nextObserveAt = undefined;
     entry.materialLost = undefined;
+    entry.opened = true;
     const reconnected = entry.reconnected;
     if (entry.closedAt !== undefined || reconnected !== undefined) {
       this.emit?.({
