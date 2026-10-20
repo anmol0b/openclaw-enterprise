@@ -4,8 +4,9 @@ Before starting a fresh Kubernetes-only development installation, prepare a
 private directory containing the approved GitHub App key and repository policy.
 The launcher creates the initial OpenClaw Namespace first, substitutes its actual
 ID into the registry, and enables the repository credential service through the
-existing Helm release. Repository access is supported without an OpenShell
-Sandbox Driver; follow the [broker installation guide](../repository-credentials/installation.md)
+existing Helm release. Repository access is supported without a Sandbox Driver,
+or with OpenShell through the [OpenShell Git route](#use-the-openshell-git-route);
+follow the [broker installation guide](../repository-credentials/installation.md)
 for production or an already running Installation. This launcher always uses a
 GitHub App. To test clone, push and `gh` with a token your host already holds,
 use the standalone [host token procedure](../repository-credentials/development-token.md).
@@ -79,3 +80,35 @@ actual repository access, continue with the [Agent repository workflow](../repos
 and verify both an approved operation and a denied operation with the authorized
 App and model credentials. The generated broker allowance is limited to its
 exact hostname; existing explicit Codex denies remain in force.
+
+## Use the OpenShell Git route
+
+To try [Git and draft pull requests through OpenShell](../../reference/repository-credentials/openshell-git.md)
+locally, select OpenShell and the route with the same input directory:
+
+```bash
+export OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell
+export OCC_DEVELOPMENT_OPENSHELL_GIT=1
+./scripts/dev-up --sandbox-network-policy-file /absolute/sandbox-policies.yaml
+```
+
+The launcher installs stock OpenShell 0.1.4 with its own PKI and mutual TLS,
+serves the `oce-prepared-git` middleware from the worker, and registers it with
+the Gateway once the worker answers. It sets `drivers.repo.openShell` and the
+Helm `openshellGit` block, and withdraws the default `source-control` policy, so
+the policy file must allow at least one other host and none of the GitHub hosts.
+Use `transport: git-and-draft-pr` with a `pullRequestBase`, or `git-only`.
+
+Before creating the cluster it refuses a container engine kernel older than
+Linux 6.2 (Sandboxes need Landlock ABI v3) and the protected profile, which
+this route cannot combine with. Set `approvalPolicy: never` for unattended
+Codex commands, as the reference describes.
+
+For a synthetic origin instead of GitHub, also set
+`OCC_DEVELOPMENT_OPENSHELL_GIT_FIXTURE_NETWORK` to a Docker network holding
+it, with its one address in `upstream-cidrs.json` and outside the private and
+special-use ranges OpenShell refuses, and add its CA as `issuer-ca.crt`. The
+launcher attaches the node and answers `github.com` and `api.github.com` with
+that address in cluster DNS. `OCC_DEVELOPMENT_OPENSHELL_SUPERVISOR_CA_FILE`
+names a PEM bundle the supervisor image must also trust, such as that CA.
+`scripts/ci/openshell-git-installed.mjs` runs this profile end to end.
