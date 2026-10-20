@@ -62,8 +62,8 @@ An exit-0 `migration.checked` record reports one reviewed history shape:
 `preOAuth`, `preCredentialWithdrawals`, `preBrokerReceiptFence`,
 `preModelProbeFailureCause`, `preProvisioningConfigurationRelease`, `preAdministratorCredentialSourceGrants`,
 `preCodexPatSources`, `preAgentCredentialSources`,
-`preCredentialWithdrawalRequester`, the later `pre*` shapes named in the source
-manifest (through `preOpenShellGitRoutes`), or `completed`.
+`preCredentialWithdrawalRequester`, `pre*` shapes through
+`preOpenShellGitRoutes`, or `completed`.
 `prePresetsMain` means
 the exact canonical history through `0023_runtime_failure_timestamp_validation`;
 `main` also includes `0024_agent_presets`. `repositoryCredentials` adds
@@ -92,10 +92,9 @@ has 46 through `0046_model_probe_failure_cause`;
 `0047_provisioning_configuration_release`; `preCodexPatSources` has 48 through
 `0048_administrator_credential_source_grants`; `preAgentCredentialSources` has 49
 through `0049_codex_pat_sources`; `preCredentialWithdrawalRequester` has 50
-through `0050_agent_credential_sources`; the later `pre*` shapes continue that
-series one migration at a time, `preOpenShellGitRoutes` having the 68 receipts
-through `0068_legacy_revision_execution_admission`. `completed` is the current
-canonical history with all receipts, including `0069_openshell_git_routes`.
+through `0050_agent_credential_sources`; later `pre*` shapes add one each, up to
+`preOpenShellGitRoutes` (68); `completed` has every receipt through
+`0069_openshell_git_routes`.
 The source manifest is
 [`migrations/meta/canonical-history.json`](../../../migrations/meta/canonical-history.json).
 Empty schemas may be absent or have only their owner's ordinary `CREATE` and

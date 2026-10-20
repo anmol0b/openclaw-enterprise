@@ -415,6 +415,10 @@
                         "label": "OpenShell Git Refusals"
                       },
                       {
+                        "page": "reference/repository-credentials/openshell-git-restarts",
+                        "label": "OpenShell Git Route Restarts"
+                      },
+                      {
                         "page": "reference/public-github-reads",
                         "label": "Public GitHub Reads"
                       }
