@@ -351,6 +351,10 @@ test(
 );
 
 test("a client reset during native-admin upgrade admission does not crash", async () => {
+  // Admission settles only after the reset, so its late result meets a closed socket and
+  // app.close() has no pending admission to wait out for the full drain (finding 814).
+  const verification = pendingValue();
+  let verifying = false;
   const crashes = [];
   const onUncaught = (error) => {
     crashes.push(error);
@@ -381,7 +385,8 @@ test("a client reset during native-admin upgrade admission does not crash", asyn
     auth: {
       admissionVerifier: {
         verify() {
-          return new Promise(() => {});
+          verifying = true;
+          return verification.promise;
         },
       },
     },
@@ -407,6 +412,9 @@ test("a client reset during native-admin upgrade admission does not crash", asyn
         }, 80);
       });
     });
+    assert.equal(verifying, true, "the upgrade must reach admission");
+    verification.reject(new Error("admission settled after the client reset"));
+    await settleCallbacks();
     assert.deepEqual(crashes, []);
   } finally {
     process.off("uncaughtException", onUncaught);
