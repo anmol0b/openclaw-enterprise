@@ -887,6 +887,7 @@ function dedicatedFirstDeployFixture({
   clock,
   modelEndpoint,
   sandboxDriver,
+  openShellGit,
   revision: revisionOverrides = {},
 } = {}) {
   const state = {
@@ -924,6 +925,7 @@ function dedicatedFirstDeployFixture({
     }),
     {
       sandboxDriver,
+      ...(openShellGit === undefined ? {} : { openShellGit }),
       nodeEnrollment: {
         async createSetup() {
           state.setupCalls++;
@@ -2784,6 +2786,171 @@ test("an unacknowledged workspace node binding costs at most one bounded wait ac
   state.gatewayWorkspaceNodeId = "node-1";
   await driver.activateRevision(revision, authContext(revision));
   assert.equal(clock.now, 20_000);
+});
+
+// The worker issues a version's first prepared Git token once the version is active, and
+// OpenShell resets every Sandbox connection when it installs it, the workspace node's
+// included (finding 2141). Activation names that wait, then the node's reconnection, so the
+// deployment does not report success a moment before the node drops.
+test("activation waits for the first repository Git credential install and the node's reconnection", async () => {
+  const clock = { now: 1_000_000 };
+  const provisions = [];
+  const sandboxDriver = {
+    id: "native-sandbox",
+    implementation: "openshell",
+    capability: "sandbox",
+    facets: ["networking", "filesystem", "process"],
+    async workspaceNodePeerLabels({ revision: target }) {
+      return provisions.some(({ revision: { id } }) => id === target.id)
+        ? supervisorPeerLabels(target.id)
+        : undefined;
+    },
+    async provisionHarness(context) {
+      provisions.push(context);
+      return {
+        namespaceName: context.namespace.name,
+        resourceName: "native-harness",
+        agentId: context.revision.agentId,
+        revisionId: context.revision.id,
+      };
+    },
+  };
+  const git = { route: { state: "pending", reason: "awaiting_material" }, installedAt: undefined };
+  const reads = { route: 0, installedAt: 0 };
+  const openShellGit = {
+    route(revisionId) {
+      assert.equal(revisionId, revision.id);
+      reads.route++;
+      return git.route;
+    },
+    materialInstalledAt(revisionId) {
+      assert.equal(revisionId, revision.id);
+      reads.installedAt++;
+      const value = git.installedAt;
+      if (git.moveOnRead) {
+        // A renewal lands while this pass reads the node.
+        git.moveOnRead = false;
+        git.installedAt = clock.now;
+      } else if (git.closeOnRead) {
+        // The route closes while this pass reads the node (a failed read, lost material).
+        git.closeOnRead = false;
+        git.installedAt = undefined;
+      }
+      return value;
+    },
+  };
+  const { state, driver, revision, namespace, gatewayName, prepare, markReady } =
+    dedicatedFirstDeployFixture({
+      clock,
+      sandboxDriver,
+      openShellGit,
+      revision: {
+        sandboxDriverId: sandboxDriver.id,
+        repositoryCredentials: {
+          driver: { id: "repository", implementation: "github" },
+          bindings: [
+            {
+              repositoryRef: "project",
+              profile: "git-write",
+              backendId: "github-primary",
+              grant: { providerInstanceId: "github", repositoryId: "42", grantId: "write-project" },
+            },
+          ],
+          deadlineWallMs: Date.now() + 600_000,
+        },
+      },
+    });
+  assert.equal((await prepare()).ready, false);
+  markReady(gatewayName);
+  assert.equal((await prepare()).ready, false);
+  assert.equal(provisions.length, 1);
+  state.providerPod = {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: { name: "native-harness", namespace, labels: provisions[0].requirements.labels },
+    status: { conditions: [{ type: "Ready", status: "True" }] },
+  };
+  assert.equal((await prepare()).pendingReason, "WORKSPACE_NODE_PENDING");
+  state.connected = true;
+  // A verified route still waiting for its first material is ready to activate (finding 2139).
+  const observation = await prepare();
+  assert.equal(observation.ready, true, inspect(observation));
+  assert.ok(reads.route > 0, "readiness consulted the route");
+  const pending = (code, message) =>
+    assert.rejects(driver.activateRevision(revision, authContext(revision)), (error) => {
+      assert.ok(error instanceof ActivationPendingError);
+      assert.equal(error.code, code);
+      assert.match(error.message, message);
+      return true;
+    });
+  // Active, but the worker has not installed the token yet. The install is checked before
+  // the node is read: a node that is down meanwhile does not change the named wait.
+  state.connected = false;
+  await pending(
+    "REPOSITORY_GIT_MATERIAL_PENDING",
+    /has not installed its repository Git credential/,
+  );
+  assert.equal(reads.installedAt, 1);
+  state.connected = true;
+  // The route verified the install this instant: the Gateway may still show the connection
+  // the Sandbox is closing, so the node is not read inside the settle margin.
+  git.route = { state: "installed" };
+  git.installedAt = clock.now;
+  await pending("WORKSPACE_NODE_RECONNECT_PENDING", /is not read until .* has settled/);
+  clock.now += 1_999;
+  await pending("WORKSPACE_NODE_RECONNECT_PENDING", /is not read until .* has settled/);
+  assert.equal(reads.installedAt, 3);
+  // The margin passed and the node is still reconnecting: the node read holds the pass.
+  clock.now += 1;
+  state.connected = false;
+  await pending("WORKSPACE_NODE_PENDING", /is not ready/);
+  assert.equal(reads.installedAt, 4, "the install is read once before the node");
+  // The node is back, but a new install lands while it is read: that read may predate the
+  // new reset, so the pass waits again.
+  state.connected = true;
+  git.moveOnRead = true;
+  await pending("WORKSPACE_NODE_RECONNECT_PENDING", /installed .* while its node was read/);
+  assert.equal(reads.installedAt, 6, "the install is read again after the node");
+  await pending("WORKSPACE_NODE_RECONNECT_PENDING", /is not read until .* has settled/);
+  // The route closes while the node is read (a failed read, lost material): the install is
+  // no longer verified, which is that wait, not a reconnection.
+  clock.now += 2_000;
+  git.closeOnRead = true;
+  await pending("REPOSITORY_GIT_MATERIAL_PENDING", /was not verified after its node was read/);
+  assert.equal(reads.installedAt, 9);
+  await pending(
+    "REPOSITORY_GIT_MATERIAL_PENDING",
+    /has not installed its repository Git credential/,
+  );
+  // Verified again, settled and reconnected after the newest install: the version activates.
+  git.installedAt = clock.now - 2_000;
+  await driver.activateRevision(revision, authContext(revision));
+  assert.equal(reads.installedAt, 12);
+  // A later pass (maintenance) with the same install does not wait again.
+  clock.now += 3_600_000;
+  await driver.activateRevision(revision, authContext(revision));
+});
+
+// The wait is for repository-bound versions only: the route is never consulted otherwise.
+test("activation of a version without repository credentials never consults the Git route", async () => {
+  const openShellGit = {
+    route() {
+      assert.fail("the route is consulted only for repository-bound versions");
+    },
+    materialInstalledAt() {
+      assert.fail("the install time is read only for repository-bound versions");
+    },
+  };
+  const { state, driver, revision, gatewayName, agentName, prepare, markReady } =
+    dedicatedFirstDeployFixture({ openShellGit });
+  assert.equal(revision.repositoryCredentials, undefined);
+  assert.equal((await prepare()).ready, false);
+  markReady(agentName);
+  markReady(gatewayName);
+  state.connected = true;
+  state.gatewayWorkspaceNodeId = "node-1";
+  assert.equal((await prepare()).ready, true);
+  await driver.activateRevision(revision, authContext(revision));
 });
 
 // A node that has not paired within the pass's wait leaves the pass pending; the

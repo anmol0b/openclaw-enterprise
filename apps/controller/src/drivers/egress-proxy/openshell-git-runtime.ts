@@ -131,6 +131,18 @@ interface Entry {
   opened?: true | undefined;
   material?: MaterialIdentity;
   installed?: OpenShellPreparedGitInstalled | undefined;
+  /**
+   * The material this route last verified installed, and the wall-clock time of that
+   * verification. OpenShell resets every connection of the Sandbox when it installs a
+   * credential (finding 2141); activation waits for the node to be back after this time.
+   */
+  materialInstalled?:
+    | {
+        readonly materialVersion: string;
+        readonly preparationAttemptId: string;
+        readonly at: number;
+      }
+    | undefined;
   blocked?: OpenShellGitRouteBlockReason;
   nextRefreshAt?: number;
   /** Why the route is closed while nothing blocks it. */
@@ -561,6 +573,28 @@ export class OpenShellGitRuntime {
   }
 
   /**
+   * When the route last verified its current material installed (wall-clock ms), or
+   * undefined while it is not installed or verified other material. Installing a credential
+   * makes OpenShell 0.1.4 reload the Sandbox's policy runtime, which closes every connection
+   * out of the Sandbox, the workspace node's included (finding 2141); Compute activation
+   * waits for the node to be connected again after this time.
+   */
+  materialInstalledAt(revisionId: string): number | undefined {
+    const entry = this.states.get(revisionId)?.entry;
+    const installed = entry?.materialInstalled;
+    if (
+      entry?.installed === undefined ||
+      entry.blocked !== undefined ||
+      installed === undefined ||
+      entry.material?.materialVersion !== installed.materialVersion ||
+      entry.material.preparationAttemptId !== installed.preparationAttemptId
+    ) {
+      return undefined;
+    }
+    return installed.at;
+  }
+
+  /**
    * The first policy that also reaches the Git hosts, which only the middleware route may. An
    * IP-address host counts too: the Controller cannot tell whether it leads to GitHub, so it is
    * refused outright rather than tracked against GitHub's published ranges (finding 2145).
@@ -959,6 +993,14 @@ export class OpenShellGitRuntime {
         !signal.aborted
       ) {
         this.installedNow(entry, installed);
+        const { materialVersion, preparationAttemptId } = entry.material;
+        if (
+          entry.materialInstalled?.materialVersion !== materialVersion ||
+          entry.materialInstalled.preparationAttemptId !== preparationAttemptId
+        ) {
+          // The supervisor activated this material: its connection reset has happened by now.
+          entry.materialInstalled = { materialVersion, preparationAttemptId, at: Date.now() };
+        }
       } else {
         this.pending(entry, "unverified");
       }
