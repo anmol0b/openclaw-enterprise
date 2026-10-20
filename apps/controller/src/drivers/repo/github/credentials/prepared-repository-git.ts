@@ -445,9 +445,10 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     }
     const sendStartBy = new Date(until).toISOString();
     if (scope) {
-      // The primary key admits only ONE create for this repository/ref/base grant,
-      // across process or session replacement. Unknown/expired permits are never reissued.
-      // Opted out, a create after the first is allowed without a receipt of its own.
+      // The primary key keeps ONE receipt for this repository/ref/base grant, across
+      // process or session replacement, so by default it admits one create. Unknown/expired
+      // permits are never reissued. Opted out, a create after the first is allowed without a
+      // receipt of its own; the row keeps the first receipt.
       const claim = await c.query(
         `INSERT INTO ${pulls}
          (grant_id,operation_id,receipt_id,admission_id,attempt_id,material_version,request_digest_sha256,scope,send_start_by)
