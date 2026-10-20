@@ -572,7 +572,7 @@
     "main": "bd490d16dd23ec1ea722bb370155e9454fb52187bd2b16cd8a0fe277e3e41bde",
     "repositoryCredentials": "5f9359057412199ea7a5659bdedbef664fb6da7bcd99d7a552f01a5782b904ea",
     "workspaceSetup": "3d7801c345eea875fb79adba4e04a4e2b24bad49ffe6ada62cc58117c5cce134",
-    "completed": "34374bccb6342bc15262d9d8e77abf1c3a0e317a2623b2bda541d1d06202a3ff",
+    "completed": "6aa99bf0d1ec3fa97f58816120c33ab6b477849cea82410f4d242014def2e60a",
     "repositoryRetention": "a66448129d9ae2adf076f1d7887d3c7151cdc68f635c6fac7984d4254604d074",
     "agentProvisioning": "baac9e369ace8610f96948c1a930e6387431b1d0a33cefa3893765e52f8f7a52",
     "backendCompleted": "a2ba6fc82fbf0047cea491efad4a9e58eacaed7c29ce8528accff331569c51dd",
@@ -603,7 +603,16 @@
     "preHeldAuthenticationSession": "153f6ef879f86781ce3355594b5dca10364fb6d118c079280655242459e041b8",
     "preCanonicalHarnessAuth": "f2ebd947c770ed1eab2628742752b924c203cdd038094d3f162db411099e2c8d",
     "preSandboxPolicies": "2a66cf512e621405a10b1c8629303220523e1dcc2d2aa90bc857855ed1d26504",
-    "preSandboxPolicyAdministrator": "34374bccb6342bc15262d9d8e77abf1c3a0e317a2623b2bda541d1d06202a3ff"
+    "preSandboxPolicyAdministrator": "34374bccb6342bc15262d9d8e77abf1c3a0e317a2623b2bda541d1d06202a3ff",
+    "preStaticEgress": "34374bccb6342bc15262d9d8e77abf1c3a0e317a2623b2bda541d1d06202a3ff",
+    "preSendReceipts": "6e5d4b645e70fb8f905767f63392d1b55b9e9ba14d79632840f285029bc9cd1d",
+    "prePreparedGitHubCustody": "a7ddb7f510bad8c962fde8f8b61b9577b93577b109d20f296a8d3408f2e1ce73",
+    "prePreparedGitHubEgress": "364bb0a0e3963bec78b7a100581e9558d4c7a3c6a2fb38830f77114a3ba46e69",
+    "preCredentialFreeMetadata": "a68806243d20898fdf561443630f185ad91ae285c9f6ec2f94a24a7f72c908a3",
+    "preRevisionHarnessAuthShape": "9dc926f94d6d0a72b64b7ecf3fd90c4288890b3cde1bc3f5d0eb9678a91267e0",
+    "prePreparedRepositoryGit": "dcc8a204d43d548fd9364c55fd0ea842112962702334419b119fdb61f43da6e6",
+    "prePreparedRepositoryDraftPulls": "4dda00f5af0e094e204cfecafbda5c6021f36b29ac56a1f0fa7d6dd49a5841fe",
+    "preLegacyRevisionExecutionAdmission": "a3baa07a6df20acbc3c128d624a9da6620a7717f5ec017888e2f3d59173d7f85"
   },
   "ledgerCatalogs": {
     "initialized": "62946da6b1fc2b06df09e97dda4cf1831f170a2f3d5ff35a9f107af206c425dc",
