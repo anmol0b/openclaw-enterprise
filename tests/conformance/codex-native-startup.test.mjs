@@ -76,6 +76,23 @@ test("Codex runtime gates startup and readiness on a successful native authentic
       expect: probeFailure({ kind: "PROBE_STATUS", detail: "error-event" }),
     },
     {
+      // Finding 1599: a protected profile retries nothing, so a transient failure that earns
+      // an unprotected probe its one retry is held at once, after one business request.
+      name: "protected transient probe error never starts a second business request",
+      protectedInference: "signed",
+      native: [login(), probe([started, errorEvent("connection refused")], { status: 1 })],
+      expect: probeFailure({ kind: "PROBE_STATUS", detail: "error-event" }),
+    },
+    {
+      name: "protected transient failed turn never starts a second business request",
+      protectedInference: "signed",
+      native: [
+        login(),
+        probe([started, failedTurn("unexpected status 502: upstream")], { status: 1 }),
+      ],
+      expect: probeFailure({ kind: "PROBE_STATUS", detail: "turn-failed" }, { status: 502 }),
+    },
+    {
       name: "provider PAT placeholder uses native auth storage before the model probe",
       providerPat: true,
       events: completedTurn(),

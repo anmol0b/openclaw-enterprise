@@ -16,6 +16,10 @@ import { DependencyUnavailableError } from "@openclaw-enterprise/occ";
 import { asRecord, immutableCopy, sha256Hex } from "@openclaw-enterprise/utils";
 import { type OpenShellGateway, openShellWorkspaceName } from "../../backends/openshell.ts";
 import {
+  confirmSandboxAbsent,
+  gatewayIdentityRefusal,
+} from "../sandbox/openshell-gateway-errors.ts";
+import {
   advertisesOpenShellExecutionProfile,
   openShellExchangeCapabilities as capabilities,
 } from "./openshell-exchange-capabilities.ts";
@@ -474,17 +478,31 @@ export class OpenShellCredentialProxyDriver implements CredentialProxyDriver {
     this.assertPlan(context);
     const ref = this.sandbox.harnessResource!(context);
     const client = this.backend.client.clientForNamespace(ref.namespaceName);
-    const selector = {
-      workspace: openShellWorkspaceName(context.namespace),
-      name: ref.resourceName,
-    };
-    const existing = await client.getSandbox(selector, context.signal);
+    const workspace = openShellWorkspaceName(context.namespace);
+    const selector = { workspace, name: ref.resourceName };
+    const unconfirmed = `the protected Sandbox ${ref.resourceName} cannot be confirmed removed`;
+    const refused = gatewayIdentityRefusal(workspace, unconfirmed);
+    const read = () => client.getSandbox(selector, context.signal);
+    // OpenShell answers NOT_FOUND alike for a removed Sandbox and for one this identity may
+    // not see, so a missing Sandbox is removed only once GetWorkspace proves the identity
+    // still sees the Workspace and a second read still finds none (findings 1670, 1692,
+    // 2055). A credential-less Sandbox is otherwise recorded withdrawn while it runs.
+    const absent = () =>
+      confirmSandboxAbsent(
+        client,
+        workspace,
+        context.signal,
+        refused,
+        () => new Error(`OpenShell reports no Workspace ${workspace}, so ${unconfirmed}.`),
+        read,
+      );
+    const existing = (await refused(read)) ?? (await absent());
     if (!existing) {
       return true;
     }
     this.assertOwned(existing.annotations, context);
-    await client.deleteSandbox(selector, context.signal);
-    return (await client.getSandbox(selector, context.signal)) === undefined;
+    await refused(() => client.deleteSandbox(selector, context.signal));
+    return ((await refused(read)) ?? (await absent())) === undefined;
   }
 
   private assertPlan(context: ProxyRevisionContext): void {

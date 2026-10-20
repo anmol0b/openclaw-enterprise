@@ -3758,7 +3758,9 @@ function probeCodexAuthentication(timeout) {
       if (event.type === "turn.started") turnStarted = true;
       const failure = event.type === "error" ? codexProbeStatusFailure(event.message, "error-event")
         : event.type === "turn.failed" ? codexProbeStatusFailure(event.error?.message, "turn-failed") : undefined;
-      if (failure?.transient === true) {
+      // A protected profile (provider tools none) retries nothing, so its transient
+      // failure is held like any other error event (finding 1599).
+      if (failure?.transient === true && pluginRuntime?.manifest.providerTools !== "none") {
         transientFailure ??= failure;
         if (event.type !== "error" || event.message !== CODEX_NETWORK_WAIT || !turnStarted) unrecoveredTransientFailure = true;
         continue;
@@ -3827,8 +3829,8 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     return;
   }
   // A transient failure gets the same single retry; every other failure is
-  // deterministic and held at once.
-  if (result.transient === true && attempt === 1 && performance.now() + 1000 < deadline) {
+  // deterministic and held at once. A protected profile retries nothing (finding 1599).
+  if (pluginRuntime?.manifest.providerTools !== "none" && result.transient === true && attempt === 1 && performance.now() + 1000 < deadline) {
     setTimeout(() => startAuthenticatedCodex(2, deadline), 1000);
     return;
   }

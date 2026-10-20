@@ -31,6 +31,8 @@ export const RUNTIME_FAILURE_CHECKS = Object.freeze([
   "peer-bridge-record",
   "plugin-approvers",
   "state-migration",
+  // A protected execution's Harness could not enroll with its egress proxy (finding 2054).
+  "egress-enrollment",
 ]);
 
 /**

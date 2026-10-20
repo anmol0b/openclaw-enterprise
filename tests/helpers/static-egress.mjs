@@ -230,7 +230,13 @@ export async function staticEgressFixture(
 
   const Gateway = grpc.loadPackageDefinition(loadGatewayDefinition()).openshell.v1.OpenShell;
   const gateway = new grpc.Server();
-  const observed = { available: true, sandbox: undefined, policy: undefined, deleted: [] };
+  const observed = {
+    available: true,
+    sandbox: undefined,
+    policy: undefined,
+    deleted: [],
+    workspaceVisible: true,
+  };
   // OpenShell reports negotiated capabilities in lexical order, including the base contract.
   const gatewayCapabilities = ["openshell.supervisor-middleware.contract", ...capabilities].sort();
   const profiles = new Map();
@@ -275,6 +281,19 @@ export async function staticEgressFixture(
               },
             ]
           : [],
+      });
+    },
+    // A missing Sandbox is absent only once the Workspace read passes (findings 1676, 2055).
+    GetWorkspace(call, callback) {
+      if (!observed.workspaceVisible) {
+        callback({ code: grpc.status.PERMISSION_DENIED, details: "workspace role revoked" });
+        return;
+      }
+      callback(null, {
+        workspace: {
+          metadata: { name: call.request.name },
+          status: { phase: "WORKSPACE_PHASE_ACTIVE" },
+        },
       });
     },
     GetSandbox(call, callback) {

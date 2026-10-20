@@ -7641,7 +7641,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
           namespace: sandboxNamespace,
           revision,
           plan: revision.egressPlan,
-          signal: AbortSignal.timeout(30_000),
+          // The claim's signal bounds the withdrawal like every other gateway call (2055).
+          signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
         },
         binding,
       );

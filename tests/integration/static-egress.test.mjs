@@ -421,6 +421,19 @@ test("protected admission requires the actual counterpart and exact loaded polic
     true,
   );
   assert.equal(f.observed.deleted.length, 1);
+  // Finding 2055: a missing Sandbox is confirmed removed only while the identity still sees
+  // the Workspace; a refusal there holds instead of recording the withdrawal.
+  f.observed.workspaceVisible = false;
+  await assert.rejects(
+    f.egress.withdrawBinding(f.context, f.context.plan.routes[0].binding.binding),
+    { message: /refused the controller gateway identity/ },
+  );
+  f.observed.workspaceVisible = true;
+  assert.equal(
+    await f.egress.withdrawBinding(f.context, f.context.plan.routes[0].binding.binding),
+    true,
+  );
+  assert.equal(f.observed.deleted.length, 1);
 });
 
 test("legacy approved copies survive Secret rotation and failed live adoption; only exact source update opts in", async (t) => {
