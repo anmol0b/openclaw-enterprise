@@ -33,12 +33,14 @@ in the Configuration.
 Claude Code's native Read, Grep, Write, Edit, WebFetch and WebSearch tools
 follow OpenClaw's exec security setting, not the Configuration's tool policy.
 OpenClaw removes native Bash and routes shell work through its own `exec` tool,
-so a `tools.deny` of `exec` or `process` holds. A `tools.deny`, nonempty
-`tools.allow`, or `tools.profile` narrower than `full` (top-level, an
-`agents.entries` entry's, or their `byProvider` entry for `anthropic`) that
-would restrict `read`, `write`, `edit`, `web_fetch` or `web_search` is refused
-at save and deployment with `400 INVALID_REQUEST`, because the runtime would
-ignore it.
+so a `tools.deny` of `exec` or `process` holds. Save and deployment refuse with
+`400 INVALID_REQUEST` any policy that would restrict `read`, `write`, `edit`,
+`web_fetch` or `web_search`, because the runtime would ignore it: a `tools.deny`
+naming one (by name, `*` glob, `group:fs`, `group:web` or `group:openclaw`), a
+nonempty `tools.allow` leaving one out, or the `minimal` or `messaging` profile
+unless `alsoAllow` adds all five back. This covers top-level `tools`, each
+`agents.entries` entry's (its `profile` and `alsoAllow` fall back to the
+top-level ones), and their `byProvider` entries for `anthropic`.
 
 ## Authentication and startup
 

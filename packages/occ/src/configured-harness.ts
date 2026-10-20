@@ -7,6 +7,7 @@ import { asRecord, isNonEmptyString, splitModelRef } from "@openclaw-enterprise/
 import {
   agentEntryMessage,
   ConfigurationHarnessError,
+  configurationSettingMessage,
   keyedSettingPath,
   modelProviderMessage,
 } from "./errors.ts";
@@ -59,7 +60,8 @@ export function selectsClaudeCodeRuntime(values: Readonly<OpenClawConfigurationD
 // web_fetch, WebSearch web_search. The pinned Gateway gates those native calls by its exec
 // security setting and plugin hooks only, never by the Configuration's tool policy, which it
 // applies to OpenClaw's own tools (finding 2142). Bash is host-owned: OpenClaw removes it and
-// routes shell work through its exec tool, so exec and process policy still holds.
+// routes shell work through its exec tool, so exec and process policy still holds. A
+// sender-restricted turn (toolsBySender) already runs with no native tools at all.
 const CLAUDE_CODE_NATIVE_CAPABILITIES: readonly string[] = [
   "read",
   "write",
@@ -67,16 +69,20 @@ const CLAUDE_CODE_NATIVE_CAPABILITIES: readonly string[] = [
   "web_fetch",
   "web_search",
 ];
-// The pinned tool catalog's groups that contain one of those capabilities.
+// The pinned catalog's groups holding one of them (buildCoreToolGroupMap): group:openclaw
+// holds only the tools flagged includeInOpenClawGroup, so web_fetch and web_search.
 const CLAUDE_CODE_NATIVE_GROUPS: Readonly<Record<string, readonly string[]>> = {
   "group:fs": ["read", "write", "edit"],
   "group:web": ["web_fetch", "web_search"],
-  "group:openclaw": CLAUDE_CODE_NATIVE_CAPABILITIES,
+  "group:openclaw": ["web_fetch", "web_search"],
 };
-// Built-in profiles narrower than `full` (see openclaw-tool-denial.ts).
-const RESTRICTIVE_TOOL_PROFILES: ReadonlySet<string> = new Set(["minimal", "coding", "messaging"]);
+// The pinned built-in profiles that allow none of them; coding and full allow all five, and an
+// unknown profile adds no profile step.
+const NATIVE_FREE_TOOL_PROFILES: ReadonlySet<string> = new Set(["minimal", "messaging"]);
+const CLAUDE_CODE_TOOL_POLICY_REFUSAL =
+  "restricts Claude Code's native file or web tools, which the Claude Code agent runtime ignores: remove the restriction or use the default agent runtime";
 
-/** The native capabilities a tool policy list names: by `*` glob, name, or catalog group. */
+/** The native capabilities a tool policy list names: by name, `*` glob, or catalog group. */
 function nativeCapabilitiesNamed(list: unknown): Set<string> {
   const named = new Set<string>();
   for (const value of Array.isArray(list) ? list : []) {
@@ -87,45 +93,29 @@ function nativeCapabilitiesNamed(list: unknown): Set<string> {
     const group = CLAUDE_CODE_NATIVE_GROUPS[entry];
     if (group !== undefined) {
       group.forEach((capability) => named.add(capability));
-      continue;
+    } else if (!entry.includes("*")) {
+      if (CLAUDE_CODE_NATIVE_CAPABILITIES.includes(entry)) {
+        named.add(entry);
+      }
+    } else {
+      const pattern = new RegExp(
+        `^${entry.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`,
+      );
+      CLAUDE_CODE_NATIVE_CAPABILITIES.filter((capability) => pattern.test(capability)).forEach(
+        (capability) => named.add(capability),
+      );
     }
-    const pattern = new RegExp(
-      `^${entry.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`,
-    );
-    CLAUDE_CODE_NATIVE_CAPABILITIES.filter((capability) => pattern.test(capability)).forEach(
-      (capability) => named.add(capability),
-    );
   }
   return named;
 }
 
-/**
- * The setting (relative to its `tools` object) of the first restriction that would reach one
- * of Claude Code's native capabilities, or undefined: a deny list naming one, a nonempty
- * allowlist that leaves one out, or a built-in profile narrower than `full` whose `alsoAllow`
- * does not add every one back.
- */
-function unenforceableNativeRestriction(policy: unknown): string | undefined {
-  const tools = asRecord(policy);
-  if (tools === undefined) {
-    return undefined;
-  }
-  if (nativeCapabilitiesNamed(tools.deny).size > 0) {
-    return "deny";
-  }
-  const covers = (list: unknown) =>
-    nativeCapabilitiesNamed(list).size === CLAUDE_CODE_NATIVE_CAPABILITIES.length;
-  if (Array.isArray(tools.allow) && tools.allow.length > 0 && !covers(tools.allow)) {
-    return "allow";
-  }
-  if (
-    typeof tools.profile === "string" &&
-    RESTRICTIVE_TOOL_PROFILES.has(tools.profile.trim().toLowerCase()) &&
-    !covers(tools.alsoAllow)
-  ) {
-    return "profile";
-  }
-  return undefined;
+const namesEveryNativeCapability = (list: unknown): boolean =>
+  nativeCapabilitiesNamed(list).size === CLAUDE_CODE_NATIVE_CAPABILITIES.length;
+
+/** A `tools` object or one of its `byProvider` entries, with the setting path that names it. */
+interface ToolPolicyScope {
+  readonly tools: Readonly<Record<string, unknown>> | undefined;
+  readonly path: string;
 }
 
 /**
@@ -136,40 +126,89 @@ export class ClaudeCodeToolPolicyError extends ConfigurationHarnessError {}
 
 /**
  * Refuses a Claude Code Configuration whose tool policy would restrict a native capability the
- * runtime cannot restrict, so an Agent never runs with a policy it silently ignores. Checks
- * top-level `tools`, each `agents.entries` entry's `tools`, and their `byProvider` objects for
- * the anthropic provider (every Claude Code model is `anthropic/*`). Deny lists naming only
- * OpenClaw tools, such as `exec` and `process`, stay valid.
+ * runtime cannot restrict, so an Agent never runs with a policy it silently ignores. Deny lists
+ * naming only OpenClaw tools, such as `exec` and `process`, stay valid.
+ *
+ * The pinned pipeline (resolveEffectiveToolPolicy) applies each deny and allow list as its own
+ * step: top-level `tools`, its `byProvider` entry, and the same two of the Agent's
+ * `agents.entries` entry. A deny list naming a native capability, or a nonempty allowlist that
+ * leaves one out, is refused. The profile step takes the entry's `profile` and `alsoAllow`, each
+ * falling back to the top-level one (and likewise for the `byProvider` profile step), so it is
+ * resolved per entry, or once without a roster: `minimal` or `messaging` is refused unless that
+ * `alsoAllow` adds every native capability back. Every `byProvider` key for `anthropic` or an
+ * `anthropic/<model>` counts, selected or not, because admission cannot know which one the
+ * Gateway's model normalization picks (as in openclaw-tool-denial.ts). Sandbox tool policy is
+ * not checked.
  */
 function requireEnforceableClaudeCodeToolPolicy(
   values: Readonly<OpenClawConfigurationDocument>,
 ): void {
-  const refusal = (path: string) =>
-    `Configuration setting ${path} restricts Claude Code's native file or web tools (read, write, edit, web_fetch, web_search), which the Claude Code agent runtime cannot enforce: remove that restriction or use the default agent runtime.`;
-  const check = (policy: unknown, message: (setting: string) => string) => {
-    const tools = asRecord(policy);
-    const setting = unenforceableNativeRestriction(tools);
-    if (setting !== undefined) {
-      throw new ClaudeCodeToolPolicyError(message(setting));
+  const refuse = (setting: string): never => {
+    throw new ClaudeCodeToolPolicyError(
+      configurationSettingMessage(setting, CLAUDE_CODE_TOOL_POLICY_REFUSAL),
+    );
+  };
+  const anthropicScopes = (scope: ToolPolicyScope): ToolPolicyScope[] =>
+    Object.entries(asRecord(scope.tools?.byProvider) ?? {})
+      .filter(([key]) => {
+        const provider = key.trim().toLowerCase();
+        return provider === "anthropic" || provider.startsWith("anthropic/");
+      })
+      .map(([key, value]) => ({
+        tools: asRecord(value),
+        path: keyedSettingPath(`${scope.path}.byProvider`, key),
+      }));
+  const listSteps = (scope: ToolPolicyScope) => {
+    if (nativeCapabilitiesNamed(scope.tools?.deny).size > 0) {
+      refuse(`${scope.path}.deny`);
     }
-    for (const [key, value] of Object.entries(asRecord(tools?.byProvider) ?? {})) {
-      const provider = key.trim().toLowerCase();
-      if (provider !== "anthropic" && !provider.startsWith("anthropic/")) {
-        continue;
-      }
-      const providerSetting = unenforceableNativeRestriction(value);
-      if (providerSetting !== undefined) {
-        throw new ClaudeCodeToolPolicyError(
-          message(`${keyedSettingPath("byProvider", key)}.${providerSetting}`),
-        );
+    const allow = scope.tools?.allow;
+    if (Array.isArray(allow) && allow.length > 0 && !namesEveryNativeCapability(allow)) {
+      refuse(`${scope.path}.allow`);
+    }
+  };
+  const profileStep = (
+    entry: ToolPolicyScope | undefined,
+    fallback: ToolPolicyScope | undefined,
+  ) => {
+    const owner = typeof entry?.tools?.profile === "string" ? entry : fallback;
+    const profile = owner?.tools?.profile;
+    if (
+      typeof profile === "string" &&
+      NATIVE_FREE_TOOL_PROFILES.has(profile.trim().toLowerCase()) &&
+      !namesEveryNativeCapability(entry?.tools?.alsoAllow ?? fallback?.tools?.alsoAllow)
+    ) {
+      refuse(`${owner!.path}.profile`);
+    }
+  };
+  const providerProfileSteps = (
+    entries: readonly ToolPolicyScope[],
+    fallbacks: readonly ToolPolicyScope[],
+  ) => {
+    for (const entry of entries.length > 0 ? entries : [undefined]) {
+      for (const fallback of fallbacks.length > 0 ? fallbacks : [undefined]) {
+        profileStep(entry, fallback);
       }
     }
   };
-  check(values.tools, (setting) => refusal(`tools.${setting}`));
-  for (const [key, entry] of Object.entries(asRecord(asRecord(values.agents)?.entries) ?? {})) {
-    check(asRecord(entry)?.tools, (setting) =>
-      agentEntryMessage(key, (path) => refusal(`${path}.tools.${setting}`)),
-    );
+
+  const global: ToolPolicyScope = { tools: asRecord(values.tools), path: "tools" };
+  const globalProviders = anthropicScopes(global);
+  [global, ...globalProviders].forEach(listSteps);
+  const roster = Object.entries(asRecord(asRecord(values.agents)?.entries) ?? {});
+  if (roster.length === 0) {
+    profileStep(undefined, global);
+    providerProfileSteps([], globalProviders);
+  }
+  for (const [key, value] of roster) {
+    const entry: ToolPolicyScope = {
+      tools: asRecord(asRecord(value)?.tools),
+      path: `${keyedSettingPath("agents.entries", key)}.tools`,
+    };
+    const entryProviders = anthropicScopes(entry);
+    [entry, ...entryProviders].forEach(listSteps);
+    profileStep(entry, global);
+    providerProfileSteps(entryProviders, globalProviders);
   }
 }
 

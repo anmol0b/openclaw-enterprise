@@ -1209,8 +1209,9 @@ test("a Claude Code Configuration refuses tool policy its native tools would ign
   });
   const refusal = (path) =>
     new ConfigurationHarnessError(
-      `Configuration setting ${path} restricts Claude Code's native file or web tools (read, write, edit, web_fetch, web_search), which the Claude Code agent runtime cannot enforce: remove that restriction or use the default agent runtime.`,
+      `Configuration setting ${path} restricts Claude Code's native file or web tools, which the Claude Code agent runtime ignores: remove the restriction or use the default agent runtime.`,
     );
+  const natives = ["group:fs", "group:web"];
   for (const [tools, path] of [
     [{ deny: ["write"] }, "tools.deny"],
     [{ deny: ["exec", "Edit"] }, "tools.deny"],
@@ -1220,9 +1221,12 @@ test("a Claude Code Configuration refuses tool policy its native tools would ign
     [{ deny: ["group:web"] }, "tools.deny"],
     [{ deny: ["group:openclaw"] }, "tools.deny"],
     [{ allow: ["exec", "read"] }, "tools.allow"],
-    [{ profile: "coding" }, "tools.profile"],
-    [{ profile: "minimal", alsoAllow: ["group:fs"] }, "tools.profile"],
+    // group:openclaw holds web_fetch and web_search only, not the file tools.
+    [{ allow: ["group:openclaw"] }, "tools.allow"],
+    [{ profile: "minimal" }, "tools.profile"],
+    [{ profile: "messaging", alsoAllow: ["group:fs"] }, "tools.profile"],
     [{ byProvider: { anthropic: { deny: ["read"] } } }, "tools.byProvider.anthropic.deny"],
+    [{ byProvider: { Anthropic: { profile: "minimal" } } }, "tools.byProvider.Anthropic.profile"],
     [
       { byProvider: { "anthropic/claude-sonnet-4-5": { allow: ["read"] } } },
       'tools.byProvider["anthropic/claude-sonnet-4-5"].allow',
@@ -1230,23 +1234,52 @@ test("a Claude Code Configuration refuses tool policy its native tools would ign
   ]) {
     assert.throws(() => resolveConfiguredAgentRuntimeId(claudeCode({ tools })), refusal(path));
   }
-  assert.throws(
-    () => resolveConfiguredAgentRuntimeId(claudeCode({}, { ops: { tools: { deny: ["write"] } } })),
-    refusal("agents.entries.ops.tools.deny"),
-  );
-  for (const tools of [
-    { deny: ["exec", "process"] },
-    { deny: ["bash", "sessions_*", "group:runtime"] },
-    { allow: ["*"] },
-    { allow: [] },
-    { allow: ["group:fs", "group:web", "exec"] },
-    { profile: "full" },
-    { profile: "coding", alsoAllow: ["group:fs", "web_fetch", "web_search"] },
-    { alsoAllow: ["exec"] },
-    { byProvider: { openai: { deny: ["write"] } } },
+  for (const [tools, entries, path] of [
+    [{}, { ops: { tools: { deny: ["write"] } } }, "agents.entries.ops.tools.deny"],
+    // The entry's profile and alsoAllow each fall back to the top-level one.
+    [{}, { ops: { tools: { profile: "minimal" } } }, "agents.entries.ops.tools.profile"],
+    [
+      { profile: "minimal", alsoAllow: natives },
+      { ops: { tools: { alsoAllow: ["exec"] } } },
+      "tools.profile",
+    ],
+    [
+      { byProvider: { anthropic: { profile: "minimal" } } },
+      { ops: {} },
+      "tools.byProvider.anthropic.profile",
+    ],
   ]) {
-    assert.equal(resolveConfiguredAgentRuntimeId(claudeCode({ tools })), "claude-cli");
+    assert.throws(
+      () => resolveConfiguredAgentRuntimeId(claudeCode({ tools }, entries)),
+      refusal(path),
+    );
   }
+  for (const [tools, entries] of [
+    [{ deny: ["exec", "process"] }, undefined],
+    [{ deny: ["bash", "sessions_*", "group:runtime"] }, undefined],
+    [{ allow: ["*"] }, undefined],
+    [{ allow: [] }, undefined],
+    [{ allow: ["group:fs", "group:web", "exec"] }, undefined],
+    [{ profile: "full" }, undefined],
+    [{ profile: "coding" }, undefined],
+    [{ profile: "minimal", alsoAllow: [...natives, "exec"] }, undefined],
+    [{ alsoAllow: ["exec"] }, undefined],
+    [{ byProvider: { openai: { deny: ["write"] } } }, undefined],
+    [{ profile: "minimal" }, { ops: { tools: { profile: "full" } } }],
+    [{ profile: "minimal" }, { ops: { tools: { alsoAllow: natives } } }],
+  ]) {
+    assert.equal(resolveConfiguredAgentRuntimeId(claudeCode({ tools }, entries)), "claude-cli");
+  }
+  // A long byProvider key is cut so the refusal stays within the error contract's cap.
+  const key = `anthropic/${"m".repeat(300)}`;
+  assert.throws(
+    () =>
+      resolveConfiguredAgentRuntimeId(
+        claudeCode({ tools: { byProvider: { [key]: { deny: ["read"] } } } }),
+      ),
+    (error) =>
+      error instanceof ConfigurationHarnessError && Array.from(error.message).length <= 256,
+  );
   // The default runtime enforces the same policy itself.
   assert.equal(
     resolveConfiguredAgentRuntimeId({
