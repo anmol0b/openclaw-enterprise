@@ -680,7 +680,8 @@ export const agentRevisions = occSchema.table(
         AND jsonb_typeof(${table.admittedSpec}->'egress_plan'->'routes') = 'array',
         false)`,
     ),
-    // Migration 0058 installs this NOT VALID to preserve old, unreadable history.
+    // Migration 0058 installs this NOT VALID; 0066 records the unprotected decision on
+    // revisions admitted before it existed and validates every stored row.
     check(
       "agent_revisions_execution_admission",
       sql`COALESCE(
