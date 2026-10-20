@@ -56,11 +56,21 @@ graph TD
 
 `packages/occ/src/index.ts:OpenClawController.deployAgent`
 
-OCC locks the authorized Agent and Configuration, resolves `agentRuntime.id`,
+OCC locks the authorized Agent and Configuration, resolves `agentRuntime.id`
+(`packages/occ/src/configured-harness.ts:resolveConfiguredAgentRuntimeId`),
 and validates primary/fallback routes and Harness modes. Fallbacks preserve native order,
 primary provider and Harness. Only unambiguous built-in configuration defaults
-to embedded OpenClaw. Missing/ambiguous policies, unsupported IDs and incompatible
-modes fail closed.
+to embedded OpenClaw. The `claude-cli` runtime (Claude Code) is accepted on
+`anthropic/*` models only and maps to the `openclaw` Harness
+(`harnessIdForAgentRuntime`); Kubernetes Compute's `validateHarnessAuth` then
+refuses it outside embedded execution, and its `harnessAuthEnvironment` adds
+`OPENCLAW_HARNESS_AGENT_RUNTIME=claude-cli` to the gateway. The gateway
+entrypoint (`runtime-entrypoints.ts:CLAUDE_CODE_RUNTIME_HELPERS`) runs the
+normal model probe first, then checks the image's pinned `claude` binary and
+writes the Pod-local `$HOME/.claude/settings.json` (endpoint, credential,
+hardening) that OpenClaw's `claude-cli` backend lets the binary read; a failure
+holds the gateway with `UNAVAILABLE` under startup phase `claude-code-runtime`.
+Missing/ambiguous policies, unsupported IDs and incompatible modes fail closed.
 Compute's `apps/controller/src/drivers/compute/native-gateway-transport.ts:validatePlaintextNativeGateway`
 rejects `gateway.tls.enabled: true` before version creation and preparation:
 Docker, SSH and Kubernetes require native HTTP.
@@ -296,6 +306,8 @@ owns claim sizes, mount paths, StorageClass requirements, and final teardown.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-20 10:30: Admit the Claude Code agent runtime (`claude-cli`) for embedded OpenClaw and prepare its Pod-local configuration after the model probe. (feat/claude-code-harness)
 
 - 2026-10-16 17:02: Persist worktrees and Git sources. (Codex/01a13654-be66-7741-b54f-f8ae80f2d496 - 68b95a2514f183b194a478e72d734b719bf4c2e8)
 

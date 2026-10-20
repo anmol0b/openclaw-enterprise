@@ -113,6 +113,7 @@ import {
   ComputeGatewaySettingError,
   ConfigurationHarnessError,
   configurationSettingMessage,
+  CLAUDE_CLI_AGENT_RUNTIME_ID,
   CredentialWithdrawalRefusedError,
   DEDICATED_OPENCLAW_SANDBOX_REQUIRED,
   DependencyUnavailableError,
@@ -121,6 +122,7 @@ import {
   provisionsDedicatedOpenClaw,
   requireOpenClawRoster,
   resolveConfiguredHarnessId,
+  selectsClaudeCodeRuntime,
   ResourceConflictError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsForbiddenByClusterError,
@@ -3925,6 +3927,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
         : [value?.primary, ...(Array.isArray(value?.fallbacks) ? value.fallbacks : [])];
     });
     const authentication = harnessModelAuthentication(configuration);
+    // Claude Code runs as a child of the embedded Gateway process. The dedicated OpenClaw
+    // worker does not spawn it, and the Harness binary is only on the Gateway image path. This
+    // precedes the provider rules so the refusal names the setting the caller changes.
+    if (selectsClaudeCodeRuntime(configuration) && !embedded) {
+      throw callerSettingError(
+        "agents.defaults.models",
+        "selects the Claude Code agent runtime, which runs only under embedded OpenClaw: set the Agent's executionMode to embedded",
+      );
+    }
     // Every model selection (fallbacks, subagents, image, PDF, per-channel, ...) and every Agent
     // entry uses the primary model's provider, named by the setting (finding 1291). Dedicated
     // Codex qualifies model policy selectors, so it refuses every bare one, a little more than
@@ -13754,6 +13765,12 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
                 name: "OPENCLAW_HARNESS_PROBE_CONFIG",
                 value: JSON.stringify(harnessProbeConfiguration(revision.configuration)),
               },
+              // The Gateway entrypoint prepares the Claude Code configuration directory
+              // from this, after the model probe; the probe itself stays on OpenClaw's
+              // HTTP client (harnessProbeConfiguration pins agentRuntime to openclaw).
+              ...(selectsClaudeCodeRuntime(revision.configuration)
+                ? [{ name: "OPENCLAW_HARNESS_AGENT_RUNTIME", value: CLAUDE_CLI_AGENT_RUNTIME_ID }]
+                : []),
             ]
           : []),
       ],

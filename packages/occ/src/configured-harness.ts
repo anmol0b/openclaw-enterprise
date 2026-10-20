@@ -7,13 +7,59 @@ import { asRecord, isNonEmptyString, splitModelRef } from "@openclaw-enterprise/
 import { agentEntryMessage, ConfigurationHarnessError, modelProviderMessage } from "./errors.ts";
 import { providerModelsListError } from "./model-provider-settings.ts";
 
+/**
+ * OpenClaw's Claude Code CLI backend. It is a model-scoped agent runtime of the embedded
+ * OpenClaw Harness, not a Harness of its own: the Gateway process spawns the Claude Code
+ * binary for each turn. Upstream calls it `claude-cli`.
+ */
+export const CLAUDE_CLI_AGENT_RUNTIME_ID = "claude-cli";
+
+const SUPPORTED_AGENT_RUNTIME_IDS: ReadonlySet<string> = new Set([
+  "openclaw",
+  "codex",
+  CLAUDE_CLI_AGENT_RUNTIME_ID,
+]);
+
+/** The Harness that executes a configured agent runtime. */
+export function harnessIdForAgentRuntime(agentRuntimeId: string): string {
+  return agentRuntimeId === CLAUDE_CLI_AGENT_RUNTIME_ID ? "openclaw" : agentRuntimeId;
+}
+
+/**
+ * Whether any model policy in the document names the Claude Code agent runtime. A lenient
+ * read for Compute, which renders an already admitted document: resolveConfiguredAgentRuntimeId
+ * has refused a document whose policies conflict or name another provider, so one such policy
+ * means the Gateway spawns Claude Code.
+ */
+export function selectsClaudeCodeRuntime(values: Readonly<OpenClawConfigurationDocument>): boolean {
+  const namesClaudeCode = (policy: unknown): boolean =>
+    asRecord(asRecord(policy)?.agentRuntime)?.id === CLAUDE_CLI_AGENT_RUNTIME_ID;
+  const modelPolicies = (host: unknown): unknown[] =>
+    Object.values(asRecord(asRecord(host)?.models) ?? {});
+  const agents = asRecord(values.agents);
+  const providers = Object.values(asRecord(asRecord(values.models)?.providers) ?? {});
+  return [
+    ...modelPolicies(agents?.defaults),
+    ...Object.values(asRecord(agents?.entries) ?? {}).flatMap(modelPolicies),
+    ...providers,
+    ...providers.flatMap((provider) => {
+      const rows = asRecord(provider)?.models;
+      return Array.isArray(rows) ? rows : [];
+    }),
+  ].some(namesClaudeCode);
+}
+
 function configuredRuntime(value: unknown): string | undefined {
   const runtimeValue = asRecord(value)?.agentRuntime;
   if (runtimeValue === undefined) {
     return undefined;
   }
   const runtime = asRecord(runtimeValue);
-  if (runtime === undefined || (runtime.id !== "openclaw" && runtime.id !== "codex")) {
+  if (
+    runtime === undefined ||
+    typeof runtime.id !== "string" ||
+    !SUPPORTED_AGENT_RUNTIME_IDS.has(runtime.id)
+  ) {
     throw new ConfigurationHarnessError(
       "The configured model Harness runtime identity is unsupported.",
     );
@@ -256,6 +302,17 @@ export function requireAgentsShape(values: Readonly<OpenClawConfigurationDocumen
 export function resolveConfiguredHarnessId(
   values: Readonly<OpenClawConfigurationDocument>,
 ): string {
+  return harnessIdForAgentRuntime(resolveConfiguredAgentRuntimeId(values));
+}
+
+/**
+ * The agent runtime every candidate selects: `openclaw`, `codex`, or `claude-cli` (Claude Code
+ * executing under the embedded OpenClaw Harness). resolveConfiguredHarnessId maps it to the
+ * Harness; Compute reads it to prepare the runtime the Gateway spawns.
+ */
+export function resolveConfiguredAgentRuntimeId(
+  values: Readonly<OpenClawConfigurationDocument>,
+): string {
   // Shape refusals come first.
   requireAgentsShape(values);
   const agents = asRecord(values.agents);
@@ -414,6 +471,13 @@ export function resolveConfiguredHarnessId(
     ) {
       throw new ConfigurationHarnessError(
         "The Codex Harness requires the native codex model provider.",
+      );
+    }
+    // Upstream routes `anthropic/<model>` through its Claude Code CLI backend; any other
+    // provider has no such backend, so the policy would select a runtime that cannot run.
+    if (selected === CLAUDE_CLI_AGENT_RUNTIME_ID && providerId !== "anthropic") {
+      throw new ConfigurationHarnessError(
+        "The Claude Code agent runtime requires the native anthropic model provider.",
       );
     }
     return selected ?? "openclaw";

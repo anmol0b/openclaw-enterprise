@@ -19,6 +19,9 @@ import {
   PINNED_OPENCLAW_RUNTIME_SUPPORTS_NATIVE_WORKERS,
   ResourceStateConflictError,
   ScopeViolationError,
+  harnessIdForAgentRuntime,
+  resolveConfiguredAgentRuntimeId,
+  selectsClaudeCodeRuntime,
   resolveConfiguredHarnessId,
 } from "../../packages/occ/src/index.ts";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
@@ -1129,6 +1132,92 @@ test("an unambiguous built-in model defaults to embedded OpenClaw", () => {
     resolveConfiguredHarnessId({ agents: { defaults: { model: "anthropic/claude" } } }),
     "openclaw",
   );
+});
+
+test("the Claude Code agent runtime resolves to the OpenClaw Harness on anthropic models only", () => {
+  const claudeCode = (model, policyHost = "defaults") => ({
+    agents: {
+      defaults:
+        policyHost === "defaults"
+          ? { model, models: { [model]: { agentRuntime: { id: "claude-cli" } } } }
+          : { model },
+    },
+    ...(policyHost === "provider"
+      ? { models: { providers: { anthropic: { agentRuntime: { id: "claude-cli" } } } } }
+      : {}),
+  });
+  for (const values of [
+    claudeCode("anthropic/claude-sonnet-4-5"),
+    claudeCode("anthropic/claude-sonnet-4-5", "provider"),
+    {
+      agents: {
+        defaults: {
+          model: { primary: "anthropic/claude-a", fallbacks: ["anthropic/claude-b"] },
+          models: {
+            "anthropic/claude-a": { agentRuntime: { id: "claude-cli" } },
+            "anthropic/claude-b": { agentRuntime: { id: "claude-cli" } },
+          },
+        },
+      },
+    },
+  ]) {
+    assert.equal(resolveConfiguredAgentRuntimeId(values), "claude-cli");
+    assert.equal(resolveConfiguredHarnessId(values), "openclaw");
+  }
+  assert.equal(
+    resolveConfiguredAgentRuntimeId({ agents: { defaults: { model: "anthropic/claude" } } }),
+    "openclaw",
+  );
+  assert.equal(harnessIdForAgentRuntime("claude-cli"), "openclaw");
+  assert.equal(harnessIdForAgentRuntime("codex"), "codex");
+  // Only the Anthropic plugin has a Claude Code backend; another provider's policy would
+  // select a runtime that cannot execute the model.
+  for (const model of ["openai/gpt-5", "codex/gpt-5", "custom/model"]) {
+    assert.throws(
+      () => resolveConfiguredHarnessId(claudeCode(model)),
+      new ConfigurationHarnessError(
+        "The Claude Code agent runtime requires the native anthropic model provider.",
+      ),
+    );
+  }
+  // A fallback that keeps the provider but drops the policy is still a conflicting selection.
+  assert.throws(
+    () =>
+      resolveConfiguredHarnessId({
+        agents: {
+          defaults: {
+            model: { primary: "anthropic/claude-a", fallbacks: ["anthropic/claude-b"] },
+            models: { "anthropic/claude-a": { agentRuntime: { id: "claude-cli" } } },
+          },
+        },
+      }),
+    ScopeViolationError,
+  );
+});
+
+test("Compute recognises a Claude Code selection without resolving the model policy", () => {
+  // The lenient scan runs before validation, so partial or conflicting documents still answer.
+  for (const values of [
+    { agents: { defaults: { models: { "anthropic/x": { agentRuntime: { id: "claude-cli" } } } } } },
+    {
+      agents: {
+        entries: { ops: { models: { "anthropic/x": { agentRuntime: { id: "claude-cli" } } } } },
+      },
+    },
+    { models: { providers: { anthropic: { agentRuntime: { id: "claude-cli" } } } } },
+    { models: { providers: { anthropic: { models: [{ agentRuntime: { id: "claude-cli" } }] } } } },
+  ]) {
+    assert.equal(selectsClaudeCodeRuntime(values), true);
+  }
+  for (const values of [
+    {},
+    { agents: { defaults: { model: "anthropic/claude" } } },
+    { agents: { defaults: { models: { "anthropic/x": { agentRuntime: { id: "codex" } } } } } },
+    { agents: { defaults: { models: { "anthropic/x": { agentRuntime: "claude-cli" } } } } },
+    { models: { providers: { anthropic: { models: { agentRuntime: { id: "claude-cli" } } } } } },
+  ]) {
+    assert.equal(selectsClaudeCodeRuntime(values), false);
+  }
 });
 
 test("ambiguous and plugin-routed models require supported explicit native policy", () => {
