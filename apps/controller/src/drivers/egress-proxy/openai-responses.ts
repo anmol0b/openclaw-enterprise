@@ -310,14 +310,55 @@ const outputItem: Validator = (value) =>
 const usage = object(
   { input_tokens: integer, output_tokens: integer, total_tokens: integer },
   {
-    input_tokens_details: optionalFields({ cached_tokens: integer }),
+    input_tokens_details: optionalFields({ cached_tokens: integer, cache_write_tokens: integer }),
     output_tokens_details: optionalFields({ reasoning_tokens: integer }),
   },
 );
 const error = object(
   { message: text },
-  { code: nullable(text), type: text, param: nullable(text) },
+  {
+    code: nullable(text),
+    type: nullable(text),
+    param: nullable(text),
+    misalignment: nullable(
+      optionalFields({
+        detailed_explanation: nullable(text),
+        error_type: nullable(text),
+        review_target: nullable(text),
+        steer: nullable(object({ message: text })),
+      }),
+    ),
+  },
 );
+const cacheDiagnostics: Validator = (value) =>
+  object(
+    {
+      type: oneOf("cache_miss"),
+      cache_missed_tokens: integer,
+      reason: oneOf(
+        "model_changed",
+        "prompt_cache_key_changed",
+        "tools_changed",
+        "text_format_changed",
+        "reasoning_effort_changed",
+        "verbosity_changed",
+        "context_compacted",
+        "input_changed",
+        "service_tier_changed",
+      ),
+    },
+    { comparison_reusable_tokens: nullable(integer) },
+  )(value) ||
+  object({ type: oneOf("cache_hit", "comparison_response_not_found", "unavailable") })(value);
+// The response envelope stays closed: every field the provider may return is declared
+// with its type, and an undeclared field refuses the whole response. The declared set
+// is the `Response` model of openai-python src/openai/types/responses/response.py at
+// 0f73f1d519f8719b226e9084d78c8bdb4a60e48f (2026-10-12), restricted to what the admitted
+// request above can produce. Fields that would describe provider-side state or features
+// the request cannot ask for (stored conversations, prior responses, prompt templates,
+// moderation, background execution) must echo their empty value. `billing` is not in that
+// model but is returned by the provider alongside the documented fields; it is declared
+// here with its observed shape rather than left to refuse every live response.
 const response = object(
   {
     id: text,
@@ -331,27 +372,54 @@ const response = object(
     model: text,
     usage: nullable(usage),
     error: nullable(error),
-    incomplete_details: nullable(object({ reason: oneOf("max_output_tokens", "content_filter") })),
+    incomplete_details: nullable(
+      optionalFields({
+        reason: nullable(oneOf("max_output_tokens", "max_messages", "content_filter", "steered")),
+      }),
+    ),
     instructions: nullable(text),
     tools,
     tool_choice: toolChoice,
     parallel_tool_calls: bool,
-    reasoning: optionalFields({ effort: nullable(text), summary: nullable(text) }),
+    reasoning: nullable(
+      optionalFields({
+        effort: nullable(text),
+        summary: nullable(text),
+        generate_summary: nullable(text),
+        context: nullable(text),
+        mode: nullable(text),
+      }),
+    ),
     store: bool,
-    background: oneOf(false),
-    service_tier: text,
+    background: nullable(oneOf(false)),
+    service_tier: nullable(text),
     temperature: nullable(number),
     top_p: nullable(number),
+    top_logprobs: nullable(integer),
     max_output_tokens: nullable(integer),
     max_tool_calls: nullable(integer),
-    text: textSettings,
+    text: nullable(textSettings),
     previous_response_id: oneOf(null),
+    conversation: oneOf(null),
+    prompt: oneOf(null),
+    moderation: oneOf(null),
     prompt_cache_key: nullable(text),
     prompt_cache_retention: nullable(text),
+    prompt_cache_options: nullable(
+      object(
+        { mode: oneOf("implicit", "explicit"), ttl: oneOf("30m") },
+        { comparison_response_id: nullable(text) },
+      ),
+    ),
+    prompt_cache_diagnostics: nullable(cacheDiagnostics),
+    access_programs: nullable(
+      object({ cyber: oneOf("standard", "daybreak_blue", "daybreak_red") }),
+    ),
+    billing: object({ payer: name }),
     safety_identifier: nullable(text),
     user: nullable(text),
-    truncation: oneOf("disabled", "auto"),
-    metadata: object({}),
+    truncation: nullable(oneOf("disabled", "auto")),
+    metadata: nullable(object({})),
   },
 );
 
