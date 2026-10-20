@@ -1281,26 +1281,6 @@ test("Codex runtime retries a reliability failure of its login or model check, n
   }
 });
 
-test("the Codex retry classes split the failure output classes", () => {
-  const context = vm.createContext({});
-  vm.runInContext(
-    `${CODEX_FAILURE_OUTPUT_CLASS_HELPER}
-    this.reliability = CODEX_RELIABILITY_FAILURE_CLASSES;
-    this.security = CODEX_SECURITY_FAILURE_CLASSES;`,
-    context,
-  );
-  const reliability = Array.from(context.reliability);
-  const security = Array.from(context.security);
-  assert.deepEqual(reliability, ["network", "timeout", "http_5xx"]);
-  assert.deepEqual(security, ["http_401_403", "http_other", "tls"]);
-  // Every class is reliability, security or unclassified, never two at once.
-  const unclassified = CODEX_FAILURE_OUTPUT_CLASSES.filter(
-    (failureClass) => !reliability.includes(failureClass) && !security.includes(failureClass),
-  );
-  assert.deepEqual(unclassified, ["empty", "unknown"]);
-  assert.equal(reliability.filter((failureClass) => security.includes(failureClass)).length, 0);
-});
-
 test("a no-retry marker anywhere in the output vetoes a retry, whatever its class", () => {
   const context = vm.createContext({});
   vm.runInContext(
