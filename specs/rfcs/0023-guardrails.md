@@ -8,7 +8,7 @@ author: kevinlin-openai
 
 - **ID:** RFC-0023
 - **Created:** 2026-10-19
-- **Last updated:** 2026-10-19
+- **Last updated:** 2026-10-20
 - **RFC PR:** [#2968](https://github.com/openclaw/openclaw-enterprise/pull/2968)
 - **Related:** [shared configuration definitions](0022-driver-configuration-contributions.md), [managed runtime](0021-managed-runtime-mode/index.md)
 
@@ -17,11 +17,16 @@ author: kevinlin-openai
 
 ## Summary
 
-Add an OCC-owned **Guardrail** resource that can deny operations and constrain
-configuration across all Namespaces or one Namespace. A Guardrail grants nothing.
-Operations retain existing IAM permissions, Restrictions, and platform invariants.
-Except for the Installation administrator bypass below, every applicable Guardrail
-must pass; Namespace policy cannot relax a global ceiling.
+Suppose a team may edit its Agents’ network policies, but the only rule it may
+add lets Python reach `api.example.com` on port 443. IAM decides who may edit.
+A configuration ceiling limits what they may save, and the worker checks the
+current ceiling before applying the change. Tightening it does not rewrite a
+running Agent’s policy.
+
+We propose an OCC-owned Guardrail that can limit configuration or deny an
+operation across the Installation or in one Namespace. A Guardrail grants
+nothing. The policy model, who a binding selects, and the administrator
+exemption are open for architecture review.
 
 ## Motivation
 
@@ -168,29 +173,26 @@ resources. Use ordinary IAM bindings for resource-specific grants.
 #### Binding selectors are conditions, not grants
 
 Either kind of entry may have `accessBindings`. Omission matches everyone in
-scope. An empty array is invalid, avoiding accidental confusion between everyone
-and nobody. Entries are ORed; fields within an entry are ANDed.
+scope. Reject an empty array. Match any selector, and every field within it.
 
-A selector accepts a `subjectKind`/`subjectId` pair, a `roleId`, or both. Require
-at least one of those choices. Resolve IDs through the selected IAM authority;
-reject unknown or cross-scope references. Global selectors may reference only
+A selector accepts a `subjectKind`/`subjectId` pair, a `roleId`, or both.
+Use the selected IAM authority to resolve IDs.
+Reject unknown or cross-scope references. Global selectors may reference only
 Installation-wide identities, Groups, or Roles. No binding ID, resource kind,
 or resource ID belongs in a selector.
 
-**Confirmed targeting decision:** inspect all current bindings for the identity or its
-current Groups that belong to this Namespace or the Installation. Match their
-subject/Role fields, regardless of which binding granted this request. A second
-grant cannot evade a matching deny. Consequently, a Role bound to one Agent can
-select its holder for restrictions throughout the Namespace; the binding's
-resource target is deliberately not a Guardrail filter. Restriction removal by
-changing membership is an administrative policy change and must be audited.
+Inspect every binding for the identity or its current Groups in this Namespace
+or Installation, including bindings that did not grant this request. For example,
+a Role bound on Agent A can select its holder for a deny on Agent B in the same
+Namespace. Another grant cannot evade that deny. Audit membership changes that
+remove a restriction.
 
 Unbound configuration ceilings follow the target Namespace. Bound ceilings are
 checked against the requesting actor; non-bypassed Agent deployment and application
 also check the Agent's own ServicePrincipal, applying the union of matching ceilings.
 Shared Configuration saves check the actor; each later Agent use checks its own
 context again. Agents inherit neither their creator's identity nor an administrator's
-bypass. Unbound ceilings cover the Namespace, subject to the administrator bypass.
+bypass.
 
 ### Configuration interface
 
@@ -272,9 +274,8 @@ No Guardrail can enable an unsupported feature or create an IAM grant.
 Network containment reuses the [existing matcher](../../packages/contracts/src/sandbox-policy.ts):
 exact executable paths, its defined DNS wildcard semantics, and complete range
 coverage. JSON Schema alone cannot prove this relationship. `maxAdditions` bounds
-array length; it does not bound the authority of a wildcard entry. Defaults and
-generated transport rules remain separately owned and are not silently described
-as covered by an additions ceiling.
+array length; it does not bound the authority of a wildcard entry. This ceiling
+covers additions only. Driver defaults and generated transport rules remain separate.
 
 <a id="ownership-and-enforcement"></a>
 
@@ -315,20 +316,23 @@ may widen a validated candidate. Repair identity-access-coverage checks too:
 their current assumption that Restrictions affect everyone equally becomes false
 with targeted Guardrails.
 
-**Confirmed first-release boundary:** new decisions and pending effects use current
-policy; tightening does not inspect, change, or terminate running Agents.
-Subsequent operations on existing resources, including configuration saves,
-deployments, and live SandboxPolicy applications, still pass through admission.
-This RFC provides no assessment of whether existing deployed configuration meets
-current Guardrails. Resource inspection, compliance reporting, and automatic
-remediation require separate scope; admission evidence is not current compliance.
+A ceiling governs the next save, deployment, or live policy application. An
+operation denial governs the next authorization decision, even for a running
+Agent. Neither establishes that the Agent’s current configuration meets the ceiling.
 
-Replace the temporary sandbox editing switch with ordinary exact `manage_policy`
-and policy `update` grants plus Guardrail denials. Preserve the startup network
-ceiling as an additional operator-owned bound initially. Fresh bootstrap must
-explicitly deny delegated SandboxPolicy updates until an administrator configures
-the intended policy; removing a deny still grants no permissions. Do not preserve
-a hidden per-Agent exception or present defaults as mutable ceilings.
+For example, the [Credential Proxy proposal](https://github.com/openclaw/openclaw-enterprise/pull/2484)
+checks the Agent’s `operate` permission on the exact CredentialSource twice in
+its exact-dispatch path: before accessing credential material and before
+authorizing a send. Apply current denials at both IAM checks. The Agent does not
+inherit its deployer’s exemption, and a denial cannot recall an authorized send.
+
+Keep the startup network ceiling. On a fresh installation, deny delegated
+SandboxPolicy updates until an administrator sets the intended policy. On an
+existing installation, keep the per-Agent editing switch until cutover can
+preserve the intended access or the administrator explicitly changes it. Retire
+the switch and old write paths together. Recheck pending work under current
+policy; if an earlier apply may have reached the sandbox, establish its outcome
+before issuing another. Removing a deny still grants no permission.
 
 ### API, IAM, and console
 
@@ -367,43 +371,52 @@ constraint, not merely a disabled widget.
 
 ## Delivery and verification
 
-Implementation needs a separate plan after review. No implementation or runtime
-proof is included in this RFC. This single decision document keeps targeting,
-the ceiling interface, and enforcement boundaries together for review.
+Plan implementation after architecture review. Verify through the real API, IAM,
+PostgreSQL, and Agent workflow, then check the final native values and sandbox
+behavior with a qualified runtime. In particular:
 
-Required implementation proof must use real API, IAM and PostgreSQL paths: global
-plus Namespace composition, alternate grants, Group changes, cross-Namespace
-denials, policy-version races, stale previews, safe errors, and zero effects after
-denial. Extend the normal Agent workflow to prove allowed save/deploy/application
-and refused widening, including wildcard/range and removed-parent cases. Prove
-final native values and actual sandbox behavior with a qualified runtime. Include
-policy cleanup and that tightening alone leaves running Agents unchanged. Prove
-administrator repair despite a
-Namespace-read deny, bypassed configuration admission, continued base/startup
-limits, and loss of bypass before queued effects. After tightening a ceiling,
-prove that a subsequent non-bypassed save, deployment, or live application that
-exceeds it is denied. Console changes require rebuilt Storybook, screenshots, and video;
-fixtures do not prove backend enforcement.
+- Save and apply an allowed rule. Refuse a wider host or port range, a missing
+  required parent, or a stale preview. A denial must produce no new effect.
+- Exercise global and Namespace limits, alternate grants, Group changes,
+  cross-Namespace references, policy races, safe errors, and cleanup.
+- Repair a Guardrail despite a Namespace-read deny. Prove base Restrictions and
+  startup limits still bind an administrator. If the original actor loses the
+  exemption while work is queued, proceed only if current policy permits it.
+- Tighten a ceiling: the running Agent stays unchanged; its next non-exempt
+  application outside the ceiling is refused.
+- In the Credential Proxy exact-dispatch path, keep the credential and grant
+  valid. Commit a matching deny between its two checks; the second must issue
+  no send permission, and the provider must receive no request.
+- Cover two Agents with opposite editing settings and the same broadly authorized
+  operator, an old writer, queued work, and an apply whose outcome is unknown.
+
+Verify Console changes in rebuilt Storybook, screenshots, and video. Fixtures
+alone do not establish enforcement.
 
 <a id="alternatives-decisions-and-proof"></a>
 <a id="alternatives-and-open-decisions"></a>
 
 ## Rationale and alternatives
 
-Reusing only Restrictions cannot express configuration containment. Copying the
-whole AWS condition language adds unsupported resource semantics. Arbitrary
-JSON Schema alone handles field values but not network containment. A generic
-Driver configuration registry is unnecessary for these two explicit callers.
-
-The author confirmed matching-binding constraints, a blanket Installation
-administrator bypass, and prospective enforcement. Existing-resource inspection
-and compliance reporting are explicitly deferred.
-The RFC remains Proposed; these choices do not constitute architecture acceptance.
+Existing Restrictions deny operations but cannot constrain configuration values.
+Both kinds of operation denial belong in the selected IAM Driver’s decision.
+Configuration Drivers own value containment; JSON Schema alone cannot establish
+network containment, and neither a general configuration registry nor the AWS
+condition language is needed for the two proposed targets.
 
 ## Unresolved questions
 
-No material design questions remain open in this draft. The proposal still
-requires architecture review; implementation planning is a separate step.
+1. **Where to author operation denials.** Extend Restriction or add Guardrail
+   alongside it? Existing Restrictions can target one resource and still bind
+   Installation administrators. Preserve those semantics under either design.
+2. **Who a binding selects.** Should a Role bound on Agent A select its holder
+   for a rule on Agent B? This draft proposes that Namespace-wide effect.
+3. **When administrators bypass policy.** The proposal exempts ordinary
+   Installation administration as well as recovery. Would a narrower recovery
+   path be sufficient?
+4. **When to remove the editing switch.** A Namespace-wide rule cannot generally
+   preserve opposite per-Agent settings for an operator with the same broad
+   grants. Agree on the cutover before removing that admission check.
 
 ## References
 
@@ -421,6 +434,7 @@ Source baseline: `5f494a0fdf8f36f5b4cdf0a2886987ca49a5248c`.
 
 ## Changelog
 
+- 2026-10-20: Clarified delegated editing, operation denials, and the transition from the per-Agent switch; identified decisions for architecture review.
 - 2026-10-19: Reorganized under the RFC template, with explicit goals, non-goals, architecture, request lifecycle, verification, and rationale.
 - 2026-10-19: Deferred existing-resource inspection and compliance reporting; retained admission enforcement and the administrator bypass.
 - 2026-10-19: Drafted Guardrail scope, binding selectors, configuration ceilings, and admission boundaries from the proposed outline and current contracts.
