@@ -12,11 +12,16 @@ import { GitHubRepoDriver } from "../../apps/controller/src/drivers/repo/github/
 import { OpenShellGateway } from "../../apps/controller/src/backends/openshell.ts";
 import { OpenShellGitRuntime } from "../../apps/controller/src/drivers/egress-proxy/openshell-git-runtime.ts";
 import { OpenShellSandboxDriver } from "../../apps/controller/src/drivers/sandbox/openshell.ts";
+import { reconcileSandboxPolicy } from "../../apps/controller/src/worker/sandbox-policy.ts";
 import { UnixRepositoryCredentialControlClient } from "../../apps/controller/src/backends/repository-credentials/control-client.ts";
 import { validateGitHubRepositoryRegistry } from "../../apps/controller/src/drivers/repo/github/credentials/registry.ts";
 import { InMemoryAuditSink } from "../../packages/audit/src/index.ts";
 import { NativeIAMDriver } from "../../packages/iam/src/index.ts";
-import { InMemoryPlatformState, OpenClawController } from "../../packages/occ/src/index.ts";
+import {
+  InMemoryPlatformState,
+  OpenClawController,
+  SandboxNetworkPolicyConflictError,
+} from "../../packages/occ/src/index.ts";
 import {
   createAuthenticatedControllerRequest,
   createTestAuthPrincipal,
@@ -1305,4 +1310,115 @@ test("OpenShell Git refuses an Agent network grant to the Git hosts at save, bin
   assert.equal(applied.status, 409, JSON.stringify(applied));
   assert.equal(applied.error.message, message);
   assert.equal((await f.request("GET", policyPath(bound))).data.policy.application, undefined);
+});
+
+test("the policy worker fails a Driver's named policy refusal at once", async () => {
+  // Finding 2144's live-application backstop: the OpenShell Driver refuses a Git route bypass
+  // before updating the policy. A retry cannot change that, so the worker fails the application
+  // as unsupported instead of retrying until it reports the outcome unconfirmed.
+  const grant = {
+    id: "git-direct",
+    binary: "/usr/bin/git",
+    host: "github.com",
+    ports: [{ from: 22, to: 22 }],
+  };
+  const application = {
+    id: "application-2144",
+    revisionId: "rev-2144",
+    policyVersion: 2,
+    snapshot: {
+      driverId: "sandbox",
+      implementation: "openshell",
+      version: 2,
+      defaults: {},
+      additions: [grant],
+    },
+    expectedProviderVersion: "1",
+    state: "pending",
+    requestedBy: "principal",
+    requestedAt: new Date().toISOString(),
+  };
+  let policy = {
+    id: "sbp-2144",
+    namespaceId: "ns-2144",
+    agentId: "agt-2144",
+    version: 2,
+    additions: [grant],
+    application,
+  };
+  const outcomes = [];
+  const unit = {
+    namespaces: { lockNamespace: async () => ({ status: "ready" }) },
+    agents: {
+      lockAgent: async () => ({
+        status: "active",
+        desiredRuntimeState: "running",
+        activeRevisionId: application.revisionId,
+      }),
+    },
+    sandboxPolicies: {
+      find: async () => policy,
+      save: async (next) => (policy = next),
+    },
+    revisions: {
+      findRevision: async () => ({
+        id: application.revisionId,
+        sandboxDriverId: "sandbox",
+        executionAdmission: { version: 2, mode: "unprotected" },
+        compute: { id: "compute", implementation: "kubernetes" },
+        repositoryCredentials: {},
+      }),
+    },
+    audit: { append: async () => {} },
+  };
+  const queue = {
+    heartbeat: async (claim) => claim,
+    complete: async () => outcomes.push("complete"),
+    fail: async (_claim, { code }) => outcomes.push(`fail ${code}`),
+    retry: async (_claim, { code }) => outcomes.push(`retry ${code}`),
+  };
+  let applied = 0;
+  const outcome = await reconcileSandboxPolicy(
+    {
+      state: { transactWithQueue: (operation) => operation(unit, queue) },
+      driver: {
+        id: "sandbox",
+        implementation: "openshell",
+        async observeNetworkPolicy() {
+          return { resourceVersion: "1", policyVersion: "1", state: "applied", matches: false };
+        },
+        async applyNetworkPolicy() {
+          applied++;
+          throw new SandboxNetworkPolicyConflictError(
+            "remove network grant git-direct (github.com).",
+          );
+        },
+      },
+      compute: {
+        id: "compute",
+        implementation: "kubernetes",
+        resolveSandboxNamespace: async (namespace) => namespace,
+      },
+      iam: { id: "iam", authorize: async () => ({ allowed: true }) },
+      installationId: "ins-2144",
+      ceiling: [grant],
+      signal: AbortSignal.timeout(5_000),
+      maxAttempts: 5,
+      deadlineMs: 600_000,
+      leaseDurationMs: 30_000,
+    },
+    {
+      idempotencyKey: `agent:${policy.agentId}:reconcile:sandbox_policy:${application.id}`,
+      namespaceId: policy.namespaceId,
+      agentId: policy.agentId,
+      actorId: "principal",
+      attemptCount: 1,
+      ageMs: 0,
+    },
+  );
+  assert.equal(applied, 1);
+  assert.equal(outcome, "permanent");
+  assert.deepEqual(outcomes, ["fail SANDBOX_POLICY_UNSUPPORTED"]);
+  assert.equal(policy.application.state, "failed");
+  assert.equal(policy.application.reason, "SANDBOX_POLICY_UNSUPPORTED");
 });

@@ -141,8 +141,8 @@ constraint and returns a detached snapshot of Driver identity, version, defaults
 and additions. The snapshot is consumed by provisioning; changed startup defaults
 cannot reinterpret an admitted revision. `scope.repositoryCredentials` marks an
 Agent with repository bindings: a Driver that routes repository hosts only through
-its own path refuses a rule that reaches them with a `ResourceStateConflictError`
-naming the rule.
+its own path refuses a rule that reaches them with a
+`SandboxNetworkPolicyConflictError` naming the rule.
 
 `observeNetworkPolicy(context, snapshot)` returns the provider resource version,
 policy version, load state, and whether the complete candidate matches.

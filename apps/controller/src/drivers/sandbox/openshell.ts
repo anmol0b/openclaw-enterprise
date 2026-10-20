@@ -30,10 +30,10 @@ import {
   ConfigurationHarnessError,
   configurationSettingMessage,
   DependencyUnavailableError,
-  ResourceStateConflictError,
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
   SandboxNamespaceRefusedError,
+  SandboxNetworkPolicyConflictError,
   SandboxRevisionUnsupportedError,
   SandboxRepositoryRecipientUnverifiedError,
   SandboxWorkspaceSetupRefusedError,
@@ -3554,16 +3554,17 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     defaults?: SandboxPolicySnapshot["defaults"],
     scope?: { readonly repositoryCredentials?: boolean },
   ): SandboxPolicySnapshot {
-    openShellAgentNetworkRules(additions);
     const rules = defaults ?? networkPolicies(this.options);
-    if (Object.keys(rules).some((name) => name.startsWith(AGENT_POLICY_PREFIX))) {
-      throw new Error("Default policy uses a reserved Agent policy name.");
-    }
+    // First, so the named refusal answers even when another check below would also fail.
     if (scope?.repositoryCredentials === true) {
       const overlap = this.gitRouteOverlap(rules, additions);
       if (overlap !== undefined) {
-        throw new ResourceStateConflictError(gitRouteOverlapMessage(overlap));
+        throw new SandboxNetworkPolicyConflictError(gitRouteOverlapMessage(overlap));
       }
+    }
+    openShellAgentNetworkRules(additions);
+    if (Object.keys(rules).some((name) => name.startsWith(AGENT_POLICY_PREFIX))) {
+      throw new Error("Default policy uses a reserved Agent policy name.");
     }
     return immutableCopy({
       driverId: this.id,
@@ -3684,7 +3685,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         ? undefined
         : this.gitRouteOverlap(input.snapshot.defaults, input.snapshot.additions);
     if (overlap !== undefined) {
-      throw new ResourceStateConflictError(gitRouteOverlapMessage(overlap));
+      throw new SandboxNetworkPolicyConflictError(gitRouteOverlapMessage(overlap));
     }
     const baseline = asRecord(sandbox.spec?.policy);
     if (baseline === undefined) {

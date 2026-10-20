@@ -1648,7 +1648,7 @@ export interface SandboxDriver extends Driver {
   /**
    * `scope.repositoryCredentials` marks a policy for an Agent or revision with repository
    * bindings, which a Driver may route only through its own repository path; it refuses an
-   * overlapping policy with a `ResourceStateConflictError` whose message names the rule.
+   * overlapping policy with a `SandboxNetworkPolicyConflictError` naming the rule.
    */
   admitNetworkPolicy?(
     additions: readonly SandboxNetworkGrant[],

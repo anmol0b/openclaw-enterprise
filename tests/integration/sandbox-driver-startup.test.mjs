@@ -5840,7 +5840,7 @@ tls.connect = (options, ...rest) => {
       assert.throws(
         () => sandboxDriver.admitNetworkPolicy([allowed, direct], 2, undefined, repositoryScope),
         {
-          name: "ResourceStateConflictError",
+          name: "SandboxNetworkPolicyConflictError",
           message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove network grant git-direct (${host}).`,
         },
         host,
@@ -5910,7 +5910,7 @@ tls.connect = (options, ...rest) => {
             operationId: randomUUID(),
           },
         ),
-        { name: "ResourceStateConflictError", message: /remove network grant git-direct/ },
+        { name: "SandboxNetworkPolicyConflictError", message: /remove network grant git-direct/ },
       );
       assert.equal(policyUpdates, 0);
     } finally {

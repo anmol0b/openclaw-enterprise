@@ -235,6 +235,7 @@ import {
   SandboxRepositoryRecipientUnverifiedError,
   ResourceConflictError,
   ResourceStateConflictError,
+  SandboxNetworkPolicyConflictError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsError,
   RuntimeLogsForbiddenByClusterError,
@@ -393,6 +394,7 @@ export {
   SandboxGatewayUnauthorizedError,
   SandboxGatewayUnavailableError,
   SandboxNamespaceRefusedError,
+  SandboxNetworkPolicyConflictError,
   SandboxRevisionUnsupportedError,
   SandboxRepositoryRecipientUnverifiedError,
   SandboxWorkspaceSetupRefusedError,
@@ -7716,7 +7718,7 @@ export class OpenClawController {
       return driver.admitNetworkPolicy(additions, version, defaults, scope);
     } catch (error) {
       // A Driver's named refusal, such as a grant beside its repository route (finding 2144).
-      if (error instanceof ResourceStateConflictError) {
+      if (error instanceof SandboxNetworkPolicyConflictError) {
         throw error;
       }
       throw new ResourceStateConflictError(
@@ -7740,7 +7742,7 @@ export class OpenClawController {
         repositoryCredentials: true,
       });
     } catch (error) {
-      if (error instanceof ResourceStateConflictError) {
+      if (error instanceof SandboxNetworkPolicyConflictError) {
         throw error;
       }
     }

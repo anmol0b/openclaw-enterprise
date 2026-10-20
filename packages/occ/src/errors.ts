@@ -512,6 +512,17 @@ export class ResourceStateConflictError extends ResourceConflictError {
 }
 
 /**
+ * A Sandbox Driver refuses a network policy rule it names, such as a grant beside its
+ * repository route. OCC returns the message; the policy worker fails the application at once.
+ */
+export class SandboxNetworkPolicyConflictError extends ResourceStateConflictError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SandboxNetworkPolicyConflictError";
+  }
+}
+
+/**
  * The Configuration moved past the generation the update named. HTTP marks it with an
  * `/expectedGeneration` detail, so a caller can tell it from other Configuration conflicts,
  * such as one reserved for provisioning, and reread before saving again.
