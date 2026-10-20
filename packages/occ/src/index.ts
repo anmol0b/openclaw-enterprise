@@ -7586,6 +7586,30 @@ export class OpenClawController {
     }
   }
 
+  /**
+   * A protected execution runs under its exact Credential Proxy profile, so Agent network
+   * policy additions can neither be saved for nor applied to its active revision. Refusing
+   * here, before save, is the same rule createRevision and the worker enforce later.
+   */
+  private async refuseProtectedExecutionPolicy(
+    state: PlatformUnitOfWork,
+    namespaceId: string,
+    agent: Readonly<Agent>,
+    refused: "additions" | "application",
+  ): Promise<void> {
+    const revision =
+      agent.activeRevisionId === undefined
+        ? undefined
+        : await state.revisions.findRevision(namespaceId, agent.id, agent.activeRevisionId);
+    if (revision?.executionAdmission.mode === "protected") {
+      throw new ResourceStateConflictError(
+        `This Agent's active revision runs under protected execution: the Credential Proxy routes govern its egress, so network policy ${
+          refused === "additions" ? "additions are refused" : "application is refused"
+        } while that revision is active.`,
+      );
+    }
+  }
+
   async getAgentSandboxPolicy(
     principalId: string,
     namespaceId: string,
@@ -7618,6 +7642,7 @@ export class OpenClawController {
       return {
         policy,
         editingEnabled: agent.sandboxPolicyEditing === true,
+        protectedExecution: revision?.executionAdmission.mode === "protected",
         capability: this.sandboxDriver()?.networkPolicy ?? null,
         ceiling: this.sandboxNetworkPolicyCeiling,
         defaults,
@@ -7726,6 +7751,9 @@ export class OpenClawController {
           "The policy changed or an application is still pending. Reload before editing.",
         );
       }
+      if (additions.length > 0) {
+        await this.refuseProtectedExecutionPolicy(state, namespaceId, agent, "additions");
+      }
       this.admitAgentNetworkPolicy(additions, expectedVersion + 1);
       const updated = await state.sandboxPolicies.save(
         {
@@ -7793,6 +7821,7 @@ export class OpenClawController {
           "Live policy application is unavailable for this revision. Deploy explicitly to apply the saved policy.",
         );
       }
+      await this.refuseProtectedExecutionPolicy(state, namespaceId, agent, "application");
       const snapshot = this.admitAgentNetworkPolicy(
         policy.additions,
         policy.version,

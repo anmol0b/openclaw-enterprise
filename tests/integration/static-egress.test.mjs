@@ -2287,6 +2287,56 @@ test("protected admission refuses an Agent's network policy additions instead of
   assert.deepEqual(revision.sandboxPolicy?.additions ?? [], []);
 });
 
+test("the policy endpoint refuses additions and live application while the active revision is protected", async (t) => {
+  // Fail early: the same rule createRevision and the worker enforce is refused at save and
+  // apply time, with the Credential Proxy named, and the policy view says so up front.
+  const grant = {
+    id: "python-demo",
+    binary: "/usr/bin/python3.11",
+    host: "example.org",
+    ports: [{ from: 443, to: 443 }],
+  };
+  const f = await staticEgressFixture(t, {
+    appFactory: (context, options) =>
+      createConsoleAppFixture(context, { ...options, sandboxNetworkPolicyCeiling: [grant] }),
+  });
+  const base = `/namespaces/${f.namespace.id}/agents/${f.agent.id}/sandbox-policy/networking`;
+  assert.equal(f.revision.executionAdmission.mode, "protected");
+  const enabled = await f.request("PATCH", `${base}/editing`, { body: { enabled: true } });
+  assert.equal(enabled.status, 200, JSON.stringify(enabled.body));
+  const view = await f.request("GET", base);
+  assert.equal(view.status, 200, JSON.stringify(view.body));
+  assert.equal(view.body.data.editingEnabled, true);
+  assert.equal(view.body.data.protectedExecution, true);
+  assert.equal(view.body.data.defaultsRevisionId, f.revision.id);
+  const version = view.body.data.policy.version;
+  const refused = await f.request("PUT", base, {
+    body: { expectedVersion: version, additions: [grant] },
+  });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error.code, "RESOURCE_CONFLICT");
+  assert.match(
+    refused.body.error.message,
+    /protected execution.*Credential Proxy.*additions are refused/,
+  );
+  // Nothing was saved, and an empty policy can still be written.
+  assert.equal((await f.request("GET", base)).body.data.policy.version, version);
+  const cleared = await f.request("PUT", base, {
+    body: { expectedVersion: version, additions: [] },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  assert.equal(cleared.body.data.version, version + 1);
+  const applied = await f.request("POST", `${base}/apply`, {
+    body: { expectedVersion: version + 1, revisionId: f.revision.id },
+  });
+  assert.equal(applied.status, 409, JSON.stringify(applied.body));
+  assert.match(
+    applied.body.error.message,
+    /protected execution.*Credential Proxy.*application is refused/,
+  );
+  assert.equal((await f.request("GET", base)).body.data.policy.application, undefined);
+});
+
 test("an unavailable protected egress provider fails the deployment with an operator message", () => {
   const error = deploymentErrorForWork({
     state: "failed_permanent",

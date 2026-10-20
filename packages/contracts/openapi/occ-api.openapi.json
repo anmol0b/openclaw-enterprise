@@ -22632,9 +22632,17 @@
                           },
                           "required": ["id", "namespaceId", "agentId", "version", "additions"],
                           "type": "object"
-                        }
+                        },
+                        "protectedExecution": { "type": "boolean" }
                       },
-                      "required": ["policy", "editingEnabled", "ceiling", "defaults", "capability"],
+                      "required": [
+                        "policy",
+                        "editingEnabled",
+                        "protectedExecution",
+                        "ceiling",
+                        "defaults",
+                        "capability"
+                      ],
                       "type": "object"
                     },
                     "meta": {

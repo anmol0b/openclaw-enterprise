@@ -1341,6 +1341,7 @@ export function installFixture(scenario, evidence) {
           return response({
             policy: sandboxPolicy,
             editingEnabled: policyEditing,
+            protectedExecution: false,
             ceiling: [policyGrant],
             defaults:
               scenario.policyState === "unsupported"

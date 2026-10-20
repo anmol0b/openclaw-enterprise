@@ -134,6 +134,7 @@ export function renderAgentSandboxPolicy(context, { agent, revisionId }) {
   const current = () => context.isCurrent();
   const editable = () =>
     view?.editingEnabled &&
+    !view.protectedExecution &&
     view.capability &&
     view.policy.application?.state !== "pending" &&
     !editDenied &&
@@ -388,6 +389,15 @@ export function renderAgentSandboxPolicy(context, { agent, revisionId }) {
           ? `Policy v${view.policy.version} · Editing ${view.editingEnabled ? "enabled" : "disabled"}`
           : "This Sandbox Driver does not support per-Agent network policy.",
       ),
+      ...(view.protectedExecution
+        ? [
+            element(
+              "p",
+              { role: "status", className: "sandbox-policy-protected" },
+              "The running version uses protected execution: the Credential Proxy routes govern this Agent's egress, so network policy additions are refused while it is active.",
+            ),
+          ]
+        : []),
       element(
         "p",
         { className: "muted" },

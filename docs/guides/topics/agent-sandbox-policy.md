@@ -40,7 +40,9 @@ access, re-enable editing if needed, remove the addition, and apply or deploy it
 
 If a read fails, retry that read. Manual policy editing remains available when
 logs or recommendations are unavailable. If saving reports a stale version,
-refresh and review the current additions. After a timeout or unconfirmed
+refresh and review the current additions. An Agent whose running version uses
+protected execution (the Credential Proxy) refuses additions and live application
+until a version without it runs; the editor says so. After a timeout or unconfirmed
 application, refresh and inspect the recorded state before another explicit
 request; do not assume the provider rejected the change.
 

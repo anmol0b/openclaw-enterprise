@@ -44,7 +44,10 @@ The solid arrows trace source paths, not a claim that all providers are verified
 `packages/occ/src/index.ts:updateAgentSandboxPolicy` independently authorizes
 Agent `manage_policy` and SandboxPolicy `update`, locks the Namespace and Agent,
 and checks editing, expected version, pending work, complete ceiling coverage,
-and Driver admission. `apps/controller/src/http/sandbox-policy.ts` records the
+and Driver admission. While the active revision runs under protected execution
+(its egress is governed by the Credential Proxy routes), additions and live
+application are refused with `409`; the policy view reports `protectedExecution`.
+`apps/controller/src/http/sandbox-policy.ts` records the
 nonsecret approved additions with their version in the same transaction.
 The required facet argument currently admits `networking` only. Other facets
 fail before network policy access. The temporary

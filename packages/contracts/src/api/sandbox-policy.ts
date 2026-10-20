@@ -65,6 +65,7 @@ export const SandboxPolicyViewResponse = Type.Object(
       {
         policy: SandboxPolicySchema,
         editingEnabled: Type.Boolean(),
+        protectedExecution: Type.Boolean(),
         ceiling: SandboxNetworkGrantsSchema,
         defaults: Type.Union([Type.Null(), Type.Record(Type.String(), Type.Unknown())]),
         defaultsRevisionId: Type.Optional(RevisionId),
