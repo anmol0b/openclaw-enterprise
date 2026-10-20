@@ -380,9 +380,9 @@ test(
           await t.test(`snapshot: ${name}`, async () => {
             await assert.rejects(
               pool.query(
-                `INSERT INTO occ.agent_revisions (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at)
+                `INSERT INTO occ.agent_revisions (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at, gateway_managed_mode)
          SELECT $2, namespace_id, agent_id, 2,
-           jsonb_set(admitted_spec, '{repository_credentials}', $3::jsonb), admitted_at
+           jsonb_set(admitted_spec, '{repository_credentials}', $3::jsonb), admitted_at, gateway_managed_mode
          FROM occ.agent_revisions WHERE id = $1`,
                 [revision.id, `rev_${randomUUID()}`, JSON.stringify(credentials)],
               ),

@@ -1174,7 +1174,7 @@ for (const { authMethod, gatewayManagedMode } of [
   { authMethod: "codex_pat", gatewayManagedMode: false },
 ]) {
   test(
-    `${authMethod} provisioning grants existing Secret access and hands off one revision with the requested Gateway mode`,
+    `${authMethod} provisioning grants existing Secret access and hands off one revision`,
     { ...requiresPostgres, timeout: 60_000 },
     async (context) => {
       let deploymentReady = false;

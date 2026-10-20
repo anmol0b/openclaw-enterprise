@@ -31,6 +31,7 @@ const revisionSummary = (revision) => ({
   backendId: revision.backendId,
   configurationId: revision.configurationId,
   configurationGeneration: revision.configurationGeneration,
+  gatewayManagedMode: revision.gatewayManagedMode,
   harness: revision.harness,
   createdAt: revision.createdAt,
 });
@@ -185,11 +186,13 @@ test(
         name: `first-${randomUUID()}`,
         configurationId: firstConfiguration.id,
         harnessAuth: await createKubernetesHarnessAuth(process, namespace.data.id),
+        gatewayManagedMode: false,
       }),
       request(process, "POST", `/namespaces/${namespace.data.id}/agents`, {
         name: `second-${randomUUID()}`,
         configurationId: secondConfiguration.id,
         harnessAuth: await createKubernetesHarnessAuth(process, namespace.data.id),
+        gatewayManagedMode: false,
       }),
     ]);
     assert.equal(first.status, 201);
@@ -680,6 +683,7 @@ test(
       "configurationId",
       "configurationKind",
       "createdAt",
+      "gatewayManagedMode",
       "harness",
       "harnessAuth",
       "id",

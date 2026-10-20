@@ -8,7 +8,7 @@ import { createPostgresAgentApp } from "../helpers/postgres-agent-app.mjs";
 import { requiresPostgres } from "../helpers/postgres-database.mjs";
 
 test(
-  "Gateway managed mode is persisted at admission and requires Installation administration to change",
+  "an Installation admin controls Gateway managed mode and a deployer applies the saved setting",
   requiresPostgres,
   async (t) => {
     const { controller, inject, pool, state, deployAgent } = await createPostgresAgentApp(t, {
@@ -57,16 +57,15 @@ test(
       agentId: agent.id,
       configurationId: agent.configurationId,
     };
-    const installationAdministrationDenied = {
-      name: "AuthorizationDeniedError",
-      authorization: {
-        action: "administer",
-        resource: { kind: "installation", id: controller.installation.id },
-      },
-    };
     await assert.rejects(
       controller.updateAgent(member.principal.id, { ...agentInput, gatewayManagedMode: false }),
-      installationAdministrationDenied,
+      {
+        name: "AuthorizationDeniedError",
+        authorization: {
+          action: "administer",
+          resource: { kind: "installation", id: controller.installation.id },
+        },
+      },
     );
 
     const agentPath = `/namespaces/${namespace.id}/agents/${agent.id}`;
@@ -78,18 +77,12 @@ test(
     assert.equal(saved.json().data.gatewayManagedMode, false);
     const ordinarySave = await controller.updateAgent(member.principal.id, agentInput);
     assert.equal(ordinarySave.gatewayManagedMode, false);
-    await assert.rejects(
-      controller.deployAgent(
-        member.principal.id,
-        { namespaceId: namespace.id, agentId: agent.id },
-        resolveApprovedHarness,
-      ),
-      installationAdministrationDenied,
+    const admitted = await controller.deployAgent(
+      member.principal.id,
+      { namespaceId: namespace.id, agentId: agent.id },
+      resolveApprovedHarness,
     );
-
-    const admitted = await inject("POST", `${agentPath}/deploy`);
-    assert.equal(admitted.statusCode, 202, admitted.body);
-    assert.equal(admitted.json().data.gatewayManagedMode, false);
+    assert.equal(admitted.gatewayManagedMode, false);
     const persisted = await pool.query(
       `SELECT id, gateway_managed_mode FROM occ.agent_revisions
        WHERE namespace_id = $1 AND agent_id = $2 ORDER BY revision_number`,
@@ -97,7 +90,7 @@ test(
     );
     assert.deepEqual(persisted.rows, [
       { id: revision.id, gateway_managed_mode: true },
-      { id: admitted.json().data.id, gateway_managed_mode: false },
+      { id: admitted.id, gateway_managed_mode: false },
     ]);
   },
 );

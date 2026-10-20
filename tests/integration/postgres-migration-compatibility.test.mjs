@@ -1673,7 +1673,7 @@ test(
                    ON r.namespace_id = a.namespace_id AND r.agent_id = a.id`,
               )
             ).rows,
-            [{ desired: true, admitted: null }],
+            [{ desired: true, admitted: false }],
           );
         }
         await assertUpgradedAuthentication(db);
@@ -1725,12 +1725,12 @@ test(
       loginMode: "chatgptAuthTokens",
     };
     let revisionNumber = 2;
-    const insertSnapshot = (auth) =>
+    const insertSnapshot = (auth, managedModeColumn = "") =>
       db.app.query(
-        `INSERT INTO occ.agent_revisions(id,namespace_id,agent_id,revision_number,admitted_spec,backend_id,admitted_at)
+        `INSERT INTO occ.agent_revisions(id,namespace_id,agent_id,revision_number,admitted_spec,backend_id,admitted_at${managedModeColumn})
          SELECT $2,namespace_id,agent_id,$3,
            jsonb_set(admitted_spec,'{harness_auth}',$4::jsonb) || '{"sandbox_driver_id":"external-sandbox"}'::jsonb,
-           backend_id,now()
+           backend_id,now()${managedModeColumn}
          FROM occ.agent_revisions WHERE namespace_id=$1 AND revision_number=1
          RETURNING admitted_spec->'harness_auth' AS auth`,
         [namespaceId, `rev_${randomUUID()}`, revisionNumber++, JSON.stringify(auth)],
@@ -1791,9 +1791,10 @@ test(
       history: "preCanonicalHarnessAuth",
     });
     await assertCompletedHistory(db, receipts);
-    assert.deepEqual((await insertSnapshot(binding)).rows, [{ auth: binding }]);
+    const insertCurrentSnapshot = (auth) => insertSnapshot(auth, ",gateway_managed_mode");
+    assert.deepEqual((await insertCurrentSnapshot(binding)).rows, [{ auth: binding }]);
     const apiKey = { ...binding, loginMode: "api_key" };
-    assert.deepEqual((await insertSnapshot(apiKey)).rows, [{ auth: apiKey }]);
+    assert.deepEqual((await insertCurrentSnapshot(apiKey)).rows, [{ auth: apiKey }]);
     assert.deepEqual(
       (
         await db.app.query(
@@ -1803,11 +1804,14 @@ test(
       ).rows,
       [{ auth: patBinding }],
     );
-    assert.deepEqual((await insertSnapshot(patBinding)).rows, [{ auth: patBinding }]);
+    assert.deepEqual((await insertCurrentSnapshot(patBinding)).rows, [{ auth: patBinding }]);
     // Only the admitted mode expands: unknown modes and credential payloads remain invalid.
-    await assert.rejects(insertSnapshot({ ...binding, loginMode: "unknown" }), invalidSnapshot);
     await assert.rejects(
-      insertSnapshot({ ...binding, accessTokenPlaceholder: "synthetic-placeholder" }),
+      insertCurrentSnapshot({ ...binding, loginMode: "unknown" }),
+      invalidSnapshot,
+    );
+    await assert.rejects(
+      insertCurrentSnapshot({ ...binding, accessTokenPlaceholder: "synthetic-placeholder" }),
       invalidSnapshot,
     );
   },

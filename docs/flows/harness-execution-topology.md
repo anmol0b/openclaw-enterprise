@@ -1,14 +1,14 @@
 ---
 created: 2026-08-21
 updated: 2026-10-20
-last_updated_session: authoring-run/308cda50-d149-495b-bdaf-0d5a3ced2792
+last_updated_session: Codex/01a1558e-c27f-7bc0-a403-af59e9364ddf
 ---
 
 # Harness Execution Topology Flow
 
 ## Overview
 
-Deployment freezes Gateway administration, Harness policy, placement and authentication. Compute prepares
+Deployment freezes Gateway settings, Harness policy, placement and authentication. Compute prepares
 workloads, publishes guarded routes and retires predecessors before activation audit.
 
 ## Entry Points
@@ -25,9 +25,9 @@ workloads, publishes guarded routes and retires predecessors before activation a
 
 ```mermaid
 graph TD
-  A["Authorize Agent, Configuration and mode change"] --> B["Resolve runtime, placement and native HTTP transport"]
+  A["Authorize Agent and Configuration"] --> B["Resolve runtime, placement and native HTTP transport"]
   B --> C["Freeze configuration, managed mode, Harness identity and authentication"]
-  C --> D["Claim and reauthorize deployment work; stop predecessors when required"]
+  C --> D["Claim and reauthorize version work"]
   D --> E{"Approved topology"}
   E -->|embedded OpenClaw| F["Create gateway or stage replacement"]
   E -->|dedicated Codex| G["Start separate Gateway and Codex Pods in the tenant namespace"]
@@ -35,8 +35,8 @@ graph TD
   Q -->|no| H
   Q -->|yes| R["Start Gateway; SandboxDriver provisions native Harness"]
   E -->|unsupported or mismatched| H["Reject before workload creation"]
-  F --> I["Start or activate embedded Gateway"]
-  I --> K{"Gateway ready?"}
+  F --> I["Activate shared gateway; Recreate on replacement"]
+  I --> K{"Gateway ready after startup authentication?"}
   K -->|no| L["Stay unready; Agent may be unavailable until repair"]
   K -->|yes| J["Complete activation, retire predecessor, and commit audit"]
   G --> N{"Predecessor Gateway can enroll node?"}
@@ -52,7 +52,7 @@ graph TD
 
 ## Execution Trace
 
-### 1. Resolve and freeze Gateway and Harness settings
+### 1. Freeze Gateway and Harness settings
 
 `packages/occ/src/index.ts:OpenClawController.deployAgent`
 
@@ -61,33 +61,25 @@ and validates primary/fallback routes and Harness modes. Fallbacks preserve nati
 primary provider and Harness. Only unambiguous built-in configuration defaults
 to embedded OpenClaw. Missing/ambiguous policies, unsupported IDs and incompatible
 modes fail closed.
-`gatewayManagedMode` defaults to `true` on the Agent. Choosing `false` at creation,
-changing the desired value, or deploying a mode change requires Installation
-`administer` as well as the operation's existing permissions. Admission records
-the chosen value on the Agent revision. A historical Agent revision without a
-recorded value remains distinguishable from an explicit `false`.
-Managed admission requires the selected Compute Driver to declare
-`supportsGatewayManagedMode`; Drivers can also reject unsupported Installation settings.
 Compute's `apps/controller/src/drivers/compute/native-gateway-transport.ts:validatePlaintextNativeGateway`
 rejects `gateway.tls.enabled: true` before version creation and preparation:
 Docker, SSH and Kubernetes require native HTTP.
-The saved version keeps native configuration, approved Harness identity/version, mode,
-Compute selection, and Agent ServicePrincipal unchanged. Production admits approved
+The version preserves native configuration, [Gateway managed mode](../reference/agent-native-admin.md#gateway-managed-mode), approved Harness identity/version and mode,
+Compute selection, and Agent ServicePrincipal. Production admits
 `openclaw`/`embedded` and `codex`/`dedicated`, and `openclaw`/`dedicated` only when
 the selected SandboxDriver provisions Harnesses with networking, filesystem, and
 process containment and the Installation has native-worker support.
-Pinned runtime support for native-worker execution is automatic; custom images
-can declare it at startup.
-An associated
-`access_token` additionally requires dedicated Codex; the frozen account
-contains only its OCC identity, credential kind, and opaque Secret reference.
+The pinned runtime includes native-worker support; custom images can declare it at startup.
+An associated `access_token` requires dedicated Codex; its account snapshot contains only
+the OCC identity, credential kind, and opaque Secret reference.
 
 ### 2. Claim work and realize the approved topology
 
 `apps/controller/src/worker.ts:ControllerWorker`
 
 The worker claims version work, rechecks actor/ownership and the frozen Harness,
-then calls `ComputeDriver.prepareRevision`.
+then calls `ComputeDriver.prepareRevision`. `apps/controller/src/drivers/compute/runtime-startup.ts:gatewayManagedModeEnvironment`
+supplies Gateway controls after OCE setup.
 
 `apps/controller/src/drivers/compute/docker/index.ts:DockerComputeDriver.prepareRevision`
 
@@ -98,21 +90,8 @@ but rejects harness-auth bindings before deployment; no Agent path is deployable
 [Docker gateway authentication reference](../reference/drivers/docker-compute.md#gateway-authentication)
 owns the mode and password rules.
 
-`apps/controller/src/drivers/compute/runtime-startup.ts:gatewayLaunchHelper`
-
-For an Agent revision with managed mode on, the Kubernetes and Docker wrappers
-render the configuration, then start OpenClaw with `OPENCLAW_CONFIG_READONLY=1`,
-`OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS=1`, and
-`OPENCLAW_DISABLE_CRON_HOST_EXECUTION=1`. OCE bundles these independent controls
-as managed mode. An OpenClaw runtime that supports them enforces the restrictions.
-The wrapper can still write OCE's desired configuration, and OpenClaw's config
-watcher remains enabled. When managed mode is off, Kubernetes supplies a writable
-configuration copy. The wrapper separately preserves config-write protection when
-the source is read-only. Kubernetes rejects managed admission when the Installation
-lacks a configured Gateway runtime.
-
-Kubernetes supports managed bindings. SSH rejects managed deployments at admission.
-With managed mode off, SSH supports `{ "method": "runtime" }` only for embedded OpenClaw: operator
+Kubernetes supports managed bindings. SSH accepts `{ "method": "runtime" }`
+only for unmanaged embedded OpenClaw: operator
 credentials remain on the host and OCC checks gateway readiness without model
 validation. See the [SSH flow](pr-24-ssh-compute.md).
 
@@ -177,18 +156,12 @@ For provider-owned Harnesses, `providerHarnessReady` requires exactly one nonter
 
 `apps/controller/src/worker.ts:ControllerWorker`
 
-Before applying a mode change, the worker rechecks the deployment actor's
-Installation `administer` permission. If access was revoked after admission,
-the worker rejects the deployment before it reaches Compute.
-
-Kubernetes requests `requiresStoppedPredecessors` for managed deployments, including
-embedded ones, as well as dedicated deployments. The worker stops all predecessors,
-including Gateways, and waits for Pod termination before replacement. Redeployment
-interrupts service but preserves both PVCs; retry or a new version recovers
-failures. Recorded stops suppress repeats. A returning
-predecessor makes its successor unready; stops retry after one, two, four, then
-more claim leases. Failed preparation or preparing/activating that predecessor
-clears its record. New exclusive versions supersede old reconciliation/maintenance
+For dedicated Kubernetes revisions, `requiresStoppedPredecessors` makes the worker
+stop predecessors, including Gateways, and wait for Pod termination. Redeployment
+interrupts service but preserves both PVCs; retry or a new version recovers.
+Recorded stops suppress repeats. A returning predecessor makes its successor unready;
+stops retry after one, two, four, then more claim leases. Failed preparation or
+preparing/activating the predecessor clears its record. New exclusive versions supersede old reconciliation/maintenance
 without rollback; see
 [production version stages](../reference/drivers/compute.md#production-revision-stages).
 For dedicated Codex API-key auth, `pluginRuntimeSnapshot` in
@@ -211,22 +184,18 @@ refs preserve native ID namespaces, including `codex/`. OpenClaw separates the
 explicit provider for thread start, resume, and turns; the Harness probe keeps the
 native ID.
 
-Kubelet probes private `/readyz` on runtime-backed workloads. Gates remain:
-Gateway plugin/native status, Codex plugin state and authenticated app-server
-WebSocket, or dedicated OpenClaw identity. Responses are bodyless `200` or `503`.
-While first-deploy [workspace setup](workspace-files.md) is pending, embedded
-preparation starts the replacement Gateway itself before activation. If the Gateway
-of a version that never served (its Service still selects no Pod) is unready,
-for example after rejected model authentication, the next version's preparation
-repairs it with its own template instead of waiting on the failed predecessor.
-The repair deletes an embedded predecessor's version Secret and ConfigMap copies.
+Kubelet probes runtime-backed workloads at private `/readyz` (bodyless `200` or
+`503`); readiness requires Gateway plugin/native status, Codex plugin state and
+authenticated app-server WebSocket, or dedicated OpenClaw identity. During first-deploy
+[workspace setup](workspace-files.md), embedded preparation starts the Gateway
+before activation. For an unready never-served Gateway (its Service selects no Pod),
+such as after rejected model authentication, successor preparation replaces its
+template and deletes its version Secret and ConfigMap copies.
 
-The worker commits `activeRevisionId` by exact compare-and-set before Kubernetes
-activation. For an Agent revision with managed mode on, preparation first starts the candidate Gateway
-and waits for readiness; an unready candidate cannot be recorded as active.
-`KubernetesComputeDriver.activateRevision` updates the shared Gateway's
-`Recreate` Deployment and Service. For other embedded deployments, cutover can stop
-the serving Gateway before replacement
+The worker compare-and-sets `activeRevisionId` before Kubernetes activation; the
+selected revision records the requested mode. `KubernetesComputeDriver.activateRevision`
+updates the shared Gateway's `Recreate` Deployment and Service; deployment succeeds
+after the replacement is ready. Cutover can stop the serving Gateway before replacement
 [startup](native-service-account-credential-delivery.md#5-authenticate-during-runtime-startup)
 validates its credentials. Each Gateway uses the same check and CPU-based deadline, at most 600 seconds;
 failures, including provider timeouts/rate limits, hold them unready until repair
@@ -312,7 +281,7 @@ owns claim sizes, mount paths, StorageClass requirements, and final teardown.
 
 - [Harness execution topology implementation specification](../../specs/.archive/07-harness-execution-topology.md)
 - [Platform design](../design/workloads.md#openclaw-gateways)
-- [Agent placement and deployment](../reference/agents/deployment.md#gateway-managed-mode)
+- [Agent placement and deployment](../reference/agents/deployment.md#execution-mode)
 - [Controller worker](../reference/controller/reconciliation.md#agentrevision-lifecycle)
 - [Docker Compute Driver](../reference/drivers/docker-compute.md)
 - [Kubernetes Compute Driver](../reference/drivers/kubernetes-compute.md)
@@ -326,9 +295,7 @@ owns claim sizes, mount paths, StorageClass requirements, and final teardown.
 
 ## Changelog
 
-- 2026-10-20 00:13: Document the independent OpenClaw launch controls that OCE bundles. (authoring-run/308cda50-d149-495b-bdaf-0d5a3ced2792 - 4671b2f58f61ed7c81c9a97e5e7ad01940c91dde)
-
-- 2026-10-19 23:11: Record managed Gateway admission, startup and replacement. (authoring-run/175b5688-81b2-40d2-ba74-24383d2064f2 - 4671b2f58f61ed7c81c9a97e5e7ad01940c91dde)
+- 2026-10-20 00:53: Record Gateway managed-mode deployment, launch, and replacement. (Codex/01a1558e-c27f-7bc0-a403-af59e9364ddf - cde9a870aa0be0e168a8eabb2c031369fc8508ff)
 
 - 2026-10-16 17:02: Persist worktrees and Git sources. (Codex/01a13654-be66-7741-b54f-f8ae80f2d496 - 68b95a2514f183b194a478e72d734b719bf4c2e8)
 

@@ -81,7 +81,7 @@ Stores numbered, immutable snapshots of Agent settings accepted for deployment.
 - `agent_id`
 - `revision_number`
 - `backend_id`
-- `gateway_managed_mode` (null for revisions admitted before the setting existed)
+- `gateway_managed_mode`
 - `admitted_spec`
 - `admitted_at`
 

@@ -38,7 +38,7 @@ import {
   PLUGIN_RUNTIME_HELPERS,
 } from "../kubernetes/runtime-entrypoints.ts";
 import {
-  gatewayLaunchHelper,
+  gatewayManagedModeEnvironment,
   gatewayStateMigrationHelper,
   startupPhaseHelper,
 } from "../runtime-startup.ts";
@@ -234,7 +234,6 @@ const { spawn } = require("node:child_process");
 ${PLUGIN_RUNTIME_HELPERS}
 ${startupPhaseHelper("gateway")}
 ${gatewayStateMigrationHelper("deploy the Agent again")}
-${gatewayLaunchHelper(managedMode)}
 
 function forwardTermination(child) {
   let terminating = false;
@@ -249,8 +248,11 @@ function forwardTermination(child) {
 }
 
 function startGateway() {
-  const { args, env } = gatewayLaunch();
-  const child = spawn("node", args, { stdio: "inherit", env });
+  const child = spawn(
+    "node",
+    ["/app/openclaw.mjs", "gateway", "--port", process.env.OPENCLAW_GATEWAY_PORT],
+    { stdio: "inherit", env: { ...process.env, ...${gatewayManagedModeEnvironment(managedMode)} } },
+  );
   forwardTermination(child);
   child.on("exit", (code, signal) => process.exit(code ?? (signal === "SIGTERM" ? 0 : 1)));
 }
@@ -1031,7 +1033,7 @@ ${WORKSPACE_SETUP_RUNTIME}`,
         (workspaceSetup === undefined
           ? ""
           : workspaceSetupVerifier(workspaceSetup, this.workspaceDirectory(revision))) +
-        gatewayRuntimeEntrypoint(revision.gatewayManagedMode === true),
+        gatewayRuntimeEntrypoint(revision.gatewayManagedMode),
       healthcheckScript: `fetch("http://127.0.0.1:${GATEWAY_PORT}/readyz").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1));`,
       exposedPort: GATEWAY_PORT,
       labels: {

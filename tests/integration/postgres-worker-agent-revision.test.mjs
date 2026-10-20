@@ -582,6 +582,7 @@ revisionTest(
           agentId: malformedAdmission.id,
           revision: 1,
           backendId: null,
+          gatewayManagedMode: malformedAdmission.gatewayManagedMode,
           configuration: {},
           servicePrincipalId: malformedAdmission.servicePrincipalId,
           createdAt: new Date().toISOString(),
@@ -596,8 +597,8 @@ revisionTest(
     await assert.rejects(
       fixture.observerPool.query(
         `INSERT INTO occ.agent_revisions
-           (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at)
-         VALUES ($1, $2, $3, 1, $4::jsonb, clock_timestamp())`,
+           (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at, gateway_managed_mode)
+         VALUES ($1, $2, $3, 1, $4::jsonb, clock_timestamp(), $5)`,
         [
           `rev_${randomUUID()}`,
           fixture.namespace.id,
@@ -609,6 +610,7 @@ revisionTest(
             configuration_generation: 1,
             harness: { id: "incomplete" },
           }),
+          malformedAdmission.gatewayManagedMode,
         ],
       ),
       ({ code, constraint }) =>

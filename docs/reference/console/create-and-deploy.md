@@ -284,11 +284,8 @@ provider acceptance, runtime readiness, or a channel connection.
 
 Open **Create new version** and select **Deploy new version** after storing
 credentials, saving channel Secret bindings, and selecting harness authentication.
-An Installation administrator can turn [Gateway managed mode](../agents/deployment.md#gateway-managed-mode)
-on or off from the **Configuration** tab of the version draft. Save the setting,
-then deploy a new version to apply it; the current version remains unchanged until deployment.
 To change plugins, edit **Plugins**, select **Save plugin selections**, then
-deploy. Deployment uses saved Configuration and the Agent plugin map; it does
+deploy. Deployment uses saved Configuration, plugins, and [Gateway managed mode](../agent-native-admin.md#gateway-managed-mode); it does
 not redeploy or roll back viewed snapshots. Every accepted request creates an
 immutable Agent revision, even with unchanged Configuration generation. Earlier versions
 retain their snapshots; see the

@@ -252,6 +252,14 @@ function text(row: PostgresRow, key: string): string {
   return value;
 }
 
+function boolean(row: PostgresRow, key: string): boolean {
+  const value = row[key];
+  if (typeof value !== "boolean") {
+    throw new DependencyUnavailableError("Persisted platform state is invalid or incomplete.");
+  }
+  return value;
+}
+
 function optionalText(row: PostgresRow, key: string): string | undefined {
   const value = row[key];
   if (value === null || value === undefined) {
@@ -411,9 +419,6 @@ function agentMetadataFromRow(row: PostgresRow): Readonly<AgentMetadata> {
   if (desiredRuntimeState !== "running" && desiredRuntimeState !== "stopped") {
     throw new DependencyUnavailableError("Persisted Agent desired runtime state is invalid.");
   }
-  if (typeof row.gateway_managed_mode !== "boolean") {
-    throw new DependencyUnavailableError("Persisted Agent Gateway managed mode is invalid.");
-  }
   return immutableCopy({
     id: text(row, "id"),
     namespaceId: text(row, "namespace_id"),
@@ -421,7 +426,7 @@ function agentMetadataFromRow(row: PostgresRow): Readonly<AgentMetadata> {
     configurationId: text(row, "configuration_id"),
     backendId: row.backend_id === null ? null : text(row, "backend_id"),
     executionMode: text(row, "execution_mode") as Agent["executionMode"],
-    gatewayManagedMode: row.gateway_managed_mode,
+    gatewayManagedMode: boolean(row, "gateway_managed_mode"),
     sandboxPolicyEditing: row.sandbox_policy_editing === true,
 
     servicePrincipalId: text(row, "service_principal_id"),
@@ -614,18 +619,13 @@ function revisionMetadataFromRow(row: PostgresRow): Readonly<AgentRevisionMetada
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision <= 0) {
     throw new DependencyUnavailableError("Persisted AgentRevision numbering is invalid.");
   }
-  if (row.gateway_managed_mode !== null && typeof row.gateway_managed_mode !== "boolean") {
-    throw new DependencyUnavailableError(
-      "Persisted AgentRevision Gateway managed mode is invalid.",
-    );
-  }
   return immutableCopy({
     id: text(row, "id"),
     namespaceId: text(row, "namespace_id"),
     agentId: text(row, "agent_id"),
     revision,
     backendId: row.backend_id === null ? null : text(row, "backend_id"),
-    ...(row.gateway_managed_mode === null ? {} : { gatewayManagedMode: row.gateway_managed_mode }),
+    gatewayManagedMode: boolean(row, "gateway_managed_mode"),
     createdAt: timestamp(row, "admitted_at"),
   });
 }
@@ -1659,7 +1659,6 @@ export class PostgresPlatformState implements PlatformStateStore {
       "enqueueRepositoryCleanup",
       "claim",
       "heartbeat",
-      "recordDeploymentEffect",
       "pending",
       "claimableWorkWaiting",
       "complete",
@@ -3698,8 +3697,7 @@ export class PostgresPlatformState implements PlatformStateStore {
           owner === undefined ||
           owner.servicePrincipalId !== revision.servicePrincipalId ||
           owner.backendId !== revision.backendId ||
-          (revision.gatewayManagedMode !== undefined &&
-            revision.gatewayManagedMode !== owner.gatewayManagedMode) ||
+          revision.gatewayManagedMode !== owner.gatewayManagedMode ||
           !harnessAuthMatches(owner.harnessAuth, revision.harnessAuth) ||
           !credentialSourcesMatch(owner.credentialSources, revision.credentialSources)
         ) {
@@ -3759,7 +3757,7 @@ export class PostgresPlatformState implements PlatformStateStore {
                 ? {}
                 : { credential_sources: revision.credentialSources }),
             }),
-            owner.gatewayManagedMode,
+            revision.gatewayManagedMode,
           ],
         );
         const [stamped] = rows(admitted.rows);
@@ -3769,7 +3767,6 @@ export class PostgresPlatformState implements PlatformStateStore {
         const { secretBindings: _providedSecretBindings, ...withoutSecretBindings } = revision;
         return immutableCopy({
           ...withoutSecretBindings,
-          gatewayManagedMode: owner.gatewayManagedMode,
           ...(secretBindings === undefined ? {} : { secretBindings }),
           createdAt: timestamp(stamped, "admitted_at"),
         });
@@ -5078,9 +5075,9 @@ export class PostgresPlatformState implements PlatformStateStore {
           await this.requireInitialized(context);
           return queue.findWork(idempotencyKey);
         },
-        findWorkAttempt: async (idempotencyKey, code) => {
+        findWorkAttempt: async (idempotencyKey) => {
           await this.requireInitialized(context);
-          return queue.findWorkAttempt(idempotencyKey, code);
+          return queue.findWorkAttempt(idempotencyKey);
         },
         hasOutstandingCredentialWithdrawalWork: async (namespaceId, revisionId) => {
           await this.requireInitialized(context);

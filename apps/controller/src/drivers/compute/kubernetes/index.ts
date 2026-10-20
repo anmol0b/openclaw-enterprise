@@ -505,7 +505,7 @@ interface GatewayConfigurationSnapshot {
   readonly name: string;
   readonly revision: number;
   readonly revisionId: string;
-  readonly gatewayManagedMode: boolean | undefined;
+  readonly gatewayManagedMode: boolean;
   readonly usesGatewayPasswordEnv: boolean;
   readonly usesWritableNativeAdminConfig: boolean;
   readonly annotations: Readonly<Record<string, string>>;
@@ -2916,10 +2916,6 @@ export class KubernetesComputeDriver implements ComputeDriver {
   readonly discoverHarnessModels = discoverHarnessModels;
 
   requiresStoppedPredecessors(revision: AgentRevision): boolean {
-    if (revision.gatewayManagedMode === true) {
-      // Preparation rejects an uncontrolled Gateway launch without stopping a serving predecessor.
-      return this.options.runtime !== undefined;
-    }
     return revision.harness.mode === "dedicated";
   }
 
@@ -5611,11 +5607,6 @@ export class KubernetesComputeDriver implements ComputeDriver {
         currentRevisionId.trim().length === 0
       ) {
         throw new OwnershipFailure(`Refusing invalid Agent gateway revision ${gatewayName}.`);
-      }
-      if (revision.gatewayManagedMode === true && currentRevisionId !== revision.id) {
-        // The worker must stop the predecessor before this revision can prepare.
-        // A predecessor's readiness cannot establish managed-mode enforcement.
-        return incomplete();
       }
       const template = asRecord(existingGateway.spec?.template);
       const pod = asRecord(template?.spec);
@@ -14724,6 +14715,20 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
             },
           }
         : {};
+    let runtimeEntrypoint: string | undefined;
+    if (runtime !== undefined) {
+      if (role === "gateway") {
+        if (typeof configuration?.gatewayManagedMode !== "boolean") {
+          throw new ConfigurationFailure(
+            "Gateway runtime requires the Agent revision's managed mode.",
+          );
+        }
+        runtimeEntrypoint = gatewayRuntimeEntrypoint(configuration.gatewayManagedMode);
+      } else {
+        runtimeEntrypoint =
+          nativeRuntime === undefined ? AGENT_RUNTIME_ENTRYPOINT : NATIVE_WORKER_ENTRYPOINT;
+      }
+    }
     return {
       ...deployment,
       metadata: {
@@ -14825,7 +14830,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
                   ...codexSeccompProfile,
                 },
                 ...(volumeMounts.length === 0 ? {} : { volumeMounts }),
-                ...(runtime === undefined
+                ...(runtimeEntrypoint === undefined
                   ? {}
                   : {
                       // Under tini, SIGTERM stops the wrapper in every startup phase.
@@ -14838,12 +14843,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
                               role === "gateway"
                                 ? required(configuration?.workspace, "Initial workspace directory")
                                 : harnessSetupWorkspace,
-                            )) +
-                          (role === "gateway"
-                            ? gatewayRuntimeEntrypoint(configuration?.gatewayManagedMode === true)
-                            : nativeRuntime === undefined
-                              ? AGENT_RUNTIME_ENTRYPOINT
-                              : NATIVE_WORKER_ENTRYPOINT),
+                            )) + runtimeEntrypoint,
                       ),
                     }),
               },

@@ -61,8 +61,6 @@ import {
   TransientDependencyError,
   WorkClaimLostError,
   CREDENTIAL_WITHDRAWAL_TARGET,
-  GATEWAY_MANAGED_MODE_TRANSITION,
-  gatewayManagedModeDeploymentRequiresAdmin,
   credentialWithdrawalCompanionRevisions,
   isCredentialWithdrawalWork,
   isRepositoryCleanupWork,
@@ -1620,7 +1618,7 @@ export class ControllerWorker {
     ) {
       throw new RepositoryCredentialAuthorityError("REPOSITORY_REVISION_SUPERSEDED");
     }
-    const denied = await this.authorizeRevision(claim, agent, revision, active);
+    const denied = await this.authorizeRevision(claim, agent, revision);
     if (denied !== undefined) {
       throw new RepositoryCredentialAuthorityError(denied.code);
     }
@@ -3779,7 +3777,7 @@ export class ControllerWorker {
         });
         return;
       }
-      const denied = await this.authorizeRevision(claim, agent, revision, previous);
+      const denied = await this.authorizeRevision(claim, agent, revision);
       if (denied !== undefined) {
         await this.finalizeRevision(claim, denied);
         return;
@@ -4145,7 +4143,6 @@ export class ControllerWorker {
     claim: ClaimedWork,
     agent: Readonly<Agent>,
     revision: Readonly<AgentRevision>,
-    active: Readonly<AgentRevision> | undefined,
   ): Promise<RevisionDispatchResult | undefined> {
     const state = await this.loadIAMState();
     const driver = this.iam;
@@ -4177,30 +4174,6 @@ export class ControllerWorker {
         authorization,
         decision,
       };
-    }
-
-    if (
-      agent.desiredRuntimeState !== "stopped" &&
-      (await gatewayManagedModeDeploymentRequiresAdmin(
-        revision.gatewayManagedMode,
-        active,
-        this.queue,
-      ))
-    ) {
-      const adminAuthorization: AuthorizationRequest = {
-        principalId: claim.actorId,
-        action: "administer",
-        resource: { kind: "installation", id: this.installation!.id },
-      };
-      const adminDecision = await this.iamDecision(driver, adminAuthorization);
-      if (!adminDecision.allowed) {
-        return {
-          outcome: "permanent",
-          code: "AUTHORIZATION_DENIED",
-          authorization: adminAuthorization,
-          decision: adminDecision,
-        };
-      }
     }
 
     const configurationAuthorization: AuthorizationRequest = {
@@ -4938,18 +4911,6 @@ export class ControllerWorker {
           committedOutcome = claim.attemptCount >= this.maxAttempts ? "permanent" : "retry";
           activeRevisionChanged = true;
           return;
-        }
-        if (
-          isCandidateDeployment(claim) &&
-          (await gatewayManagedModeDeploymentRequiresAdmin(
-            resolved.revision.gatewayManagedMode,
-            resolved.previous,
-            queue,
-          ))
-        ) {
-          // Publication precedes activation. Persist even an inherited unfinished transition
-          // with the pointer so retries and later deployments retain its authorization.
-          await queue.recordDeploymentEffect(claim, GATEWAY_MANAGED_MODE_TRANSITION);
         }
         activated = resolved.revision;
         return;

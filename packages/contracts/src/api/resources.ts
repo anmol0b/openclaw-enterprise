@@ -1149,12 +1149,10 @@ export const AgentRevisionSchema = Type.Object(
     configurationKind: ConfigurationKindSchema,
     configurationGeneration: ConfigurationGeneration,
     configuration: ConfigurationValues,
-    gatewayManagedMode: Type.Optional(
-      Type.Boolean({
-        description:
-          "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
-      }),
-    ),
+    gatewayManagedMode: Type.Boolean({
+      description:
+        "Gateway managed mode requested for this Agent version. It does not report Gateway runtime state.",
+    }),
     harness: Type.Object(
       {
         id: Type.String({ minLength: 1 }),

@@ -144,6 +144,7 @@ function revisionFor(agent, configuration, storedSecret, revisionNumber = 1) {
     configurationKind: configuration.kind,
     configurationGeneration: configuration.generation,
     backendId: null,
+    gatewayManagedMode: agent.gatewayManagedMode,
     harnessAuth: {
       method: "codex_pat",
       source: { kind: "secret", namespaceId: agent.namespaceId, id: storedSecret.id },
@@ -174,7 +175,7 @@ async function ensureInstallation(store) {
 
 async function exerciseRepository(store) {
   await ensureInstallation(store);
-  const { namespace, configuration, agent } = resources();
+  const { namespace, configuration, agent: initialAgent } = resources();
   const storedSecret = secret(namespace.id);
   const siblingConfiguration = {
     ...configuration,
@@ -183,14 +184,14 @@ async function exerciseRepository(store) {
   };
   const secondSharedSecret = secret(namespace.id);
   const siblingAgent = {
-    ...agent,
+    ...initialAgent,
     id: identifier("agt"),
     name: `Sibling ${randomUUID()}`,
     servicePrincipalId: `service-agent-${randomUUID()}`,
     configurationId: siblingConfiguration.id,
   };
 
-  await store.transact(async (state) => {
+  const agent = await store.transact(async (state) => {
     await state.namespaces.createNamespace(namespace);
     assert.equal(await state.namespaces.hasSecrets(namespace.id), false);
     // Namespace-owned Secrets can be registered before any Agent exists.
@@ -203,7 +204,7 @@ async function exerciseRepository(store) {
       ...configuration,
       secretBindings: acceptedBindings(storedSecret),
     });
-    await state.agents.createAgent(agent);
+    return state.agents.createAgent(initialAgent);
   });
 
   await store.transact(async (state) => {
@@ -590,8 +591,9 @@ test(
     await assert.rejects(
       pool.query(
         `INSERT INTO occ.agent_revisions
-         (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at)
-       VALUES ($1, $2, $3, 99, $4::jsonb, now())`,
+         (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at, gateway_managed_mode)
+       SELECT $1, namespace_id, id, 99, $4::jsonb, now(), gateway_managed_mode
+       FROM occ.agents WHERE namespace_id = $2 AND id = $3`,
         [
           identifier("rev"),
           namespace.id,

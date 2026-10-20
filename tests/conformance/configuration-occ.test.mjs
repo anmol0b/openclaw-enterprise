@@ -1856,6 +1856,7 @@ test("Harness admission rejects conflicting selections, mode mismatches, and una
         backendId: embedded.backendId,
         configurationId: embedded.configurationId,
         configurationGeneration: embedded.configurationGeneration,
+        gatewayManagedMode: embedded.gatewayManagedMode,
         harness: embedded.harness,
         createdAt: embedded.createdAt,
       },

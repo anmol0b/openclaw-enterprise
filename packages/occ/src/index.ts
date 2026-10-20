@@ -19,7 +19,6 @@ import {
   type RemovedAccessBinding,
 } from "./iam-policy-cleanup.ts";
 import { deploymentDiagnostics } from "./deployment-diagnostics.ts";
-import { gatewayManagedModeDeploymentRequiresAdmin } from "./gateway-managed-mode.ts";
 import {
   deviceAuthorizationSession,
   type DeviceAuthorizationSession,
@@ -294,10 +293,6 @@ export {
 } from "./iam-policy-cleanup.ts";
 export type { RemovedAccessBinding } from "./iam-policy-cleanup.ts";
 export { operationRefusalHint } from "./state/controller-work.ts";
-export {
-  GATEWAY_MANAGED_MODE_TRANSITION,
-  gatewayManagedModeDeploymentRequiresAdmin,
-} from "./gateway-managed-mode.ts";
 export {
   ActivationFailedError,
   ComputePreparationFailedError,
@@ -704,7 +699,7 @@ export interface ValidateAgentCreateInput {
 export interface UpdateAgentInput {
   readonly namespaceId: string;
   readonly agentId: string;
-  readonly configurationId: string;
+  readonly configurationId?: string;
   readonly backendId?: string | null;
   readonly harnessAuth?: HarnessAuthBinding | null;
   /** Replaces the Agent's non-model sources; an empty list removes them. */
@@ -1201,14 +1196,12 @@ function validExecutionMode(value: unknown): value is HarnessExecutionMode {
   return value === "embedded" || value === "dedicated";
 }
 
-function normalizeGatewayManagedMode(value: unknown): boolean {
-  if (value === undefined) {
-    return true;
-  }
-  if (typeof value !== "boolean") {
+function normalizeGatewayManagedMode(value: unknown, defaultValue?: boolean): boolean {
+  const mode = value === undefined ? defaultValue : value;
+  if (typeof mode !== "boolean") {
     throw new ScopeViolationError("The Agent Gateway managed mode must be a boolean.");
   }
-  return value;
+  return mode;
 }
 
 // Agent save and deploy admission apply these rules to the same pair, with the same message.
@@ -2500,7 +2493,7 @@ export class OpenClawController {
     if (!validExecutionMode(executionMode)) {
       throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
     }
-    const gatewayManagedMode = normalizeGatewayManagedMode(input.gatewayManagedMode);
+    const gatewayManagedMode = normalizeGatewayManagedMode(input.gatewayManagedMode, true);
     const backendId = this.backendId(input.backendId);
     const plugins = normalizeAgentPlugins(input.plugins);
     const pluginApprovers = normalizeAgentPluginApprovers(input.pluginApprovers);
@@ -2552,7 +2545,7 @@ export class OpenClawController {
       ...(backendId === undefined ? {} : { backendId }),
       harnessAuth,
       executionMode,
-      ...(gatewayManagedMode ? {} : { gatewayManagedMode }),
+      gatewayManagedMode,
       ...(plugins === undefined ? {} : { plugins }),
       ...(pluginApprovers === undefined ? {} : { pluginApprovers }),
       ...(input.repositoryBindings === undefined
@@ -7174,7 +7167,7 @@ export class OpenClawController {
     if (!validExecutionMode(executionMode)) {
       throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
     }
-    const gatewayManagedMode = normalizeGatewayManagedMode(input.gatewayManagedMode);
+    const gatewayManagedMode = normalizeGatewayManagedMode(input.gatewayManagedMode, true);
     const backendId = this.backendId(input.backendId);
     const plugins = normalizeAgentPlugins(input.plugins);
     const pluginApprovers = normalizeAgentPluginApprovers(input.pluginApprovers);
@@ -7309,7 +7302,7 @@ export class OpenClawController {
     });
     await this.authorizeGatewayManagedModeChange(
       principalId,
-      normalizeGatewayManagedMode(input.gatewayManagedMode) === false,
+      normalizeGatewayManagedMode(input.gatewayManagedMode, true) === false,
     );
     await this.read(async (state) => {
       const namespace = await this.exactNamespace(state, input.namespaceId);
@@ -7365,8 +7358,13 @@ export class OpenClawController {
     if (!isNonEmptyString(input.agentId)) {
       throw new ScopeViolationError("The exact Agent identity is missing.");
     }
-    if (!isNonEmptyString(input.configurationId)) {
+    if (input.configurationId !== undefined && !isNonEmptyString(input.configurationId)) {
       throw new ScopeViolationError("The exact Agent Configuration identity is missing.");
+    }
+    if (input.configurationId === undefined && input.gatewayManagedMode === undefined) {
+      throw new ScopeViolationError(
+        "An Agent update must name a Configuration or Gateway managed mode.",
+      );
     }
     const requestedAuth =
       input.harnessAuth === undefined ? undefined : this.harnessAuthBinding(input.harnessAuth);
@@ -7398,6 +7396,7 @@ export class OpenClawController {
       if (agent.status !== "active") {
         throw new AgentDeletingError();
       }
+      const configurationId = input.configurationId ?? agent.configurationId;
       if (gatewayManagedMode !== undefined) {
         await this.authorizeGatewayManagedModeChange(
           principalId,
@@ -7406,12 +7405,12 @@ export class OpenClawController {
       }
       await this.authorize(principalId, "read", {
         kind: "configuration",
-        id: input.configurationId,
+        id: configurationId,
         namespaceId: namespace.id,
       });
       const configuration = await state.configurations.findConfiguration(
         namespace.id,
-        input.configurationId,
+        configurationId,
       );
       if (!configuration || configuration.kind !== "agent") {
         throw new ScopeViolationError(
@@ -7419,7 +7418,7 @@ export class OpenClawController {
         );
       }
       await this.guardAgentProvisioning(state, namespace.id, agent.id);
-      await this.guardProvisioningConfiguration(state, namespace.id, input.configurationId);
+      await this.guardProvisioningConfiguration(state, namespace.id, configurationId);
       const previousAuth = this.harnessAuthBinding(agent.harnessAuth);
       // Every update needs the caller's grant on each source the Agent binds now, but not a
       // usable record: after a Secret Driver or Credential Gateway change, an update must still
@@ -7485,7 +7484,7 @@ export class OpenClawController {
       const updated = await state.agents.updateConfiguration(
         namespace.id,
         agent.id,
-        input.configurationId,
+        configurationId,
         input.executionMode,
         requestedAuth,
         input.backendId === undefined ? undefined : backendId,
@@ -7658,25 +7657,6 @@ export class OpenClawController {
       if (lockedAgent.status !== "active") {
         throw new AgentDeletingError();
       }
-      const active =
-        lockedAgent.activeRevisionId === undefined
-          ? undefined
-          : await state.revisions.findRevisionForBrowsing(
-              namespace.id,
-              lockedAgent.id,
-              lockedAgent.activeRevisionId,
-            );
-      if (lockedAgent.activeRevisionId !== undefined && active === undefined) {
-        throw new ResourceStateConflictError("The active Agent revision is unavailable.");
-      }
-      await this.authorizeGatewayManagedModeChange(
-        principalId,
-        await gatewayManagedModeDeploymentRequiresAdmin(
-          lockedAgent.gatewayManagedMode,
-          active,
-          state.operations,
-        ),
-      );
       const backendId = this.backendId(lockedAgent.backendId);
       if (!validExecutionMode(lockedAgent.executionMode)) {
         throw new ScopeViolationError("The persisted Agent Harness execution mode is invalid.");

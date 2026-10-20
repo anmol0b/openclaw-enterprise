@@ -869,10 +869,7 @@ export type PlatformOperation =
 export interface PlatformOperationReadRepository {
   list(): Promise<readonly Readonly<PlatformOperation>[]>;
   findWork(idempotencyKey: string): Promise<Readonly<ControllerWork> | undefined>;
-  findWorkAttempt(
-    idempotencyKey: string,
-    code?: string | readonly string[],
-  ): Promise<Readonly<ControllerWorkAttempt> | undefined>;
+  findWorkAttempt(idempotencyKey: string): Promise<Readonly<ControllerWorkAttempt> | undefined>;
   /** True while credential withdrawal work for the revision is queued or claimed. */
   hasOutstandingCredentialWithdrawalWork(namespaceId: string, revisionId: string): Promise<boolean>;
 }
@@ -2702,7 +2699,7 @@ function repositories(
                     agentId,
                     revision,
                     backendId,
-                    ...(gatewayManagedMode === undefined ? {} : { gatewayManagedMode }),
+                    gatewayManagedMode,
                     createdAt,
                   }),
               )
@@ -2743,7 +2740,7 @@ function repositories(
               backendId,
               configurationId,
               configurationGeneration,
-              ...(gatewayManagedMode === undefined ? {} : { gatewayManagedMode }),
+              gatewayManagedMode,
               harness,
               createdAt,
             }),
@@ -2761,8 +2758,7 @@ function repositories(
         owner === undefined ||
         owner.servicePrincipalId !== revision.servicePrincipalId ||
         owner.backendId !== revision.backendId ||
-        (revision.gatewayManagedMode !== undefined &&
-          revision.gatewayManagedMode !== owner.gatewayManagedMode) ||
+        revision.gatewayManagedMode !== owner.gatewayManagedMode ||
         !harnessAuthMatches(owner.harnessAuth, revision.harnessAuth) ||
         !credentialSourcesMatch(owner.credentialSources, revision.credentialSources)
       ) {
@@ -2788,7 +2784,6 @@ function repositories(
       } = revision;
       const saved = immutableCopy({
         ...withoutSecretBindings,
-        gatewayManagedMode: owner.gatewayManagedMode,
         ...(secretBindings === undefined ? {} : { secretBindings }),
         ...(plugins === undefined ? {} : { plugins }),
       });

@@ -282,7 +282,7 @@ async function redeployWithNativeAdminAccess(topology, publicOrigin, nativeDomai
   );
   assert.equal(patched.status, 200, JSON.stringify(patched.error));
   const previousGatewayUid = topology.gatewayPod.metadata.uid;
-  const deployed = await topology.adminRequest(
+  const deployed = await topology.request(
     "POST",
     `/namespaces/${topology.agent.namespaceId}/agents/${topology.agent.id}/deploy`,
   );
@@ -550,7 +550,7 @@ async function assertStopRedeployPreservesWorkspaceFile(
   );
 
   const deployEventStart = topology.events.length;
-  const redeployed = await topology.adminRequest("POST", agentPath(topology, "/deploy"));
+  const redeployed = await topology.request("POST", agentPath(topology, "/deploy"));
   assert.equal(redeployed.status, 202, JSON.stringify(redeployed.error));
   assert.equal(redeployed.data.gatewayManagedMode, true);
   assert.notEqual(

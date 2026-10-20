@@ -789,7 +789,7 @@ export const ValidateAgentCreateBody = Type.Object(
 
 export const UpdateAgentBody = Type.Object(
   {
-    configurationId: ConfigurationId,
+    configurationId: Type.Optional(ConfigurationId),
     backendId: Type.Optional(Type.Union([BackendId, Type.Null()])),
     harnessAuth: Type.Optional(Type.Union([HarnessAuthBindingSchema, Type.Null()])),
     credentialSources: Type.Optional(AgentCredentialSourcesSchema),
@@ -800,7 +800,10 @@ export const UpdateAgentBody = Type.Object(
     repositoryBindings: Type.Optional(RepositoryBindingRequestsSchema),
     repositoryAccess: Type.Optional(RepositoryAccessSchema),
   },
-  { additionalProperties: false },
+  {
+    additionalProperties: false,
+    anyOf: [{ required: ["configurationId"] }, { required: ["gatewayManagedMode"] }],
+  },
 );
 
 const ChannelDirectoryLookupFields = {

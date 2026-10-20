@@ -42,7 +42,7 @@ import {
   waitForLiveControls,
 } from "./console-agents-test-support.mjs";
 
-test("an Installation admin must retain access to change Gateway managed mode for a future deployment", async (t) => {
+test("saving Gateway managed mode preserves a concurrent Configuration reassignment and the current version", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   const installation = await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Managed Gateway", { ready: true });
@@ -74,15 +74,32 @@ test("an Installation admin must retain access to change Gateway managed mode fo
     true,
   );
   fixture.policy.restrictions.pop();
+  const saving = await holdRequests(
+    t,
+    page,
+    `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}`,
+    {
+      method: "PATCH",
+    },
+  );
   await turnOff.click();
-  await page.getByText("Managed mode saved. Deploy a new version to apply it.").waitFor();
+  await saving.requested;
+  await page.getByText("Saving managed mode. Wait before deploying.").waitFor();
+  assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
+  // Another Agent update lands before the browser's save. The flag must not restore the old binding.
+  const reassigned = await fixture.createConfiguration(namespace.id, nativeValues("reassigned"));
+  await fixture.updateAgent(namespace.id, agent.id, { configurationId: reassigned.id });
+  saving.release();
   await page.getByRole("button", { name: "Turn on managed mode for next deployment" }).waitFor();
   const saved = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`);
   assert.equal(saved.data.gatewayManagedMode, false);
+  assert.equal(saved.data.configurationId, reassigned.id);
   assert.equal(saved.data.activeRevisionId, revision.id);
   await page.getByRole("button", { name: "View version v1, current version" }).click();
   await page.getByRole("heading", { name: "Configuration snapshot" }).waitFor();
-  const mode = page.locator(".configuration-summary dt", { hasText: "Gateway managed mode" });
+  const mode = page.locator(".configuration-summary dt", {
+    hasText: "Requested Gateway managed mode",
+  });
   assert.equal(await mode.locator("xpath=following-sibling::dd[1]").textContent(), "On");
 });
 

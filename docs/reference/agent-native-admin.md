@@ -1,6 +1,6 @@
 # Agent native admin UI
 
-Agent native admin UI access lets an authorized operator open the selected Agent's native OpenClaw administration UI from the platform console. It is an explicit pilot capability for trusted operators. It exposes the stock native administrator surface for one Agent Gateway, subject to [Gateway managed mode](agents/deployment.md#gateway-managed-mode).
+Agent native admin UI access lets an authorized operator open the selected Agent's native OpenClaw administration UI from the platform console. It is an explicit pilot capability for trusted operators. It exposes the stock native administrator surface for one Agent Gateway, subject to [Gateway managed mode](#gateway-managed-mode).
 
 The feature is disabled by default. When enabled, the console shows **Native admin UI** on the Agent detail tabs only for callers with exact Agent `administer` permission. Opening the Agent host uses the operator's ordinary OCE console session cookie, resolves the exact Agent represented by that host, then serves native HTTP and WebSocket traffic through OCC.
 
@@ -90,6 +90,34 @@ For browser proxying, OCC maps that value to the same authority and Agent path o
 The console and Agent hosts share the ordinary OCE session cookie through the configured cookie parent domain. That expands the cookie trust boundary: every host under the console and Agent subdomains that can receive the cookie must be a trusted OCE ingress endpoint. Public Agent hosts route to OCC, not Envoy or tenant gateway Services. OCC strips browser cookies, `Authorization`, API keys, forwarded identity, scope headers, and native `Set-Cookie` before forwarding upstream, so the native gateway never receives the OCE session cookie.
 
 Native chat or other activity in the Agent tab does not renew the console session. Session expiry, logout, session revocation, permission removal, pilot disablement, Agent unavailability, or a version change closes active WebSockets during the authorization lease. Reconnecting uses the same stable Agent host and the selected version when the shared OCE session, exact Agent permission, and native configuration remain valid.
+
+## Gateway managed mode
+
+OCE enables managed mode by default for each Agent, independently of this UI pilot.
+On a supporting runtime, it prevents Gateway administrators from changing
+configuration through OpenClaw, opening Gateway-local terminals, and running
+Gateway-hosted command jobs. OCE supplies `OPENCLAW_CONFIG_READONLY=1`,
+`OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS=1`, and
+`OPENCLAW_DISABLE_CRON_HOST_EXECUTION=1`; the config watcher stays enabled.
+Node-relayed terminals, scheduled Agent turns, and Harness shell access are separate.
+Harness Gateway policies apply in either mode.
+
+Creating an Agent with `gatewayManagedMode=false` or changing the saved setting
+requires Installation `administer` in addition to the operation's normal permissions.
+In the Console, use the version draft's **Configuration** tab. Anyone authorized
+to deploy can apply the saved setting. Gateway administrators cannot change it
+through OpenClaw. The Agent revision records the requested mode, not live
+enforcement: OCC can select the revision before the replacement Gateway starts.
+A successful deployment and a supporting runtime are required to confirm enforcement.
+
+OCE must publish, pin, and qualify an OpenClaw runtime that supports these controls. The
+[default runtime source pin](../../deploy/runtime/Dockerfile) lacks the terminal
+and command-job controls. Compute Drivers must declare managed-mode support.
+Kubernetes requires a configured Gateway runtime; SSH rejects managed revisions.
+See [Docker deployment limits](drivers/docker-compute.md).
+Re-enabling managed mode restores OCE configuration and can discard Gateway-local
+changes; replacement can interrupt service. Filesystem protection is additional
+hardening when actors with direct write access to Gateway configuration files are in scope.
 
 ## Native authority and drift
 

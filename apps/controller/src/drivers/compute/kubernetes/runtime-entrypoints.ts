@@ -9,7 +9,7 @@ import {
 import { PLUGIN_RUNTIME_TRANSLATOR_SOURCE } from "../../plugin/runtime-translator.ts";
 import { nodeProgramArguments } from "../node-program.ts";
 import {
-  gatewayLaunchHelper,
+  gatewayManagedModeEnvironment,
   gatewayStateMigrationHelper,
   startupPhaseHelper,
 } from "../runtime-startup.ts";
@@ -2277,7 +2277,6 @@ ${WORKSPACE_ASSET_HELPERS}
 ${OPENCLAW_AUTH_PROBE_HELPERS}
 ${startupPhaseHelper("gateway")}
 ${gatewayStateMigrationHelper("restart the Pod")}
-${gatewayLaunchHelper(managedMode)}
 
 function gatewayRuntimeReady() {
   if (pluginRuntimeStatusPort() !== undefined && pluginStatusReport.phase !== "ready") {
@@ -2830,21 +2829,26 @@ let verifyingServingReplacement = false;
 let stoppingContainer = false;
 let gatewayGeneration = 0;
 
-// A generated effective config may be writable even when OCC mounted the
-// admitted source read-only. Preserve that source's existing write boundary.
-function readonlyGatewaySourceConfiguration() {
-  if (initialConfigPath === undefined) return false;
+// OpenClaw backs up a config file it can write. One OCC mounted read-only is
+// externally managed: say so, so OpenClaw skips that backup instead of logging
+// EROFS on every start.
+function gatewayEnvironment() {
+  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  if (configPath === undefined) return process.env;
   try {
-    accessSync(dirname(initialConfigPath), fsConstants.W_OK);
-    return false;
+    accessSync(dirname(configPath), fsConstants.W_OK);
+    return process.env;
   } catch {
-    return true;
+    return { ...process.env, OPENCLAW_CONFIG_READONLY: "1" };
   }
 }
 
 function startGatewayProcess() {
-  const { args, env } = gatewayLaunch(readonlyGatewaySourceConfiguration());
-  const spawned = spawn("node", args, { stdio: "inherit", env });
+  const spawned = spawn(
+    "node",
+    ["/app/openclaw.mjs", "gateway", "--port", process.env.OPENCLAW_GATEWAY_PORT],
+    { stdio: "inherit", env: { ...gatewayEnvironment(), ...${gatewayManagedModeEnvironment(managedMode)} } },
+  );
   child = spawned;
   childRunning = true;
   gatewayGeneration++;

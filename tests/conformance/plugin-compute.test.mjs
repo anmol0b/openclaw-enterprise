@@ -151,6 +151,7 @@ function revision(overrides = {}) {
     configurationId: agent.configurationId,
     configurationKind: "agent",
     configurationGeneration: 1,
+    gatewayManagedMode: true,
     configuration: admitLoggingConfiguration(native, "info"),
     harnessAuth: {
       method: "api_key",
@@ -3708,12 +3709,6 @@ async function startCodexGatewaySupervisor(
       }
       if (specifier === "node:fs") {
         return {
-          accessSync(path) {
-            if (path === "/etc/openclaw") {
-              throw new Error("Read-only configuration source");
-            }
-          },
-          constants: nodeRequire("node:fs").constants,
           existsSync: (path) => fixture.files.has(path),
           mkdirSync() {},
           readFileSync(path) {
@@ -3806,17 +3801,8 @@ async function startCodexGatewaySupervisor(
   return fixture;
 }
 
-test("Codex gateway supervisor preserves the read-only admitted source after generating an effective config", async (t) => {
-  const gateway = await startCodexGatewaySupervisor(t);
-  assert.equal(gateway.children[0].env.OPENCLAW_CONFIG_PATH, "/home/node/.openclaw/openclaw.json");
-  assert.equal(gateway.children[0].env.OPENCLAW_CONFIG_READONLY, "1");
-  assert.equal(gateway.children[0].env.OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS, undefined);
-  assert.equal(gateway.children[0].env.OPENCLAW_DISABLE_CRON_HOST_EXECUTION, undefined);
-});
-
 test("Codex gateway supervisor recovers a changed peer after restarting with its writable copy", async (t) => {
   const previous = await startCodexGatewaySupervisor(t, { writableConfig: true });
-  assert.equal(previous.children[0].env.OPENCLAW_CONFIG_READONLY, undefined);
   const path = "/home/node/.openclaw/openclaw.json";
   const edited = JSON.parse(previous.files.get(path));
   edited.messages = { responsePrefix: "Native admin edit" };

@@ -101,7 +101,7 @@ async function createQueueRevision(
 ) {
   const revisionId = `rev_${randomUUID()}`;
   const configuration = await pool.query(
-    `SELECT agent.configuration_id, agent.harness_auth, secret.driver_id
+    `SELECT agent.configuration_id, agent.harness_auth, agent.gateway_managed_mode, secret.driver_id
      FROM occ.agents agent
      JOIN occ.secrets secret
        ON secret.namespace_id = agent.namespace_id AND secret.id = agent.harness_auth_secret_id
@@ -126,9 +126,16 @@ async function createQueueRevision(
   };
   await pool.query(
     `INSERT INTO occ.agent_revisions
-       (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, clock_timestamp())`,
-    [revisionId, namespaceId, agentId, revisionNumber, JSON.stringify(admittedSpec)],
+       (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at, gateway_managed_mode)
+     VALUES ($1, $2, $3, $4, $5::jsonb, clock_timestamp(), $6)`,
+    [
+      revisionId,
+      namespaceId,
+      agentId,
+      revisionNumber,
+      JSON.stringify(admittedSpec),
+      configuration.rows[0].gateway_managed_mode,
+    ],
   );
   return revisionId;
 }

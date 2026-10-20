@@ -830,8 +830,7 @@ export interface AgentRevision extends Scope {
   readonly configurationKind: ConfigurationKind;
   readonly configurationGeneration: number;
   readonly configuration: OpenClawConfigurationDocument;
-  /** Absent on revisions admitted before Gateway managed mode existed. */
-  readonly gatewayManagedMode?: boolean;
+  readonly gatewayManagedMode: boolean;
   readonly harness: RevisionHarnessDescriptor;
   readonly compute: {
     readonly id: string;

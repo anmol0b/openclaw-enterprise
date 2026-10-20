@@ -15,6 +15,7 @@ import {
   GATEWAY_RUNTIME_ENTRYPOINT,
   RUNTIME_WRAPPER_COMMAND,
   SETUP_WRAPPER_COMMAND,
+  gatewayRuntimeEntrypoint,
 } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
 import { nodeProgramArguments } from "../../apps/controller/src/drivers/compute/node-program.ts";
 import {
@@ -5224,12 +5225,12 @@ test("gateway routing derives stable endpoints and exact Envoy HTTPRoutes", asyn
   const plainEnvironment = Object.fromEntries(
     plainPod.containers[0].env.map((entry) => [entry.name, entry]),
   );
-  assert.equal(plainEnvironment.OPENCLAW_CONFIG_PATH.value, "/etc/openclaw/openclaw.json");
+  assert.equal(plainEnvironment.OPENCLAW_CONFIG_PATH.value, "/home/node/.openclaw/openclaw.json");
   assert.deepEqual(
     plainPod.containers[0].volumeMounts.find(({ name }) => name === "openclaw-configuration"),
-    { name: "openclaw-configuration", mountPath: "/etc/openclaw", readOnly: true },
+    { name: "openclaw-configuration", mountPath: "/etc/openclaw-managed", readOnly: true },
   );
-  assert.equal(plainPod.initContainers[0].args[0].includes("copyFileSync"), false);
+  assert.equal(plainPod.initContainers[0].args[0].includes("copyFileSync"), true);
 
   const runtimeDriver = createKubernetesComputeDriver(
     routedOptions({
@@ -8392,6 +8393,7 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
     configurationId: "cfg-native-worker",
     configurationKind: "agent",
     configurationGeneration: 1,
+    gatewayManagedMode: true,
     configuration,
     harness: { id: "openclaw", version: "1.0.0", mode: "dedicated" },
     harnessAuth: apiKeyAuth,
@@ -10099,6 +10101,7 @@ async function exerciseEmbeddedReplacement({ providerId, model, environmentName,
     configurationId: "cfg_00000000-0000-4000-8000-000000000077",
     configurationKind: "agent",
     configurationGeneration: 1,
+    gatewayManagedMode: true,
     harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
     harnessAuth: apiKeyAuth,
     compute: { id: driver.id, implementation: driver.implementation },
@@ -12895,6 +12898,7 @@ test("revision lifecycle rejects another driver or missing identity before clust
     configurationId: "cfg_00000000-0000-4000-8000-000000000001",
     configurationKind: "agent",
     configurationGeneration: 1,
+    gatewayManagedMode: false,
     configuration: {
       agents: { defaults: { model: "codex/gpt-5" } },
       gateway: { controlUi: { enabled: false } },
@@ -13616,6 +13620,7 @@ test("Gateway and Harness storage are separate and preserve ephemeral Codex cred
           name: "configuration-2",
           revision: 2,
           revisionId: "revision-2",
+          gatewayManagedMode: false,
           annotations: {},
           loggingLevel: "info",
         },
@@ -16538,7 +16543,7 @@ function workspaceSetupFixture(
       const observed = structuredClone(object);
       if (kind === "Deployment" && state.ready) {
         observed.status = {
-          observedGeneration: 1,
+          observedGeneration: state.deploymentObservedGeneration ?? 1,
           replicas: 1,
           updatedReplicas: 1,
           readyReplicas: 1,
@@ -16727,7 +16732,7 @@ function workspaceSetupFixture(
   return { driver, revision, namespace, objects, records, state, setup, context };
 }
 
-test("managed embedded Gateway replaces an unmanaged predecessor before reporting ready", async () => {
+test("embedded Gateway managed mode takes effect at activation and preserves ordinary redeployment", async () => {
   const { driver, revision, namespace, objects, state } = workspaceSetupFixture(true);
   const unmanaged = { ...revision, gatewayManagedMode: false };
   const managed = {
@@ -16738,7 +16743,6 @@ test("managed embedded Gateway replaces an unmanaged predecessor before reportin
   };
   const gatewayName = `gateway-${digest(revision.agentId)}`;
   const gatewayKey = `Deployment:${namespace}:${gatewayName}`;
-  const serviceKey = `Service:${namespace}:${gatewayName}`;
 
   state.ready = true;
   assert.equal((await driver.prepareRevision(unmanaged, authContext(unmanaged))).ready, true);
@@ -16748,36 +16752,47 @@ test("managed embedded Gateway replaces an unmanaged predecessor before reportin
     unmanagedContainer.env.find(({ name }) => name === "OPENCLAW_CONFIG_PATH").value,
     "/home/node/.openclaw/openclaw.json",
   );
+  assert.doesNotMatch(
+    containerProgram(unmanagedContainer),
+    /OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS/,
+  );
 
-  // The worker uses this declaration to stop the old Gateway before preparing
-  // the candidate. A stale or out-of-order call cannot count the old Gateway as ready.
-  assert.equal(driver.requiresStoppedPredecessors(unmanaged), false);
-  assert.equal(driver.requiresStoppedPredecessors(managed), true);
-  assert.equal((await driver.prepareRevision(managed, authContext(managed))).ready, false);
+  // Embedded preparation leaves the serving predecessor in place. The worker only
+  // completes deployment once activation has replaced it with the managed Gateway.
+  assert.equal(driver.requiresStoppedPredecessors(managed), false);
+  assert.equal((await driver.prepareRevision(managed, authContext(managed))).ready, true);
   assert.equal(
     objects.get(gatewayKey).metadata.annotations["openclaw.dev/agent-revision-id"],
     unmanaged.id,
   );
-  await driver.stopRevision(unmanaged);
+  // The service and predecessor report ready, but the Deployment controller has not
+  // observed the new template yet. Activation must not complete on that stale readiness.
+  state.deploymentObservedGeneration = 0;
+  await assert.rejects(
+    driver.activateRevision(managed, authContext(managed)),
+    /gateway is not ready/,
+  );
+  const managedGateway = objects.get(gatewayKey);
+  assert.equal(managedGateway.metadata.annotations["openclaw.dev/agent-revision-id"], managed.id);
+  assert.equal(managedGateway.spec.strategy.type, "Recreate");
+  assert.match(
+    containerProgram(managedGateway.spec.template.spec.containers[0]),
+    /"OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS":"1"/,
+  );
+  state.deploymentObservedGeneration = 1;
+  await driver.activateRevision(managed, authContext(managed));
 
-  state.ready = false;
-  assert.equal((await driver.prepareRevision(managed, authContext(managed))).ready, false);
+  const successor = { ...managed, id: "managed-redeploy", revision: managed.revision + 1 };
+  assert.equal((await driver.prepareRevision(successor, authContext(successor))).ready, true);
   assert.equal(
     objects.get(gatewayKey).metadata.annotations["openclaw.dev/agent-revision-id"],
     managed.id,
   );
+  await driver.activateRevision(successor, authContext(successor));
   assert.equal(
-    objects.get(serviceKey).spec.selector["app.kubernetes.io/name"],
-    `${gatewayName}-inactive`,
+    objects.get(gatewayKey).metadata.annotations["openclaw.dev/agent-revision-id"],
+    successor.id,
   );
-  state.ready = true;
-  assert.equal((await driver.prepareRevision(managed, authContext(managed))).ready, true);
-  assert.equal(
-    objects.get(serviceKey).spec.selector["app.kubernetes.io/name"],
-    `${gatewayName}-inactive`,
-  );
-  await driver.activateRevision(managed, authContext(managed));
-  assert.equal(objects.get(serviceKey).spec.selector["app.kubernetes.io/name"], gatewayName);
 });
 
 test("Kubernetes rejects managed mode when it cannot control the Gateway launch", async () => {
@@ -17180,9 +17195,11 @@ test("rendered exec arguments and environment values stay within the per-string 
       // Runtime programs travel as bounded pieces and arrive intact.
       const program = containerProgram(spec.template.spec.containers[0]);
       assert.ok(
-        [GATEWAY_RUNTIME_ENTRYPOINT, AGENT_RUNTIME_ENTRYPOINT, AGENT_WITH_NODE_ENTRYPOINT].some(
-          (entrypoint) => program.endsWith(entrypoint),
-        ),
+        [
+          gatewayRuntimeEntrypoint(revision.gatewayManagedMode),
+          AGENT_RUNTIME_ENTRYPOINT,
+          AGENT_WITH_NODE_ENTRYPOINT,
+        ].some((entrypoint) => program.endsWith(entrypoint)),
       );
     }
   }

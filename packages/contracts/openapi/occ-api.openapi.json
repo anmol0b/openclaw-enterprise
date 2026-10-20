@@ -16588,6 +16588,10 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
+                "anyOf": [
+                  { "required": ["configurationId"] },
+                  { "required": ["gatewayManagedMode"] }
+                ],
                 "properties": {
                   "backendId": {
                     "anyOf": [
@@ -16794,7 +16798,6 @@
                     "type": "array"
                   }
                 },
-                "required": ["configurationId"],
                 "type": "object"
               }
             }
@@ -17601,7 +17604,7 @@
                           "uniqueItems": true
                         },
                         "gatewayManagedMode": {
-                          "description": "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
+                          "description": "Gateway managed mode requested for this Agent version. It does not report Gateway runtime state.",
                           "type": "boolean"
                         },
                         "harness": {
@@ -17824,6 +17827,7 @@
                         "configurationKind",
                         "configurationGeneration",
                         "configuration",
+                        "gatewayManagedMode",
                         "harness",
                         "compute",
                         "harnessAuth",
@@ -21303,7 +21307,7 @@
                             "type": "string"
                           },
                           "gatewayManagedMode": {
-                            "description": "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
+                            "description": "Gateway managed mode requested for this Agent version. It does not report Gateway runtime state.",
                             "type": "boolean"
                           },
                           "harness": {
@@ -21339,6 +21343,7 @@
                           "backendId",
                           "configurationId",
                           "configurationGeneration",
+                          "gatewayManagedMode",
                           "harness",
                           "createdAt"
                         ],
@@ -21523,7 +21528,7 @@
                               "uniqueItems": true
                             },
                             "gatewayManagedMode": {
-                              "description": "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
+                              "description": "Gateway managed mode requested for this Agent version. It does not report Gateway runtime state.",
                               "type": "boolean"
                             },
                             "harness": {
@@ -21751,6 +21756,7 @@
                             "configurationKind",
                             "configurationGeneration",
                             "configuration",
+                            "gatewayManagedMode",
                             "harness",
                             "compute",
                             "harnessAuth",
@@ -21806,7 +21812,7 @@
                               "type": "string"
                             },
                             "gatewayManagedMode": {
-                              "description": "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
+                              "description": "Gateway managed mode requested for this Agent version. It does not report Gateway runtime state.",
                               "type": "boolean"
                             },
                             "id": {
@@ -21825,6 +21831,7 @@
                             "agentId",
                             "revision",
                             "backendId",
+                            "gatewayManagedMode",
                             "createdAt",
                             "configurationReadError"
                           ],

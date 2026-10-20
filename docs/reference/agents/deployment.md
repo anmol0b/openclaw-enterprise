@@ -80,38 +80,7 @@ runtime selection, identity boundaries, and activation.
 
 ## Gateway managed mode
 
-OCE enables Gateway managed mode by default for each Agent. It prevents Gateway
-administrators from changing the Gateway configuration through OpenClaw, opening
-Gateway-local terminals, or running Gateway-hosted command jobs. It leaves the
-config watcher enabled for OCE updates. Authorized terminals relayed to a node,
-ordinary scheduled Agent turns, and Harness shell access are separate. Harness
-Gateway policies remain independent and must apply in either mode.
-
-OCE must pin an OpenClaw source commit that supports these controls and qualify
-the resulting runtime image before managed mode can enforce the complete
-restrictions. The repository's [default OpenClaw source pin](../../../deploy/runtime/Dockerfile)
-does not include the terminal and automation controls. A runtime built with that
-pin does not enforce those restrictions.
-
-An OCE Installation administrator can change `gatewayManagedMode` on the Agent
-draft. The value takes effect only on deployment. Creating an Agent with the mode
-off, changing its draft value, or deploying a mode change requires Installation
-`administer` in addition to the operation's normal permissions. The worker
-rechecks that permission, including when retrying an interrupted mode change.
-Each Agent revision records its own value; historical Agent revisions may have
-no recorded value. Gateway administrators cannot change this setting from OpenClaw.
-
-Turning managed mode back on replaces the Gateway and restores OCE's admitted
-configuration, so changes made directly in the Gateway while the mode was off
-may be lost. Replacement can interrupt service. Compute Drivers must explicitly
-support managed mode. Kubernetes requires a configured Gateway runtime; SSH
-Compute rejects managed Agent revisions. Docker's Gateway wrapper requests the
-same restrictions, subject to Docker's existing [deployment limits](../drivers/docker-compute.md).
-
-This mode controls OpenClaw's administrative entry points. It is not filesystem
-isolation: a separate process or administrator with direct write access to the
-Gateway's configuration files can bypass the application controls. Use filesystem
-protection as additional hardening when that actor is in scope.
+See [Gateway administration](../agent-native-admin.md#gateway-managed-mode) for restrictions and control.
 
 <a id="revisions-and-deployment" class="anchor-alias"></a>
 

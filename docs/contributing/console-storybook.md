@@ -111,13 +111,10 @@ Compare **New version queued**, **Deployment waiting for runtime**, and
 **Deployment retry after dependency failure**; switch versions and check
 **Since**.
 
-In **Pages → Agent detail → Gateway Managed Mode**, turn managed mode off for the
-next deployment. Compare the current version's recorded mode with the changed
-draft and check that the Console says deployment is required. The fixture simulates the save.
+**Gateway Managed Mode**: simulate saving.
 
-**First deployment creates credentials** accepts **Deploy new version** without
-a separate credential action. Its initial state is not a Stop request; OCC
-generation is simulated.
+**First deployment creates credentials** simulates OCC credential generation
+during **Deploy new version**; its initial state is not a Stop request.
 
 Choose a Preset, fill its variables, review seeded workspace files, and create
 a Codex-harness Agent: the Console submits inline Configuration and Secret
