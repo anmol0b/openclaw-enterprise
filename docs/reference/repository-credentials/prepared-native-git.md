@@ -28,6 +28,13 @@ Reads cover the repository, not just the review branch. GitHub's `contents: writ
 permission is not branch-scoped: protect important refs at GitHub independently,
 without an App bypass. The Git-only profile exposes fetch and push, not GitHub REST or GraphQL.
 
+For bounded `metadata-read`, the [response policy](../../../apps/controller/src/drivers/repo/github/credentials/metadata-response.ts)
+requires HTTP 200 and the exact repository ID and full name. After stream end, the
+[transport](../../../apps/controller/src/drivers/repo/credentials/transport/upstream.ts)
+rejects actual trailers (a declaration alone is not one), enforces byte limits before and
+after rewriting, then releases the configured `{ id, full_name }` as fixed JSON with
+no-store headers. Streamed responses cannot make that guarantee.
+
 ## Let the Agent open a draft pull request
 
 If the task includes handing work to a reviewer, explicitly select

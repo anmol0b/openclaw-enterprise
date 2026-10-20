@@ -223,24 +223,24 @@ shorten custody or restart use lifetime.
 
 `apps/controller/src/drivers/repo/github/credentials/driver/acquisition-response.ts:observeAcquisitionResponse`
 captures a uniquely identified root token before validating status, scope and
-usable lifetime. Invalid UTF-8, malformed JSON or any duplicate member name
-disqualifies the response as evidence. With duplicate permission fields, retain
-the token only for cleanup. With duplicate root token fields, never guess which
-token to revoke, even if the values match. Recheck admission synchronously before
-accepting a credential. Repository and permissions must match exactly; optional
+usable lifetime. Invalid UTF-8, malformed JSON or a duplicate member name
+disqualifies the response as evidence: duplicate permission fields keep the token
+only for cleanup, and duplicate root token fields leave no revocation target to
+guess. Admission is rechecked synchronously before a credential is accepted;
+repository and permissions must match exactly and an optional
 `repository_selection` must be `selected`.
 
 Its credential transport,
 `apps/controller/src/drivers/repo/github/credentials/provider-transport.ts:createProviderTransport`,
 uses `apps/controller/src/drivers/repo/github/credentials/provider-transport/request.ts:sendProviderRequest`
-to dispatch and join the actual request close event. The transport applies request
-deadlines and response-size limits. It latches dispatch, after
-rechecking admission, only when TCP connects, so DNS and connection-refused
-failures are definite and only later failures are uncertain. Opaque scope freezes
-installation, repository and profile. The adapter can issue that scope or revoke
-a token, never supply arbitrary targets, bodies or headers. After authentication
-preparation, a synchronous gate rechecks admission, registers cancellation and
-opens the exchange without an intervening await.
+to dispatch and join the request close event under request deadlines and
+response-size limits. It latches dispatch, after rechecking admission, only when
+TCP connects, so DNS and connection-refused failures are definite and only later
+failures are uncertain. Opaque scope freezes installation, repository and profile;
+the adapter can issue that scope or revoke a token, never supply arbitrary
+targets, bodies or headers. After authentication preparation, a synchronous gate
+rechecks admission, registers cancellation and opens the exchange without an
+intervening await.
 The handler and sender independently capture their allowed upstream origins.
 `apps/controller/src/drivers/repo/credentials/transport/request-headers.ts:createUpstreamHeaders`
 validates adapter fields, rejects case-insensitive duplicates and reconstructs
@@ -276,13 +276,6 @@ Informational nested labels, milestones, repository metadata and human content
 remain unchanged. Transport applies
 `apps/controller/src/drivers/repo/credentials/transport/response-headers.ts:safeResponseHeaders`
 before writing response headers to the client.
-
-For bounded `metadata-read`, the [response policy](../../apps/controller/src/drivers/repo/github/credentials/metadata-response.ts)
-requires HTTP 200 and the exact repository ID and full name. After stream end,
-[transport](../../apps/controller/src/drivers/repo/credentials/transport/upstream.ts)
-rejects actual trailers (a declaration alone is not one), enforces byte limits
-before and after rewriting, then releases configured `{ id, full_name }` with
-fixed JSON and no-store headers. Streamed responses cannot make that guarantee.
 
 After successful input, upstream failure before response headers stops upstream
 I/O, then sends fixed `502 exchange-uncertain` after settlement. Cancellation,
@@ -370,12 +363,13 @@ client and alternate-adapter checks; live-provider behavior requires separate qu
 
 ## Changelog
 
-- 2026-10-15 20:51: Document accompanying separation of token custody from ambiguous response evidence. (authoring-run/3af8b480-048d-4e5e-a05c-f5a92f357ccd - 53c4297eb1e0894042a1698609c3e672aef2c97b)
+- 2026-10-15 20:51: Separate token custody from ambiguous response evidence. (authoring-run/3af8b480-048d-4e5e-a05c-f5a92f357ccd - 53c4297eb1e0894042a1698609c3e672aef2c97b)
 
 - 2026-10-15 04:44: Bound upload-pack streaming separately while retaining exchange and credential fencing. (authoring-run/35418147-f92b-4808-96cf-a6db4d91f2bb - 00bbc7cd976ab7be317ce1e0a9d36ad72ce10567)
 
 - 2026-10-14 12:23: Document prompt rejection of oversized private-socket replies. (authoring-run/a404e7a3-9acf-4b50-9307-31e50b1b3582 - 4727e9b109a2127150e03e39e859d45e0668f82f)
-- 2026-10-15 04:05: Project closed metadata reads and reject actual trailers before protected metadata release. (authoring-run/ec233aef-e8c7-46e0-b7ca-d1e180dd99aa - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
+
+- 2026-10-15 04:05: Project closed metadata reads; reject actual trailers before release. (authoring-run/ec233aef-e8c7-46e0-b7ca-d1e180dd99aa - 0647e70303cd583ed64286f0ae11c1fa1896ac6a)
 
 - 2026-10-13 07:40: Past its window, a sweep fences a refused admission's reservation again and forgets it once the fence commits. (fix-1196-1197)
 
@@ -385,10 +379,4 @@ client and alternate-adapter checks; live-provider behavior requires separate qu
 
 - 2026-10-03: Refuse GraphQL bodies that select the provider clone credential before dispatch.
 
-- 2026-09-28 08:12: Trace durable admission fencing and original-broker disposal acknowledgments. (authoring-run/41ba3c72-c44a-4a26-8285-7d4724f24352 - e06ff9625e72ff5ab3483a504a2f02a69a370cbb)
-
-- 2026-09-28 04:48: Receive the gh material consistency preflight and its limits. (authoring-run/6e1aa273-a96b-4b17-9514-d6d7064decea - ae31581574744bea2745066f189eea6e826fe823)
-
-- 2026-09-23 06:18: Trace accompanying profile-aligned REST permissions, token-bounded GraphQL and bounded raw replies. (authoring-run/0dffba8f-d16f-4f90-8fe2-893368f6926a - a2e94cf8ac2d94306f0701cee5457d1a9797e50a)
-
-[Repository credential service documentation history](repository-credentials/history.md) preserves the older dated entries.
+- Earlier entries (3) are in this page's Git history.

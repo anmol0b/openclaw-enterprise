@@ -122,6 +122,11 @@ paired Sandbox can consume them. The Sandbox must apply every attachment and
 reject any it did not issue. After the Harness is ready, Compute asks the
 gateway whether each attachment is applied before activating the Agent revision.
 
+A private WSS Harness endpoint may supply public CA trust in `tls.caBundle`. Compute
+projects that bundle through an immutable revision ConfigMap into only this Gateway; Node
+verifies the peer certificate and hostname, activation checks the same trust, and
+retirement removes it after the workloads.
+
 ### Sandbox resource identity
 
 `SandboxResourceRef` contains `namespaceName`, `resourceName`, `agentId`, and
@@ -247,6 +252,7 @@ as the `reason`. OpenShell throws it for gRPC `PERMISSION_DENIED` and
 | Deployment rejects the Harness                       | Confirm dedicated execution and that the provider can preserve the approved identity, token, mounts, login mode, and Secret references. |
 | Cleanup keeps retrying after the Pod disappears      | Check the stable Sandbox resource reference and provider bootstrap resources. Pod absence alone does not prove cleanup completed.       |
 | Containment is unavailable or ownership is ambiguous | Restore the provider or correct ownership. Never activate a workload without the required containment.                                  |
+| A gateway request fails                              | Worker diagnostics carry only the method, gRPC status and a fixed validation category, never supplier text or request values.           |
 
 ## Implementations
 

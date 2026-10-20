@@ -120,6 +120,10 @@ The App installation needs the corresponding repository contents and pull reques
 permissions. GitHub permissions themselves are broader than the middleware's
 branch and draft checks; keep independent GitHub branch protection.
 
+[Codex OAuth](../../testing/openshell-oauth.md) does not grant Git access. OpenShell Git
+binds a live revision to its installed credential and authorizes each request; other
+sandbox repository bindings remain refused.
+
 From the admitted Agent shell, use its managed proxy environment and ordinary
 GitHub URLs. Replace the repository and branch below with the enrolled values:
 

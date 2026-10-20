@@ -14,6 +14,8 @@ owns Namespace Workspaces; managed mode fails before mutation.
 Agent Secret permission. Agent revision files and bearer passthrough authenticate Codex Gateway requests
 without a Harness Service.
 
+Development workspace-node setup uses a scoped token in its provider file.
+
 ## Entry Points
 
 - Trigger: a worker reconciles an Agent revision that selects the OpenShell
@@ -87,7 +89,7 @@ graph TD
 `internal/occdev/kubernetes.go:writeInstallation`
 
 `openshell` profiles support Node and x64/ARM64 Codex on any launcher architecture
-and require Landlock. Credential-source profiles govern credential substitution.
+and require Landlock.
 
 `scripts/dev-up` validates Kubernetes/OpenShell and invokes `occ dev up`.
 Compose is default; `OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes` selects Kubernetes-only.
@@ -102,10 +104,9 @@ After Agent Sandbox rollout failure, `prepareOpenShell` invokes
 `internal/occdev/agent_sandbox_rollout_diagnostics.go:captureAgentSandboxRollout`
 once, preserving the original error for rollback. It records Deployment,
 UID-linked ReplicaSets/Pods and Warning reasons without messages, environment,
-full labels or logs; unavailable, malformed or oversized results are marked.
-Limits: fresh 15-second context, three seconds and 256 KiB/command, 32 KiB/record.
-Commands are awaited; 200 ms pipe draining cannot terminate descendants.
-Output failures are ignored. The writer has no timeout or persistence guarantee. Capture never retries.
+full labels or logs, marking unavailable, malformed or oversized results
+(15-second context; three seconds and 256 KiB per command, 32 KiB per record).
+It never retries, and 200 ms pipe draining cannot terminate descendants.
 
 `network.providerHarness` records Gateway ClusterIP, Pod selector and TCP/8080.
 Agent Gateways alias only the advertised hostname, preserving HTTP Host;
@@ -113,9 +114,8 @@ NetworkPolicy permits only those Pods/port.
 Compose runs PostgreSQL and OCC with a k3d-targeting worker; Kubernetes-only uses
 `oce-system` and in-cluster authentication. Both install private Envoy routing
 and operator Workspaces, restricting Gateway access to API, worker, supervisor
-callbacks and dedicated Agent Gateways. See [local deployment guides](../guides/deploy/local-kubernetes-development.md).
-[Protected development](../guides/deploy/local-openshell-images.md#select-the-protected-profile)
-starts its worker only after tenant access, network policies and Gateway rollout.
+callbacks and dedicated Agent Gateways. See [local deployment guides](../guides/deploy/local-kubernetes-development.md)
+and [protected development](../guides/deploy/local-openshell-images.md#select-the-protected-profile).
 
 `internal/occdev/sandbox_network_policy.go:loadSandboxNetworkPolicies` runs
 Driver validation before provisioning (policy file maximum 1 MiB). Persisted rules
@@ -203,10 +203,6 @@ without plugins, each at most 65,536 bytes. `APP_SERVER_TOKEN` is forbidden. Sel
 a second model proxy, malformed files and other Secret-backed environment fail before
 Gateway mutation.
 
-[Codex OAuth](../testing/openshell-oauth.md) does not grant Git access. Separately,
-[OpenShell Git](../reference/repository-credentials/openshell-git.md) binds a live revision to its
-installed credential and authorizes each request. Other sandbox repository bindings remain refused.
-
 Providers use `oce-codex-runtime` or `oce-openclaw-runtime`. Both supply read-only setup and Gateway CA files; Codex requires `runtime.json` and `config.toml`, which native OpenClaw refuses. The validated setup Secret's complete expiring envelope, including `bootstrapToken`, becomes `node-setup.json`. WebSocket rewriting is unsupported: OpenClaw signs the literal token in its device proof.
 Renewal requires the same endpoint, TLS fingerprint, runtime, and CA configuration.
 Renewal requires an expired stored envelope and a later live expiry. The Sandbox network policy limits the connection to the exact
@@ -259,14 +255,12 @@ delete, by `withdrawHarnessExposure`, adoption or recreation with
 
 The Backend reuses clients, retrying setup. Cancellation is checked after
 setup/credential preparation; stalled initialization/file reads have no cancellation deadline. After dispatch, cancellation stops local gRPC; remote mutations
-may continue, requiring recovery. Worker diagnostics expose only the method, gRPC
-status and a fixed validation category. They omit supplier text and request values.
+may continue, requiring recovery.
 
 `GetService` separates control URL and advertised workload host/port.
 `harnessEndpoint` returns WebSocket origin and configured
 `sandboxDataMount.mountPath` (default `/sandbox/enterprise`). Native hooks
 use `harnessHome`, mode `0700`. Invalid or changed exposure fails closed.
-Private WSS endpoints can return public CA trust in `tls.caBundle`.
 
 `apps/controller/src/drivers/sandbox/openshell.ts:harnessStatus` probes the
 authenticated WebSocket handshake before reading a held-failure document;
@@ -296,10 +290,6 @@ Agent Service stays inactive and Compute omits its Harness route. Preparation
 preserves a serving predecessor; activation resolves the candidate again. Without
 `harnessEndpoint`, Codex retains Kubernetes transport and `/home/node/workspace`.
 Native OpenClaw enrolls outbound into its admitted workspace.
-
-When the endpoint supplies a CA, Compute projects the public trust bundle through an
-immutable revision ConfigMap into only this Gateway. Node verifies the peer certificate
-and hostname. Activation checks the same trust; retirement removes it after the workloads.
 
 Compute awaits the Harness Pod and the Secret's enrolled node.
 Missing enrollment prevents activation. The Codex supervisor
@@ -355,7 +345,9 @@ proof on a Landlock-capable host; Console admission and initialized files are in
 - 2026-10-15 22:26: Reconcile current main behavior with OpenShell OAuth contracts in the accompanying merge. (authoring-run/41e4bb7a-c8eb-4332-b1f9-07fb8e234f63 - b747cf5b6402ad36ce9f1ae6dbed08928ddcf3dc)
 
 - 2026-10-15 18:17: Pin OpenShell v0.1.4. (authoring-run/openshell-014-rebase-20261015 - 64a3424a9)
+
 - 2026-10-14: Merge current contracts with native provisioning and retained-workspace preparation. (Codex/01a13654-be66-7741-b54f-f8ae80f2d496)
+
 - 2026-10-15 08:47: Select explicit Codex permissions. (authoring-run/7eb24321-3670-4154-adde-41a0f1b36728 - 04514330688378316bd0641b8d5560da56aeff85)
 
 - 2026-10-15 02:25: Distinguish API-key and PAT isolation. (authoring-run/c11897e0-33a6-4276-b620-aaec6d57ab00 - 07eb950b5)
@@ -363,6 +355,7 @@ proof on a Landlock-capable host; Console admission and initialized files are in
 - 2026-10-14 14:04: Scope PAT authentication and OpenShell prerequisites. (authoring-run/dba0a6cb-33d9-40fd-b38b-e20cddf4b75f - 96a2b79fa)
 
 - 2026-10-14 22:33: Exclude static Codex aliases. (authoring-run/32c91236-108c-48b8-9a06-9747c1d2d90c - f3a4d896bb51cd0d8e62bcdb29a69645b1c850dc)
+
 - 2026-10-15 16:14: Link frozen Agent policy admission and later live application. (authoring-run/43cb74b9-e1fe-4fc2-adde-9d932b061d7c - a28596ab8)
 
 - 2026-10-14 14:52: Validate and snapshot startup Sandbox network policy overrides through the Driver. (authoring-run/5e9763cf-c7fd-4990-94ac-6bc267d0287a - a28596ab8cf5e028a5eb91c276feb19a3775554c)
@@ -381,36 +374,4 @@ proof on a Landlock-capable host; Console admission and initialized files are in
 
 - 2026-10-13 09:37: Reconcile current admission and lifecycle behavior with external OAuth custody in the accompanying merge. (authoring-run/fd902939-ed58-4508-8d33-95a863d966af - e8d39978d801e7a5a8ac7242f32035f426da94e1)
 
-- 2026-10-10 12:40: Declare the Sandbox HOME for native hook credentials; hooks trust the file-delivered Gateway CA. (fix-1017)
-
-- 2026-10-09 12:22: Pass the Sandbox-owned private native hook credential directory to the Gateway launcher. (authoring-run/8e337823-5cdf-4dbb-bdac-e9c51a5051b9 - 635244e85c443a4408c92730b508601bbb20f2cd)
-
-- 2026-10-09 23:18: Accept bracketed IPv6 endpoints. (authoring-run/6eefb93e-33fb-450a-9657-51ebe15a686e - 21f34928437fb7d6f4391ba4af5d3e15bf9ce480)
-
-- 2026-10-09 20:27: Integrate main lifecycle, native workspace and readiness contracts without dropping endpoint safeguards. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - 90268463bbd255c3c13a0e0bdeb437728189eb1a)
-
-- 2026-10-09 19:45: Cover both runtime architectures in the development credential policy. (authoring-run/1e7118f7-bdb0-4564-894c-02f990f75e67 - bd540bcdef63cdc719e73192e4dbe99c365953c3)
-
-- 2026-10-09 15:30: Record bounded Agent Sandbox failure metadata before the original error returns and rollback proceeds; tighten setup prose. (authoring-run/54f8d1c2-fb6e-4074-999f-5185af50a86f - 8bfec22f49b207c16afce21bd9a941ee0e9cd95d)
-
-- 2026-10-13 16:45: Reconcile native private temporary state and retained writable-subpath preparation. (Codex/01a13654-be66-7741-b54f-f8ae80f2d496 - ff12fc86cd1662c98a9d8db78be9c2fa4facdcdd)
-
-- 2026-10-08: Document normal native OpenClaw provider delivery and private Compute workspace initialization; retain experimental qualification limits. (Codex/01a0e8ec-d02f-7b93-a59b-5b7fccf2ebaa)
-
-- 2026-10-06 22:10: Preserve HTTP port 80 when creating the OpenShell gRPC target. (authoring-run/88f2e095-3f3a-4d9b-a878-663034cdde6e - 2fc8320cf8bfbf9d7ea20757ef3fe32d7157e6aa)
-
-- 2026-10-06 15:57: Recorded the development image-import order that keeps pinned OpenShell images available until their workloads start. (authoring-run/473c1419-a5a2-4774-ac8d-33d6a265ae06 - 99641a7ab00ad8fdd987e27e9ee838814e5f535a)
-
-- 2026-10-06 11:17: Reconciled endpoint flow with current namespace and provider provisioning; condensed repeated prose. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - b6dc6b87a461ad33374e133d15cc739d8e074fea)
-
-- 2026-10-05 16:17: Documented version-fenced workspace-node setup renewal through the revision provider and supervisor refresh. (authoring-run/4f3e6ccd-a967-48c8-9d5d-f29a6d338d7d - fd9a082e2587432bde6282748a82e3025a64fd1a)
-
-- 2026-10-05 11:36: Trace pre-registration endpoint validation and condense repeated setup and runtime details. (agent:roboclaw:dashboard:9d0532e1-befb-4fc3-935e-7cd2a0c72110 - 9958ef0412565864efba7b13995536d7c2a51d22)
-
-- 2026-10-05 00:06: Bind immutable credential-source endpoints to provider profiles and Codex runtime configuration while retaining existing default endpoint limits for other consumers. (authoring-run/4e4824a1-f107-44c2-90bf-00fe13ff650c - d269c6d03)
-
-- 2026-10-05 12:50: Removed repeated setup and wire-contract detail while preserving the current OpenShell provisioning sequence and moved older entries to the history page. (authoring-run/fd7f6cdb-1d1d-40d5-8d4a-d6d80cd946e7 - 4b5afe0cb653f7dd99fccdb2e3432cbf60e6a03e)
-
-- 2026-10-02 16:26: Passed OpenShell's provider-local workspace root to the dedicated Gateway while preserving the canonical Kubernetes Harness root. (authoring-run/3bf937d5-c422-419e-af2d-754abe024ca4 - 987c8c2b4ace1e152262ef6920b6d0f9ff26a086)
-
-[OpenShell Sandbox provisioning documentation history](openshell-sandbox-provisioning/history.md) preserves the older dated entries.
+- Earlier entries (16) are in this page's Git history.
