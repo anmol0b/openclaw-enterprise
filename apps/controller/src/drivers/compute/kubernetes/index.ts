@@ -1289,7 +1289,10 @@ const GATEWAY_PRIVATE_STATE_CATEGORIES = Object.freeze([
 // Claude Code keeps each session's transcript under its configuration directory, and
 // OpenClaw resumes a conversation by that session ID (`claude --resume`). The rest of the
 // directory, including the settings file that carries the credential, stays Pod-local.
-const CLAUDE_CODE_PROJECTS_STATE = Object.freeze(["claude-projects", "/home/node/.claude/projects"] as const);
+const CLAUDE_CODE_PROJECTS_STATE = Object.freeze([
+  "claude-projects",
+  "/home/node/.claude/projects",
+] as const);
 const HARNESS_WORKSPACE_VOLUME = "openclaw-workspace";
 const HARNESS_WORKSPACE_SIZE = "40Gi";
 type WorkspaceRole = "agent" | "gateway";
@@ -12853,10 +12856,7 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
     }));
   }
 
-  private gatewayPrivateStateVolumeMounts(
-    embedded: boolean,
-    claudeCode: boolean,
-  ): V1VolumeMount[] {
+  private gatewayPrivateStateVolumeMounts(embedded: boolean, claudeCode: boolean): V1VolumeMount[] {
     const mounts: V1VolumeMount[] = GATEWAY_PRIVATE_STATE_CATEGORIES.map(
       ([subPath, mountPath]) => ({
         name: GATEWAY_PRIVATE_STATE_VOLUME,
@@ -12944,7 +12944,9 @@ chmodSync(${JSON.stringify(nodeStatePath)}, 0o700);`;
         "/runtime-state/home/gateway-codex-home",
       );
       directories.push(embedded ? "/gateway-state/workspace" : "/gateway-state/sessions");
-      if (claudeCode) directories.push(`/gateway-state/${CLAUDE_CODE_PROJECTS_STATE[0]}`);
+      if (claudeCode) {
+        directories.push(`/gateway-state/${CLAUDE_CODE_PROJECTS_STATE[0]}`);
+      }
     }
     // Init mounts the volume root; the gateway later mounts its home subdirectory.
     const writableConfigurationInitPath = WRITABLE_CONFIGURATION_PATH.replace(

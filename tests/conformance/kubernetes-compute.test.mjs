@@ -10541,9 +10541,8 @@ async function exerciseEmbeddedReplacement({
   const transcriptMounts = gatewayPod.containers[0].volumeMounts.filter(
     ({ mountPath }) => mountPath === "/home/node/.claude/projects",
   );
-  const preparation = gatewayPod.initContainers.find(
-    ({ name }) => name === "prepare-private-state",
-  ).args[0];
+  const preparation = gatewayPod.initContainers.find(({ name }) => name === "prepare-private-state")
+    .args[0];
   if (agentRuntimeId === "claude-cli") {
     assert.deepEqual(transcriptMounts, [
       {
@@ -10560,7 +10559,9 @@ async function exerciseEmbeddedReplacement({
     assert.doesNotMatch(preparation, /claude/u);
   }
   assert.equal(
-    gatewayPod.containers[0].volumeMounts.some(({ mountPath }) => mountPath === "/home/node/.claude"),
+    gatewayPod.containers[0].volumeMounts.some(
+      ({ mountPath }) => mountPath === "/home/node/.claude",
+    ),
     false,
     "the Claude Code settings file never reaches the claim",
   );
