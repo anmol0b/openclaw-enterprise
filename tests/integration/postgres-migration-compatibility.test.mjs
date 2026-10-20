@@ -1174,10 +1174,13 @@ async function assertHistoryRefused(db, refusal) {
     ["development", false],
     ["production", false],
   ]) {
-    assert.deepEqual(await runHistoryMigration(db, mode, checkOnly ? "--check" : undefined, refusal), {
-      ok: false,
-      code: "MIGRATION_HISTORY_UNSUPPORTED",
-    });
+    assert.deepEqual(
+      await runHistoryMigration(db, mode, checkOnly ? "--check" : undefined, refusal),
+      {
+        ok: false,
+        code: "MIGRATION_HISTORY_UNSUPPORTED",
+      },
+    );
     assert.deepEqual(await historySnapshot(db), before);
   }
 }

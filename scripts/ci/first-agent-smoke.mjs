@@ -1645,12 +1645,9 @@ async function smoke() {
       enablePublicReader(stack),
     );
     await step("route api.openai.com to the stand-in provider", () =>
-      routeModelProvider(
-        stack,
-        modelDirectory,
-        process.env.OCC_KUBERNETES_RUNTIME_IMAGE,
-        { credentialDigests },
-      ),
+      routeModelProvider(stack, modelDirectory, process.env.OCC_KUBERNETES_RUNTIME_IMAGE, {
+        credentialDigests,
+      }),
     );
     // The two Agents are independent; deploy them together to bound CI time.
     const [embedded, codex, control] = await Promise.all([
