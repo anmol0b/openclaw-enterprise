@@ -670,6 +670,13 @@ export const NAMESPACE_NAME_CONFLICT =
 export const DELETED_NAMESPACE_NAME_CONFLICT =
   "This name belongs to a deleted Namespace and cannot be reused. Choose a different name.";
 
+/**
+ * A revision admits one installed egress execution (UNIQUE (namespace_id, revision_id)); a
+ * second Sandbox for the same revision is refused alike by the memory and PostgreSQL stores.
+ */
+export const EGRESS_REVISION_INSTALLED_CONFLICT =
+  "Egress revision already has an installed execution.";
+
 export class AgentDeletingError extends ResourceConflictError {
   constructor(message = "The Agent is being deleted.") {
     super(message);

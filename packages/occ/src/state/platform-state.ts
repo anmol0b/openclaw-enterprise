@@ -84,6 +84,7 @@ import {
   CREDENTIAL_SOURCE_NAME_CONFLICT,
   DELETED_NAMESPACE_NAME_CONFLICT,
   DependencyUnavailableError,
+  EGRESS_REVISION_INSTALLED_CONFLICT,
   IAMPolicyValidationError,
   IAMRoleInUseError,
   NAMESPACE_NAME_CONFLICT,
@@ -2019,7 +2020,7 @@ function repositories(
             other.plan.execution.revisionId === execution.revisionId,
         )
       ) {
-        throw new ResourceStateConflictError("Egress revision already has an installed execution.");
+        throw new ResourceStateConflictError(EGRESS_REVISION_INSTALLED_CONFLICT);
       }
       snapshot.egressInstallations.set(key, prior ?? immutableCopy(installation));
     },

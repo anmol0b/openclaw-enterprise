@@ -77,7 +77,11 @@ test(
           sandboxId: "another-execution",
         }),
       ),
-      (error) => error.name === "ResourceConflictError",
+      // A second Sandbox for one revision hits UNIQUE (namespace_id, revision_id): the same
+      // state conflict the memory store raises, not the generic identity collision.
+      (error) =>
+        error.name === "ResourceStateConflictError" &&
+        error.message === "Egress revision already has an installed execution.",
     );
     const capture = f.capture();
     const ready = (await f.resolve(capture)).ready;
