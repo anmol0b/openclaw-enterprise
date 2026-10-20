@@ -42,7 +42,9 @@ If the task includes handing work to a reviewer, explicitly select
 `pullRequestBase: main` in the registry policy. The worker then requests
 `pull_requests: write` as well. GitHub does not limit that permission to drafts;
 the broker limits it to creating one draft from the review branch to the selected
-base. Later feedback and commits use ordinary Git on the same branch.
+base. Later feedback and commits use ordinary Git on the same branch. The Agent may
+also force-push or delete that branch, and deleting it closes the draft; protect the
+branch on GitHub to stop either.
 
 The Agent uses `oce-github pr-create --draft` with the head, base, title, optional
 explicit `--body` text and a fresh operation ID. The helper refuses `--body-file`;

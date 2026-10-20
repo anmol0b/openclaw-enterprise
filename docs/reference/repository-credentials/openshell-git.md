@@ -152,6 +152,11 @@ The App installation needs the corresponding repository contents and pull reques
 permissions. GitHub permissions themselves are broader than the middleware's
 branch and draft checks; keep independent GitHub branch protection.
 
+The Agent may force-push and delete its own review branch: both are admitted for
+that one ref. Deleting the branch closes its draft pull request. OCE does not block
+either; to stop them, protect the review branch on GitHub (branch protection or a
+ruleset).
+
 [Codex OAuth](../../testing/openshell-oauth.md) does not grant Git access. OpenShell Git
 binds a live revision to its installed credential and authorizes each request; other
 sandbox repository bindings remain refused.
