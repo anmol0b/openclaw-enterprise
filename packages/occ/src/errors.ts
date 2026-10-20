@@ -522,6 +522,26 @@ export class SandboxNetworkPolicyConflictError extends ResourceStateConflictErro
   }
 }
 
+const PROTECTED_EXECUTION_NETWORK_POLICY_MESSAGES = {
+  save: "Protected execution applies to this Agent: the Credential Proxy routes alone govern its egress, so network policy additions are refused; only an empty policy can be saved.",
+  apply:
+    "This Agent's active revision runs under protected execution: the Credential Proxy routes alone govern its egress, so live network policy application is refused.",
+  deploy:
+    "Protected execution keeps only the Credential Proxy egress policy, so this Agent's network policy additions are refused. Remove them, then deploy.",
+} as const;
+
+/**
+ * Finding 2053: a protected execution runs under its exact Credential Proxy egress policy, so
+ * an Agent's network policy additions are refused when saved, applied live or deployed, never
+ * dropped from the protected profile. HTTP returns 409 SANDBOX_POLICY_PROTECTED_EXECUTION.
+ */
+export class ProtectedExecutionNetworkPolicyError extends ResourceStateConflictError {
+  constructor(operation: keyof typeof PROTECTED_EXECUTION_NETWORK_POLICY_MESSAGES) {
+    super(PROTECTED_EXECUTION_NETWORK_POLICY_MESSAGES[operation]);
+    this.name = "ProtectedExecutionNetworkPolicyError";
+  }
+}
+
 /**
  * The Configuration moved past the generation the update named. HTTP marks it with an
  * `/expectedGeneration` detail, so a caller can tell it from other Configuration conflicts,

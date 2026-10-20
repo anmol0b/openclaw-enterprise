@@ -181,9 +181,10 @@ export async function reconcileSandboxPolicy(
       return "permanent";
     }
     // A protected execution runs under its exact protected egress policy; applying an
-    // Agent policy to that Sandbox would replace it, so the Driver cannot apply one.
+    // Agent policy to that Sandbox would replace it. OCC refuses the application first
+    // (finding 2053); this names the same rule for work queued before that refusal.
     if (revision.executionAdmission.mode === "protected") {
-      await fail("SANDBOX_POLICY_UNSUPPORTED");
+      await fail("SANDBOX_POLICY_PROTECTED_EXECUTION");
       return "permanent";
     }
     if (

@@ -16,7 +16,9 @@ shared exchange but does not establish static inference or Git transport support
 A fresh revision records its execution admission, including whether it is protected.
 A protected plan with no bindings means deny all, including direct networking.
 Readers that cannot interpret the decision refuse the revision. Other Compute
-implementations refuse protected admission. See the
+implementations refuse protected admission. A protected revision keeps only its
+Credential Proxy egress policy: per-Agent network policy additions are refused at
+save, live application and deploy with `409 SANDBOX_POLICY_PROTECTED_EXECUTION`. See the
 [developer upgrade and withdrawal procedure](../../guides/deploy/protected-egress-development.md)
 before migrating an installation with running Agents.
 

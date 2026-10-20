@@ -766,6 +766,11 @@
                     "type": "string"
                   },
                   {
+                    "const": "SANDBOX_POLICY_PROTECTED_EXECUTION",
+                    "description": "The Agent runs, or will deploy, under protected execution, whose Credential Proxy egress policy admits no Agent network policy additions; they are refused at save, live application and deploy.",
+                    "type": "string"
+                  },
+                  {
                     "const": "SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED",
                     "description": "The Installation has no ChatGPT Backend, so service-account credentials cannot be issued, used for Harness authentication, or revoked to delete their account.",
                     "type": "string"
@@ -22633,7 +22638,10 @@
                           "required": ["id", "namespaceId", "agentId", "version", "additions"],
                           "type": "object"
                         },
-                        "protectedExecution": { "type": "boolean" }
+                        "protectedExecution": {
+                          "description": "True while the active revision or the next deploy runs under protected execution. Network policy additions are then refused with SANDBOX_POLICY_PROTECTED_EXECUTION; saving an empty policy stays allowed.",
+                          "type": "boolean"
+                        }
                       },
                       "required": [
                         "policy",

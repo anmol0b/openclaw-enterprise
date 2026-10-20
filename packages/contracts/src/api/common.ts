@@ -893,6 +893,7 @@ export const ERROR_CODES = Object.freeze([
   "DEPENDENCY_UNAVAILABLE",
   "CREDENTIAL_GATEWAY_NOT_CONFIGURED",
   "CREDENTIAL_WITHDRAWAL_IN_PROGRESS",
+  "SANDBOX_POLICY_PROTECTED_EXECUTION",
   "SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED",
   "REPOSITORY_OPTIONS_UNAVAILABLE",
   "MODEL_DISCOVERY_CREDENTIALS_REJECTED",
@@ -972,6 +973,10 @@ export const ErrorResponse = Type.Object(
           Type.Literal("CREDENTIAL_WITHDRAWAL_IN_PROGRESS", {
             description:
               "Only credential withdrawal work still queued or running for an Agent revision that held the source keeps it from being deleted.",
+          }),
+          Type.Literal("SANDBOX_POLICY_PROTECTED_EXECUTION", {
+            description:
+              "The Agent runs, or will deploy, under protected execution, whose Credential Proxy egress policy admits no Agent network policy additions; they are refused at save, live application and deploy.",
           }),
           Type.Literal("SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED", {
             description:

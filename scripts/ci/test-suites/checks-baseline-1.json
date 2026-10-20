@@ -454,7 +454,10 @@
         "signed Responses Plan projections protect completed and response-wide streamed text",
         "live-shaped Responses envelopes pass while undeclared or credential-bearing envelope fields refuse",
         "protected admission refuses an Agent's network policy additions instead of dropping them",
-        "the policy endpoint refuses additions and live application while the active revision is protected"
+        "the policy endpoint refuses additions and live application while the active revision is protected",
+        "the policy endpoint refuses additions before an Agent's first protected deploy",
+        "the OpenShell Driver refuses a protected revision carrying Agent network policy additions",
+        "the policy worker names protected execution when it fails queued live application"
       ]
     },
     {

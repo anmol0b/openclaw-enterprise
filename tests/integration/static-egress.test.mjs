@@ -19,6 +19,7 @@ import {
   egressInjectionDigest,
 } from "../../packages/occ/src/credential-proxy.ts";
 import { deploymentErrorForWork } from "../../packages/occ/src/state/controller-work.ts";
+import { reconcileSandboxPolicy } from "../../apps/controller/src/worker/sandbox-policy.ts";
 import {
   pluginRuntimeSpecForRevision,
   pluginRuntimeConfigMapData,
@@ -2663,14 +2664,17 @@ test("protected admission refuses an Agent's network policy additions instead of
     `/namespaces/${f.namespace.id}/agents/${f.agent.id}/deploy`,
   );
   assert.equal(refused.status, 409, JSON.stringify(refused.body));
-  assert.equal(refused.body.error.code, "RESOURCE_CONFLICT");
-  assert.match(refused.body.error.message, /network policy additions/);
+  assert.equal(refused.body.error.code, "SANDBOX_POLICY_PROTECTED_EXECUTION");
+  assert.match(
+    refused.body.error.message,
+    /^Protected execution keeps only the Credential Proxy egress policy, so this Agent's network policy additions are refused\./,
+  );
   assert.deepEqual(
     await f.controller.transact((unit) => unit.revisions.listRevisions(f.namespace.id, f.agent.id)),
     [],
   );
-  // Without additions the same Agent admits a protected revision whose Sandbox policy
-  // carries the Driver defaults only; the protected profile replaces them at provisioning.
+  // Without additions the same Agent admits a protected revision that keeps only its
+  // protected egress policy: no Agent policy snapshot rides beside the egress plan.
   await savePolicy([]);
   const metadata = await f.deployAgent(f.namespace.id, f.agent.id);
   const revision = await f.controller.transact((unit) =>
@@ -2678,7 +2682,7 @@ test("protected admission refuses an Agent's network policy additions instead of
   );
   assert.equal(revision.executionAdmission.mode, "protected");
   assert.ok(revision.egressPlan);
-  assert.deepEqual(revision.sandboxPolicy?.additions ?? [], []);
+  assert.equal(revision.sandboxPolicy, undefined);
 });
 
 test("the policy endpoint refuses additions and live application while the active revision is protected", async (t) => {
@@ -2702,16 +2706,17 @@ test("the policy endpoint refuses additions and live application while the activ
   assert.equal(view.status, 200, JSON.stringify(view.body));
   assert.equal(view.body.data.editingEnabled, true);
   assert.equal(view.body.data.protectedExecution, true);
-  assert.equal(view.body.data.defaultsRevisionId, f.revision.id);
+  // The protected revision admitted no Agent policy snapshot, so no revision owns defaults.
+  assert.equal(view.body.data.defaultsRevisionId, undefined);
   const version = view.body.data.policy.version;
   const refused = await f.request("PUT", base, {
     body: { expectedVersion: version, additions: [grant] },
   });
   assert.equal(refused.status, 409, JSON.stringify(refused.body));
-  assert.equal(refused.body.error.code, "RESOURCE_CONFLICT");
+  assert.equal(refused.body.error.code, "SANDBOX_POLICY_PROTECTED_EXECUTION");
   assert.match(
     refused.body.error.message,
-    /protected execution.*Credential Proxy.*additions are refused/,
+    /^Protected execution.*Credential Proxy.*additions are refused/,
   );
   // Nothing was saved, and an empty policy can still be written.
   assert.equal((await f.request("GET", base)).body.data.policy.version, version);
@@ -2724,11 +2729,213 @@ test("the policy endpoint refuses additions and live application while the activ
     body: { expectedVersion: version + 1, revisionId: f.revision.id },
   });
   assert.equal(applied.status, 409, JSON.stringify(applied.body));
+  assert.equal(applied.body.error.code, "SANDBOX_POLICY_PROTECTED_EXECUTION");
   assert.match(
     applied.body.error.message,
     /protected execution.*Credential Proxy.*application is refused/,
   );
   assert.equal((await f.request("GET", base)).body.data.policy.application, undefined);
+});
+
+test("the policy endpoint refuses additions before an Agent's first protected deploy", async (t) => {
+  // Finding 2053, fail early: with the Credential Proxy selected, the next deploy is protected
+  // and would refuse saved additions, so save refuses them before any revision exists.
+  const grant = {
+    id: "python-demo",
+    binary: "/usr/bin/python3.11",
+    host: "example.org",
+    ports: [{ from: 443, to: 443 }],
+  };
+  const f = await staticEgressFixture(t, {
+    admitRevision: false,
+    appFactory: (context, options) =>
+      createConsoleAppFixture(context, { ...options, sandboxNetworkPolicyCeiling: [grant] }),
+  });
+  const base = `/namespaces/${f.namespace.id}/agents/${f.agent.id}/sandbox-policy/networking`;
+  const enabled = await f.request("PATCH", `${base}/editing`, { body: { enabled: true } });
+  assert.equal(enabled.status, 200, JSON.stringify(enabled.body));
+  const view = await f.request("GET", base);
+  assert.equal(view.status, 200, JSON.stringify(view.body));
+  assert.equal(view.body.data.protectedExecution, true, "no revision yet; the next one is protected");
+  const version = view.body.data.policy.version;
+  const refused = await f.request("PUT", base, {
+    body: { expectedVersion: version, additions: [grant] },
+  });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error.code, "SANDBOX_POLICY_PROTECTED_EXECUTION");
+  assert.equal(
+    refused.body.error.message,
+    "Protected execution applies to this Agent: the Credential Proxy routes alone govern its egress, so network policy additions are refused; only an empty policy can be saved.",
+  );
+  const unchanged = (await f.request("GET", base)).body.data.policy;
+  assert.equal(unchanged.version, version);
+  assert.deepEqual(unchanged.additions, []);
+  const cleared = await f.request("PUT", base, {
+    body: { expectedVersion: version, additions: [] },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  // The deploy that follows is protected and carries no Agent policy snapshot.
+  const metadata = await f.deployAgent(f.namespace.id, f.agent.id);
+  const revision = await f.controller.transact((unit) =>
+    unit.revisions.findRevision(f.namespace.id, f.agent.id, metadata.id),
+  );
+  assert.equal(revision.executionAdmission.mode, "protected");
+  assert.equal(revision.sandboxPolicy, undefined);
+});
+
+test("the OpenShell Driver refuses a protected revision carrying Agent network policy additions", async (t) => {
+  // Finding 2053's provisioning backstop: the protected Sandbox policy is the protected egress
+  // profile alone. A revision that somehow carries additions is refused, never provisioned
+  // with them silently dropped.
+  const f = await staticEgressFixture(t);
+  const grant = {
+    id: "python-demo",
+    binary: "/usr/bin/python3.11",
+    host: "example.org",
+    ports: [{ from: 443, to: 443 }],
+  };
+  const requirements = {
+    loginMode: "api_key",
+    image: "harness-fixture:local",
+    command: ["node", "harness.mjs"],
+    workspaceMounts: [],
+    credentialAttachments: [],
+    proxyWiring: f.attachment,
+    labels: { "openclaw.dev/revision": f.revision.id },
+    files: [],
+    environment: [],
+  };
+  await assert.rejects(
+    f.sandboxDriver.provisionHarness({
+      ...f.context,
+      kubernetes: {},
+      signal: AbortSignal.timeout(5000),
+      transportToken: "fixture-transport-token",
+      requirements,
+      revision: {
+        ...f.revision,
+        sandboxPolicy: {
+          driverId: f.sandboxDriver.id,
+          implementation: "openshell",
+          version: 2,
+          defaults: {},
+          additions: [grant],
+        },
+      },
+    }),
+    {
+      code: "SANDBOX_HARNESS_UNSUPPORTED",
+      message:
+        "Protected execution keeps only its protected egress policy; this revision carries Agent network policy additions.",
+    },
+  );
+});
+
+test("the policy worker names protected execution when it fails queued live application", async () => {
+  // Finding 2053's worker backstop: OCC refuses live application to a protected revision, but
+  // work queued before that refusal must fail at once, name the rule and touch no provider.
+  const grant = {
+    id: "python-demo",
+    binary: "/usr/bin/python3.11",
+    host: "example.org",
+    ports: [{ from: 443, to: 443 }],
+  };
+  const application = {
+    id: "application-2053",
+    revisionId: "rev-2053",
+    policyVersion: 2,
+    snapshot: {
+      driverId: "sandbox",
+      implementation: "openshell",
+      version: 2,
+      defaults: {},
+      additions: [grant],
+    },
+    expectedProviderVersion: "1",
+    state: "pending",
+    requestedBy: "principal",
+    requestedAt: new Date().toISOString(),
+  };
+  let policy = {
+    id: "sbp-2053",
+    namespaceId: "ns-2053",
+    agentId: "agt-2053",
+    version: 2,
+    additions: [grant],
+    application,
+  };
+  const outcomes = [];
+  const unit = {
+    namespaces: { lockNamespace: async () => ({ status: "ready" }) },
+    agents: {
+      lockAgent: async () => ({
+        status: "active",
+        desiredRuntimeState: "running",
+        activeRevisionId: application.revisionId,
+      }),
+    },
+    sandboxPolicies: {
+      find: async () => policy,
+      save: async (next) => (policy = next),
+    },
+    revisions: {
+      findRevision: async () => ({
+        id: application.revisionId,
+        sandboxDriverId: "sandbox",
+        executionAdmission: { version: 2, mode: "protected" },
+        compute: { id: "compute", implementation: "kubernetes" },
+      }),
+    },
+    audit: { append: async () => {} },
+  };
+  const queue = {
+    heartbeat: async (claim) => claim,
+    complete: async () => outcomes.push("complete"),
+    fail: async (_claim, { code }) => outcomes.push(`fail ${code}`),
+    retry: async (_claim, { code }) => outcomes.push(`retry ${code}`),
+  };
+  let providerCalls = 0;
+  const outcome = await reconcileSandboxPolicy(
+    {
+      state: { transactWithQueue: (operation) => operation(unit, queue) },
+      driver: {
+        id: "sandbox",
+        implementation: "openshell",
+        async observeNetworkPolicy() {
+          providerCalls++;
+          return { resourceVersion: "1", policyVersion: "1", state: "applied", matches: false };
+        },
+        async applyNetworkPolicy() {
+          providerCalls++;
+        },
+      },
+      compute: {
+        id: "compute",
+        implementation: "kubernetes",
+        resolveSandboxNamespace: async (namespace) => namespace,
+      },
+      iam: { id: "iam", authorize: async () => ({ allowed: true }) },
+      installationId: "ins-2053",
+      ceiling: [grant],
+      signal: AbortSignal.timeout(5_000),
+      maxAttempts: 5,
+      deadlineMs: 600_000,
+      leaseDurationMs: 30_000,
+    },
+    {
+      idempotencyKey: `agent:${policy.agentId}:reconcile:sandbox_policy:${application.id}`,
+      namespaceId: policy.namespaceId,
+      agentId: policy.agentId,
+      actorId: "principal",
+      attemptCount: 1,
+      ageMs: 0,
+    },
+  );
+  assert.equal(outcome, "permanent");
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(outcomes, ["fail SANDBOX_POLICY_PROTECTED_EXECUTION"]);
+  assert.equal(policy.application.state, "failed");
+  assert.equal(policy.application.reason, "SANDBOX_POLICY_PROTECTED_EXECUTION");
 });
 
 test("an unavailable protected egress provider fails the deployment with an operator message", () => {

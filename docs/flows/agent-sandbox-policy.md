@@ -44,9 +44,11 @@ The solid arrows trace source paths, not a claim that all providers are verified
 `packages/occ/src/index.ts:updateAgentSandboxPolicy` independently authorizes
 Agent `manage_policy` and SandboxPolicy `update`, locks the Namespace and Agent,
 and checks editing, expected version, pending work, complete ceiling coverage,
-and Driver admission. While the active revision runs under protected execution
-(its egress is governed by the Credential Proxy routes), additions and live
-application are refused with `409`; the policy view reports `protectedExecution`.
+and Driver admission. While the active or next revision runs under protected
+execution (the Installation selects the Credential Proxy), additions are refused
+with `409 SANDBOX_POLICY_PROTECTED_EXECUTION`, as are live application to a
+protected revision and a protected deploy carrying them; protected
+revisions admit no policy snapshot. The policy view reports `protectedExecution`.
 For an Agent with repository bindings (or a Git-bound active revision), Driver
 admission gets `repositoryCredentials`: the OpenShell Driver with its Git route
 refuses a grant or default reaching `github.com` or a name under it, or naming an

@@ -2046,8 +2046,8 @@ function sandboxSpec(
             network_middlewares: protectedEgressPolicy(options, requirements).network_middlewares,
           }),
       network_policies: {
-        // A protected execution keeps its exact protected egress policy; admission refuses
-        // Agent network policy additions for it, so no additions reach this branch.
+        // A protected execution keeps its exact protected egress policy; admission and
+        // provisionHarness refuse Agent network policy additions for it (finding 2053).
         ...(requirements.proxyWiring === undefined
           ? (revision.sandboxPolicy?.defaults ?? networkPolicies(options))
           : asRecord(protectedEgressPolicy(options, requirements).network_policies)),
@@ -2810,6 +2810,17 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     if (!isDeepStrictEqual(context.requirements.proxyWiring?.plan, context.revision.egressPlan)) {
       throw new OpenShellSandboxConfigurationFailure(
         "Protected egress attachment must match the admitted revision.",
+      );
+    }
+    // Finding 2053: a protected Sandbox keeps only its protected egress policy. OCC admission
+    // refuses Agent network policy additions for it; refuse any that reach here, never drop them.
+    if (
+      context.requirements.proxyWiring !== undefined &&
+      (context.revision.sandboxPolicy?.additions.length ?? 0) > 0
+    ) {
+      throw new SandboxRevisionUnsupportedError(
+        "SANDBOX_HARNESS_UNSUPPORTED",
+        "Protected execution keeps only its protected egress policy; this revision carries Agent network policy additions.",
       );
     }
     if (context.revision.egressPlan !== undefined && context.revision.harness.id !== "codex") {

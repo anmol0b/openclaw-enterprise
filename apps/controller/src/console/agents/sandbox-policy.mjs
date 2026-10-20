@@ -394,8 +394,33 @@ export function renderAgentSandboxPolicy(context, { agent, revisionId }) {
             element(
               "p",
               { role: "status", className: "sandbox-policy-protected" },
-              "The running version uses protected execution: the Credential Proxy routes govern this Agent's egress, so network policy additions are refused while it is active.",
+              "Protected execution applies to this Agent: the Credential Proxy routes alone govern its egress, so network policy additions are refused.",
             ),
+            // Saved additions block every protected deploy; removing them is the only edit left.
+            ...(view.policy.additions.length > 0 && view.editingEnabled && view.capability
+              ? [
+                  button(
+                    "Remove saved network rules",
+                    () =>
+                      void mutate(async () => {
+                        const saved = await context.request(policyPath, {
+                          method: "PUT",
+                          body: { expectedVersion: view.policy.version, additions: [] },
+                        });
+                        view.policy = saved;
+                        additions = structuredClone(saved.additions);
+                        feedback.textContent = `Policy v${saved.version} saved without network rules. Deploy a new version when ready.`;
+                      }),
+                    {
+                      disabled:
+                        mutation ||
+                        unknownOutcome ||
+                        editDenied ||
+                        view.policy.application?.state === "pending",
+                    },
+                  ),
+                ]
+              : []),
           ]
         : []),
       element(

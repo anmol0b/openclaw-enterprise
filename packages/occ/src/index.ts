@@ -242,6 +242,7 @@ import {
   SandboxRepositoryRecipientUnverifiedError,
   ResourceConflictError,
   ResourceStateConflictError,
+  ProtectedExecutionNetworkPolicyError,
   SandboxNetworkPolicyConflictError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsError,
@@ -401,6 +402,7 @@ export {
   SandboxGatewayUnauthorizedError,
   SandboxGatewayUnavailableError,
   SandboxNamespaceRefusedError,
+  ProtectedExecutionNetworkPolicyError,
   SandboxNetworkPolicyConflictError,
   SandboxRevisionUnsupportedError,
   SandboxRepositoryRecipientUnverifiedError,
@@ -7603,27 +7605,25 @@ export class OpenClawController {
   }
 
   /**
-   * A protected execution runs under its exact Credential Proxy profile, so Agent network
-   * policy additions can neither be saved for nor applied to its active revision. Refusing
-   * here, before save, is the same rule createRevision and the worker enforce later.
+   * Finding 2053: a protected execution keeps only its Credential Proxy egress policy, so an
+   * Agent's network policy additions are refused rather than dropped. They are refused at save
+   * while the active revision is protected or the next deploy will be (the Installation selects
+   * the Credential Proxy), and live application is refused to a protected active revision.
+   * createRevision and the OpenShell Driver refuse the same rule at deploy.
    */
-  private async refuseProtectedExecutionPolicy(
+  private async protectedExecutionPolicy(
     state: PlatformUnitOfWork,
     namespaceId: string,
     agent: Readonly<Agent>,
-    refused: "additions" | "application",
-  ): Promise<void> {
+  ): Promise<{ readonly active: boolean; readonly next: boolean }> {
     const revision =
       agent.activeRevisionId === undefined
         ? undefined
         : await state.revisions.findRevision(namespaceId, agent.id, agent.activeRevisionId);
-    if (revision?.executionAdmission.mode === "protected") {
-      throw new ResourceStateConflictError(
-        `This Agent's active revision runs under protected execution: the Credential Proxy routes govern its egress, so network policy ${
-          refused === "additions" ? "additions are refused" : "application is refused"
-        } while that revision is active.`,
-      );
-    }
+    return {
+      active: revision?.executionAdmission.mode === "protected",
+      next: this.selections.has("credential_proxy"),
+    };
   }
 
   async getAgentSandboxPolicy(
@@ -7658,7 +7658,10 @@ export class OpenClawController {
       return {
         policy,
         editingEnabled: agent.sandboxPolicyEditing === true,
-        protectedExecution: revision?.executionAdmission.mode === "protected",
+        // Additions are refused while either the running or the next revision is protected.
+        protectedExecution:
+          revision?.executionAdmission.mode === "protected" ||
+          this.selections.has("credential_proxy"),
         capability: this.sandboxDriver()?.networkPolicy ?? null,
         ceiling: this.sandboxNetworkPolicyCeiling,
         defaults,
@@ -7794,7 +7797,10 @@ export class OpenClawController {
         );
       }
       if (additions.length > 0) {
-        await this.refuseProtectedExecutionPolicy(state, namespaceId, agent, "additions");
+        const protectedExecution = await this.protectedExecutionPolicy(state, namespaceId, agent);
+        if (protectedExecution.active || protectedExecution.next) {
+          throw new ProtectedExecutionNetworkPolicyError("save");
+        }
       }
       this.admitAgentNetworkPolicy(additions, expectedVersion + 1, undefined, {
         repositoryCredentials: (agent.repositoryBindings?.length ?? 0) > 0,
@@ -7853,6 +7859,10 @@ export class OpenClawController {
       }
       const driver = this.sandboxDriver();
       const revision = await state.revisions.findRevision(namespaceId, agentId, revisionId);
+      // A protected revision carries no Agent policy snapshot; name the rule, not the gap.
+      if (revision?.executionAdmission.mode === "protected") {
+        throw new ProtectedExecutionNetworkPolicyError("apply");
+      }
       if (
         driver === undefined ||
         revision?.sandboxPolicy === undefined ||
@@ -7865,7 +7875,6 @@ export class OpenClawController {
           "Live policy application is unavailable for this revision. Deploy explicitly to apply the saved policy.",
         );
       }
-      await this.refuseProtectedExecutionPolicy(state, namespaceId, agent, "application");
       const snapshot = this.admitAgentNetworkPolicy(
         policy.additions,
         policy.version,
@@ -8750,8 +8759,21 @@ export class OpenClawController {
       }
       const policy = await state.sandboxPolicies.find(namespace.id, lockedAgent.id);
       const policyScope = { repositoryCredentials: repositoryCredentials !== undefined };
-      const sandboxPolicy =
-        (policy?.additions.length ?? 0) > 0
+      // Finding 2053: a protected execution keeps only its protected egress policy. It admits
+      // no Agent policy snapshot, and the Agent's network policy additions are refused, never
+      // dropped. The caller learns of them only with SandboxPolicy read access.
+      const protectedExecution = execution.executionAdmission.mode === "protected";
+      if (protectedExecution && policy !== undefined && policy.additions.length > 0) {
+        await this.authorize(principalId, "read", {
+          kind: "sandbox_policy",
+          id: policy.id,
+          namespaceId: namespace.id,
+        });
+        throw new ProtectedExecutionNetworkPolicyError("deploy");
+      }
+      const sandboxPolicy = protectedExecution
+        ? undefined
+        : (policy?.additions.length ?? 0) > 0
           ? this.admitAgentNetworkPolicy(policy!.additions, policy!.version, undefined, policyScope)
           : sandbox?.admitNetworkPolicy?.([], policy?.version ?? 1, undefined, policyScope);
       if ((policy?.additions.length ?? 0) > 0 && sandboxPolicy === undefined) {
@@ -8765,16 +8787,6 @@ export class OpenClawController {
           id: policy.id,
           namespaceId: namespace.id,
         });
-      }
-      // A protected execution admits exactly its protected egress policy. Agent network
-      // policy additions would be dropped from that profile, so refuse them instead.
-      if (
-        execution.executionAdmission.mode === "protected" &&
-        (policy?.additions.length ?? 0) > 0
-      ) {
-        throw new ResourceStateConflictError(
-          "Protected execution admission cannot include this Agent's network policy additions; remove them before deploying.",
-        );
       }
       const revisionDraft: AgentRevision = {
         id: revisionId,

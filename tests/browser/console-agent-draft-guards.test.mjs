@@ -313,6 +313,53 @@ test("Agent policy proposals save separately or save then apply the newly saved 
   );
 });
 
+test("Agent policy under protected execution offers only removal of saved network rules", async (t) => {
+  const { fixture, namespace, agent, base } = await createPolicyConsole(t, [delegatedPolicyGrant]);
+  // Rules saved before protected execution applied block every protected deploy. This fixture
+  // selects no Credential Proxy, so only the view's protectedExecution flag is set on the read;
+  // the removal itself goes through real HTTP, IAM and OCC admission.
+  const saved = await fixture.request("PUT", base, {
+    body: { expectedVersion: 1, additions: [delegatedPolicyGrant] },
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  const { page } = await newPage(t, fixture);
+  await page.route(`${fixture.origin}${base}`, async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = await response.json();
+    body.data.protectedExecution = true;
+    await route.fulfill({ response, json: body });
+  });
+  const requests = apiRequests(page, fixture.origin);
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "policy"));
+  await page
+    .getByText(
+      "Protected execution applies to this Agent: the Credential Proxy routes alone govern its egress, so network policy additions are refused.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(
+    await page.getByRole("button", { name: "Add proposed rule", exact: true }).isDisabled(),
+    true,
+  );
+  await page.getByRole("button", { name: "Remove saved network rules", exact: true }).click();
+  await page.getByText(/Policy v3 saved without network rules\./).waitFor();
+  assert.deepEqual(
+    pathRequests(requests, "PUT", base).map(({ body }) => body),
+    [{ expectedVersion: 2, additions: [] }],
+  );
+  const cleared = (await fixture.request("GET", base)).data.policy;
+  assert.equal(cleared.version, 3);
+  assert.deepEqual(cleared.additions, []);
+  assert.equal(
+    await page.getByRole("button", { name: "Remove saved network rules", exact: true }).count(),
+    0,
+  );
+});
+
 test("Agent policy combined save distinguishes ceiling rejection from a saved policy whose application is rejected", async (t) => {
   const { fixture, namespace, agent, base } = await createPolicyConsole(t, [delegatedPolicyGrant]);
   const { revision } = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
