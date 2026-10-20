@@ -10,34 +10,125 @@ import {
 } from "./manifest.ts";
 import { readPrivateFile } from "./private-files.ts";
 
+const USAGE =
+  "Usage: oce-github pr-create --draft --head <branch> --base <branch> --title <text> [--body <text>]";
+
+/**
+ * Why a draft create stopped, by what is known about GitHub's state. `usage` and `not-sent`
+ * stop before any request; `not-created` means the request never reached GitHub or GitHub
+ * refused it; anything else may have created a draft. Messages never carry credentials.
+ */
+export class DraftPullFailure extends Error {
+  readonly stage: "usage" | "not-sent" | "not-created";
+  constructor(stage: DraftPullFailure["stage"], message: string) {
+    super(message);
+    this.name = "DraftPullFailure";
+    this.stage = stage;
+  }
+}
+
+// GitHub and middleware text is shown to the Agent: printable, bounded, one line.
+function printable(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  // eslint-disable-next-line no-control-regex
+  const text = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
+  return text === "" ? undefined : Array.from(text).slice(0, 300).join("");
+}
+
+// Connect-phase failures: no connection was established, so no request was sent.
+const NOT_CONNECTED = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+]);
+
+/**
+ * Classifies a reply OpenShell or GitHub gave instead of a created draft. OpenShell marks a
+ * refusal made before forwarding with `layer: "l7"` (request-phase middleware and L7 policy);
+ * any other OpenShell refusal, such as a response-phase middleware block, may follow a create
+ * and stays unconfirmed.
+ */
+function openShellRefusal(status: number | undefined, result: Record<string, unknown> | undefined) {
+  if (typeof result?.error === "string") {
+    if (result.layer !== "l7") {
+      return undefined;
+    }
+    if (result.error === "middleware_denied") {
+      const reason = printable(result.reason_code);
+      return new DraftPullFailure(
+        "not-created",
+        `the repository route refused it${reason ? ` (${reason})` : ""}; GitHub did not receive it.`,
+      );
+    }
+    if (result.error === "middleware_failed") {
+      return new DraftPullFailure(
+        "not-created",
+        "the repository route could not check it; GitHub did not receive it. Ask an operator to check the worker.",
+      );
+    }
+    return new DraftPullFailure(
+      "not-created",
+      `OpenShell refused it (${printable(result.error) ?? "policy"}); GitHub did not receive it.`,
+    );
+  }
+  if (status === undefined || status < 400 || status >= 500) {
+    return undefined;
+  }
+  const errors = Array.isArray(result?.errors) ? result.errors.slice(0, 5) : [];
+  const detail = [
+    printable(result?.message),
+    ...errors.map((item) => printable((item as Record<string, unknown> | null)?.message)),
+  ]
+    .filter((item) => item !== undefined)
+    .join("; ");
+  const hint =
+    status === 401 ? " The repository credential was not accepted; ask an operator." : "";
+  return new DraftPullFailure(
+    "not-created",
+    `GitHub answered ${status}${detail ? `: ${detail}` : ""}${/[.!?]$/.test(detail) ? "" : "."}${hint}`,
+  );
+}
+
 /** Exactly one HTTPS exchange, with the broker or with GitHub through OpenShell's mediation. */
 export async function createDraftPull(args: string[], manifestRoot?: string) {
-  const { values: q, positionals } = parseArgs({
-    args,
-    allowPositionals: true,
-    options: {
-      head: { type: "string" },
-      base: { type: "string" },
-      title: { type: "string" },
-      body: { type: "string" },
-      "operation-id": { type: "string" },
-      draft: { type: "boolean" },
-    },
-  });
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      allowPositionals: true,
+      options: {
+        head: { type: "string" },
+        base: { type: "string" },
+        title: { type: "string" },
+        body: { type: "string" },
+        "operation-id": { type: "string" },
+        draft: { type: "boolean" },
+      },
+    });
+  } catch (error) {
+    throw new DraftPullFailure("usage", (error as Error).message);
+  }
+  const { values: q, positionals } = parsed;
   const { head, base, title, body = "", draft } = q;
-  if (
-    positionals.length !== 1 ||
-    positionals[0] !== "pr-create" ||
-    !draft ||
-    !head ||
-    !base ||
-    !title
-  ) {
-    throw new Error("invalid-draft-pull-arguments");
+  if (positionals.length !== 1 || positionals[0] !== "pr-create") {
+    throw new DraftPullFailure("usage", "The only command is pr-create.");
+  }
+  const missing = [
+    ...(draft ? [] : ["--draft"]),
+    ...(head ? [] : ["--head"]),
+    ...(base ? [] : ["--base"]),
+    ...(title ? [] : ["--title"]),
+  ];
+  if (!head || !base || !title || !draft) {
+    throw new DraftPullFailure("usage", `Missing ${missing.join(", ")}.`);
   }
   const operationId = q["operation-id"] ?? randomUUID();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)) {
-    throw new Error("invalid-operation-id");
+    throw new DraftPullFailure("usage", "--operation-id must be a lowercase UUIDv4.");
   }
   const { client, bearer, ca, check, openShell } = await transport(head, base, manifestRoot);
   const { gatewayOrigin, repository } = client;
@@ -52,7 +143,8 @@ export async function createDraftPull(args: string[], manifestRoot?: string) {
     }),
   );
   if (bytes.length > 65536) {
-    throw new Error("draft-pull-request-too-large");
+    bearer.fill(0);
+    throw new DraftPullFailure("not-sent", "the title and body exceed 64 KiB.");
   }
   const path = "/repos/" + repository + "/pulls";
   // Record the ID before the first possible send. A failed response may mean a draft was created.
@@ -60,7 +152,11 @@ export async function createDraftPull(args: string[], manifestRoot?: string) {
     (openShell ? "local draft attempt " : "draft pull operation ") + operationId + "\n",
   );
   try {
-    check?.();
+    try {
+      check?.();
+    } catch {
+      throw new DraftPullFailure("not-sent", "the repository session has expired.");
+    }
     // A managed Agent shell reaches the bound broker through its HTTPS proxy; TLS authenticates
     // the broker end to end. OpenShell strips proxy variables and mediates every connection from
     // the sandbox network namespace, as for Git there: connect to the GitHub API origin and
@@ -97,7 +193,14 @@ export async function createDraftPull(args: string[], manifestRoot?: string) {
                 throw new Error("unrecognized-receipt");
               }
             }
-            const result = JSON.parse(data);
+            let result;
+            try {
+              result = JSON.parse(data);
+            } catch {
+              // A non-JSON 4xx still says GitHub (or the route) refused the create.
+              const refusal = openShell ? openShellRefusal(res.statusCode, undefined) : undefined;
+              throw refusal ?? new Error("unrecognized-receipt");
+            }
             if (openShell) {
               // OCE authorizes this create once; only GitHub's reply confirms its outcome.
               const { html_url: url, number } = result;
@@ -113,7 +216,12 @@ export async function createDraftPull(args: string[], manifestRoot?: string) {
                 result.base?.ref !== base ||
                 result.base?.repo?.full_name !== repository
               ) {
-                throw new Error("github-draft-not-confirmed");
+                throw (
+                  openShellRefusal(
+                    res.statusCode,
+                    result !== null && typeof result === "object" ? result : undefined,
+                  ) ?? new Error("github-draft-not-confirmed")
+                );
               }
               resolve(JSON.stringify({ url, number, head, base, draft: true }));
               return;
@@ -141,12 +249,25 @@ export async function createDraftPull(args: string[], manifestRoot?: string) {
               }
               reject(new Error("draft-pull-receipt-unavailable"));
             }
-          } catch {
-            reject(new Error("draft-pull-receipt-unavailable"));
+          } catch (error) {
+            reject(
+              error instanceof DraftPullFailure
+                ? error
+                : new Error("draft-pull-receipt-unavailable"),
+            );
           }
         },
       );
-      req.once("error", reject);
+      req.once("error", (error: NodeJS.ErrnoException) => {
+        reject(
+          error.code !== undefined && NOT_CONNECTED.has(error.code)
+            ? new DraftPullFailure(
+                "not-sent",
+                `could not connect to ${new URL(gatewayOrigin).host} (${error.code}).`,
+              )
+            : new Error(`connection failed${error.code ? ` (${error.code})` : ""}`),
+        );
+      });
       req.end(bytes);
     });
     process.stdout.write(receipt + "\n");
@@ -168,7 +289,15 @@ async function transport(head: string, base: string, manifestRoot?: string) {
       env.OCE_OPENSHELL_GIT_API_ORIGIN !== "https://api.github.com" ||
       !/^openshell:resolve:env:s[a-f0-9]{64}_GITHUB_TOKEN$/.test(marker)
     ) {
-      throw new Error("openshell-draft-binding-required");
+      // The admitted branch and base are this Sandbox's own environment, not a secret.
+      const admittedHead = env.OCE_OPENSHELL_GIT_PUSH_REF?.replace(/^refs\/heads\//, "");
+      throw new DraftPullFailure(
+        "not-sent",
+        env.OCE_OPENSHELL_GIT_PUSH_REF === "refs/heads/" + head &&
+          env.OCE_OPENSHELL_GIT_BASE === base
+          ? "this Sandbox's repository binding is incomplete; ask an operator."
+          : `this Sandbox's repository binding allows only --head ${admittedHead ?? "(none)"} --base ${env.OCE_OPENSHELL_GIT_BASE ?? "(none)"}.`,
+      );
     }
     return {
       client: { gatewayOrigin: "https://api.github.com", repository },
@@ -183,7 +312,10 @@ async function transport(head: string, base: string, manifestRoot?: string) {
     inheritedRepositoryBinding(manifest, env) ??
     (manifest.bindings.length === 1 ? manifest.bindings[0] : undefined);
   if (!b) {
-    throw new Error("no-single-selected-repository");
+    throw new DraftPullFailure(
+      "not-sent",
+      "no single repository binding is selected for this workspace.",
+    );
   }
   const check = () => requireCurrentBinding(b);
   check();
@@ -193,11 +325,34 @@ async function transport(head: string, base: string, manifestRoot?: string) {
   const bearer = await readPrivateFile(join(b.directory, "bearer"), 256);
   return { client: b.client, ca, bearer, check, openShell: false };
 }
+/** The one stderr line for a failure, and the exit code: 2 for usage, 1 otherwise. */
+export function draftPullFailureMessage(error: unknown): { message: string; exitCode: number } {
+  if (error instanceof DraftPullFailure) {
+    if (error.stage === "usage") {
+      return { message: `${error.message}\n${USAGE}`, exitCode: 2 };
+    }
+    return {
+      message:
+        (error.stage === "not-sent" ? "Draft not sent: " : "Draft not created: ") + error.message,
+      exitCode: 1,
+    };
+  }
+  const reason = error instanceof Error && error.message.startsWith("connection failed");
+  return {
+    message: `Draft not confirmed${reason ? ` (${(error as Error).message})` : ""}. Check the pull requests at the repository; do not submit another create.`,
+    exitCode: 1,
+  };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  createDraftPull(process.argv.slice(2)).catch(() => {
-    process.stderr.write(
-      "Draft not confirmed. Check the pull requests at the repository; do not submit another create.\n",
-    );
-    process.exitCode = 1;
-  });
+  const args = process.argv.slice(2);
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+    process.stdout.write(USAGE + "\n");
+  } else {
+    createDraftPull(args).catch((error: unknown) => {
+      const { message, exitCode } = draftPullFailureMessage(error);
+      process.stderr.write(message + "\n");
+      process.exitCode = exitCode;
+    });
+  }
 }

@@ -213,6 +213,7 @@
     "tests/integration/repository-credentials-control.test.mjs": 3900,
     "tests/integration/repository-credentials-descriptions-uncertain.test.mjs": 400,
     "tests/integration/repository-credentials-descriptions.test.mjs": 4100,
+    "tests/integration/repository-credentials-draft-pr-cli.test.mjs": 1500,
     "tests/integration/repository-credentials-driver.test.mjs": 1700,
     "tests/integration/repository-credentials-github-token.test.mjs": 16200,
     "tests/integration/repository-credentials-http.test.mjs": 1100,
