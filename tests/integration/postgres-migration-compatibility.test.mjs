@@ -1576,6 +1576,108 @@ async function assertUpgradedAuthentication(db) {
   );
 }
 
+const legacyExecutionAdmission = { version: 2, mode: "unprotected" };
+
+// A revision admitted before 0058 carries no execution admission. The upgrade records
+// the unprotected decision it was admitted under; every other stored field stays identical.
+function upgradedCanonicalData(data) {
+  return {
+    ...data,
+    agent_revisions: data.agent_revisions.map(({ value }) => ({
+      value: Object.hasOwn(value.admitted_spec, "execution_admission")
+        ? value
+        : {
+            ...value,
+            admitted_spec: {
+              ...value.admitted_spec,
+              execution_admission: legacyExecutionAdmission,
+            },
+          },
+    })),
+  };
+}
+
+// Every pre-existing Agent must stay readable through the application adapter after
+// the upgrade: createRevision decodes the earlier revisions, and the worker's reconcile,
+// stop, retire and delete paths all go through findRevision or listRevisions.
+async function assertUpgradedRevisionReadable(db) {
+  const { PostgresPlatformState } = await import("../../packages/occ/src/state/postgres-state.ts");
+  const application = new URL(db.migrationUrl);
+  application.username = "occ_app";
+  application.password = "occ-app-local";
+  const seeded = (await db.app.query("SELECT namespace_id, agent_id, id FROM occ.agent_revisions"))
+    .rows;
+  assert.equal(seeded.length, 1);
+  const { namespace_id: namespaceId, agent_id: agentId, id } = seeded[0];
+  const pool = new pg.Pool({ connectionString: application.toString(), max: 1 });
+  try {
+    const state = new PostgresPlatformState(pool);
+    const found = await state.read((view) => view.revisions.findRevision(namespaceId, agentId, id));
+    assert.equal(found?.id, id, "findRevision must decode the pre-upgrade revision");
+    assert.deepEqual(found.executionAdmission, legacyExecutionAdmission);
+    assert.equal(found.egressPlan, undefined);
+    const listed = await state.read((view) => view.revisions.listRevisions(namespaceId, agentId));
+    assert.deepEqual(
+      listed.map((revision) => [revision.id, revision.executionAdmission]),
+      [[id, legacyExecutionAdmission]],
+      "listRevisions must decode the pre-upgrade revision",
+    );
+  } finally {
+    await pool.end();
+  }
+  // The decision is now proven for every stored row, not only for new writers.
+  assert.deepEqual(
+    (
+      await db.migrator.query(
+        `SELECT convalidated FROM pg_catalog.pg_constraint
+         WHERE conrelid='occ.agent_revisions'::pg_catalog.regclass AND conname='agent_revisions_execution_admission'`,
+      )
+    ).rows,
+    [{ convalidated: true }],
+  );
+  // The recorded decision stays immutable: the migrator's row rewrite is closed again and
+  // the application role never held UPDATE, so an unprotected revision cannot later claim
+  // protection or an egress plan.
+  await assert.rejects(
+    db.migrator.query(
+      `UPDATE occ.agent_revisions
+       SET admitted_spec = admitted_spec || '{"execution_admission":{"version":2,"mode":"protected"}}'::jsonb
+       WHERE id=$1`,
+      [id],
+    ),
+    (error) => error.code === "55000",
+  );
+  assert.equal(
+    (
+      await db.app.query(
+        "SELECT has_table_privilege(current_user,'occ.agent_revisions','UPDATE') AS allowed",
+      )
+    ).rows[0].allowed,
+    false,
+  );
+  // New rows still fail closed: no snapshot may omit its decision, and a decision that
+  // claims protection without the protected plan and reader marker is inconsistent.
+  for (const rewrite of [
+    "admitted_spec - 'execution_admission'",
+    `admitted_spec || '{"execution_admission":{"version":2,"mode":"protected"}}'::jsonb`,
+  ]) {
+    await assert.rejects(
+      db.app.query(
+        `INSERT INTO occ.agent_revisions(id,namespace_id,agent_id,revision_number,admitted_spec,backend_id,admitted_at)
+         SELECT $1, namespace_id, agent_id, 2, ${rewrite}, NULL, now() FROM occ.agent_revisions WHERE id=$2`,
+        [`rev_${randomUUID()}`, id],
+      ),
+      (error) =>
+        error.code === "23514" && error.constraint === "agent_revisions_execution_admission",
+    );
+  }
+  assert.equal(
+    (await db.app.query("SELECT count(*)::integer AS count FROM occ.agent_revisions")).rows[0]
+      .count,
+    1,
+  );
+}
+
 async function canonicalData(db) {
   const result = { presets: [] };
   const hasPresets =
@@ -1704,6 +1806,7 @@ test(
       [62, "preRevisionHarnessAuthShape"],
       [63, "prePreparedRepositoryGit"],
       [64, "prePreparedRepositoryDraftPulls"],
+      [65, "preLegacyRevisionExecutionAdmission"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -1720,7 +1823,8 @@ test(
         });
         assert.deepEqual(await runHistoryMigration(db), { ok: true, history });
         await assertCompletedHistory(db, receipts);
-        assert.deepEqual(await canonicalData(db), before);
+        await assertUpgradedRevisionReadable(db);
+        assert.deepEqual(await canonicalData(db), upgradedCanonicalData(before));
         await assertUpgradedAuthentication(db);
         if (prefix === 57) {
           const upgradedReceipts = await historyReceipts(db.migrator);
@@ -2113,6 +2217,7 @@ test(
       [62, "preRevisionHarnessAuthShape"],
       [63, "prePreparedRepositoryGit"],
       [64, "prePreparedRepositoryDraftPulls"],
+      [65, "preLegacyRevisionExecutionAdmission"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -2207,6 +2312,7 @@ test(
       [62, "preRevisionHarnessAuthShape"],
       [63, "prePreparedRepositoryGit"],
       [64, "prePreparedRepositoryDraftPulls"],
+      [65, "preLegacyRevisionExecutionAdmission"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
@@ -2224,7 +2330,10 @@ test(
         // 0051's final GRANT runs after it dropped both withdrawal triggers.
         // Abort 0056 after its function was created, before the deferred trigger exists.
         // 0057 replaces the Harness validator, so reject that function replacement.
+        // Abort 0066 at its final VALIDATE: the decision backfill and the restored
+        // immutability trigger must roll back with it.
         const rollbackTag = [
+          [65, "ALTER TABLE"],
           [64, "GRANT"],
           [62, "ALTER TABLE"],
           [61, "CREATE FUNCTION"],

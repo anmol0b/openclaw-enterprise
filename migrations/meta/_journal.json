@@ -414,6 +414,13 @@
       "when": 1787000000059,
       "tag": "0059_administrator_sandbox_policy_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1787000000066,
+      "tag": "0066_legacy_revision_execution_admission",
+      "breakpoints": true
     }
   ]
 }

@@ -106,8 +106,10 @@ For a revision with durable unprotected execution admission and this reader gran
 `rejectedExecutionWithdrawal` lets that claim close the same policy and observe the
 same workload stopped. An incomplete observation remains pending beyond the convergence
 deadline. Completion fails the old release with `EXECUTION_ADMISSION_WITHDRAWN`, even if
-the reader peer returned meanwhile. Historical rows without durable execution admission
-still require their original release to close access before the upgrade.
+the reader peer returned meanwhile. Historical rows admitted before execution admission
+existed were governed by nothing, so migration `0066_legacy_revision_execution_admission`
+records the unprotected decision on them; the upgrade then closes their access through
+this same path instead of leaving them unreadable.
 
 ## Debugging and Verification
 
