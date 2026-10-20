@@ -611,10 +611,7 @@ test("OpenShell client serializes v0.1.4 create-time service exposure", async ()
         assert.ok(error instanceof DependencyUnavailableError);
         assert.equal(error.grpcStatus, grpc.status.INVALID_ARGUMENT);
         assert.equal(error.code, undefined);
-        assert.equal(
-          error.message,
-          "OpenShell CreateSandbox failed with gRPC status 3: sandbox spec rejected by the Kubernetes driver",
-        );
+        assert.equal(error.message, "OpenShell CreateSandbox failed with gRPC status 3.");
         assert.deepEqual(error.requestDiagnostic, {
           method: "CreateSandbox",
           grpcStatus: grpc.status.INVALID_ARGUMENT,
@@ -1431,15 +1428,17 @@ test("OpenShell client names only an unanswered gateway request a Sandbox gatewa
   for (const code of [grpc.status.INTERNAL, grpc.status.DEADLINE_EXCEEDED, grpc.status.UNKNOWN]) {
     await assert.rejects(client.health(AbortSignal.timeout(2_000)), answered(code));
   }
-  // CreateSandbox names the gateway's reason, as before finding 2040.
+  // CreateSandbox keeps closed diagnostics (finding 2040): the gateway's reason stays out of
+  // the message, which HTTP dependency logging also emits.
   await assert.rejects(client.createSandbox(sandbox, AbortSignal.timeout(2_000)), (error) => {
     assert.ok(error instanceof DependencyUnavailableError, String(error));
     assert.ok(!(error instanceof SandboxGatewayUnavailableError), String(error));
     assert.equal(error.grpcStatus, grpc.status.UNAVAILABLE);
     assert.equal(
       error.message,
-      `OpenShell CreateSandbox failed with gRPC status ${grpc.status.UNAVAILABLE}: ${refusal}`,
+      `OpenShell CreateSandbox failed with gRPC status ${grpc.status.UNAVAILABLE}.`,
     );
+    assert.equal(error.message.includes(refusal), false);
     return true;
   });
   await assert.rejects(

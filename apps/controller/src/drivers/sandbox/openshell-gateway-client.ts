@@ -612,13 +612,11 @@ function gatewayRequestFailureMessage(
   // A failure without a gRPC status (a local client error) keeps only its class: its message
   // can be any library text, and the API logs this message for a 503 (http.dependency_unavailable).
   const detail =
-    method === "CreateSandbox"
-      ? sanitizedErrorDetail(error)
-      : grpcStatus === undefined &&
-          error instanceof Error &&
-          /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.name)
-        ? error.name
-        : undefined;
+    grpcStatus === undefined &&
+    error instanceof Error &&
+    /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(error.name)
+      ? error.name
+      : undefined;
   return `OpenShell ${method} failed${
     grpcStatus === undefined ? "" : ` with gRPC status ${grpcStatus}`
   }${detail === undefined ? "." : `: ${detail}`}`;
@@ -734,25 +732,6 @@ function rawStatusCode(error: unknown): number | undefined {
     candidate <= 16
     ? candidate
     : undefined;
-}
-
-function sanitizedErrorDetail(error: unknown): string | undefined {
-  return sanitizedText(asRecord(error)?.details);
-}
-
-function sanitizedText(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const normalized = [...value]
-    .map((character) => {
-      const code = character.charCodeAt(0);
-      return code <= 31 || code === 127 ? " " : character;
-    })
-    .join("")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return normalized.length === 0 ? undefined : normalized.slice(0, 512);
 }
 
 function workspaceResponse(response: RecordValue, operation: string): OpenShellWorkspaceResponse {
