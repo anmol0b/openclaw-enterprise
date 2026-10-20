@@ -168,6 +168,54 @@ export async function startSkipperPrivateGitOrigin({
       });
       return { ...pullRequest, head: side(reviewHead), base: side("main") };
     };
+    // Draft pull-request creation for the team-review topology. The caller has matched the
+    // route and counted the attempt; `reply` records the outcome under that endpoint.
+    const createDraftPull = async (request, reply) => {
+      const auth = request.headers.authorization;
+      if (!authority.authorize(auth) || authority.permissions(auth)?.pull_requests !== "write") {
+        reply(403);
+        return;
+      }
+      let json = "";
+      for await (const chunk of request) {
+        if (json.length + chunk.length > 32_768) {
+          reply(413);
+          return;
+        }
+        json += chunk;
+      }
+      const { title, body, head, base, draft, maintainer_can_modify } = JSON.parse(json);
+      const refs = await readRefs();
+      if (
+        pullRequest ||
+        head !== reviewHead ||
+        base !== "main" ||
+        draft !== true ||
+        maintainer_can_modify !== false ||
+        !title ||
+        !body ||
+        !refs[approvalRef] ||
+        refs[approvalRef] === refs["refs/heads/main"]
+      ) {
+        reply(422);
+        return;
+      }
+      // Reading the body and refs yielded; retirement during either must still win.
+      if (!authority.authorize(auth)) {
+        reply(403);
+        return;
+      }
+      pullRequest = {
+        id: 7001,
+        number: 1,
+        state: "open",
+        draft,
+        title,
+        body,
+        html_url: "https://github.com/" + repository + "/pull/1",
+      };
+      reply(201, await observePullRequest());
+    };
     const counts = {};
     const count = (endpoint, status) => {
       const key = `${endpoint}:${status}`;
@@ -236,53 +284,7 @@ export async function startSkipperPrivateGitOrigin({
         if (teamReview && request.method === "POST" && url.pathname === pullRoute && !url.search) {
           endpoint = "pull-create";
           pullCreateRequests++;
-          const auth = request.headers.authorization;
-          if (
-            !authority.authorize(auth) ||
-            authority.permissions(auth)?.pull_requests !== "write"
-          ) {
-            reply(403);
-            return;
-          }
-          let json = "";
-          for await (const chunk of request) {
-            if (json.length + chunk.length > 32_768) {
-              reply(413);
-              return;
-            }
-            json += chunk;
-          }
-          const { title, body, head, base, draft, maintainer_can_modify } = JSON.parse(json);
-          const refs = await readRefs();
-          if (
-            pullRequest ||
-            head !== reviewHead ||
-            base !== "main" ||
-            draft !== true ||
-            maintainer_can_modify !== false ||
-            !title ||
-            !body ||
-            !refs[approvalRef] ||
-            refs[approvalRef] === refs["refs/heads/main"]
-          ) {
-            reply(422);
-            return;
-          }
-          // Reading the body and refs yielded; retirement during either must still win.
-          if (!authority.authorize(auth)) {
-            reply(403);
-            return;
-          }
-          pullRequest = {
-            id: 7001,
-            number: 1,
-            state: "open",
-            draft,
-            title,
-            body,
-            html_url: "https://github.com/" + repository + "/pull/1",
-          };
-          reply(201, await observePullRequest());
+          await createDraftPull(request, reply);
           return;
         }
         const service = url.searchParams.get("service");

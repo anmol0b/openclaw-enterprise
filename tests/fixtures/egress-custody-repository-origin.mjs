@@ -26,6 +26,30 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
   let nextResponse;
   let issues = 0;
   let retirement204 = 0;
+  // GitHub's installation-token exchange: an RS256 app JWT and the one-repository body.
+  const acceptsIssueRequest = (authorization, text) => {
+    try {
+      const bearer = /^Bearer ([\w-]+)\.([\w-]+)\.([\w-]+)$/i.exec(authorization ?? "");
+      assert.ok(bearer, "expected a bearer with three compact JWT segments");
+      const [, header, claims, signature] = bearer;
+      assert.ok(
+        verify("RSA-SHA256", header + "." + claims, publicKey, Buffer.from(signature, "base64url")),
+      );
+      assert.equal(JSON.parse(Buffer.from(header, "base64url")).alg, "RS256");
+      const { iss, iat, exp } = JSON.parse(Buffer.from(claims, "base64url"));
+      const now = Math.floor(Date.now() / 1000);
+      assert.equal(String(iss), identity.app_id);
+      assert.ok(Number.isSafeInteger(iat) && Number.isSafeInteger(exp));
+      assert.ok(iat <= now && now < exp && exp - iat <= 600);
+      assert.deepEqual(JSON.parse(text), {
+        repository_ids: [repository.id],
+        permissions: { metadata: "read" },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const server = custodyOriginWire(
     {
       cert: await readFile(configuration.certificatePath),
@@ -38,31 +62,7 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
       }
       const text = Buffer.concat(body).toString();
       if (req.method === "POST" && req.url === "/app/installations/7303/access_tokens") {
-        try {
-          const bearer = /^Bearer ([\w-]+)\.([\w-]+)\.([\w-]+)$/i.exec(
-            req.headers.authorization ?? "",
-          );
-          assert.ok(bearer, "expected a bearer with three compact JWT segments");
-          const [, header, claims, signature] = bearer;
-          assert.ok(
-            verify(
-              "RSA-SHA256",
-              header + "." + claims,
-              publicKey,
-              Buffer.from(signature, "base64url"),
-            ),
-          );
-          assert.equal(JSON.parse(Buffer.from(header, "base64url")).alg, "RS256");
-          const { iss, iat, exp } = JSON.parse(Buffer.from(claims, "base64url"));
-          const now = Math.floor(Date.now() / 1000);
-          assert.equal(String(iss), identity.app_id);
-          assert.ok(Number.isSafeInteger(iat) && Number.isSafeInteger(exp));
-          assert.ok(iat <= now && now < exp && exp - iat <= 600);
-          assert.deepEqual(JSON.parse(text), {
-            repository_ids: [repository.id],
-            permissions: { metadata: "read" },
-          });
-        } catch {
+        if (!acceptsIssueRequest(req.headers.authorization, text)) {
           res.writeHead(403).end();
           return;
         }

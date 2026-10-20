@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  readlink,
   realpath,
   rename,
   symlink,
@@ -356,7 +357,7 @@ test("projection startup preserves unexpected stale entries and rejects unsafe p
   await unlink(privateKey);
   await symlink(key, privateKey);
   await assert.rejects(f.prepare(), { message: "invalid-projected-inputs" });
-  assert.equal((await lstat(privateKey)).isSymbolicLink(), true);
+  assert.equal(await readlink(privateKey), key);
   assert.equal(await readFile(key, "utf8"), f.values["private-key.pem"]);
   await unlink(privateKey);
   await writeFile(privateKey, f.values["private-key.pem"], { flag: "wx", mode: 0o600 });

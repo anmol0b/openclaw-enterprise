@@ -569,7 +569,8 @@ test("SSH Namespace preparation creates exact ownership, rejects adoption, and c
   }
   await rm(marker);
   assert.equal((await f.driver.ensureNamespace(tenant)).failure, "permanent");
-  await writeFile(marker, JSON.stringify(original), { flag: "wx", mode: 0o600 });
+  await assert.rejects(access(marker), { code: "ENOENT" });
+  await replaceMarker(original);
   const unowned = revision(f.driver, 1, "agent-ssh-unowned");
   const account = runtimeAccountName(tenant, unowned.agentId, f.configured.runtime.user);
   await Promise.all([
