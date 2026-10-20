@@ -823,7 +823,11 @@ async function assertSharedNativeSessions(context, { topology, browser, ingress,
   ]);
   assert.equal(root.status(), 302);
   const agentKey = status.host.split(".")[0].slice("agent-".length);
-  await nativePage.waitForURL(ingress.origin + "/console/#native-agent=" + agentKey);
+  // Console removes the fragment before showing sign-in. Check the redirect itself.
+  assert.equal(
+    await root.headerValue("location"),
+    ingress.origin + "/console/#native-agent=" + agentKey,
+  );
   const [resolved] = await Promise.all([
     nativePage.waitForResponse(ingress.origin + "/native-admin/return/" + agentKey),
     login(nativePage, unaffected.credentials),
