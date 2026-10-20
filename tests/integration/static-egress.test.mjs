@@ -1194,6 +1194,119 @@ test("selected Codex Responses wire admits local tools and finite SSE while reje
   }
 });
 
+// A streamed response from the provider carries its full documented envelope on
+// response.created, response.in_progress and response.completed. The shape follows
+// openai-python src/openai/types/responses/response.py at
+// 0f73f1d519f8719b226e9084d78c8bdb4a60e48f (2026-10-12) for the request fields the
+// bounded inference policy admits; the fixture envelope only ever carried the minimum.
+function liveResponsesEnvelope(status) {
+  return {
+    id: "resp_live_shaped",
+    object: "response",
+    created_at: 1791985502.0,
+    status,
+    background: false,
+    billing: { payer: "developer" },
+    completed_at: status === "completed" ? 1791985503.0 : null,
+    conversation: null,
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    max_output_tokens: null,
+    max_tool_calls: null,
+    model: wire.request.model,
+    output: [],
+    parallel_tool_calls: true,
+    previous_response_id: null,
+    prompt_cache_key: wire.request.prompt_cache_key,
+    prompt_cache_retention: null,
+    reasoning: { effort: "medium", summary: "auto" },
+    safety_identifier: null,
+    service_tier: "default",
+    store: false,
+    temperature: 1.0,
+    text: { format: { type: "text" }, verbosity: "medium" },
+    tool_choice: "auto",
+    tools: wire.request.tools,
+    top_logprobs: 0,
+    top_p: 1.0,
+    truncation: "disabled",
+    usage: null,
+    user: null,
+    metadata: {},
+  };
+}
+
+test("live-shaped Responses envelopes pass while undeclared or credential-bearing envelope fields refuse", async (t) => {
+  const f = await staticEgressFixture(t);
+  const check = responseChecks(f);
+  const base = responseEvents();
+  const completed = structuredClone(base.at(-1));
+  completed.response = {
+    ...liveResponsesEnvelope("completed"),
+    output: completed.response.output,
+    usage: {
+      ...completed.response.usage,
+      input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+    },
+  };
+  const live = [
+    {
+      type: "response.created",
+      sequence_number: 0,
+      response: liveResponsesEnvelope("in_progress"),
+    },
+    {
+      type: "response.in_progress",
+      sequence_number: 1,
+      response: liveResponsesEnvelope("in_progress"),
+    },
+    ...base.slice(1, -1).map((event, index) => ({ ...event, sequence_number: index + 2 })),
+    { ...completed, sequence_number: base.length + 1 },
+  ];
+  await check.events(live, false, "documented envelope fields on every envelope event");
+  // Documented fields that the admitted request cannot ask for still have to be absent,
+  // and documented optional structures are typed, not free-form.
+  const nullableStructures = structuredClone(live);
+  Object.assign(nullableStructures.at(-1).response, {
+    access_programs: { cyber: "standard" },
+    prompt_cache_diagnostics: { type: "cache_hit" },
+    prompt_cache_options: { mode: "implicit", ttl: "30m", comparison_response_id: null },
+    reasoning: null,
+    incomplete_details: { reason: null },
+    error: null,
+    text: null,
+    moderation: null,
+    prompt: null,
+  });
+  await check.events(nullableStructures, false, "typed optional envelope structures");
+  const withEnvelope = (fields) => {
+    const events = structuredClone(live);
+    Object.assign(events[0].response, fields);
+    return events;
+  };
+  for (const [label, fields] of [
+    ["undeclared envelope field", { x_future_field: 0 }],
+    ["undeclared field carrying the selected material", { debug: selectedMaterial }],
+    [
+      "declared text field reflecting the selected material",
+      { safety_identifier: selectedMaterial },
+    ],
+    ["declared text field reflecting encoded material", { user: reflectedMaterial[1] }],
+    ["undeclared structure member", { billing: { payer: "developer", token: "x" } }],
+    ["undeclared conversation state", { conversation: { id: "conv_unadmitted" } }],
+    ["undeclared prior response state", { previous_response_id: "resp_unadmitted" }],
+    ["prompt template reference", { prompt: { id: "pmpt_unadmitted" } }],
+    ["moderation result", { moderation: { input: { type: "error", code: "x", message: "y" } } }],
+    ["wrong top_logprobs type", { top_logprobs: "0" }],
+    ["unknown access program", { access_programs: { cyber: "unknown" } }],
+    ["unknown cache diagnostic", { prompt_cache_diagnostics: { type: "future" } }],
+    ["background execution", { background: true }],
+  ]) {
+    await check.events(withEnvelope(fields), true, label);
+  }
+});
+
 test("signed supervisor instance and UUIDv7 creation horizon refuse old callers and deadline-extension replay", async (t) => {
   let elapsed = 0;
   const now = () => new Date(Date.now() + elapsed);
