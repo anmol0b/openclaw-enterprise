@@ -58,13 +58,17 @@ const ROUTE_REFUSALS: ReadonlyMap<string, string> = new Map([
   ],
   [
     "credential_unavailable",
-    "The repository credential is unavailable; retrying will not help. Ask an operator to check the worker log.",
+    "The repository credential is unavailable; ask an operator to check the worker log before retrying.",
   ],
   [
     "route_blocked",
     "The repository route is closed for this Agent version; ask an operator to deploy a new version.",
   ],
   ["route_not_ready", "The repository route is not ready yet; retry in a minute."],
+  [
+    "online_authorization_denied",
+    "Retry once; if it is refused again, ask an operator to check the worker log.",
+  ],
 ]);
 
 /**

@@ -83,5 +83,6 @@ token until a new version deploys. When a version holding a token from the previ
 issuer is replaced or withdrawn, the worker retires that token without revoking it
 and logs `worker.error` with `PREPARED_GITHUB_RETIRED_UNREVOKED`
 (`reason: issuer_authority_changed`, the Namespace, revision, `repositoryRef` and
-`providerExpiresAt`). The token stays valid at GitHub until that time, at most an
-hour. A worker with the previous setting revokes it.
+`providerExpiresAt`), leaving revocation to the issuer that prepared it. If no
+worker with the previous setting is still running, the token stays valid at
+GitHub until that time, at most an hour.

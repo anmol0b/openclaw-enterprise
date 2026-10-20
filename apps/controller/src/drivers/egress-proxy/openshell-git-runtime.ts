@@ -281,11 +281,10 @@ function refusedIdentity(error: unknown): boolean {
   return code === GRPC_PERMISSION_DENIED || code === GRPC_UNAUTHENTICATED;
 }
 
-/** Runs a read. A failure that is not one of the runtime's own verifications is unavailable
- * evidence (the provider's observe() treats its reads the same way), never a verdict. */
 /**
  * What the Agent is told for a lookup denial of one of this worker's routes (finding 2149). A
- * request from another Sandbox than the route's stays generic: it is not this route's Agent.
+ * request from another Sandbox than an open route's stays generic: it is not that Agent. A
+ * closed route answers every request for its binding the same way; the codes are not secret.
  */
 function lookupReasonCode(reason: string, entry: Entry): OpenShellOnlineGitReasonCode | undefined {
   switch (reason) {
@@ -303,6 +302,8 @@ function lookupReasonCode(reason: string, entry: Entry): OpenShellOnlineGitReaso
   }
 }
 
+/** Runs a read. A failure that is not one of the runtime's own verifications is unavailable
+ * evidence (the provider's observe() treats its reads the same way), never a verdict. */
 async function read<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
   try {
     return await operation();

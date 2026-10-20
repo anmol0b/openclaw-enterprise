@@ -689,11 +689,11 @@ test(
       },
     ]);
     assert.equal(f.gh.trace.length, before, "the new authority never sends the old token");
-    assert.equal(await f.providerStatus(used.value), 200);
     // Reported once: a later pass finds nothing new to retire and still sends nothing.
     await next.maintain();
     assert.equal(reports.length, 1);
     assert.equal(f.gh.trace.length, before);
+    assert.equal(await f.providerStatus(used.value), 200, "retired, not revoked");
     // The issuing authority, if it comes back, revokes it as usual.
     await f.owner.maintain();
     assert.equal(await f.providerStatus(used.value), 401);

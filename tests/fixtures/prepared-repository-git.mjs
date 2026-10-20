@@ -189,9 +189,11 @@ export async function fixture(
   return {
     /** Another worker owner on the same database, such as one after an issuer change. */
     async startOwner(overrides) {
+      // Each owner serves its use socket beside its control socket: give it its own directory.
+      const sockets = await socketDirectory(t, "pgit-", { longest: "prepared-git-use.sock" });
       const other = await startPreparedGitHubGitOwner({
         ...ownerOptions,
-        controlSocket: join(directory, `control-${randomUUID().slice(0, 8)}.sock`),
+        controlSocket: join(sockets, "control.sock"),
         ...overrides,
       });
       t.after(() => other.close());

@@ -197,7 +197,7 @@ tls.connect = (options, ...rest) => connect({ ...options, host: "127.0.0.1", por
             layer: "l7",
           },
         },
-        "Draft not created: the repository route refused it (online_authorization_denied); GitHub did not receive it.",
+        "Draft not created: the repository route refused it (online_authorization_denied); GitHub did not receive it. Retry once; if it is refused again, ask an operator to check the worker log.",
       ],
       // Finding 2147: the grant's one draft create was already used, by any version or Agent.
       [
@@ -225,7 +225,7 @@ tls.connect = (options, ...rest) => connect({ ...options, host: "127.0.0.1", por
         ],
         [
           "credential_unavailable",
-          "The repository credential is unavailable; retrying will not help. Ask an operator to check the worker log.",
+          "The repository credential is unavailable; ask an operator to check the worker log before retrying.",
         ],
         [
           "route_blocked",
