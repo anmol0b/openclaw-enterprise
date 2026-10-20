@@ -11,6 +11,7 @@ import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { teamReviewProof } from "../../tests/fixtures/skipper-team-review-journey.mjs";
+import { imageConfigDigest } from "./image-config-digest.mjs";
 import { createInterface } from "node:readline";
 import {
   kubectl,
@@ -152,7 +153,13 @@ async function checkImage(stack, selected, built) {
     local = await inspect("--platform", "linux/amd64");
   }
   assert.equal(local.Config.Labels["org.opencontainers.image.revision"], sourceCommit);
-  const config = local.Descriptor?.annotations?.["config.digest"] ?? local.Id;
+  // The import copied the local platform manifest blob into the node, where it is
+  // readable without host privileges; imageConfigDigest checks it against its digest.
+  const config = await imageConfigDigest(
+    local,
+    async (digest) =>
+      (await run("docker", ["exec", node, "ctr", "-n", "k8s.io", "content", "get", digest])).stdout,
+  );
   assert.match(config, /^sha256:[a-f0-9]{64}$/);
   assert.equal(image.status.id, config);
   return { built: built.split("@")[1], installed: selected.split("@")[1], config };

@@ -143,6 +143,7 @@
     "tests/integration/bootstrap-volume.test.mjs": 7800,
     "tests/integration/ci-cleanup.test.mjs": 23200,
     "tests/integration/ci-download-pinned.test.mjs": 7300,
+    "tests/integration/ci-image-config-digest.test.mjs": 100,
     "tests/integration/ci-image-pull.test.mjs": 1100,
     "tests/integration/ci-image-reconciliation.test.mjs": 1100,
     "tests/integration/ci-impact-gate.test.mjs": 1700,
