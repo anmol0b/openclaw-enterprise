@@ -120,7 +120,10 @@ interface Entry {
   binding: OpenShellPreparedGitBinding;
   verify?: (sandbox: OpenShellSandboxResponse) => void;
   sandboxId?: string;
+  /** The last observation that verified; the next one must read as the same installation. */
   supervisor?: OpenShellPreparedGitInstalled;
+  /** A new supervisor session was adopted for the same process; reported once installed. */
+  reconnected?: { readonly since: number } | undefined;
   material?: MaterialIdentity;
   installed?: OpenShellPreparedGitInstalled | undefined;
   blocked?: OpenShellGitRouteBlockReason;
@@ -647,20 +650,52 @@ export class OpenShellGitRuntime {
     if (!observed) {
       return;
     }
-    if (
-      entry.supervisor &&
-      ["supervisorSessionId", "processInstanceId", "networkInstanceId"].some(
-        (key) =>
-          entry.supervisor![key as keyof OpenShellPreparedGitInstalled] !==
-          observed[key as keyof OpenShellPreparedGitInstalled],
-      )
-    ) {
-      throw new OpenShellGitRouteError(
-        "supervisor_replaced",
-        "OpenShell Git supervisor was replaced.",
-      );
+    const previous = entry.supervisor;
+    if (previous !== undefined) {
+      if (observed.supervisorSessionId === previous.supervisorSessionId) {
+        if (
+          observed.processInstanceId !== previous.processInstanceId ||
+          observed.networkInstanceId !== previous.networkInstanceId
+        ) {
+          throw new OpenShellGitRouteError(
+            "supervisor_replaced",
+            "OpenShell Git supervisor was replaced.",
+          );
+        }
+      } else {
+        // The supervisor holds a new control session. A replaced Gateway Pod does this to
+        // every running Sandbox at once (the same supervisor process reconnects), so a
+        // redeploy of the whole fleet is not required: the new session is adopted when the
+        // rest of the verified observation reads exactly as before (same Sandbox id, process
+        // and network instance ids, provider generation, revisions, policy hash, credentials
+        // installed and policy active). Any other difference is a replaced supervisor. A
+        // reconnect in the moment between a credential rotation and its verifying read
+        // differs in the provider generation and closes the route the same way (a new
+        // version is required): rare, and closed is the safe side (finding 2136).
+        //
+        // Stated limit (owner decision 2026-10-20): in OpenShell 0.1.4 (`5a7728c3`) both
+        // instance ids are asserted by the supervisor, not attested by the Gateway. The
+        // network instance id is the supervisor's own SupervisorHello instance id
+        // (crates/openshell-server/src/grpc/provider_readiness.rs; generated sandbox-side in
+        // crates/openshell-supervisor-process/src/delegated.rs), the process instance id comes
+        // from its readiness report and is only held constant within one session, and the
+        // Gateway persists what a reconnecting supervisor claims as its main process instance
+        // (crates/openshell-server/src/compute/mod.rs). ConnectSupervisor does authenticate a
+        // sandbox principal scoped to this Sandbox id, so continuity rests on that principal
+        // plus the supervisor's claims until OpenShell provides an attested reconnect identity
+        // (a planned OpenShell change). No material is issued or replayed on adoption.
+        const { supervisorSessionId: _before, ...before } = previous;
+        const { supervisorSessionId: _after, ...after } = observed;
+        if (!isDeepStrictEqual(before, after)) {
+          throw new OpenShellGitRouteError(
+            "supervisor_replaced",
+            "OpenShell Git supervisor was replaced.",
+          );
+        }
+        entry.reconnected ??= { since: entry.closedAt ?? performance.now() };
+      }
     }
-    entry.supervisor ??= observed;
+    entry.supervisor = observed;
     return observed;
   }
 
@@ -681,14 +716,17 @@ export class OpenShellGitRuntime {
     entry.pending = undefined;
     entry.unobserved = undefined;
     entry.nextObserveAt = undefined;
-    if (entry.closedAt !== undefined) {
+    const reconnected = entry.reconnected;
+    if (entry.closedAt !== undefined || reconnected !== undefined) {
       this.emit?.({
         event: "worker.openshell-git-route",
         status: "restored",
-        durationMs: Math.round(performance.now() - entry.closedAt),
+        ...(reconnected === undefined ? {} : { reason: "supervisor_reconnected" }),
+        durationMs: Math.round(performance.now() - (entry.closedAt ?? reconnected!.since)),
         ...this.identity(entry),
       });
       entry.closedAt = undefined;
+      entry.reconnected = undefined;
     }
   }
 
@@ -698,6 +736,7 @@ export class OpenShellGitRuntime {
     entry.installed = undefined;
     entry.unobserved = undefined;
     entry.closedAt = undefined;
+    entry.reconnected = undefined;
     this.emit?.({
       event: "worker.error",
       code: "OPENSHELL_GIT_RECONCILIATION_REQUIRED",
@@ -784,6 +823,19 @@ export class OpenShellGitRuntime {
         signal,
       );
       if (!material) {
+        if (entry.installed && entry.material) {
+          // An open route lost the material it had: the owner retired it (the App key was
+          // rotated or rejected and preparation is quarantined, or access was withdrawn).
+          // Say so once, with the revision; the restoration reports the outage's length
+          // (finding 2135).
+          entry.closedAt ??= performance.now();
+          this.emit?.({
+            event: "worker.openshell-git-route-warning",
+            status: "pending",
+            reason: "material_unavailable",
+            ...this.identity(entry),
+          });
+        }
         this.pending(entry, "material_unavailable");
         return;
       }
@@ -873,7 +925,13 @@ export class OpenShellGitRuntime {
         break;
       }
       if (!entry.installed || !entry.material) {
-        reason = entry.unobserved ? "route_unobserved" : "route_pending";
+        // A route that had material and lost it names that, so an operator can tell a
+        // retired credential (recovery required) from a version still verifying.
+        reason = entry.unobserved
+          ? "route_unobserved"
+          : entry.pending === "material_unavailable" && entry.material
+            ? "material_unavailable"
+            : "route_pending";
         break;
       }
       const material = entry.material;
