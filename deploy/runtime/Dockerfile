@@ -179,6 +179,12 @@ RUN echo 'e9408d8fe1c97411db97896ea635498170e40079730ea6e463bb82b45f667573  /tmp
     && git apply /tmp/openclaw-required-worker-authority-regression.patch
 RUN --network=none OPENCLAW_VITEST_MAX_WORKERS=1 pnpm_config_verify_deps_before_run=false \
     node --import ./scripts/tsx.mjs scripts/test-projects.mts src/gateway/server.required-placement-scopes.test.ts
+# Remove this bridge when the pinned Control UI offers a browser navigation after access refusal.
+COPY deploy/runtime/openclaw-control-ui-browser-reconnect.patch /tmp/openclaw-control-ui-browser-reconnect.patch
+RUN echo '964c500f981f343d8c131a213aad65ea47e2de4a9a5d11dbb57c3f30bead7065  /tmp/openclaw-control-ui-browser-reconnect.patch' | sha256sum --check --strict \
+    && git apply /tmp/openclaw-control-ui-browser-reconnect.patch
+RUN --network=none cd ui && node ../scripts/run-node-package-bin.mts vitest run --config vitest.config.ts \
+    src/api/gateway-reachability.node.test.ts src/app/gateway-store.observers.test.ts
 # Follow the pinned upstream Docker assembly; plugin-local dependencies remain
 # separate when a plugin and core require different versions.
 RUN OPENCLAW_INTERNAL_DOCKER_BUILD_PLUGIN_IDS=codex,slack \
