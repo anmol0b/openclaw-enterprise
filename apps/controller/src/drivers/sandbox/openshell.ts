@@ -1,4 +1,7 @@
-import type { OpenShellGitRuntime } from "../egress-proxy/openshell-git-runtime.ts";
+import type {
+  OpenShellGitPolicyOverlap,
+  OpenShellGitRuntime,
+} from "../egress-proxy/openshell-git-runtime.ts";
 import { networkPolicySpecToJson } from "../kubernetes/network-policy.ts";
 import {
   openShellEgressConfiguration,
@@ -1951,8 +1954,11 @@ function networkPolicyBinaries(policy: OpenShellNetworkPolicyRule) {
   }));
 }
 
-function gitRouteOverlapMessage(rule: string): string {
-  return `OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove ${rule}.`;
+function gitRouteOverlapMessage({ name, host, ipAddress }: OpenShellGitPolicyOverlap): string {
+  const rule = host === "" ? name : `${name} (${host})`;
+  return ipAddress
+    ? `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove ${rule}.`
+    : `OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove ${rule}.`;
 }
 
 function assertNoRepositoryEnrollment(
@@ -2576,9 +2582,14 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     this.openShellGit = selection.openShellGit;
     // Fail at startup, not at the first Agent deploy (finding 2131).
     const overlapping = this.openShellGit?.overlappingPolicy(options.policy.networkPolicies);
+    if (overlapping?.ipAddress === true) {
+      throw new OpenShellSandboxConfigurationFailure(
+        `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there; use DNS hosts instead of ${overlapping.host} in sandbox network policy ${overlapping.name}.`,
+      );
+    }
     if (overlapping !== undefined) {
       throw new OpenShellSandboxConfigurationFailure(
-        `OpenShell Git reaches github.com and api.github.com only through its middleware route; remove those hosts from sandbox network policy ${overlapping}.`,
+        `OpenShell Git reaches github.com and api.github.com only through its middleware route; remove those hosts from sandbox network policy ${overlapping.name}.`,
       );
     }
     this.backend = selection.backend;
@@ -3578,16 +3589,17 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   /**
    * With the OpenShell Git route, github.com and api.github.com are reachable only through its
    * middleware, which authorizes, audits and denies each request. A rule beside it would skip
-   * all three, on any port (finding 2144). Names the first such rule: an Agent network grant,
-   * then a default policy. The Driver's own policies are checked at construction (2131).
+   * all three, on any port (finding 2144), and so could an IP-address host (2145). Names the first
+   * such rule: an Agent network grant, then a default policy. The Driver's own policies are
+   * checked at construction (2131).
    */
   private gitRouteOverlap(
     defaults: Readonly<Record<string, unknown>>,
     additions: readonly SandboxNetworkGrant[],
-  ): string | undefined {
+  ): OpenShellGitPolicyOverlap | undefined {
     return this.openShellGit?.overlappingPolicy([
       ...additions.map((grant) => ({
-        name: `network grant ${grant.id} (${grant.host})`,
+        name: `network grant ${grant.id}`,
         endpoints: [{ host: grant.host }],
       })),
       ...Object.entries(defaults).map(([name, rule]) => {

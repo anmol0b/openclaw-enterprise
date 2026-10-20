@@ -1171,6 +1171,8 @@ test("OpenShell Git refuses an Agent network grant to the Git hosts at save, bin
   });
   const docs = grant("docs", "docs.github.com");
   const direct = grant("git-direct", "github.com", 22);
+  // Finding 2145: an IP address may lead to GitHub, so it is refused the same way.
+  const address = grant("git-address", "140.82.112.3");
   class OpenShellGitComputeDriver extends KubernetesComputeDriver {
     // Stands in for the Kubernetes Driver composed with drivers.repo.openShell, which admits
     // dedicated Codex repository bindings in the selected OpenShell Sandbox.
@@ -1181,7 +1183,7 @@ test("OpenShell Git refuses an Agent network grant to the Git hosts at save, bin
   const f = await fixture(t, {
     harness: "codex",
     compute: kubernetesCompute(OpenShellGitComputeDriver),
-    controllerOptions: { sandboxNetworkPolicyCeiling: [docs, direct] },
+    controllerOptions: { sandboxNetworkPolicyCeiling: [docs, direct, address] },
   });
   const sandbox = new OpenShellSandboxDriver(
     {
@@ -1243,6 +1245,17 @@ test("OpenShell Git refuses an Agent network grant to the Git hosts at save, bin
   assert.equal(refused.status, 409, JSON.stringify(refused));
   assert.equal(refused.error.code, "RESOURCE_CONFLICT");
   assert.equal(refused.error.message, message);
+  assert.deepEqual(await additions(bound), []);
+  const refusedAddress = await f.request("PUT", policyPath(bound), {
+    expectedVersion: 1,
+    additions: [docs, address],
+  });
+  assert.equal(refusedAddress.status, 409, JSON.stringify(refusedAddress));
+  assert.equal(refusedAddress.error.code, "RESOURCE_CONFLICT");
+  assert.equal(
+    refusedAddress.error.message,
+    "OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove network grant git-address (140.82.112.3).",
+  );
   assert.deepEqual(await additions(bound), []);
   const saved = await f.request("PUT", policyPath(bound), {
     expectedVersion: 1,

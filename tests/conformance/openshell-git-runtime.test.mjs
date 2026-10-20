@@ -874,26 +874,41 @@ test("a restarted worker names why it cannot adopt a revision's Sandbox, once pe
 
 test("the Git route refuses overlapping policies at startup and again at deploy", async () => {
   // Finding 2131: the Sandbox Driver checks its configured policies when it is built; prepare()
-  // keeps refusing hosts that reach github.com or api.github.com outside the route.
+  // keeps refusing hosts that reach github.com or api.github.com outside the route. Finding 2145:
+  // an IP-address host may lead to GitHub as well, so it is refused outright and reported as one.
   const f = fixture();
   const policy = (name, host) => ({ name, endpoints: [{ host }] });
   assert.equal(
     f.runtime.overlappingPolicy([
       policy("model", "api.openai.com"),
       policy("docs", "docs.github.com"),
+      policy("digits", "1password.com"),
+      policy("label", "build.123abc"),
     ]),
     undefined,
   );
-  for (const host of [
-    "github.com",
-    "API.GITHUB.COM",
-    "api.github.com.",
-    "*.github.com",
-    "bad host",
-  ]) {
-    assert.equal(
+  const hosts = [
+    ...["github.com", "API.GITHUB.COM", "api.github.com.", "*.github.com", "bad host"].map(
+      (host) => [host, false],
+    ),
+    ...[
+      "140.82.112.3",
+      "140.82.112.3.",
+      "*.82.112.3",
+      "0x8c.0x52.0x70.0x3",
+      "0X8C.0X52.0X70.0X3",
+      "2354212867",
+      "140.82.112.0/20",
+      "2606:50c0:8000::154",
+      "[2606:50c0:8000::154]",
+      "::ffff:140.82.112.3",
+      "::/0",
+    ].map((host) => [host, true]),
+  ];
+  for (const [host, ipAddress] of hosts) {
+    assert.deepEqual(
       f.runtime.overlappingPolicy([policy("model", "api.openai.com"), policy("git", host)]),
-      "git",
+      { name: "git", host, ipAddress },
       host,
     );
     await assert.rejects(

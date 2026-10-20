@@ -5811,6 +5811,17 @@ tls.connect = (options, ...rest) => {
         host,
       );
     }
+    // Finding 2145: an IP-address host may lead to GitHub too, so it is refused outright.
+    for (const host of ["140.82.112.3", "[2606:50c0:8000::154]", "140.82.112.0/20"]) {
+      collisionConfiguration.policy.networkPolicies.at(-1).endpoints[0].host = host;
+      assert.throws(
+        collision,
+        {
+          message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there; use DNS hosts instead of ${host} in sandbox network policy overlap.`,
+        },
+        host,
+      );
+    }
     // The same policy is fine without the Git route.
     const routeless = new OpenShellSandboxDriver(collisionConfiguration, {
       id: drivers.sandboxDriver.id,
@@ -5852,6 +5863,20 @@ tls.connect = (options, ...rest) => {
         host,
       );
     }
+    // Finding 2145: an IP-address grant may reach GitHub, so it is refused with its own message;
+    // without the Git route it stays an ordinary grant.
+    for (const host of ["140.82.112.3", "*.82.112.3", "0x8c.0x52.0x70.0x3", "2354212867"]) {
+      const address = { ...allowed, id: "git-address", host };
+      assert.throws(
+        () => sandboxDriver.admitNetworkPolicy([allowed, address], 2, undefined, repositoryScope),
+        {
+          name: "SandboxNetworkPolicyConflictError",
+          message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove network grant git-address (${host}).`,
+        },
+        host,
+      );
+      assert.equal(sandboxDriver.admitNetworkPolicy([address], 2).additions[0].host, host);
+    }
     // Revision defaults get the same check; the Driver's own policies were checked at startup.
     const defaults = sandboxDriver.admitNetworkPolicy([], 1).defaults;
     assert.throws(
@@ -5862,8 +5887,24 @@ tls.connect = (options, ...rest) => {
           { ...defaults, mirror: { name: "mirror", endpoints: [{ host: "github.com" }] } },
           repositoryScope,
         ),
-      /remove sandbox network policy mirror\.$/,
+      /remove sandbox network policy mirror \(github\.com\)\.$/,
     );
+    for (const host of ["2606:50c0:8000::154", "[2606:50c0:8000::154]", "140.82.112.0/20"]) {
+      assert.throws(
+        () =>
+          sandboxDriver.admitNetworkPolicy(
+            [],
+            1,
+            { ...defaults, mirror: { name: "mirror", endpoints: [{ host }] } },
+            repositoryScope,
+          ),
+        {
+          name: "SandboxNetworkPolicyConflictError",
+          message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove sandbox network policy mirror (${host}).`,
+        },
+        host,
+      );
+    }
     // Backstop at provisioning: a revision admitted with such a grant never gets a Sandbox.
     const direct = {
       ...allowed,
@@ -5892,6 +5933,26 @@ tls.connect = (options, ...rest) => {
       },
     );
     assert.equal(created, createdBefore, "no Sandbox is created");
+    await assert.rejects(
+      sandboxDriver.provisionHarness({
+        ...context,
+        revision: {
+          ...bypassRevision,
+          sandboxPolicy: {
+            ...bypassRevision.sandboxPolicy,
+            additions: [{ ...direct, id: "git-address", host: "140.82.112.3" }],
+          },
+        },
+        requirements,
+      }),
+      {
+        name: "SandboxRevisionUnsupportedError",
+        code: "SANDBOX_HARNESS_UNSUPPORTED",
+        message:
+          /IP address may lead there.*: remove network grant git-address \(140\.82\.112\.3\)\.$/,
+      },
+    );
+    assert.equal(created, createdBefore, "no Sandbox is created for an IP-address grant");
     // Backstop at live application: the running Git Sandbox's policy is never widened.
     const getSandbox = gateway.getSandbox;
     const updatePolicy = gateway.updatePolicy;

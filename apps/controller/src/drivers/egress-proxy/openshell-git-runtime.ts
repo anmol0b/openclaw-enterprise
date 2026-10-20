@@ -267,6 +267,29 @@ function revisionIdentity(revision: Readonly<AgentRevision>): Readonly<Record<st
   };
 }
 
+/** A network policy or Agent network grant that would open a route beside the middleware. */
+export interface OpenShellGitPolicyOverlap {
+  readonly name: string;
+  readonly host: string;
+  /** The host is an IP address (or range), refused because it may reach GitHub (finding 2145). */
+  readonly ipAddress: boolean;
+}
+
+/**
+ * Whether a policy host names an IP address rather than a DNS name: IPv6 in any form (bracketed
+ * or not), a CIDR range, or an IPv4 address, which, like a URL parser, is any host whose last label
+ * is numeric (so 0x8c.0x52.0x70.0x3 and 2354212867 count) and also a wildcard over one.
+ */
+function isIpAddressHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/\.$/, "");
+  if (normalized.includes(":") || normalized.startsWith("[")) {
+    return true;
+  }
+  const address = normalized.split("/")[0]!;
+  const last = address.slice(address.lastIndexOf(".") + 1);
+  return /^(?:0x[0-9a-f]*|[0-9]+)$/.test(last);
+}
+
 /** Worker-local authority. A restart deliberately requires a new revision; persisted labels
  * alone cannot adopt an old supervisor or resume a provider write whose result was lost. */
 export class OpenShellGitRuntime {
@@ -331,7 +354,7 @@ export class OpenShellGitRuntime {
     otherHosts: readonly string[] = [],
   ) {
     const scope = this.scope(revision);
-    if (otherHosts.some((host) => this.overlapsGit(host))) {
+    if (otherHosts.some((host) => isIpAddressHost(host) || this.overlapsGit(host))) {
       throw new Error("OpenShell Git cannot share overlapping network policy.");
     }
     if (!this.owner || this.stopped.signal.aborted) {
@@ -535,16 +558,28 @@ export class OpenShellGitRuntime {
     return { state: "pending", reason: entry.pending ?? "unverified" };
   }
 
-  /** The first policy that also reaches the Git hosts, which only the middleware route may. */
+  /**
+   * The first policy that also reaches the Git hosts, which only the middleware route may. An
+   * IP-address host counts too: the Controller cannot tell whether it leads to GitHub, so it is
+   * refused outright rather than tracked against GitHub's published ranges (finding 2145).
+   */
   overlappingPolicy(
     policies: readonly {
       readonly name: string;
       readonly endpoints: readonly { readonly host: string }[];
     }[],
-  ): string | undefined {
-    return policies.find((policy) =>
-      policy.endpoints.some((endpoint) => this.overlapsGit(endpoint.host)),
-    )?.name;
+  ): OpenShellGitPolicyOverlap | undefined {
+    for (const policy of policies) {
+      for (const { host } of policy.endpoints) {
+        if (isIpAddressHost(host)) {
+          return { name: policy.name, host, ipAddress: true };
+        }
+        if (this.overlapsGit(host)) {
+          return { name: policy.name, host, ipAddress: false };
+        }
+      }
+    }
+    return undefined;
   }
 
   private overlapsGit(host: string): boolean {
