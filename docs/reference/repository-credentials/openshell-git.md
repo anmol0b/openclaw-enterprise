@@ -203,10 +203,12 @@ installation verifies. Nothing is rewritten or replayed meanwhile.
 
 A replaced Gateway Pod also gives every running Sandbox's supervisor a new control
 session when it reconnects. The worker adopts that session, so no version is
-redeployed, only when everything else it verified reads exactly as before: the same
-Sandbox ID, the same supervisor process and network instance IDs, the same provider
-generation, revisions and policy hash, credentials installed and policy active. Any
-other difference closes the route for good as `supervisor_replaced`. Stated limit:
+redeployed, only when the verified observation is the same installation as before:
+the same Sandbox ID, provider and attachment epoch, the same supervisor process and
+network instance IDs, credentials installed and policy active, and the revisions
+and provider generation the Gateway's receipt and this worker's own last write
+expect. A changed process or network instance ID closes the route for good as
+`supervisor_replaced` (a replaced Sandbox as `execution_replaced`). Stated limit:
 in OpenShell 0.1.4 (`5a7728c3`) the process and network instance IDs are reported
 by the supervisor itself (its hello and readiness messages:
 `crates/openshell-server/src/grpc/provider_readiness.rs`,
@@ -230,8 +232,9 @@ once per version when a restarted or other worker finds a Sandbox it did not pre
 `gateway_unauthorized` when the Gateway refuses the worker's identity), the Namespace,
 Agent, revision and `repositoryRef`; `worker.openshell-git-route-warning` reports a
 route closed by a failed read (`status: unobserved` with `gateway_unavailable`,
-`timeout`, `read_failed`) or by material the version had and lost (`status:
-pending`, `reason: material_unavailable`), and `worker.openshell-git-route` its
+`timeout`, `read_failed`) or, on the first request refused for it, material the
+version had and lost (`status: pending`, `reason: material_unavailable`), and
+`worker.openshell-git-route` its
 restoration with the outage's `durationMs` (`reason: supervisor_reconnected` when
 it reopened on a new supervisor session). Each request the worker refuses logs one
 `worker.openshell-git-denied` line with its `reason` (`route_unobserved`,
@@ -249,14 +252,17 @@ its Git requests answer 403 the same way. Surfacing this at deploy time is a
 planned follow-up.
 
 Detection is in the worker log. Preparation for the active version is
-quarantined, and each maintenance pass (every 5 s) logs `worker.error` with
-`PREPARED_GITHUB_RECOVERY_REQUIRED`, `reason: quarantined` (`blocked` once a later
-pass finds the quarantined attempt), the Namespace, revision and `repositoryRef`.
-The version's route logs one `worker.openshell-git-route-warning` with
-`reason: material_unavailable`, Compute readiness reports
-`REPOSITORY_GIT_ROUTE_PENDING`, and each refused request logs
-`worker.openshell-git-denied` with `reason: material_unavailable`. Alert on the
-first two lines.
+quarantined, and maintenance logs `worker.error` with
+`PREPARED_GITHUB_RECOVERY_REQUIRED` about once a minute per binding:
+`reason: quarantined` (`blocked` once a later pass finds the quarantined attempt),
+the Namespace, revision and `repositoryRef`. The version's route then reports
+`REPOSITORY_GIT_ROUTE_PENDING` to Compute readiness, each refused request logs
+`worker.openshell-git-denied` with `reason: material_unavailable`, and the first of
+them logs one `worker.openshell-git-route-warning` with
+`reason: material_unavailable`. Alert on the recovery-required and warning lines.
+If the key was rotated at GitHub but the Secret still holds the old one, the
+material already issued stays usable until it expires, so the route lines can lag
+the recovery-required line by up to about ten minutes.
 
 Recovery: put a key GitHub accepts in the `private-key.pem` entry of the Secret
 named by `repositoryCredentials.appKeySecretName` (the worker re-reads the mounted
