@@ -339,3 +339,48 @@ test(
     });
   },
 );
+
+test(
+  "private origin serves a gzip-encoded upload-pack negotiation (more than 20 refs)",
+  { timeout: 60000 },
+  async (t) => {
+    // git remote-curl gzips every upload-pack request body over 1024 bytes, which a clone of a
+    // repository with more than about 20 refs reaches. git http-backend inflates such a body only
+    // when the CGI environment carries HTTP_CONTENT_ENCODING.
+    const fixture = await startSkipperPrivateGitOrigin({ seedRefs: 40 });
+    t.after(() => fixture.close());
+    assert.equal(Object.keys(await fixture.readRefs()).length, 41);
+    const directory = await mkdtemp(join(tmpdir(), "private-git-gzip-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const caFile = join(directory, "ca.pem");
+    await writeFile(caFile, fixture.tls.ca);
+    const issued = await api(
+      fixture,
+      "POST",
+      `/app/installations/${fixture.installationId}/access_tokens`,
+      `Bearer ${fixture.createAppJwt()}`,
+      {
+        repository_ids: [Number(fixture.repositoryId)],
+        permissions: { metadata: "read", contents: "write" },
+      },
+    );
+    assert.equal(issued.status, 201);
+    const env = cleanEnvironment({
+      HOME: directory,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_SSL_CAINFO: caFile,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.extraHeader",
+      GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${issued.body.token}`).toString("base64")}`,
+    });
+    await run("git", ["clone", fixture.cloneUrl, "many-refs"], { cwd: directory, env });
+    const cloned = await run("git", ["-C", join(directory, "many-refs"), "ls-remote", "origin"], {
+      cwd: directory,
+      env,
+    });
+    assert.equal(cloned.stdout.trim().split("\n").length, 42);
+    const endpoints = fixture.snapshot().endpoints;
+    assert.equal(endpoints["upload-pack:502"], undefined);
+    assert.ok(endpoints["upload-pack:200"] >= 1);
+  },
+);

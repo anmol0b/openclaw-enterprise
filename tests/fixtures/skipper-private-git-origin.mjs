@@ -22,6 +22,7 @@ export async function startSkipperPrivateGitOrigin({
   approvalRef = "refs/heads/approved",
   repositoryId = "73",
   teamReview = false,
+  seedRefs = 0,
 } = {}) {
   if (!/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/.test(repository)) {
     throw new Error("repository must be owner/name");
@@ -99,6 +100,10 @@ export async function startSkipperPrivateGitOrigin({
     ]);
     await git(["-C", seed, "push", bare, "HEAD:refs/heads/main"]);
     const initialSha = (await git(["-C", bare, "rev-parse", "refs/heads/main"])).stdout.trim();
+    // Extra refs at the seed commit make a clone's negotiation exceed 1 KiB, so git gzips it.
+    for (let index = 0; index < seedRefs; index++) {
+      await git(["-C", bare, "update-ref", `refs/heads/seed/${index}`, initialSha]);
+    }
     // A pre-receive hook rejects the entire transaction, including mixed pushes.
     // Network clients can only change the exact approval ref; main stays protected.
     await writeFile(
@@ -319,6 +324,7 @@ export async function startSkipperPrivateGitOrigin({
               REQUEST_METHOD: request.method,
               CONTENT_TYPE: request.headers["content-type"] ?? "",
               CONTENT_LENGTH: request.headers["content-length"] ?? "",
+              HTTP_CONTENT_ENCODING: request.headers["content-encoding"] ?? "",
               HTTP_GIT_PROTOCOL: request.headers["git-protocol"] ?? "",
               REMOTE_USER: "fixture",
               FIXTURE_APPROVAL_REF: approvalRef,
