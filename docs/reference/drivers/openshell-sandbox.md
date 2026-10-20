@@ -136,6 +136,9 @@ Optional readiness observes a Service and Pods in the OCC namespace; a paired
 Gateway normally uses an explicit Backend `endpoint`. Readiness requires a
 positive `timeoutMs`. Development sets `startupDelayMs` to
 30 seconds because v0.1.4 exposes its service before the process listens.
+For a dedicated Codex Harness it is an upper bound: the wait after creating
+the Sandbox ends as soon as the Harness answers through its exposure, either
+serving or holding a startup failure.
 
 Install OpenShell's gateway separately. Required `gateway.workspaceMode`
 accepts `operator` or `managed`; deferred managed mode fails before Kubernetes
