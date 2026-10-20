@@ -183,6 +183,10 @@ RUN --network=none OPENCLAW_VITEST_MAX_WORKERS=1 pnpm_config_verify_deps_before_
 COPY deploy/runtime/openclaw-control-ui-browser-reconnect.patch /tmp/openclaw-control-ui-browser-reconnect.patch
 RUN echo '964c500f981f343d8c131a213aad65ea47e2de4a9a5d11dbb57c3f30bead7065  /tmp/openclaw-control-ui-browser-reconnect.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-control-ui-browser-reconnect.patch
+# Type-check the two UI test graphs touched by the bridge. The upstream runner
+# generates its database types and compiler cache under .artifacts.
+RUN --network=none --mount=type=tmpfs,target=/source/.artifacts \
+    node scripts/run-tsgo-core-test-shards.mjs --ci-graphs-json '["core-test-ui-chat","core-test-ui-app"]'
 RUN --network=none cd ui && node ../scripts/run-node-package-bin.mts vitest run --config vitest.config.ts \
     src/api/gateway-reachability.node.test.ts src/app/gateway-store.observers.test.ts
 # Follow the pinned upstream Docker assembly; plugin-local dependencies remain
