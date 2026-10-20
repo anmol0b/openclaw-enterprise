@@ -976,7 +976,7 @@ export const ErrorResponse = Type.Object(
           }),
           Type.Literal("SANDBOX_POLICY_PROTECTED_EXECUTION", {
             description:
-              "The Agent runs, or will deploy, under protected execution, whose Credential Proxy egress policy admits no Agent network policy additions; they are refused at save, live application and deploy.",
+              "Protected execution keeps only its Credential Proxy egress policy: Agent network policy additions are refused at save and deploy while the running or next revision is protected, and live application to a protected revision is refused.",
           }),
           Type.Literal("SERVICE_ACCOUNT_DRIVER_NOT_CONFIGURED", {
             description:

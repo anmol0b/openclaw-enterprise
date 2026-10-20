@@ -7611,19 +7611,11 @@ export class OpenClawController {
    * the Credential Proxy), and live application is refused to a protected active revision.
    * createRevision and the OpenShell Driver refuse the same rule at deploy.
    */
-  private async protectedExecutionPolicy(
-    state: PlatformUnitOfWork,
-    namespaceId: string,
-    agent: Readonly<Agent>,
-  ): Promise<{ readonly active: boolean; readonly next: boolean }> {
-    const revision =
-      agent.activeRevisionId === undefined
-        ? undefined
-        : await state.revisions.findRevision(namespaceId, agent.id, agent.activeRevisionId);
-    return {
-      active: revision?.executionAdmission.mode === "protected",
-      next: this.selections.has("credential_proxy"),
-    };
+  private protectedExecutionApplies(activeRevision: Readonly<AgentRevision> | undefined): boolean {
+    return (
+      this.selections.has("credential_proxy") ||
+      activeRevision?.executionAdmission.mode === "protected"
+    );
   }
 
   async getAgentSandboxPolicy(
@@ -7658,10 +7650,7 @@ export class OpenClawController {
       return {
         policy,
         editingEnabled: agent.sandboxPolicyEditing === true,
-        // Additions are refused while either the running or the next revision is protected.
-        protectedExecution:
-          revision?.executionAdmission.mode === "protected" ||
-          this.selections.has("credential_proxy"),
+        protectedExecution: this.protectedExecutionApplies(revision),
         capability: this.sandboxDriver()?.networkPolicy ?? null,
         ceiling: this.sandboxNetworkPolicyCeiling,
         defaults,
@@ -7797,8 +7786,11 @@ export class OpenClawController {
         );
       }
       if (additions.length > 0) {
-        const protectedExecution = await this.protectedExecutionPolicy(state, namespaceId, agent);
-        if (protectedExecution.active || protectedExecution.next) {
+        const active =
+          this.selections.has("credential_proxy") || agent.activeRevisionId === undefined
+            ? undefined
+            : await state.revisions.findRevision(namespaceId, agentId, agent.activeRevisionId);
+        if (this.protectedExecutionApplies(active)) {
           throw new ProtectedExecutionNetworkPolicyError("save");
         }
       }

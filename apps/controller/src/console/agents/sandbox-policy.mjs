@@ -421,6 +421,15 @@ export function renderAgentSandboxPolicy(context, { agent, revisionId }) {
                   ),
                 ]
               : []),
+            ...(view.policy.additions.length > 0 && !view.editingEnabled
+              ? [
+                  element(
+                    "p",
+                    { className: "hint" },
+                    "Saved network rules block protected deploys. Enable policy editing to remove them.",
+                  ),
+                ]
+              : []),
           ]
         : []),
       element(
@@ -437,7 +446,9 @@ export function renderAgentSandboxPolicy(context, { agent, revisionId }) {
           { className: "muted" },
           view.defaultsRevisionId
             ? `Admitted for running version ${view.defaultsRevisionId}. Generated transport access is managed separately.`
-            : "Defaults from the selected Sandbox Driver. Generated transport access is managed separately.",
+            : view.protectedExecution
+              ? "Defaults from the selected Sandbox Driver. Protected versions do not use them: the Credential Proxy egress policy replaces them."
+              : "Defaults from the selected Sandbox Driver. Generated transport access is managed separately.",
         ),
         view.defaults === null
           ? element("p", {}, "No editable network-policy capability is available.")

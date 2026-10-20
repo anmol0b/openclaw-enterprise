@@ -175,3 +175,4 @@ export const PolicyDenialsSuggestionsUnavailable = story("policyDenialsSuggestio
 export const PolicyDenialsReadDenied = story("policyDenialsReadDenied");
 export const PolicyDenialsLoading = story("policyDenialsLoading");
 export const PolicyDenialsNoCredential = story("policyDenialsNoCredential");
+export const PolicyDenialsProtected = story("policyDenialsProtected");

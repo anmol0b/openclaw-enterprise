@@ -2756,7 +2756,11 @@ test("the policy endpoint refuses additions before an Agent's first protected de
   assert.equal(enabled.status, 200, JSON.stringify(enabled.body));
   const view = await f.request("GET", base);
   assert.equal(view.status, 200, JSON.stringify(view.body));
-  assert.equal(view.body.data.protectedExecution, true, "no revision yet; the next one is protected");
+  assert.equal(
+    view.body.data.protectedExecution,
+    true,
+    "no revision yet; the next one is protected",
+  );
   const version = view.body.data.policy.version;
   const refused = await f.request("PUT", base, {
     body: { expectedVersion: version, additions: [grant] },
@@ -2785,8 +2789,8 @@ test("the policy endpoint refuses additions before an Agent's first protected de
 
 test("the OpenShell Driver refuses a protected revision carrying Agent network policy additions", async (t) => {
   // Finding 2053's provisioning backstop: the protected Sandbox policy is the protected egress
-  // profile alone. A revision that somehow carries additions is refused, never provisioned
-  // with them silently dropped.
+  // profile alone. Admission never stores additions on a protected revision; should one carry
+  // them anyway, provisioning refuses it rather than silently dropping them.
   const f = await staticEgressFixture(t);
   const grant = {
     id: "python-demo",
@@ -2832,8 +2836,9 @@ test("the OpenShell Driver refuses a protected revision carrying Agent network p
 });
 
 test("the policy worker names protected execution when it fails queued live application", async () => {
-  // Finding 2053's worker backstop: OCC refuses live application to a protected revision, but
-  // work queued before that refusal must fail at once, name the rule and touch no provider.
+  // Finding 2053's worker backstop: OCC now refuses live application to a protected revision,
+  // so only work queued by earlier admission code reaches this state. It must fail at once,
+  // name the rule and touch no provider.
   const grant = {
     id: "python-demo",
     binary: "/usr/bin/python3.11",

@@ -41,9 +41,9 @@ access, re-enable editing if needed, remove the addition, and apply or deploy it
 If a read fails, retry that read. Manual policy editing remains available when
 logs or recommendations are unavailable. If saving reports a stale version,
 refresh and review the current additions. When the running or next version uses
-protected execution (the Credential Proxy), additions, live application and deploys
-carrying them are refused with `SANDBOX_POLICY_PROTECTED_EXECUTION`; the editor says
-so and offers only removal of saved rules. With OpenShell Git, an Agent
+protected execution (the Credential Proxy), saving additions and deploying with them
+are refused with `SANDBOX_POLICY_PROTECTED_EXECUTION`, as is live application to a
+protected version; the editor says so and offers only removal of saved rules. With OpenShell Git, an Agent
 with a repository binding cannot add a grant for `github.com` or any name under it
 (any port or matching wildcard), or for an IP address, which may lead to GitHub:
 GitHub goes only through the Git route, so save, binding, deploy and apply refuse

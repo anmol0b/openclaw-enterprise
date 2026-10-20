@@ -767,7 +767,7 @@
                   },
                   {
                     "const": "SANDBOX_POLICY_PROTECTED_EXECUTION",
-                    "description": "The Agent runs, or will deploy, under protected execution, whose Credential Proxy egress policy admits no Agent network policy additions; they are refused at save, live application and deploy.",
+                    "description": "Protected execution keeps only its Credential Proxy egress policy: Agent network policy additions are refused at save and deploy while the running or next revision is protected, and live application to a protected revision is refused.",
                     "type": "string"
                   },
                   {
@@ -22639,7 +22639,7 @@
                           "type": "object"
                         },
                         "protectedExecution": {
-                          "description": "True while the active revision or the next deploy runs under protected execution. Network policy additions are then refused with SANDBOX_POLICY_PROTECTED_EXECUTION; saving an empty policy stays allowed.",
+                          "description": "True while the active revision or the next deploy runs under protected execution. Saving network policy additions is then refused with SANDBOX_POLICY_PROTECTED_EXECUTION; saving an empty policy stays allowed.",
                           "type": "boolean"
                         }
                       },

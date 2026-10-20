@@ -7166,6 +7166,7 @@ for (const [id, state, name] of [
     "noCredential",
     "Policy logs unavailable without runtime credentials",
   ],
+  ["policyDenialsProtected", "protected", "Protected execution refuses network policy additions"],
 ]) {
   scenarios[id] = {
     group: "Pages/Agent detail",
@@ -7187,6 +7188,14 @@ for (const [id, state, name] of [
       ? {
           steps: [
             "The tab says once that the Sandbox Driver does not support per-Agent network policy. It reads no Sandbox logs or suggestions and offers no editor.",
+          ],
+        }
+      : {}),
+    ...(state === "protected"
+      ? {
+          steps: [
+            "The tab states that protected execution applies: the Credential Proxy routes alone govern this Agent's egress, so network policy additions are refused. The proposal editor and Apply are unavailable.",
+            "A rule saved before protected execution applied blocks every protected deploy. Choose Remove saved network rules and confirm the saved policy is now empty.",
           ],
         }
       : {}),
