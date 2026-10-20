@@ -661,6 +661,12 @@ for (const loss of ["missing", "closed-repair"]) {
         [maintenance.rows[0].idempotency_key],
       );
       assert.equal(refusal.rows[0].reason_code, "REPOSITORY_SESSION_RECOVERY_UNSAFE");
+      // The runtime stopped even though the session's disposal is still unconfirmed.
+      // Report no active revision; keep the requested run state and deployment history.
+      const agent = await fixture.currentAgent(owner);
+      assert.equal(agent.activeRevisionId, undefined);
+      assert.equal(agent.desiredRuntimeState, "running");
+      assert.equal((await fixture.workResult(candidate)).rows[0].reason_code, "REVISION_ACTIVATED");
       const [retained] = await repositoryAttempts(fixture, candidate);
       assert.equal(retained.phase, loss === "missing" ? "invalidated" : "closing");
       assert.equal(retained.sessionId, original.sessionId);
@@ -734,9 +740,12 @@ test(
   async (context) => {
     const repository = repositoryBoundary({ count: 2 });
     const fixture = await setup(context, { repoDriver: repository.driver });
-    const { candidate } = await fixture.admitInitialRevision("repository-maintenance-restart", {
-      revision: { repositoryCredentials: repository.snapshot },
-    });
+    const { owner, candidate } = await fixture.admitInitialRevision(
+      "repository-maintenance-restart",
+      {
+        revision: { repositoryCredentials: repository.snapshot },
+      },
+    );
     const initial = [];
     await fixture.start({
       ...fixture.compute,
@@ -848,6 +857,7 @@ test(
       return cleanup.rowCount === 1 && cleanup.rows[0].state === "succeeded" ? true : undefined;
     });
     assert.deepEqual(stopped, []);
+    assert.equal((await fixture.currentAgent(owner)).activeRevisionId, candidate.id);
   },
 );
 
@@ -1201,6 +1211,7 @@ test(
     assert.equal(retirement.rows[0].state, "queued");
     assert.equal(retirement.rows[0].actor_id, fixture.actor.id);
     assert.deepEqual(prepared, [candidate.id]);
+    assert.equal((await fixture.currentAgent(owner)).activeRevisionId, candidate.id);
 
     // A restart may retire only the failed revision, even after a newer revision
     // and another Agent become active. Neither needs this expired repository grant.

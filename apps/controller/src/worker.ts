@@ -1902,6 +1902,7 @@ export class ControllerWorker {
   private async processRepositoryCleanup(claim: ClaimedWork): Promise<void> {
     let complete = false;
     let cause: string | undefined;
+    let stoppedRevision: Readonly<AgentRevision> | undefined;
     const cleanupRevisionId = repositoryCleanupRevisionId(claim);
     if (cleanupRevisionId === undefined) {
       await this.finalize(claim, undefined, { outcome: "permanent", code: "INVALID_TARGET" });
@@ -1944,6 +1945,7 @@ export class ControllerWorker {
           }
           // Session service outages cannot delay exact workload/material retirement.
           await this.withClaimHeartbeat(claim, () => this.compute.stopRevision(revision));
+          stoppedRevision = revision;
         }
       } else {
         const attempts = await this.state.read(async (view) =>
@@ -1966,6 +1968,18 @@ export class ControllerWorker {
     await this.state.transactWithQueue(async (unit, queue) => {
       if ((await queue.heartbeat(claim)) === undefined) {
         throw new WorkClaimLostError();
+      }
+      if (stoppedRevision !== undefined) {
+        // Record a confirmed runtime stop even when session disposal is still pending.
+        // A newer active revision and the Agent's desired run state are left intact.
+        const agent = await this.lockClaimAgent(unit, claim);
+        if (agent?.servicePrincipalId === stoppedRevision.servicePrincipalId) {
+          await unit.agents.compareAndClearActiveRevision(
+            claim.namespaceId,
+            agent.id,
+            stoppedRevision.id,
+          );
+        }
       }
       const attempts =
         claim.agentId === undefined
