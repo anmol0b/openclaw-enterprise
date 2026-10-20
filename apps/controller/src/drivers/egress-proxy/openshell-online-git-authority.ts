@@ -392,7 +392,10 @@ export function createOpenShellOnlineGitAuthority(
         // The owner did not answer; nothing was recorded as possible use, so deny.
         return deny("approval_failed", selected.operation);
       }
-      if (allowed === "draft_already_opened" && !signal.aborted) {
+      if (allowed === "draft_already_opened") {
+        if (signal.aborted) {
+          return deny("aborted", selected.operation);
+        }
         // The grant's one draft create was already used (finding 2147). The helper says so
         // instead of the generic refusal; nothing about the earlier draft is disclosed.
         deny("draft_already_opened", selected.operation);

@@ -273,12 +273,21 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     if (!installed?.preparationAttemptId || !installed.materialVersion) {
       return false;
     }
+    // transaction() replaces every error with a redacted one, so the spent draft is noted here.
+    let spent = false;
     try {
-      const result = await this.transaction((c) => this.recordUse(c, q, signal, installed));
+      const result = await this.transaction(async (c) => {
+        try {
+          return await this.recordUse(c, q, signal, installed);
+        } catch (error) {
+          spent = error instanceof DraftAlreadyOpened;
+          throw error;
+        }
+      });
       return !("kind" in result) && !signal.aborted && Date.now() < Date.parse(result.sendStartBy);
-    } catch (error) {
+    } catch {
       // A lost commit acknowledgment may leave a receipt. Never retry or turn it into an allow.
-      return error instanceof DraftAlreadyOpened ? "draft_already_opened" : false;
+      return spent ? "draft_already_opened" : false;
     }
   }
 
