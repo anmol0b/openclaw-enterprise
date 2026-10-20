@@ -233,7 +233,12 @@ export async function startSkipperPrivateGitOrigin({
           reply(204);
           return;
         }
-        if (teamReview && request.method === "POST" && url.pathname === pullRoute && !url.search) {
+        if (teamReview && request.method === "POST" && url.pathname === pullRoute) {
+          // The pull route takes no query string.
+          if (url.search) {
+            reply(404);
+            return;
+          }
           endpoint = "pull-create";
           pullCreateRequests++;
           const auth = request.headers.authorization;
