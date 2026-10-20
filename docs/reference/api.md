@@ -4756,7 +4756,6 @@ List Agent revision summaries that you can read for the requested Agent, newest 
 | `data[].configurationGeneration` | `integer` | Yes | minimum: 1; maximum: 9007199254740991 |
 | `data[].configurationId` | `string` | Yes | pattern: `^cfg_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$` |
 | `data[].createdAt` | `string (date-time)` | Yes | pattern: `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$` |
-| `data[].gatewayManagedMode` | `boolean` | Yes | Gateway managed mode requested for this Agent version. It does not report Gateway runtime state. |
 | `data[].harness` | `object` | Yes | — |
 | `data[].harness.id` | `string` | Yes | min length: 1 |
 | `data[].harness.mode` | `"embedded" or "dedicated"` | Yes | — |

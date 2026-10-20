@@ -66,9 +66,8 @@ test(
     );
     await client.query(
       `INSERT INTO occ.agent_revisions
-         (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at, gateway_managed_mode)
-       SELECT $1, namespace_id, id, 1, $4::jsonb, now(), gateway_managed_mode
-       FROM occ.agents WHERE namespace_id = $2 AND id = $3`,
+         (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at)
+       VALUES ($1, $2, $3, 1, $4, now())`,
       [
         revisionId,
         namespaceId,

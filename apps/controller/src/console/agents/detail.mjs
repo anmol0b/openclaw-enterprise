@@ -2670,8 +2670,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     let deployReloadMessage = "";
     let deployFeedback;
     let deployStatus;
-    let managedModeAction;
-    let managedModeControl = null;
+    const managedMode = {
+      value: document.createTextNode(agent.gatewayManagedMode ? "On" : "Off"),
+      action: null,
+      control: null,
+    };
     let authenticationForm;
     const retainedAuthentication = context.drafts.get("authentication");
     let authenticationPending = Boolean(
@@ -2757,10 +2760,13 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       draft && !runtimeAuth
         ? button("Set up credentials", () => change("draft", "credentials"))
         : null;
-    function draftChangesPending() {
+    function deployIsDisabled() {
       const retainedConfiguration = retainedConfigurationState();
       return (
+        deployPending ||
+        callerPermissions?.deploy === false ||
         authenticationSaveState !== "idle" ||
+        Boolean(deployReloadMessage) ||
         authenticationPending ||
         authenticationUnsaved ||
         retainedConfiguration.dirty ||
@@ -2772,15 +2778,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         pluginEditorState.dirty ||
         pluginEditorState.saving ||
         pluginEditorState.outcomeUnknown ||
-        pluginEditorState.reloadRequired
-      );
-    }
-    function deployIsDisabled() {
-      return (
-        deployPending ||
-        callerPermissions?.deploy === false ||
-        Boolean(deployReloadMessage) ||
-        draftChangesPending() ||
+        pluginEditorState.reloadRequired ||
         !agent.harnessAuth ||
         revisionResult.status !== "fulfilled" ||
         (!runtimeAuth && !credentials?.canDeploy())
@@ -2793,12 +2791,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         return;
       }
       const retainedConfiguration = retainedConfigurationState();
-      if (managedModeAction) {
-        managedModeAction.disabled =
-          managedModeControl.hidden ||
+      if (managedMode.action) {
+        managedMode.action.disabled =
+          managedMode.control.hidden ||
           deployPending ||
           Boolean(deployReloadMessage) ||
-          draftChangesPending() ||
+          Boolean(draftEditorNavigationBlock) ||
           Boolean(credentials?.mutationPending());
       }
       deploy.disabled = deployIsDisabled();
@@ -3007,8 +3005,10 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       const reload = button("Reload draft", () => void reloadDraftInPlace(context), {
         hidden: true,
       });
-      managedModeAction = button(
-        `Turn ${agent.gatewayManagedMode ? "off" : "on"} managed mode for next deployment`,
+      const actionLabel = () =>
+        `Turn ${agent.gatewayManagedMode ? "off" : "on"} managed mode for next deployment`;
+      managedMode.action = button(
+        actionLabel(),
         async () => {
           const previousBlock = showDraftEditorNavigationBlock;
           const hold = (text, saving = false) => {
@@ -3016,7 +3016,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
             draftEditorNavigationBlock = text || null;
             draftEditorSaving = saving;
             showDraftEditorNavigationBlock = text
-              ? () => showLeaveNote(managedModeControl, text, "end")
+              ? () => showLeaveNote(managedMode.control, text, "end")
               : previousBlock;
             content
               .querySelector(".configuration-draft-editor")
@@ -3027,17 +3027,16 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           feedback.textContent = "";
           setStatusTone(feedback, null);
           hold("Saving managed mode. Wait before deploying.", true);
-          let remainingBlock = "";
           try {
             const savedAgent = await request(path, {
               method: "PATCH",
               body: { gatewayManagedMode: !agent.gatewayManagedMode },
             });
             if (context.isCurrent()) {
-              await refreshDraftInPlace({
-                agent: savedAgent,
-                saved: "Managed mode saved. Deploy a new version to apply it.",
-              });
+              agent = { ...agent, gatewayManagedMode: savedAgent.gatewayManagedMode };
+              managedMode.value.textContent = agent.gatewayManagedMode ? "On" : "Off";
+              managedMode.action.textContent = actionLabel();
+              feedback.textContent = "Managed mode saved. Deploy a new version to apply it.";
             }
           } catch (error) {
             if (!context.isCurrent()) {
@@ -3047,26 +3046,23 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
               context.onExpired();
               return;
             }
-            feedback.textContent = rejectionMessage(refusedSave(error, "managedMode", true), true);
-            if (![400, 403, 404, 409, 429].includes(error.status)) {
-              remainingBlock =
-                "Managed mode may have been saved. Reload this draft before continuing.";
-            }
+            reload.hidden = [400, 403, 404, 409, 429].includes(error.status);
+            feedback.textContent = reload.hidden
+              ? rejectionMessage(refusedSave(error, "managedMode", true), true)
+              : "Managed mode may have been saved. Reload this draft before continuing.";
+            setStatusTone(feedback, "danger");
           } finally {
-            if (context.isCurrent() && managedModeControl.isConnected) {
-              feedback.textContent = remainingBlock || feedback.textContent;
-              reload.hidden = !remainingBlock;
-              hold(remainingBlock);
+            if (context.isCurrent() && managedMode.control.isConnected) {
+              hold(reload.hidden ? "" : feedback.textContent);
               if (feedback.textContent) {
-                setStatusTone(feedback, "danger");
-                focusSaveOutcome(managedModeControl, [reload, managedModeAction], feedback);
+                focusSaveOutcome(managedMode.control, [reload, managedMode.action], feedback);
               }
             }
           }
         },
         { disabled: true },
       );
-      managedModeControl = element(
+      managedMode.control = element(
         "section",
         { hidden: true },
         element("h3", {}, "Gateway managed mode"),
@@ -3075,12 +3071,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           { className: "hint" },
           "Managed mode restricts Gateway administrators from changing Gateway configuration, opening Gateway-local terminals, and running Gateway-hosted command jobs. Changing this setting does not change Harness Gateway policies. Deploy a new version to apply it.",
         ),
-        element("div", { className: "form-actions" }, managedModeAction, reload),
+        element("div", { className: "form-actions" }, managedMode.action, reload),
         feedback,
       );
       void agentUpdateAllowed.then((allowed) => {
         if (allowed === true && context.isCurrent()) {
-          managedModeControl.hidden = false;
+          managedMode.control.hidden = false;
           updateDeployControls();
         }
       });
@@ -3124,7 +3120,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       executionMode,
       credentials,
       channelSecretsNote,
-      managedModeControl,
+      managedMode,
       setAuthenticationPending(pending) {
         authenticationPending = pending;
         updateDeployControls();
@@ -3959,12 +3955,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       const repositoryBindings = draft
         ? agent.repositoryBindings
         : snapshot.repositoryCredentials?.bindings;
-      const gatewayManagedMode = draft ? agent.gatewayManagedMode : snapshot.gatewayManagedMode;
       const details = [
         ["Execution mode", executionMode === "dedicated" ? "Dedicated" : "Embedded"],
         [
           draft ? "Gateway managed mode" : "Requested Gateway managed mode",
-          gatewayManagedMode ? "On" : "Off",
+          data.managedMode?.value ?? (snapshot.gatewayManagedMode ? "On" : "Off"),
         ],
         ["Backend (experimental)", draft ? agent.backendId : snapshot.backendId],
         [
@@ -3997,7 +3992,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           repositoryBindings?.some((binding) => repositoryProfile(binding.profile)?.writes)
             ? element("p", { className: "hint repository-write-access" }, repositoryWriteAccessHelp)
             : null,
-          data.managedModeControl,
+          data.managedMode?.control,
           draft
             ? renderDraftConfigurationEditor(context, data)
             : element(

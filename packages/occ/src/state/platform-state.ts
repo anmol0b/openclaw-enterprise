@@ -2683,25 +2683,8 @@ function repositories(
               .filter(
                 (revision) => revision.namespaceId === namespaceId && revision.agentId === agentId,
               )
-              .map(
-                ({
-                  id,
-                  namespaceId,
-                  agentId,
-                  revision,
-                  backendId,
-                  gatewayManagedMode,
-                  createdAt,
-                }) =>
-                  Object.freeze({
-                    id,
-                    namespaceId,
-                    agentId,
-                    revision,
-                    backendId,
-                    gatewayManagedMode,
-                    createdAt,
-                  }),
+              .map(({ id, namespaceId, agentId, revision, backendId, createdAt }) =>
+                Object.freeze({ id, namespaceId, agentId, revision, backendId, createdAt }),
               )
           : [],
       ),
@@ -2728,7 +2711,6 @@ function repositories(
             backendId,
             configurationId,
             configurationGeneration,
-            gatewayManagedMode,
             harness,
             createdAt,
           }) =>
@@ -2740,7 +2722,6 @@ function repositories(
               backendId,
               configurationId,
               configurationGeneration,
-              gatewayManagedMode,
               harness,
               createdAt,
             }),

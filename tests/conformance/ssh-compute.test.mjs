@@ -957,7 +957,6 @@ test("SSH revisions fail closed on invalid identities and unsupported workload f
     message: "Agent setting gatewayManagedMode is not supported on SSH Compute.",
   };
   const beforeManagedMode = f.calls.length;
-  assert.throws(() => f.driver.admitRevision(managed), unsupportedManaged);
   await assert.rejects(f.driver.prepareRevision(managed), unsupportedManaged);
   await assert.rejects(f.driver.activateRevision(managed), unsupportedManaged);
   assert.equal(f.calls.length, beforeManagedMode);

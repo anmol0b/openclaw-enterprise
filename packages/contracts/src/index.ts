@@ -853,7 +853,7 @@ export interface AgentRevision extends Scope {
 
 export type AgentRevisionMetadata = Pick<
   AgentRevision,
-  "id" | "namespaceId" | "agentId" | "revision" | "backendId" | "gatewayManagedMode" | "createdAt"
+  "id" | "namespaceId" | "agentId" | "revision" | "backendId" | "createdAt"
 >;
 
 /**

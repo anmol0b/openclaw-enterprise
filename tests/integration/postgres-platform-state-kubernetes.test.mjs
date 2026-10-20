@@ -31,7 +31,6 @@ const revisionSummary = (revision) => ({
   backendId: revision.backendId,
   configurationId: revision.configurationId,
   configurationGeneration: revision.configurationGeneration,
-  gatewayManagedMode: revision.gatewayManagedMode,
   harness: revision.harness,
   createdAt: revision.createdAt,
 });

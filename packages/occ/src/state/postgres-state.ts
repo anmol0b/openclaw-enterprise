@@ -625,7 +625,6 @@ function revisionMetadataFromRow(row: PostgresRow): Readonly<AgentRevisionMetada
     agentId: text(row, "agent_id"),
     revision,
     backendId: row.backend_id === null ? null : text(row, "backend_id"),
-    gatewayManagedMode: boolean(row, "gateway_managed_mode"),
     createdAt: timestamp(row, "admitted_at"),
   });
 }
@@ -725,6 +724,7 @@ function revisionFromRow(
     configurationKind: admitted.configuration_kind,
     configurationGeneration: admitted.configuration_generation,
     configuration: admitted.draft_spec,
+    gatewayManagedMode: boolean(row, "gateway_managed_mode"),
     harness: admitted.harness,
     compute: admitted.compute,
     ...(admitted.sandbox_policy === undefined ? {} : { sandboxPolicy: admitted.sandbox_policy }),
@@ -3633,7 +3633,7 @@ export class PostgresPlatformState implements PlatformStateStore {
             (
               await client.query(
                 `SELECT r.id, r.namespace_id, r.agent_id, r.revision_number, r.backend_id,
-                        r.admitted_at, r.gateway_managed_mode
+                        r.admitted_at
                  FROM occ.agent_revisions AS r
                  JOIN occ.agents AS a ON a.namespace_id = r.namespace_id AND a.id = r.agent_id
                  JOIN occ.namespaces AS n ON n.id = r.namespace_id AND n.deleted_at IS NULL
@@ -3651,10 +3651,10 @@ export class PostgresPlatformState implements PlatformStateStore {
           (
             await client.query(
               `SELECT p.id, p.namespace_id, p.agent_id, p.revision_number, p.backend_id,
-                      p.admitted_at, p.gateway_managed_mode, s.configuration_id, s.configuration_generation, s.harness
+                      p.admitted_at, s.configuration_id, s.configuration_generation, s.harness
                FROM (
                  SELECT r.id, r.namespace_id, r.agent_id, r.revision_number, r.backend_id,
-                        r.admitted_at, r.gateway_managed_mode, r.admitted_spec
+                        r.admitted_at, r.admitted_spec
                  FROM occ.agent_revisions AS r
                  JOIN occ.agents AS a ON a.namespace_id = r.namespace_id AND a.id = r.agent_id
                  JOIN occ.namespaces AS n ON n.id = r.namespace_id AND n.deleted_at IS NULL

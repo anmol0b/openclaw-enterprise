@@ -512,17 +512,14 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     // Revision metadata lists the same revisions, in the same order, without saved settings.
     assert.deepEqual(
       await state.revisions.listRevisionMetadata(namespace.id, agent.id),
-      listed.map(
-        ({ id, namespaceId, agentId, revision, backendId, gatewayManagedMode, createdAt }) => ({
-          id,
-          namespaceId,
-          agentId,
-          revision,
-          backendId,
-          gatewayManagedMode,
-          createdAt,
-        }),
-      ),
+      listed.map(({ id, namespaceId, agentId, revision, backendId, createdAt }) => ({
+        id,
+        namespaceId,
+        agentId,
+        revision,
+        backendId,
+        createdAt,
+      })),
     );
     assert.deepEqual(await state.revisions.listRevisionMetadata(identifier("ns"), agent.id), []);
     // A summary page carries metadata plus the fields that tell revisions apart, never the
@@ -540,7 +537,6 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
           configurationGeneration: item.configurationGeneration,
           harness: item.harness,
           createdAt: item.createdAt,
-          gatewayManagedMode: item.gatewayManagedMode,
         })),
       },
     );

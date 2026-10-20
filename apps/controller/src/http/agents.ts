@@ -448,7 +448,6 @@ export function createAgentHandlers(options: AgentHandlerOptions) {
           agentId: summary.agentId,
           revision: summary.revision,
           backendId: summary.backendId,
-          gatewayManagedMode: summary.gatewayManagedMode,
           configurationId: summary.configurationId,
           configurationGeneration: summary.configurationGeneration,
           harness: summary.harness,

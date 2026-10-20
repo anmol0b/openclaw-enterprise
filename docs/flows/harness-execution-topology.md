@@ -26,7 +26,7 @@ workloads, publishes guarded routes and retires predecessors before activation a
 ```mermaid
 graph TD
   A["Authorize Agent and Configuration"] --> B["Resolve runtime, placement and native HTTP transport"]
-  B --> C["Freeze configuration, managed mode, Harness identity and authentication"]
+  B --> C["Freeze configuration, Gateway managed mode, Harness identity and authentication"]
   C --> D["Claim and reauthorize version work"]
   D --> E{"Approved topology"}
   E -->|embedded OpenClaw| F["Create gateway or stage replacement"]
@@ -64,14 +64,13 @@ modes fail closed.
 Compute's `apps/controller/src/drivers/compute/native-gateway-transport.ts:validatePlaintextNativeGateway`
 rejects `gateway.tls.enabled: true` before version creation and preparation:
 Docker, SSH and Kubernetes require native HTTP.
-The version preserves native configuration, [Gateway managed mode](../reference/agent-native-admin.md#gateway-managed-mode), approved Harness identity/version and mode,
-Compute selection, and Agent ServicePrincipal. Production admits
-`openclaw`/`embedded` and `codex`/`dedicated`, and `openclaw`/`dedicated` only when
-the selected SandboxDriver provisions Harnesses with networking, filesystem, and
-process containment and the Installation has native-worker support.
-The pinned runtime includes native-worker support; custom images can declare it at startup.
-An associated `access_token` requires dedicated Codex; its account snapshot contains only
-the OCC identity, credential kind, and opaque Secret reference.
+The saved version snapshots [Gateway managed mode](../reference/agent-native-admin.md#gateway-managed-mode), native configuration, Harness identity/version and mode,
+Compute selection and Agent ServicePrincipal. Production admits `openclaw`/`embedded` and
+`codex`/`dedicated`; `openclaw`/`dedicated` needs a SandboxDriver that provisions Harnesses
+with networking, filesystem and process containment, plus native-worker support. The pinned
+runtime includes this support; custom images can declare it at startup. An `access_token`
+requires dedicated Codex; its account snapshot holds only the OCC identity, credential kind
+and opaque Secret reference.
 
 ### 2. Claim work and realize the approved topology
 
@@ -79,7 +78,7 @@ the OCC identity, credential kind, and opaque Secret reference.
 
 The worker claims version work, rechecks actor/ownership and the frozen Harness,
 then calls `ComputeDriver.prepareRevision`. `apps/controller/src/drivers/compute/runtime-startup.ts:gatewayManagedModeEnvironment`
-supplies Gateway controls after OCE setup.
+supplies controls to the Gateway child after OCE setup.
 
 `apps/controller/src/drivers/compute/docker/index.ts:DockerComputeDriver.prepareRevision`
 
@@ -90,8 +89,8 @@ but rejects harness-auth bindings before deployment; no Agent path is deployable
 [Docker gateway authentication reference](../reference/drivers/docker-compute.md#gateway-authentication)
 owns the mode and password rules.
 
-Kubernetes supports managed bindings. SSH accepts `{ "method": "runtime" }`
-only for unmanaged embedded OpenClaw: operator
+Kubernetes supports managed bindings.
+SSH supports `{ "method": "runtime" }` only for unmanaged embedded OpenClaw: operator
 credentials remain on the host and OCC checks gateway readiness without model
 validation. See the [SSH flow](pr-24-ssh-compute.md).
 
@@ -156,12 +155,12 @@ For provider-owned Harnesses, `providerHarnessReady` requires exactly one nonter
 
 `apps/controller/src/worker.ts:ControllerWorker`
 
-For dedicated Kubernetes revisions, `requiresStoppedPredecessors` makes the worker
-stop predecessors, including Gateways, and wait for Pod termination. Redeployment
-interrupts service but preserves both PVCs; retry or a new version recovers.
-Recorded stops suppress repeats. A returning predecessor makes its successor unready;
-stops retry after one, two, four, then more claim leases. Failed preparation or
-preparing/activating the predecessor clears its record. New exclusive versions supersede old reconciliation/maintenance
+`requiresStoppedPredecessors` stops all predecessors, including Gateways, and
+waits for Pod termination before replacement. Redeployment interrupts service but preserves both PVCs; retry or a
+new version recovers failures. Recorded stops suppress repeats. A returning
+predecessor makes its successor unready; stops retry after one, two, four, then
+more claim leases. Failed preparation or preparing/activating that predecessor
+clears its record. New exclusive versions supersede old reconciliation/maintenance
 without rollback; see
 [production version stages](../reference/drivers/compute.md#production-revision-stages).
 For dedicated Codex API-key auth, `pluginRuntimeSnapshot` in
@@ -192,12 +191,12 @@ before activation. For an unready never-served Gateway (its Service selects no P
 such as after rejected model authentication, successor preparation replaces its
 template and deletes its version Secret and ConfigMap copies.
 
-The worker compare-and-sets `activeRevisionId` before Kubernetes activation; the
-selected revision records the requested mode. `KubernetesComputeDriver.activateRevision`
-updates the shared Gateway's `Recreate` Deployment and Service; deployment succeeds
-after the replacement is ready. Cutover can stop the serving Gateway before replacement
+The worker compare-and-sets `activeRevisionId` to the revision containing the requested
+mode before Kubernetes activation. `KubernetesComputeDriver.activateRevision` updates the
+shared Gateway's `Recreate` Deployment and Service and requires Gateway readiness. Embedded
+preparation does not validate credentials, so cutover can stop the serving Gateway before replacement
 [startup](native-service-account-credential-delivery.md#5-authenticate-during-runtime-startup)
-validates its credentials. Each Gateway uses the same check and CPU-based deadline, at most 600 seconds;
+validates them. Each Gateway uses the same check and CPU-based deadline, at most 600 seconds;
 failures, including provider timeouts/rate limits, hold them unready until repair
 and restart or a new deployment. Readiness polling does not repeat model requests;
 worker retries do not restart unchanged Pods. There is no automatic rollback.

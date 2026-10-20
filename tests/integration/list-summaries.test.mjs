@@ -16,7 +16,6 @@ const REVISION_SUMMARY_KEYS = [
   "configurationGeneration",
   "configurationId",
   "createdAt",
-  "gatewayManagedMode",
   "harness",
   "id",
   "namespaceId",
@@ -132,10 +131,17 @@ test("Preset and revision lists return summaries, not the stored documents", asy
   assert.equal(Object.keys(preset.data.template.configuration.values.env.vars).length, 70_000);
   const revision = await fixture.request("GET", `${revisionsPath}/${heavy.at(-1).id}`);
   assert.equal(Object.keys(revision.data.configuration.env.vars).length, 70_000);
-  assert.deepEqual(
-    listedRevisions.data[0],
-    Object.fromEntries(REVISION_SUMMARY_KEYS.map((key) => [key, revision.data[key]])),
-  );
+  assert.deepEqual(listedRevisions.data[0], {
+    id: revision.data.id,
+    namespaceId: revision.data.namespaceId,
+    agentId: revision.data.agentId,
+    revision: revision.data.revision,
+    backendId: revision.data.backendId,
+    configurationId: revision.data.configurationId,
+    configurationGeneration: revision.data.configurationGeneration,
+    harness: revision.data.harness,
+    createdAt: revision.data.createdAt,
+  });
 });
 
 test("revision pages run newest first and a cursor continues below a deploy between pages", async (t) => {

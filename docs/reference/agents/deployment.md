@@ -78,10 +78,6 @@ Updating that Configuration, or naming another one, resolves it. See the
 [Harness execution topology flow](../../flows/harness-execution-topology.md) for
 runtime selection, identity boundaries, and activation.
 
-## Gateway managed mode
-
-See [Gateway administration](../agent-native-admin.md#gateway-managed-mode) for restrictions and control.
-
 <a id="revisions-and-deployment" class="anchor-alias"></a>
 
 ## Versions and deployment
@@ -93,7 +89,7 @@ ordered version history and at most one selected version, identified by
 readiness. See [Agent revisions](../../guides/topics/agent-revisions.md).
 
 The Agent revision records the source `configurationId`, `configurationKind`, and
-`configurationGeneration`, `gatewayManagedMode`, its complete saved native `configuration`
+`configurationGeneration`, [`gatewayManagedMode`](../agent-native-admin.md#gateway-managed-mode), its complete saved native `configuration`
 document, the approved Harness identity/version/mode, selected Compute identity,
 nullable `backendId`, and `harnessAuth` with its resolved internal source snapshot.
 The auth snapshot contains no credential bytes; public Agent revisions omit private

@@ -74,6 +74,10 @@ test("saving Gateway managed mode preserves a concurrent Configuration reassignm
     true,
   );
   fixture.policy.restrictions.pop();
+  await page.getByRole("button", { name: "Edit Configuration", exact: true }).click();
+  const editor = page.getByLabel("Configuration JSON");
+  const unsavedConfiguration = JSON.stringify(nativeValues("unsaved"), null, 2);
+  await editor.fill(unsavedConfiguration);
   const saving = await holdRequests(
     t,
     page,
@@ -91,10 +95,16 @@ test("saving Gateway managed mode preserves a concurrent Configuration reassignm
   await fixture.updateAgent(namespace.id, agent.id, { configurationId: reassigned.id });
   saving.release();
   await page.getByRole("button", { name: "Turn on managed mode for next deployment" }).waitFor();
+  assert.equal(await editor.inputValue(), unsavedConfiguration);
   const saved = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`);
   assert.equal(saved.data.gatewayManagedMode, false);
   assert.equal(saved.data.configurationId, reassigned.id);
   assert.equal(saved.data.activeRevisionId, revision.id);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Deploy new version" }).click();
+  await page
+    .getByText("Configuration or authentication changed. Reload this draft before deploying.")
+    .waitFor();
   await page.getByRole("button", { name: "View version v1, current version" }).click();
   await page.getByRole("heading", { name: "Configuration snapshot" }).waitFor();
   const mode = page.locator(".configuration-summary dt", {

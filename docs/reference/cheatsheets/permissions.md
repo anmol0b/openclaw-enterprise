@@ -77,7 +77,7 @@ needs its principal’s own grants; it does not inherit the issuer’s. See
   for each source in `credentialSources`. At
   deployment the Agent’s own service principal also needs `secret:operate` on each
   bound Secret and `credential_source:operate` on each source.
-- Creating an Agent with [Gateway managed mode](../agents/deployment.md#gateway-managed-mode)
+- Creating an Agent with [Gateway managed mode](../agent-native-admin.md#gateway-managed-mode)
   off or changing the setting also requires `installation:administer`.
 - [Registering](../api.md#post-namespacesnamespaceidcredentialsources) or
   [updating a credential source](../api.md#patch-namespacesnamespaceidcredentialsourcescredentialsourceid)

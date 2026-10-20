@@ -2673,9 +2673,9 @@ revisionTest(
       const id = `rev_${randomUUID()}`;
       await fixture.observerPool.query(
         `INSERT INTO occ.agent_revisions
-           (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at, gateway_managed_mode)
+           (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
          SELECT $2, namespace_id, agent_id, $3, backend_id, admitted_spec - 'credential_sources',
-                clock_timestamp(), gateway_managed_mode
+                clock_timestamp()
          FROM occ.agent_revisions WHERE id = $1`,
         [listed.id, id, number],
       );

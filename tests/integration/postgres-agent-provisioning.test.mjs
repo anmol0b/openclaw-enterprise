@@ -4174,6 +4174,7 @@ test(
             source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
           },
           executionMode: body.executionMode,
+          gatewayManagedMode: true,
           drivers: {
             compute: fixture.computeDriver.id,
             configuration: fixture.configurationDriver.id,
@@ -4276,6 +4277,7 @@ test(
             source: { kind: "service_account", namespaceId: account.namespaceId, id: account.id },
           },
           executionMode: body.executionMode,
+          gatewayManagedMode: true,
           drivers: {
             compute: fixture.computeDriver.id,
             configuration: fixture.configurationDriver.id,

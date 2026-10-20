@@ -926,9 +926,9 @@ test(
       await assert.rejects(
         pool.query(
           `INSERT INTO occ.agent_revisions
-        (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at, gateway_managed_mode)
+        (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
         SELECT $1, namespace_id, agent_id, $2, backend_id,
-          jsonb_set(admitted_spec, '{harness_auth}', $3::jsonb), admitted_at, gateway_managed_mode
+          jsonb_set(admitted_spec, '{harness_auth}', $3::jsonb), admitted_at
         FROM occ.agent_revisions WHERE id = $4`,
           [`rev_${randomUUID()}`, 1000 + offset, JSON.stringify(invalid), fixture.revision.id],
         ),
@@ -968,9 +968,9 @@ test(
       await assert.rejects(
         pool.query(
           `INSERT INTO occ.agent_revisions
-             (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at, gateway_managed_mode)
+             (id, namespace_id, agent_id, revision_number, admitted_spec, admitted_at)
            SELECT $2, namespace_id, agent_id, $3,
-                  jsonb_set(admitted_spec, '{sandbox_driver_id}', $1::jsonb, true), admitted_at, gateway_managed_mode
+                  jsonb_set(admitted_spec, '{sandbox_driver_id}', $1::jsonb, true), admitted_at
            FROM occ.agent_revisions WHERE id = $4`,
           [
             JSON.stringify(invalid),
@@ -1340,10 +1340,10 @@ test(
     );
     await pool.query(
       `INSERT INTO occ.agent_revisions
-         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at, gateway_managed_mode)
+         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
        SELECT 'rev_' || gen_random_uuid(), namespace_id, agent_id, 5000 + n, backend_id,
               jsonb_set(admitted_spec, '{draft_spec,env}', jsonb_build_object('vars', $2::jsonb)),
-              admitted_at, gateway_managed_mode
+              admitted_at
        FROM occ.agent_revisions, generate_series(1, 64) AS n WHERE id = $1`,
       [fixture.revision.id, large],
     );
@@ -1815,9 +1815,9 @@ test(
       await client.query("BEGIN");
       await client.query(
         `INSERT INTO occ.agent_revisions
-           (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at, gateway_managed_mode)
+           (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
          SELECT $1, namespace_id, agent_id, revision_number + 1000, backend_id,
-                jsonb_set(admitted_spec, '{plugins}', $2::jsonb, false), admitted_at, gateway_managed_mode
+                jsonb_set(admitted_spec, '{plugins}', $2::jsonb, false), admitted_at
          FROM occ.agent_revisions WHERE id = $3`,
         [malformedRevisionId, JSON.stringify(malformedPlugins), revision.id],
       );
@@ -1939,9 +1939,9 @@ test(
     const malformedRevisionId = `rev_${randomUUID()}`;
     await pool.query(
       `INSERT INTO occ.agent_revisions
-         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at, gateway_managed_mode)
+         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
        SELECT $1, namespace_id, agent_id, revision_number + 1, backend_id,
-              jsonb_set(admitted_spec, '{plugins,plugins}', $2::jsonb, false), admitted_at, gateway_managed_mode
+              jsonb_set(admitted_spec, '{plugins,plugins}', $2::jsonb, false), admitted_at
        FROM occ.agent_revisions WHERE id = $3`,
       [malformedRevisionId, JSON.stringify(malformedPlugins), revision.id],
     );
@@ -1954,7 +1954,6 @@ test(
       agentId: agent.id,
       revision: 2,
       backendId: null,
-      gatewayManagedMode: revision.gatewayManagedMode,
       createdAt: healthyRevision.data.createdAt,
       configurationReadError: readError,
     };
@@ -1982,7 +1981,6 @@ test(
       agentId: item.agentId,
       revision: item.revision,
       backendId: item.backendId,
-      gatewayManagedMode: item.gatewayManagedMode,
       configurationId: item.configurationId,
       configurationGeneration: item.configurationGeneration,
       harness: item.harness,
@@ -2214,9 +2212,9 @@ test(
       const id = `rev_${randomUUID()}`;
       await pool.query(
         `INSERT INTO occ.agent_revisions
-           (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at, gateway_managed_mode)
+           (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
          SELECT $1, namespace_id, agent_id, $2, backend_id,
-                jsonb_set(admitted_spec, '{plugins,plugins}', $4::jsonb, false), admitted_at, gateway_managed_mode
+                jsonb_set(admitted_spec, '{plugins,plugins}', $4::jsonb, false), admitted_at
          FROM occ.agent_revisions WHERE id = $3`,
         [id, revision, template.id, JSON.stringify(malformedPlugins)],
       );
@@ -2351,9 +2349,9 @@ test(
     // carrying a previously accepted plugin approval enum the current contract no longer decodes.
     await pool.query(
       `INSERT INTO occ.agent_revisions
-         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at, gateway_managed_mode)
+         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
        SELECT $1, namespace_id, agent_id, 2, backend_id,
-              jsonb_set(admitted_spec, '{plugins}', $2::jsonb, true), admitted_at, gateway_managed_mode
+              jsonb_set(admitted_spec, '{plugins}', $2::jsonb, true), admitted_at
        FROM occ.agent_revisions WHERE id = $3`,
       [
         `rev_${randomUUID()}`,

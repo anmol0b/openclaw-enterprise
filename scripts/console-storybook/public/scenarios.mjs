@@ -3254,23 +3254,11 @@ export const scenarios = {
       "Edit and save the current Configuration before deploying a new immutable version. The selected version stays unchanged until activation.",
     steps: [
       "Review the selected version and saved draft settings.",
-      "Edit and save Configuration; then deploy the new version.",
+      "Turn off Gateway managed mode and confirm the current version still requests it on.",
+      "Return to the draft, edit and save Configuration, then deploy the new version.",
       "Inspect the admitted version and its deployment activity.",
     ],
-    gap: "The fixture simulates admission and worker completion; it does not verify a live Agent.",
-  },
-  managedModeDraft: {
-    group: "Pages/Agent detail",
-    name: "Gateway managed mode",
-    path: draft,
-    deployed: true,
-    description:
-      "An OCE Installation administrator changes managed mode for the next deployment. The current version keeps its recorded setting until a new version is deployed.",
-    steps: [
-      "Turn off managed mode for the next deployment and check the saved draft.",
-      "Open the current version and confirm that its recorded mode remains on.",
-    ],
-    gap: "The fixture simulates the save and does not run a Gateway.",
+    gap: "The fixture simulates saves, admission, and worker completion; it does not run a live Agent or Gateway.",
   },
   longVersionHistory: {
     group: "Pages/Agent detail",

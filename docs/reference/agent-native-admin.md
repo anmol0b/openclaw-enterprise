@@ -129,7 +129,7 @@ configuration through OCE. In the Kubernetes pilot, native configuration edits
 affect a Pod-local copy that resets from the managed snapshot when the Pod is
 recreated or the Agent is redeployed.
 See [Kubernetes managed native configuration](drivers/kubernetes-compute/storage-and-credentials.md#managed-native-configuration)
-for the opt-in predicate, mounts, and copy lifecycle.
+for mount selection and the copy lifecycle.
 
 Do not change `gateway.bind`, `gateway.customBindHost`, or
 `gateway.tailscale.mode` in that copy. OCE checks these listener settings in the

@@ -1602,7 +1602,6 @@ export function installFixture(scenario, evidence) {
               agentId: item.agentId,
               revision: item.revision,
               backendId: item.backendId,
-              gatewayManagedMode: item.gatewayManagedMode,
               configurationId: item.configurationId,
               configurationGeneration: item.configurationGeneration,
               harness: item.harness,

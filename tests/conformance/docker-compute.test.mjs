@@ -553,7 +553,7 @@ test("Docker Compute rejects unsupported native gateway settings before Docker e
 });
 
 test("Docker prepares configuration before starting a managed Gateway", async () => {
-  const { body, environment } = await gatewayContainerLaunch({}, { gatewayManagedMode: true });
+  const { body, environment } = await gatewayContainerLaunch();
   const program = inflateRawSync(Buffer.from(body.Cmd.slice(2).join(""), "base64")).toString();
   const nativeRequire = createRequire(import.meta.url);
   const events = [];
@@ -599,11 +599,11 @@ test("Docker prepares configuration before starting a managed Gateway", async ()
   ]);
 });
 
-async function gatewayContainerLaunch(configuration = {}, revisionOverrides = {}) {
+async function gatewayContainerLaunch(configuration = {}) {
   const driver = new DockerComputeDriver({
     images: { gateway: "gateway:local", agent: "agent:local" },
   });
-  const revision = { ...dockerGatewayRevision(driver, configuration), ...revisionOverrides };
+  const revision = dockerGatewayRevision(driver, configuration);
   const createdContainers = [];
   const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "test-openai-api-key";
@@ -669,6 +669,7 @@ function dockerGatewayRevision(driver, configuration = {}) {
     configurationKind: "agent",
     configurationGeneration: 1,
     configuration: admitLoggingConfiguration(configuration, "info"),
+    gatewayManagedMode: true,
     harness: { id: "openclaw", version: "1.0.0", mode: "embedded" },
     compute: { id: driver.id, implementation: driver.implementation },
     servicePrincipalId: "service-principal-docker-auth",

@@ -7909,7 +7909,6 @@ export class OpenClawController {
         servicePrincipalId: lockedAgent.servicePrincipalId,
         createdAt,
       };
-      const computeAdmission = compute.admitRevision?.(freezeAgentRevision(revisionDraft));
       if (
         revisionDraft.gatewayManagedMode === true &&
         compute.supportsGatewayManagedMode !== true
@@ -7918,6 +7917,7 @@ export class OpenClawController {
           "Agent setting gatewayManagedMode is not supported by the selected Compute Driver.",
         );
       }
+      const computeAdmission = compute.admitRevision?.(freezeAgentRevision(revisionDraft));
       const revision = await state.revisions.createRevision(
         freezeAgentRevision({
           ...revisionDraft,

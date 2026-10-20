@@ -111,10 +111,9 @@ Compare **New version queued**, **Deployment waiting for runtime**, and
 **Deployment retry after dependency failure**; switch versions and check
 **Since**.
 
-**Gateway Managed Mode**: simulate saving.
-
-**First deployment creates credentials** simulates OCC credential generation
-during **Deploy new version**; its initial state is not a Stop request.
+**First deployment creates credentials** accepts **Deploy new version** without
+a separate credential action. Its initial state is not a Stop request; OCC
+generation is simulated.
 
 Choose a Preset, fill its variables, review seeded workspace files, and create
 a Codex-harness Agent: the Console submits inline Configuration and Secret
