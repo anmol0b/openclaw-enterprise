@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { appendFile, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
@@ -315,9 +315,17 @@ async function developmentUp(pki, inputs) {
   };
   delete install.OPENAI_API_KEY;
   delete install.OCC_DEVELOPMENT_PREPARED_GIT_PROVIDER_ORIGIN;
-  // occ dev down removes the cluster even when dev up failed half way.
+  // occ dev down removes the cluster even when dev up failed half way; a dev up refused
+  // before it wrote any state left nothing to remove.
   cleanup.push(async () => {
-    await run(occ, ["dev", "down"], { env: install, timeout: 12 * minute });
+    if (
+      await stat(install.OCC_DEVELOPMENT_STATE_DIRECTORY).then(
+        () => true,
+        () => false,
+      )
+    ) {
+      await run(occ, ["dev", "down"], { env: install, timeout: 12 * minute });
+    }
     const names = await output("docker", ["ps", "-a", "--format", "{{.Names}}"]);
     assert.ok(!names.split("\n").some((name) => name.startsWith(`k3d-${cluster}-`)));
   });
