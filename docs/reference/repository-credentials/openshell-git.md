@@ -162,12 +162,14 @@ connection from OpenShell to GitHub uses verified TLS.
 The worker verifies each admitted Sandbox's Git route itself: the exact Sandbox,
 its supervisor instance and the installed provider generation, re-read through the
 Gateway every few seconds and on every request. A deployment waits as
-`REPOSITORY_GIT_ROUTE_PENDING` until that route is verified and the prepared
-material is installed. A route the worker has closed for good (the Sandbox or its
-supervisor was replaced, a provider write's outcome is unknown, or access was
-withdrawn) fails the deployment with `REPOSITORY_GIT_ROUTE_BLOCKED`; an active
-version in that state keeps serving chat, but every Git request answers 403 until
-a new version deploys.
+`REPOSITORY_GIT_ROUTE_PENDING` until that route is verified. The prepared material
+is issued only once the version is active and installs within a few seconds; an
+active version that loses its material reports `REPOSITORY_GIT_ROUTE_PENDING`
+again. A route the worker has closed for good (the Sandbox or its supervisor was
+replaced, a provider write's outcome is unknown, or access was withdrawn) fails
+the deployment with `REPOSITORY_GIT_ROUTE_BLOCKED`; an active version in that
+state keeps serving chat, but every Git request answers 403 until a new version
+deploys.
 
 A read the worker cannot complete is not a verdict. While the Gateway Pod is being
 replaced (an upgrade, node drain or restart), or a read times out, the route closes
@@ -186,7 +188,9 @@ route closed by a failed read (`gateway_unavailable`, `timeout`, `read_failed`) 
 `worker.openshell-git-route` its restoration with the outage's `durationMs`. When
 the provider rejects the App key, preparation is quarantined and
 `PREPARED_GITHUB_RECOVERY_REQUIRED` names the `reason`, revision and
-`repositoryRef`; restore the key, then deploy a new version. Each request the
-worker refuses logs one `worker.openshell-git-denied` line with its `reason`
-(`route_unobserved`, `route_blocked`, `ref_not_allowed`, `approval_denied`, and so
-on), the Sandbox ID and the request ID the supervisor's own log shows.
+`repositoryRef`. A new version still deploys (its material is requested only after
+it activates); then Git answers 403 and the worker logs this line. Restore the key,
+then deploy a new version. Each request the worker refuses logs one
+`worker.openshell-git-denied` line with its `reason` (`route_unobserved`,
+`route_blocked`, `ref_not_allowed`, `approval_denied`, and so on), the Sandbox ID
+and the request ID the supervisor's own log shows.

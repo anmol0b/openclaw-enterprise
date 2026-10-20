@@ -78,11 +78,35 @@ export type OpenShellGitRouteState =
   | { readonly state: "bootstrapping" }
   | {
       readonly state: "pending";
-      readonly reason: "unverified" | "material_unavailable" | "unobserved";
+      readonly reason: "unverified" | "awaiting_material" | "material_unavailable" | "unobserved";
       readonly failure?: OpenShellGitObservationFailure;
     }
   | { readonly state: "installed" }
   | { readonly state: "blocked"; readonly reason: OpenShellGitRouteBlockReason };
+
+/**
+ * What a route state means for Compute readiness. Prepared material is discovered and read
+ * only for the Agent's active revision (the `sessions` snapshot in prepared-repository-git.ts),
+ * so a deploying revision whose Sandbox route has verified waits as `awaiting_material` (no
+ * material was ever installed) until it activates: it is ready to activate, and its material
+ * installs within seconds after. Holding it would never end (finding 2139). A revision that
+ * lost the material it had (`material_unavailable`) and every other pending state waits; a
+ * blocked route fails.
+ */
+export function openShellGitRouteReadiness(
+  route: OpenShellGitRouteState,
+): "ready" | "pending" | "blocked" {
+  if (route.state === "blocked") {
+    return "blocked";
+  }
+  if (
+    route.state === "installed" ||
+    (route.state === "pending" && route.reason === "awaiting_material")
+  ) {
+    return "ready";
+  }
+  return "pending";
+}
 
 export type OpenShellGitRuntimeEmit = (event: Readonly<Record<string, unknown>>) => void;
 
@@ -455,8 +479,9 @@ export class OpenShellGitRuntime {
 
   /**
    * The route's state for a revision this worker prepared. Compute readiness holds a
-   * revision until the route is installed and fails it while the route is blocked, so a
-   * deployment never reports success over a closed route (findings 2135, 2136).
+   * revision until the route is verified (installed, or awaiting its first material, which
+   * is issued only once the revision is active) and fails it while the route is blocked, so
+   * a deployment never reports success over a route that cannot open (findings 2136, 2139).
    */
   route(revisionId: string): OpenShellGitRouteState {
     const state = this.states.get(revisionId);
@@ -478,6 +503,9 @@ export class OpenShellGitRuntime {
     }
     if (entry.unobserved) {
       return { state: "pending", reason: "unobserved", failure: entry.unobserved.failure };
+    }
+    if (entry.pending === "material_unavailable" && entry.material === undefined) {
+      return { state: "pending", reason: "awaiting_material" };
     }
     return { state: "pending", reason: entry.pending ?? "unverified" };
   }

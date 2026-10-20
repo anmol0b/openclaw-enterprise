@@ -1,5 +1,6 @@
 import {
   OpenShellGitRouteBlockedError,
+  openShellGitRouteReadiness,
   type OpenShellGitRuntime,
 } from "../../egress-proxy/openshell-git-runtime.ts";
 import { networkPolicySpecToJson } from "../../kubernetes/network-policy.ts";
@@ -6771,9 +6772,11 @@ export class KubernetesComputeDriver implements ComputeDriver {
           // middleware route. A Sandbox whose route is not yet verified is not ready, and one
           // whose route is blocked (a replaced execution or supervisor, an unknown provider
           // write) never will be without a new revision: the deployment fails with that cause
-          // instead of reporting success over a closed route (findings 2135, 2136).
-          const route = this.openShellGit.route(revision.id);
-          if (route.state === "blocked") {
+          // instead of reporting success over a closed route (finding 2136). Material itself
+          // is prepared only once this revision is active, so a verified route that waits
+          // for material is ready (finding 2139).
+          const route = openShellGitRouteReadiness(this.openShellGit.route(revision.id));
+          if (route === "blocked") {
             const runtimeFailure: RuntimeFailureEvidence = {
               component: "agent",
               check: "repository-git-route",
@@ -6782,7 +6785,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
             };
             return { ...result, runtimeFailure };
           }
-          if (route.state !== "installed") {
+          if (route === "pending") {
             return incomplete("REPOSITORY_GIT_ROUTE_PENDING");
           }
         }

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   OpenShellGitRouteBlockedError,
   OpenShellGitRuntime,
+  openShellGitRouteReadiness,
 } from "../../apps/controller/src/drivers/egress-proxy/openshell-git-runtime.ts";
 import { OpenShellPreparedGitProviderError } from "../../apps/controller/src/drivers/egress-proxy/openshell-prepared-git-provider.ts";
 import {
@@ -461,13 +462,13 @@ test("the Git route reports bootstrap, material and binding states for Compute r
     state: "blocked",
     reason: "bootstrap_failed",
   });
-  // No committed material yet (for example, the App key was rotated and preparation is
-  // quarantined): the route waits, nothing is written, and the state says so.
+  // No committed material yet (the revision is not active yet, or the App key was rotated
+  // and preparation is quarantined): the route waits, nothing is written, and the state says so.
   f.owner.material = undefined;
   await f.reconcile();
   assert.deepEqual(f.runtime.route(f.revision.id), {
     state: "pending",
-    reason: "material_unavailable",
+    reason: "awaiting_material",
   });
   assert.equal(f.calls.rotate, 0);
   assert.equal(await f.lookup(), undefined);
@@ -510,4 +511,64 @@ test("the Git route reports bootstrap, material and binding states for Compute r
     requestId: "request-three",
   });
   assert.deepEqual(f.errors(), []);
+});
+
+test("a deploying revision whose route verified is ready before its material exists", async () => {
+  // Finding 2139: material is prepared and read only for the Agent's active revision, so a
+  // revision Compute is still readying never gets any. Holding it until the route is
+  // installed left every deployment with an OpenShell Git binding pending forever.
+  const f = fixture();
+  const readiness = () => openShellGitRouteReadiness(f.runtime.route(f.revision.id));
+  assert.equal(openShellGitRouteReadiness(f.runtime.route("unknown-revision")), "pending");
+  f.runtime.states.set("rev-two", {});
+  assert.equal(openShellGitRouteReadiness(f.runtime.route("rev-two")), "pending");
+  f.runtime.states.set("rev-three", { failed: true });
+  assert.equal(openShellGitRouteReadiness(f.runtime.route("rev-three")), "blocked");
+  // The Sandbox has not verified yet: wait.
+  f.owner.material = undefined;
+  f.sandbox.phase = "SANDBOX_PHASE_PROVISIONING";
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "pending", reason: "unverified" });
+  assert.equal(readiness(), "pending");
+  // Verified, no material yet (not active): ready to activate, still nothing written or sent.
+  f.sandbox.phase = "SANDBOX_PHASE_READY";
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), {
+    state: "pending",
+    reason: "awaiting_material",
+  });
+  assert.equal(readiness(), "ready");
+  assert.equal(f.calls.rotate, 0);
+  assert.equal(await f.lookup(), undefined);
+  // Activated: material arrives and installs.
+  f.owner.material = fixture().owner.material;
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  assert.equal(readiness(), "ready");
+  // A failed read closes the route: wait, never fail.
+  f.faults.gateway = new SandboxGatewayUnavailableError("OpenShell GetSandbox failed.");
+  await f.reconcile();
+  assert.equal(f.runtime.route(f.revision.id).reason, "unobserved");
+  assert.equal(readiness(), "pending");
+  f.faults.gateway = undefined;
+  await f.reconcile();
+  assert.equal(readiness(), "ready");
+  // An active revision that loses its material (the attempt was retired or expired, the
+  // App key was rejected) closes the route and is not ready again until material returns.
+  f.owner.material = undefined;
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), {
+    state: "pending",
+    reason: "material_unavailable",
+  });
+  assert.equal(readiness(), "pending");
+  assert.equal(await f.lookup(), undefined);
+  f.owner.material = fixture().owner.material;
+  await f.reconcile();
+  assert.equal(readiness(), "ready");
+  // A replaced execution blocks the route for good.
+  f.sandbox.id = "sandbox-id-two";
+  await f.reconcile();
+  assert.equal(f.runtime.route(f.revision.id).state, "blocked");
+  assert.equal(readiness(), "blocked");
 });
