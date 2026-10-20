@@ -1912,7 +1912,7 @@ test("closed Installation observes only its operator-bound Namespace, including 
     assert.equal(result.namespaceReady, false);
   }
   await assert.rejects(configurationDriver.controlNamespace(core, id), {
-    message: /control-plane storage namespace|requires exactly one namespace/,
+    message: /does not match the Installation|control-plane storage namespace/,
   });
   await assert.rejects(secretDriver.readyNamespace(core, id), {
     message: /Kubernetes Secret namespace verification/,

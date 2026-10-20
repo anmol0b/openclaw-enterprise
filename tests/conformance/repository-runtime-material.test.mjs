@@ -1582,7 +1582,7 @@ test("the owning active reconcile withdraws its admitted reader across the Crede
   for (const unsupported of [legacy, unselected, otherCompute]) {
     assert.equal(driver.rejectedExecutionWithdrawal(unsupported), undefined);
     assert.throws(() => driver.validateExecutionAdmission(unsupported), {
-      name: "DependencyUnavailableError",
+      message: /Protected execution is unavailable/,
     });
   }
 

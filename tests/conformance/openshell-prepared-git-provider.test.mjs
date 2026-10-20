@@ -41,7 +41,6 @@ async function wire(t) {
   proto = proto.replace(
     "service OpenShell {",
     `service OpenShell {
-    rpc GetWorkspace(GetWorkspaceRequest) returns (GetWorkspaceResponse);
     rpc GetProvider(GetProviderRequest) returns (ProviderResponse);
     rpc GetProviderProfile(GetProviderProfileRequest) returns (ProviderProfileResponse);`,
   );
@@ -50,9 +49,6 @@ async function wire(t) {
     "  string path_template = 9;\n  bool stable_placeholder = 12;",
   );
   proto += `
-    message GetWorkspaceRequest { string name = 1; }
-    message Workspace { ObjectMeta metadata = 1; }
-    message GetWorkspaceResponse { Workspace workspace = 1; }
     message GetProviderRequest { string name = 1; WorkspaceSelector workspace_scope = 2; }
     message GetProviderProfileRequest { string id = 1; WorkspaceSelector workspace_scope = 2; }
     message ProviderProfileResponse { ProviderProfile profile = 1; }

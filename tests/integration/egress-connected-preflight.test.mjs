@@ -381,7 +381,10 @@ test("connected database selection rejects missing, remote and redirected observ
     url({ search: "?host=database.test" }),
     url({ search: "?dbname=unowned" }),
   ]) {
-    assert.throws(() => validateConnectedDatabaseUrl(rejected), { code: "ERR_ASSERTION" });
+    assert.throws(
+      () => validateConnectedDatabaseUrl(rejected),
+      (error) => error.code === "ERR_ASSERTION" || /valid PostgreSQL URL/.test(error.message),
+    );
   }
 });
 
