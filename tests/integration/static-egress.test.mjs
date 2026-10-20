@@ -2162,10 +2162,16 @@ for (const policy of ["withdrawn", "source changed", "unavailable", "never avail
     const s = await leasedStreamFixture(t, (f) => ({
       check: async (use, evidence, stream) => {
         const source = await f.ports.check(use, evidence, stream);
-        if (!stream || (!persisting && policy !== "never available")) return source;
+        if (!stream || (!persisting && policy !== "never available")) {
+          return source;
+        }
         checkedUntil = stream.until;
-        if (policy === "withdrawn") return { kind: "denied", code: "withdrawn" };
-        if (policy === "source changed") return { ...source, materialRefId: "replacement" };
+        if (policy === "withdrawn") {
+          return { kind: "denied", code: "withdrawn" };
+        }
+        if (policy === "source changed") {
+          return { ...source, materialRefId: "replacement" };
+        }
         throw new Error("synthetic policy outage");
       },
     }));
@@ -2216,9 +2222,15 @@ for (const loss of ["lease expires", "exchange closes", "owner changes"]) {
     finishing = true;
     const response = s.complete();
     await checking.promise;
-    if (loss === "lease expires") s.f.advance(Date.parse(lease.renewBy) - s.f.ports.now());
-    if (loss === "exchange closes") s.abort();
-    if (loss === "owner changes") s.f.replaceCustody();
+    if (loss === "lease expires") {
+      s.f.advance(Date.parse(lease.renewBy) - s.f.ports.now());
+    }
+    if (loss === "exchange closes") {
+      s.abort();
+    }
+    if (loss === "owner changes") {
+      s.f.replaceCustody();
+    }
     resume.resolve();
     assert.equal(await response, undefined);
     assert.deepEqual(await s.observation(), {
