@@ -624,24 +624,34 @@ async function gatewayClient(stack) {
   });
 }
 
+// The Agent's Sandbox Pod carries the Agent label and is owned by its OpenShell Sandbox,
+// whose name and Kubernetes namespace are the Gateway's Sandbox and Workspace names.
 async function agentSandbox(stack, agent) {
-  const sandboxes = JSON.parse(
+  const owners = JSON.parse(
     await output("kubectl", [
       "--kubeconfig",
       stack.kubeconfig,
       "--context",
       stack.context,
       "get",
-      "sandboxes.agents.x-k8s.io",
+      "pods",
       "--all-namespaces",
       "-l",
       `openclaw.dev/agent=${agent.id}`,
       "-o",
       "json",
     ]),
-  ).items.filter((item) => !item.metadata.deletionTimestamp);
-  assert.equal(sandboxes.length, 1, "expected one Sandbox for the Agent");
-  return { workspace: sandboxes[0].metadata.namespace, sandbox: sandboxes[0].metadata.name };
+  ).items.flatMap((pod) =>
+    pod.metadata.deletionTimestamp
+      ? []
+      : (pod.metadata.ownerReferences ?? [])
+          .filter(
+            (owner) => owner.kind === "Sandbox" && owner.apiVersion.startsWith("agents.x-k8s.io/"),
+          )
+          .map((owner) => ({ workspace: pod.metadata.namespace, sandbox: owner.name })),
+  );
+  assert.equal(owners.length, 1, "expected one Sandbox Pod for the Agent");
+  return owners[0];
 }
 
 // Each step is one shell script whose exit code is the only result: the origin's witness
@@ -727,7 +737,7 @@ try {
   await phase("deploy", () => deploy(stack, agent));
   record("revision-active-git-route-verified");
   const client = await phase("Gateway exec client", () => gatewayClient(stack));
-  const target = await agentSandbox(stack, agent);
+  const target = await phase("find the Sandbox", () => agentSandbox(stack, agent));
   const sessionEnvironment = await exec(client, target, "environment");
   progress(
     `exec sessions ${sessionEnvironment === 0 ? "carry" : "lack"} the Sandbox Git environment`,
