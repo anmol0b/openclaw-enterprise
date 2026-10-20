@@ -124,16 +124,19 @@ OCE advertises the request-phase binding; policy admission calls `ValidateConfig
 The registration name must match `drivers.repo.openShell.registrationName`.
 OCE attaches the selected binding to the sandbox policy with `on_error: fail_closed`
 for `github.com` and `api.github.com`. Do not hand-author its binding identifier.
-Those hosts come only from this route: if another Sandbox Driver network policy
-(`policy.networkPolicies`, such as a `source-control` policy) also allows them, the
-Installation refuses to start and names that policy. The Driver still needs at
+Those hosts, and every other name under `github.com` (GitHub's other front ends,
+such as `ssh.github.com`, `codeload.github.com` and `uploads.github.com`), come only
+from this route: if another Sandbox Driver network policy (`policy.networkPolicies`,
+such as a `source-control` policy) also allows one, the Installation refuses to
+start and names that policy. `githubusercontent.com` hosts are not covered. The Driver still needs at
 least one policy, such as the model endpoint's. An Agent network grant for those
 hosts on any port is refused the same way: saving it for an Agent with a repository
 binding, adding the binding beside it, deploy and live application each fail with a
 `409` that names the grant. IP-address hosts (IPv4, IPv6 or a range, private and
 loopback included) may lead to GitHub, so both checks refuse them too; use DNS names,
 such as a Service name. The checks compare names only: a DNS name that resolves to
-GitHub is not detected.
+a GitHub address, such as a wildcard-IP service name or your own record, is not
+detected, so do not add one.
 Retain HTTPS, hostname verification and authenticated Gateway JWTs; do not enable
 `allow_insecure_transport`. This policy attachment still has the stock enforcement
 and origin-TLS limits stated above.

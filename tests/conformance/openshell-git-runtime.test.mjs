@@ -958,14 +958,19 @@ test("a restarted worker names why it cannot adopt a revision's Sandbox, once pe
 
 test("the Git route refuses overlapping policies at startup and again at deploy", async () => {
   // Finding 2131: the Sandbox Driver checks its configured policies when it is built; prepare()
-  // keeps refusing hosts that reach github.com or api.github.com outside the route. Finding 2145:
-  // an IP-address host may lead to GitHub as well, so it is refused outright and reported as one.
+  // keeps refusing hosts that reach GitHub outside the route: github.com and, since finding 2148,
+  // every name under it (other GitHub front ends such as ssh., codeload. and uploads.).
+  // Finding 2145: an IP-address host may lead to GitHub as well, so it is refused outright and
+  // reported as one.
   const f = fixture();
   const policy = (name, host) => ({ name, endpoints: [{ host }] });
   assert.equal(
     f.runtime.overlappingPolicy([
       policy("model", "api.openai.com"),
-      policy("docs", "docs.github.com"),
+      policy("objects", "objects.githubusercontent.com"),
+      policy("raw", "*.githubusercontent.com"),
+      policy("lookalike", "notgithub.com"),
+      policy("suffix", "github.com.example.org"),
       policy("digits", "1password.com"),
       policy("label", "build.123abc"),
     ]),
@@ -977,6 +982,12 @@ test("the Git route refuses overlapping policies at startup and again at deploy"
       "API.GITHUB.COM",
       "api.github.com.",
       "*.github.com",
+      "*.com",
+      "ssh.github.com",
+      "codeload.github.com",
+      "UPLOADS.GITHUB.COM.",
+      "docs.github.com",
+      "*.pkg.github.com",
       "bad host",
       "github.com:443",
     ].map((host) => [host, false]),

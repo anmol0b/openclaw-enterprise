@@ -1958,7 +1958,7 @@ function gitRouteOverlapMessage({ name, host, ipAddress }: OpenShellGitPolicyOve
   const rule = host === "" ? name : `${name} (${host})`;
   return ipAddress
     ? `OpenShell Git reaches GitHub only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove ${rule}.`
-    : `OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove ${rule}.`;
+    : `OpenShell Git reaches github.com and its subdomains only through its middleware route, so an Agent with a repository binding cannot also allow them: remove ${rule}.`;
 }
 
 function assertNoRepositoryEnrollment(
@@ -2589,7 +2589,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     if (overlapping !== undefined) {
       throw new OpenShellSandboxConfigurationFailure(
-        `OpenShell Git reaches github.com and api.github.com only through its middleware route; remove those hosts from sandbox network policy ${overlapping.name}.`,
+        `OpenShell Git reaches github.com and its subdomains only through its middleware route; remove those hosts from sandbox network policy ${overlapping.name}.`,
       );
     }
     this.backend = selection.backend;
@@ -3587,9 +3587,9 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   }
 
   /**
-   * With the OpenShell Git route, github.com and api.github.com are reachable only through its
+   * With the OpenShell Git route, github.com and its subdomains are reachable only through its
    * middleware, which authorizes, audits and denies each request. A rule beside it would skip
-   * all three, on any port (finding 2144), and so could an IP-address host (2145). Names the first
+   * all three, on any port (findings 2144, 2148), and so could an IP-address host (2145). Names the first
    * such rule: an Agent network grant, then a default policy. The Driver's own policies are
    * checked at construction (2131).
    */

@@ -43,7 +43,7 @@ logs or recommendations are unavailable. If saving reports a stale version,
 refresh and review the current additions. An Agent whose running version uses
 protected execution (the Credential Proxy) refuses additions and live application
 until a version without it runs; the editor says so. With OpenShell Git, an Agent
-with a repository binding cannot add a grant for `github.com` or `api.github.com`
+with a repository binding cannot add a grant for `github.com` or any name under it
 (any port or matching wildcard), or for an IP address, which may lead to GitHub:
 GitHub goes only through the Git route, so save, binding, deploy and apply refuse
 it and name the grant. After a timeout or unconfirmed

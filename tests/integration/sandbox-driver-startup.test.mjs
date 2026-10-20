@@ -5803,11 +5803,20 @@ tls.connect = (options, ...rest) => {
         backend: backendFor(gateway),
         openShellGit: runtime,
       });
-    for (const host of ["*.github.com", "api.github.com", "github.com"]) {
+    for (const host of [
+      "*.github.com",
+      "api.github.com",
+      "github.com",
+      "codeload.github.com",
+      "uploads.github.com",
+    ]) {
       collisionConfiguration.policy.networkPolicies.at(-1).endpoints[0].host = host;
       assert.throws(
         collision,
-        /only through its middleware route; remove those hosts from sandbox network policy overlap\./,
+        {
+          message:
+            "OpenShell Git reaches github.com and its subdomains only through its middleware route; remove those hosts from sandbox network policy overlap.",
+        },
         host,
       );
     }
@@ -5834,7 +5843,7 @@ tls.connect = (options, ...rest) => {
     const allowed = {
       id: "docs",
       binary: "/usr/bin/curl",
-      host: "docs.github.com",
+      host: "objects.githubusercontent.com",
       ports: [{ from: 443, to: 443 }],
     };
     const repositoryScope = { repositoryCredentials: true };
@@ -5846,13 +5855,16 @@ tls.connect = (options, ...rest) => {
       ["github.com", 22],
       ["api.github.com", 443],
       ["*.github.com", 443],
+      // Finding 2148: GitHub's other front ends under github.com skip the middleware too.
+      ["ssh.github.com", 443],
+      ["codeload.github.com", 443],
     ]) {
       const direct = { ...allowed, id: "git-direct", host, ports: [{ from: port, to: port }] };
       assert.throws(
         () => sandboxDriver.admitNetworkPolicy([allowed, direct], 2, undefined, repositoryScope),
         {
           name: "SandboxNetworkPolicyConflictError",
-          message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove network grant git-direct (${host}).`,
+          message: `OpenShell Git reaches github.com and its subdomains only through its middleware route, so an Agent with a repository binding cannot also allow them: remove network grant git-direct (${host}).`,
         },
         host,
       );

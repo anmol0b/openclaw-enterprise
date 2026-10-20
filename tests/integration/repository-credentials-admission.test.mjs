@@ -1158,7 +1158,7 @@ test("Provisioning refuses repository bindings on a topology Agent create refuse
 });
 
 test("OpenShell Git refuses an Agent network grant to the Git hosts at save, binding and deploy", async (t) => {
-  // Finding 2144: with the OpenShell Git route, github.com and api.github.com are reachable only
+  // Finding 2144: with the OpenShell Git route, github.com and its subdomains are reachable only
   // through its middleware. An approved grant for them would add a direct route beside it, so
   // the policy save, the binding save (the reverse order), deploy and live application refuse
   // it with a message naming the grant. The Driver's provisioning backstop is covered in
@@ -1169,7 +1169,7 @@ test("OpenShell Git refuses an Agent network grant to the Git hosts at save, bin
     host,
     ports: [{ from: port, to: port }],
   });
-  const docs = grant("docs", "docs.github.com");
+  const docs = grant("docs", "objects.githubusercontent.com");
   const direct = grant("git-direct", "github.com", 22);
   // Finding 2145: an IP address may lead to GitHub, so it is refused the same way.
   const address = grant("git-address", "140.82.112.3");
@@ -1226,7 +1226,7 @@ test("OpenShell Git refuses an Agent network grant to the Git hosts at save, bin
   f.controller.registerDriver(sandbox);
   f.controller.selectDriver("sandbox", sandbox.id);
   const message =
-    "OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove network grant git-direct (github.com).";
+    "OpenShell Git reaches github.com and its subdomains only through its middleware route, so an Agent with a repository binding cannot also allow them: remove network grant git-direct (github.com).";
   const policyPath = (agent) => `${f.collection}/${agent.id}/sandbox-policy/networking`;
   const enableEditing = async (agent) => {
     const enabled = await f.request("PATCH", `${policyPath(agent)}/editing`, { enabled: true });

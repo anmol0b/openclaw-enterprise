@@ -613,7 +613,8 @@ export class OpenShellGitRuntime {
   }
 
   /**
-   * The first policy that also reaches the Git hosts, which only the middleware route may. An
+   * The first policy that also reaches GitHub (github.com or a name under it), which only the
+   * middleware route may. An
    * IP-address host counts too: the Controller cannot tell whether it leads to GitHub, so it is
    * refused outright rather than tracked against GitHub's published ranges (finding 2145).
    */
@@ -636,15 +637,22 @@ export class OpenShellGitRuntime {
     return undefined;
   }
 
+  /**
+   * github.com and every name under it: besides the route's own github.com and api.github.com,
+   * GitHub serves repository content and accepts GitHub credentials on other front ends there
+   * (ssh.github.com:443, codeload.github.com, uploads.github.com), which would skip the
+   * middleware (finding 2148). A wildcard over github.com's parent (`*.com`) counts too.
+   * githubusercontent.com is not covered: the route sends nothing there.
+   */
   private overlapsGit(host: string): boolean {
     const normalized = host.toLowerCase().replace(/\.$/, "");
     if (!/^(?:\*\.)?[a-z0-9.-]+$/.test(normalized)) {
       return true;
     }
-    return ["github.com", "api.github.com"].some(
-      (target) =>
-        normalized === target ||
-        (normalized.startsWith("*.") && target.endsWith(normalized.slice(1))),
+    return (
+      normalized === "github.com" ||
+      normalized.endsWith(".github.com") ||
+      (normalized.startsWith("*.") && "github.com".endsWith(normalized.slice(1)))
     );
   }
 
