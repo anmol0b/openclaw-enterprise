@@ -106,7 +106,7 @@ function requireReceiptsMatchEntries(receipts, entries) {
 
 function classifyReceipts(receipts, manifest) {
   const canonicalHarnessAuth = manifest.entries[56];
-  const staticEgress = manifest.entries[57];
+  const staticEgress = manifest.entries[59];
   const receipt = receipts[56];
   if (
     receipt !== undefined &&
@@ -238,30 +238,36 @@ function classifyReceipts(receipts, manifest) {
     return "preCanonicalHarnessAuth";
   }
   if (receipts.length === 57) {
-    return "preStaticEgress";
+    return "preSandboxPolicies";
   }
   if (receipts.length === 58) {
-    return "preSendReceipts";
+    return "preSandboxPolicyAdministrator";
   }
   if (receipts.length === 59) {
-    return "prePreparedGitHubCustody";
+    return "preStaticEgress";
   }
   if (receipts.length === 60) {
-    return "prePreparedGitHubEgress";
+    return "preSendReceipts";
   }
   if (receipts.length === 61) {
-    return "preCredentialFreeMetadata";
+    return "prePreparedGitHubCustody";
   }
   if (receipts.length === 62) {
-    return "preRevisionHarnessAuthShape";
+    return "prePreparedGitHubEgress";
   }
   if (receipts.length === 63) {
-    return "prePreparedRepositoryGit";
+    return "preCredentialFreeMetadata";
   }
   if (receipts.length === 64) {
-    return "prePreparedRepositoryDraftPulls";
+    return "preRevisionHarnessAuthShape";
   }
   if (receipts.length === 65) {
+    return "prePreparedRepositoryGit";
+  }
+  if (receipts.length === 66) {
+    return "prePreparedRepositoryDraftPulls";
+  }
+  if (receipts.length === 67) {
     return "preLegacyRevisionExecutionAdmission";
   }
   refuse("an incomplete or unsupported development history is installed");

@@ -1,6 +1,6 @@
--- Revisions admitted before 0058 carry no execution admission. That release neither
+-- Revisions admitted before 0060 carry no execution admission. That release neither
 -- authenticated nor governed their direct requests, which is exactly the unprotected
--- mode. 0058 left them without a decision, so after an upgrade the application reader
+-- mode. 0060 left them without a decision, so after an upgrade the application reader
 -- refused every pre-existing Agent: createRevision decodes the earlier revisions, and
 -- the worker's reconcile, stop, retire and delete paths all read them, so no new
 -- revision could even replace them. Record the decision they were admitted under.

@@ -7,7 +7,7 @@ remains closed until the installed pair and its release authority are qualified.
 ## Upgrade or withdraw a development installation
 
 Start with a disposable database on the public migration history through
-`0057_canonical_harness_auth`. Migrations 0058 through 0065 add protected egress,
+`0059_administrator_sandbox_policy_grants`. Migrations 0060 through 0068 add protected egress,
 credential custody and prepared repository access. Migration checks compare the
 receipt ledger, catalog and effective grants. They do not enable protected execution.
 
@@ -23,7 +23,7 @@ Use this order when keeping a development database:
    including any running anonymous reader. Retire predecessors and verify that no revision is
    active and no cleanup remains. If you cannot settle the work, stay on that release.
    If you need to deploy under that Agent identity again, stay on its owning release. Stopping an
-   Agent preserves its revisions; there is no in-place conversion of revision admissions made before migration 0058.
+   Agent preserves its revisions; revisions admitted before migration 0060 receive the unprotected decision they ran under (migration 0068).
 2. **Quiesce writers and verify a physical snapshot.** Stop admission, workers and maintenance
    writers. On PostgreSQL 18.6, `CREATE DATABASE ... TEMPLATE ... STRATEGY FILE_COPY` with the
    same database-level access preserved the catalog and receipt history. A logical restore can

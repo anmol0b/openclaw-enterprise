@@ -8686,7 +8686,10 @@ export class OpenClawController {
       }
       // A protected execution admits exactly its protected egress policy. Agent network
       // policy additions would be dropped from that profile, so refuse them instead.
-      if (execution.executionAdmission.mode === "protected" && (policy?.additions.length ?? 0) > 0) {
+      if (
+        execution.executionAdmission.mode === "protected" &&
+        (policy?.additions.length ?? 0) > 0
+      ) {
         throw new ResourceStateConflictError(
           "Protected execution admission cannot include this Agent's network policy additions; remove them before deploying.",
         );

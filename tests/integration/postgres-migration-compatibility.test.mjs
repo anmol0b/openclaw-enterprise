@@ -1798,22 +1798,22 @@ test(
       [56, "preCanonicalHarnessAuth"],
       [57, "preSandboxPolicies"],
       [58, "preSandboxPolicyAdministrator"],
-      [57, "preStaticEgress"],
-      [58, "preSendReceipts"],
-      [59, "prePreparedGitHubCustody"],
-      [60, "prePreparedGitHubEgress"],
-      [61, "preCredentialFreeMetadata"],
-      [62, "preRevisionHarnessAuthShape"],
-      [63, "prePreparedRepositoryGit"],
-      [64, "prePreparedRepositoryDraftPulls"],
-      [65, "preLegacyRevisionExecutionAdmission"],
+      [59, "preStaticEgress"],
+      [60, "preSendReceipts"],
+      [61, "prePreparedGitHubCustody"],
+      [62, "prePreparedGitHubEgress"],
+      [63, "preCredentialFreeMetadata"],
+      [64, "preRevisionHarnessAuthShape"],
+      [65, "prePreparedRepositoryGit"],
+      [66, "prePreparedRepositoryDraftPulls"],
+      [67, "preLegacyRevisionExecutionAdmission"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
         await seedCanonicalData(db, {
           preset: prefix >= 25,
           computeAdmission: prefix >= 55,
-          executionAdmission: prefix >= 58,
+          executionAdmission: prefix >= 60,
         });
         const before = await canonicalData(db);
         const receipts = await historyReceipts(db.migrator);
@@ -1826,7 +1826,7 @@ test(
         await assertUpgradedRevisionReadable(db);
         assert.deepEqual(await canonicalData(db), upgradedCanonicalData(before));
         await assertUpgradedAuthentication(db);
-        if (prefix === 57) {
+        if (prefix === 59) {
           const upgradedReceipts = await historyReceipts(db.migrator);
           const sessions = await db.app.query("SELECT count(*)::integer AS count FROM occ.session");
           child.diagnostic(
@@ -2209,15 +2209,15 @@ test(
       [56, "preCanonicalHarnessAuth"],
       [57, "preSandboxPolicies"],
       [58, "preSandboxPolicyAdministrator"],
-      [57, "preStaticEgress"],
-      [58, "preSendReceipts"],
-      [59, "prePreparedGitHubCustody"],
-      [60, "prePreparedGitHubEgress"],
-      [61, "preCredentialFreeMetadata"],
-      [62, "preRevisionHarnessAuthShape"],
-      [63, "prePreparedRepositoryGit"],
-      [64, "prePreparedRepositoryDraftPulls"],
-      [65, "preLegacyRevisionExecutionAdmission"],
+      [59, "preStaticEgress"],
+      [60, "preSendReceipts"],
+      [61, "prePreparedGitHubCustody"],
+      [62, "prePreparedGitHubEgress"],
+      [63, "preCredentialFreeMetadata"],
+      [64, "preRevisionHarnessAuthShape"],
+      [65, "prePreparedRepositoryGit"],
+      [66, "prePreparedRepositoryDraftPulls"],
+      [67, "preLegacyRevisionExecutionAdmission"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -2304,15 +2304,16 @@ test(
       [55, "preHeldAuthenticationSession"],
       [56, "preCanonicalHarnessAuth"],
       [57, "preSandboxPolicies"],
-      [57, "preStaticEgress"],
-      [58, "preSendReceipts"],
-      [59, "prePreparedGitHubCustody"],
-      [60, "prePreparedGitHubEgress"],
-      [61, "preCredentialFreeMetadata"],
-      [62, "preRevisionHarnessAuthShape"],
-      [63, "prePreparedRepositoryGit"],
-      [64, "prePreparedRepositoryDraftPulls"],
-      [65, "preLegacyRevisionExecutionAdmission"],
+      [58, "preSandboxPolicyAdministrator"],
+      [59, "preStaticEgress"],
+      [60, "preSendReceipts"],
+      [61, "prePreparedGitHubCustody"],
+      [62, "prePreparedGitHubEgress"],
+      [63, "preCredentialFreeMetadata"],
+      [64, "preRevisionHarnessAuthShape"],
+      [65, "prePreparedRepositoryGit"],
+      [66, "prePreparedRepositoryDraftPulls"],
+      [67, "preLegacyRevisionExecutionAdmission"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
@@ -2320,7 +2321,7 @@ test(
           await seedCanonicalData(db, {
             preset: prefix >= 25,
             computeAdmission: prefix >= 55,
-            executionAdmission: prefix >= 58,
+            executionAdmission: prefix >= 60,
           });
         }
         const before = await historySnapshot(db);
@@ -2330,14 +2331,15 @@ test(
         // 0051's final GRANT runs after it dropped both withdrawal triggers.
         // Abort 0056 after its function was created, before the deferred trigger exists.
         // 0057 replaces the Harness validator, so reject that function replacement.
-        // Abort 0066 at its final VALIDATE: the decision backfill and the restored
+        // 0058 creates the policy table; 0059 has no DDL, so prefix 58 aborts in 0060 too.
+        // Abort 0068 at its final VALIDATE: the decision backfill and the restored
         // immutability trigger must roll back with it.
         const rollbackTag = [
-          [65, "ALTER TABLE"],
-          [64, "GRANT"],
-          [62, "ALTER TABLE"],
-          [61, "CREATE FUNCTION"],
-          [57, "GRANT"],
+          [67, "ALTER TABLE"],
+          [66, "GRANT"],
+          [64, "ALTER TABLE"],
+          [63, "CREATE FUNCTION"],
+          [58, "GRANT"],
           [57, "CREATE TABLE"],
           [56, "CREATE FUNCTION"],
           [55, "CREATE TRIGGER"],
@@ -2438,13 +2440,13 @@ test(
       async (child) => {
         const db = await historyDatabase(child, fixture, "experimentalegress");
         // Install the old branch's complete SQL and real Drizzle receipts, omitting main's
-        // 0057 and shifting only the unpublished migrations back to their experimental slots.
+        // 0057-0059 and shifting only the unpublished migrations back to their experimental slots.
         const entries = [
           ...manifest.entries.slice(0, 56),
-          ...manifest.entries.slice(57).map((entry) => ({
+          ...manifest.entries.slice(59).map((entry) => ({
             ...entry,
-            idx: entry.idx - 1,
-            when: entry.when - 1,
+            idx: entry.idx - 3,
+            when: entry.when - 3,
           })),
         ];
         await installCanonicalPrefix(db, entries.length, { entries });

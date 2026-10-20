@@ -473,6 +473,78 @@
       "tag": "0059_administrator_sandbox_policy_grants",
       "breakpoints": true,
       "sha256": "5693d93865d61360d2b8943846cfbfb5590c9e52e90f89eac50fec7bd3672498"
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1787000000060,
+      "tag": "0060_static_egress",
+      "breakpoints": true,
+      "sha256": "41187ea37a83a33ef725c762e5c04af7381139e685795ec5a7233024810a53cf"
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1787000000061,
+      "tag": "0061_egress_send_receipts",
+      "breakpoints": true,
+      "sha256": "193a18fe7ad88a7c6418749cdd52be0062267dcbed39d8286d540bd453d43cdf"
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1787000000062,
+      "tag": "0062_prepared_github_custody",
+      "breakpoints": true,
+      "sha256": "1d55d6eaac9106490a62a04efa1f8f2b7061d30c757c8c9b6f9f198494bfec96"
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1787000000063,
+      "tag": "0063_prepared_github_egress",
+      "breakpoints": true,
+      "sha256": "76f385a160d5662aebef2b439494f7d10e7410351f1c039f2b3f0cea2132fcdc"
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1787000000064,
+      "tag": "0064_protected_credential_free_metadata",
+      "breakpoints": true,
+      "sha256": "d042f82987c476488fcf461e2cb60bd95706b53edb47f0cc46783ecec6ce99f8"
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1787000000065,
+      "tag": "0065_revision_harness_auth_shape",
+      "breakpoints": true,
+      "sha256": "dd02c82589af7ebd10640e4190cbc27959393baac910af997e836bc825292b82"
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1787000000066,
+      "tag": "0066_prepared_repository_git",
+      "breakpoints": true,
+      "sha256": "5fbb2769ec51c46a48c4e6dd9102baba46d71321b39c4176cdd864e1ad178575"
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1787000000067,
+      "tag": "0067_prepared_repository_draft_pulls",
+      "breakpoints": true,
+      "sha256": "4cfa28c47b246638a7e3831b93f1eac25a6e6ffca4e7cbd454e4ade306089b07"
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1787000000068,
+      "tag": "0068_legacy_revision_execution_admission",
+      "breakpoints": true,
+      "sha256": "76aff98b9d5d220ba089ea32ad0c7b2c34ab3b4c7adb3ea614d7fb31d246ee36"
     }
   ],
   "initialSchemaStates": {
@@ -486,18 +558,8 @@
     "ownerOnly": {
       "owner": "occ_migrator",
       "privileges": [
-        [
-          "occ_migrator",
-          "occ_migrator",
-          "CREATE",
-          false
-        ],
-        [
-          "occ_migrator",
-          "occ_migrator",
-          "USAGE",
-          false
-        ]
+        ["occ_migrator", "occ_migrator", "CREATE", false],
+        ["occ_migrator", "occ_migrator", "USAGE", false]
       ],
       "objects": 0,
       "defaultPrivileges": 0,

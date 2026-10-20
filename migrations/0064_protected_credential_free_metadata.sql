@@ -35,7 +35,7 @@ ALTER TABLE occ.credential_sources DROP CONSTRAINT credential_sources_egress_val
 --> statement-breakpoint
 
 -- Keep credential-rejection feedback restricted to actual material. Record a positive no-material
--- selection, never a dummy version/expiry or NULL. The strict same-stream association from 0059
+-- selection, never a dummy version/expiry or NULL. The strict same-stream association from 0061
 -- applies unchanged. The empty-injection digest is SHA-256 of zero bytes.
 ALTER TABLE occ.egress_send_receipts DROP CONSTRAINT egress_send_receipts_check_17,
   ADD CONSTRAINT egress_send_receipts_check_17 CHECK (authorized_dispatch IS NULL OR (
