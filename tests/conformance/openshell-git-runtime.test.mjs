@@ -87,6 +87,7 @@ function fixture() {
     observe: undefined,
     observeAfterRotate: undefined,
     environmentLag: undefined,
+    duringObserve: undefined,
   };
   const client = {
     getProvider: async () => ({ type: "openai", profileWorkspace: "" }),
@@ -106,6 +107,7 @@ function fixture() {
     observe: async (binding, sandboxId, _signal, installed) => {
       calls.observe += 1;
       calls.observedWith.push(installed);
+      faults.duringObserve?.();
       if (faults.environmentLag) {
         // Like the real observe(): only the provider environment moved and the supervisor has
         // not installed it yet, so the verified installation (if any) is answered unchanged.
@@ -586,8 +588,12 @@ test("another Agent's deploy leaves a running Agent's Git route open", async () 
   assert.equal(lag.entry.installed, admittedInstall);
   // A supervisor that never installs it: after the limit the route waits, said once.
   lag.entry.environmentLag = { since: performance.now() - 61_000 };
-  assert.equal(await lag.lookup(), undefined);
-  assert.equal(lag.denials().at(-1).reason, "installation_changed");
+  // Two requests past the limit at once: both are denied, the warning is said once.
+  assert.deepEqual(await Promise.all([lag.lookup(), lag.lookup()]), [undefined, undefined]);
+  assert.deepEqual(
+    lag.denials().map((event) => event.reason),
+    ["installation_changed", "installation_changed"],
+  );
   await lag.reconcile();
   assert.deepEqual(lag.runtime.route(lag.revision.id), { state: "pending", reason: "unverified" });
   const warnings = lag.events.filter(
@@ -601,7 +607,31 @@ test("another Agent's deploy leaves a running Agent's Git route open", async () 
   await lag.reconcile();
   assert.deepEqual(lag.runtime.route(lag.revision.id), { state: "installed" });
   assert.equal(lag.entry.environmentLag, undefined);
+  // The outage is reported as restored, like any other closed route.
+  const restored = lag.events.filter(
+    (event) => event.event === "worker.openshell-git-route" && event.status === "restored",
+  );
+  assert.equal(restored.length, 1);
+  assert.ok(restored[0].durationMs >= 0);
   assert.deepEqual(lag.errors(), []);
+
+  // A close that lands while a read is in flight (a request's lookup past the limit) cannot
+  // make the reconcile's read look fresh and restart the window.
+  const race = fixture();
+  await race.reconcile();
+  race.faults.environmentLag = true;
+  const since = performance.now() - 61_000;
+  race.entry.environmentLag = { since };
+  race.faults.duringObserve = () => {
+    race.faults.duringObserve = undefined;
+    race.entry.installed = undefined;
+  };
+  await race.reconcile();
+  assert.deepEqual(race.runtime.route(race.revision.id), {
+    state: "pending",
+    reason: "unverified",
+  });
+  assert.equal(race.entry.environmentLag?.since, since);
 
   // A credential rotation's verifying read is never handed the old installation.
   const rotation = fixture();

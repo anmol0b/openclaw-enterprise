@@ -762,21 +762,20 @@ export class OpenShellGitRuntime {
       );
     }
     entry.sandboxId = sandbox.id;
-    // observe() answers undefined, never throws, for a read it could not complete.
-    const observed = await entry.provider.observe(
-      entry.binding,
-      sandbox.id,
-      signal,
-      entry.installed,
-    );
+    // observe() answers undefined, never throws, for a read it could not complete. It is handed
+    // the installation admitted when the read began; a concurrent close cannot swap it.
+    const admitted = entry.installed;
+    const observed = await entry.provider.observe(entry.binding, sandbox.id, signal, admitted);
     if (!observed) {
       return;
     }
-    if (observed === entry.installed) {
+    if (observed === admitted) {
       // Only the provider environment moved and the supervisor has not installed it yet: the
       // verified installation stands, for a bounded time (finding 2146).
       const lag = (entry.environmentLag ??= { since: performance.now() });
       if (performance.now() - lag.since > ENVIRONMENT_LAG_LIMIT_MS) {
+        // Reported as a restoration once the supervisor installs it.
+        entry.closedAt ??= performance.now();
         if (!lag.reported) {
           lag.reported = true;
           this.emit?.({
