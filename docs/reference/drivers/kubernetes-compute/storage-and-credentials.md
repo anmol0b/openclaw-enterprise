@@ -67,7 +67,6 @@ databases and their WAL/SHM siblings:
 | Private subpath             | Gateway mount                               |
 | --------------------------- | ------------------------------------------- |
 | `state`                     | `/home/node/.openclaw/state`                |
-| `client`                    | `/home/node/.openclaw/client`               |
 | `agent`                     | `/home/node/.openclaw/agents/main/agent`    |
 | `media`                     | `/home/node/.openclaw/media`                |
 | `worktrees`                 | `/home/node/.openclaw/worktrees`            |
@@ -75,8 +74,6 @@ databases and their WAL/SHM siblings:
 | `sessions` (dedicated mode) | `/home/node/.openclaw/agents/main/sessions` |
 
 Linked worktrees and Git metadata in `worktree-sources` persist across Gateway replacement.
-The client credential store also persists: its migration receipt refers to the
-retained Gateway database, so replacing only the client store can prevent startup.
 
 Embedded Gateways mount the claim's `workspace` subpath at
 `/home/node/.openclaw/workspace`, the default workspace under the configured
