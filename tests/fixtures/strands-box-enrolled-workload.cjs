@@ -6,7 +6,7 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-module.exports = async function serveEnrolledWorkload(enrollment, waitForComputeRelease) {
+module.exports = async function serveEnrolledWorkload(enrollment, waitForComputeRelease, stateDir) {
   const crypto = require("node:crypto");
   const http = require("node:http");
   const fs = require("node:fs");
@@ -81,7 +81,12 @@ module.exports = async function serveEnrolledWorkload(enrollment, waitForCompute
     }
   });
   server.listen(18790, () => {
-    fs.writeFileSync("/tmp/qualification-app-pid", String(process.pid));
-    fs.writeFileSync("/tmp/compute-released", process.env.OPENCLAW_EGRESS_ENROLLMENT_REVISION_ID);
+    // Refuse an existing directory, even after a restart: its receipt belongs to another release.
+    fs.mkdirSync(stateDir, { mode: 0o700 });
+    fs.writeFileSync(
+      stateDir + "/release.json",
+      JSON.stringify({ pid: process.pid, revisionId: enrollment.execution.revisionId }),
+      { flag: "wx", mode: 0o600 },
+    );
   });
 };

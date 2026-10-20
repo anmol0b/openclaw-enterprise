@@ -126,6 +126,8 @@ Readiness cannot establish cloud metadata isolation or make an untrusted node sa
 
 ## How protected execution becomes ready
 
+[Trace one execution from source admission to the protected reply and retirement.](../../flows/strands-box-protected-execution.md)
+
 1. The controller installs an execution-specific sender, its history volume, the network fences,
    and the nonsecret route and policy document. The signing key for this execution stays on the
    sender side. The Harness gets the public interception CA and its ordinary admitted workspace.

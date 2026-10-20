@@ -499,9 +499,10 @@ test(
       const ctx = { namespace, revision, plan, signal };
       const computeKey = generateKeyPairSync("ed25519").privateKey;
       const token = randomBytes(32).toString("base64url");
+      const stateDir = "/tmp/qualification-workload-" + randomUUID();
       const requirements = {
         image: process.env.STRANDS_PROXY_WORKLOAD_IMAGE,
-        command: ["node", "-e", workload(plan)],
+        command: ["node", "-e", workload(plan, stateDir)],
         workspaceMounts: [],
         files: [],
         credentialAttachments: [],
@@ -581,11 +582,13 @@ test(
           await delay(2000, undefined, { signal });
         }
       }
+      const release = JSON.parse(inPod("cat", stateDir + "/release.json"));
       assert.equal(
-        inPod("cat", "/tmp/compute-released").trim(),
+        release.revisionId,
         revision.id,
         "actual workload verified signed startup challenge",
       );
+      assert.ok(Number.isSafeInteger(release.pid) && release.pid > 0);
       inPod("node", "-e", rejectedStrandsWsCapabilities());
       let status;
       for (let tries = 0; tries < 8; tries++) {
@@ -630,6 +633,13 @@ test(
         installed,
         ctx,
         inPod,
+        disconnectApp: () =>
+          inPod(
+            "node",
+            "-e",
+            'process.kill(Number(process.argv[1]), "SIGUSR2")',
+            String(release.pid),
+          ),
         operation: async (route, recipient) => {
           // Keep this event loop available: it owns both the actual TLS authority and test origin.
           const { stdout } = await promisify(execFile)(
@@ -1365,11 +1375,7 @@ test(
     // Drop only the synthetic app's retained capability channel, never an origin connection.
     // The listener remains live and rejects missing/wrong credentials. A prior successful upgrade
     // is insufficient, but a new control observation may acquire fresh authenticated evidence.
-    identityOnly.inPod(
-      "node",
-      "-e",
-      'process.kill(Number(require("fs").readFileSync("/tmp/qualification-app-pid","utf8")),"SIGUSR2")',
-    );
+    identityOnly.disconnectApp();
     let seenUnready = false;
     for (let i = 0; i < 8; i++) {
       if (!identityOnly.ready()) {
@@ -1399,7 +1405,7 @@ test(
   },
 );
 
-function workload(plan) {
+function workload(plan, stateDir) {
   const enrollment = JSON.stringify(harnessEgressEnrollment(plan));
   const fixture = readFileSync(
     new URL("../fixtures/strands-box-enrolled-workload.cjs", import.meta.url),
@@ -1411,7 +1417,9 @@ function workload(plan) {
     fixture +
     "\nmodule.exports(" +
     enrollment +
-    ",waitForHarnessEgressEnrollment).catch(() => {console.error('fixture release or serving failed');process.exitCode=1});"
+    ",waitForHarnessEgressEnrollment," +
+    JSON.stringify(stateDir) +
+    ").catch(() => {console.error('fixture release or serving failed');process.exitCode=1});"
   );
 }
 

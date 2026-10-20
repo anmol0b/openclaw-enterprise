@@ -1010,6 +1010,7 @@
               "testing/repository-credentials",
               "flows/agent-presets",
               "flows/credential-source-egress",
+              "flows/strands-box-protected-execution",
               "testing/static-egress",
               "testing/strands-box-credential-proxy",
               "testing/protected-repository-custody"

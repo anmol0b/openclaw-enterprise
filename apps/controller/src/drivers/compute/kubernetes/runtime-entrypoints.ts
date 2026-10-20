@@ -3759,11 +3759,11 @@ const child = spawn(
   // stdout is the protocol stream; stderr passes through the span-noise filter.
   { stdio: ["inherit", "inherit", "pipe"], cwd: workspaceDirectory, env: codexChildEnvironment() },
 );
-// The released native app-server lifetime fences its authenticated observation connection.
-child.once("exit", () => releasedKubernetesObservation?.close());
 forwardTermination(child);
 const codexStderrDone = child.stderr ? forwardCodexStderr(child.stderr) : Promise.resolve();
 child.on("exit", (code, signal) => {
+  // Stop serving the authenticated observation as soon as the native app-server exits.
+  releasedKubernetesObservation?.close();
   const status = code ?? (signal === "SIGTERM" ? 0 : 1);
   // Forward Codex's last lines; a descendant holding the pipe cannot delay exit
   // by more than 2 s. The unref'd timer never keeps an otherwise idle wrapper alive.
