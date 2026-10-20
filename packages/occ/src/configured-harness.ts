@@ -129,6 +129,12 @@ function unenforceableNativeRestriction(policy: unknown): string | undefined {
 }
 
 /**
+ * A Claude Code tool policy the runtime would ignore. Unlike other Harness refusals, which a
+ * draft may still resolve, it is a complete setting, so Configuration save refuses it too.
+ */
+export class ClaudeCodeToolPolicyError extends ConfigurationHarnessError {}
+
+/**
  * Refuses a Claude Code Configuration whose tool policy would restrict a native capability the
  * runtime cannot restrict, so an Agent never runs with a policy it silently ignores. Checks
  * top-level `tools`, each `agents.entries` entry's `tools`, and their `byProvider` objects for
@@ -144,7 +150,7 @@ function requireEnforceableClaudeCodeToolPolicy(
     const tools = asRecord(policy);
     const setting = unenforceableNativeRestriction(tools);
     if (setting !== undefined) {
-      throw new ConfigurationHarnessError(message(setting));
+      throw new ClaudeCodeToolPolicyError(message(setting));
     }
     for (const [key, value] of Object.entries(asRecord(tools?.byProvider) ?? {})) {
       const provider = key.trim().toLowerCase();
@@ -153,7 +159,7 @@ function requireEnforceableClaudeCodeToolPolicy(
       }
       const providerSetting = unenforceableNativeRestriction(value);
       if (providerSetting !== undefined) {
-        throw new ConfigurationHarnessError(
+        throw new ClaudeCodeToolPolicyError(
           message(`${keyedSettingPath("byProvider", key)}.${providerSetting}`),
         );
       }

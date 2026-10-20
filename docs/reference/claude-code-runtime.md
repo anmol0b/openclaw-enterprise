@@ -37,7 +37,8 @@ so a `tools.deny` of `exec` or `process` holds. A `tools.deny`, nonempty
 `tools.allow`, or `tools.profile` narrower than `full` (top-level, an
 `agents.entries` entry's, or their `byProvider` entry for `anthropic`) that
 would restrict `read`, `write`, `edit`, `web_fetch` or `web_search` is refused
-with `400 INVALID_REQUEST`, because the runtime would ignore it.
+at save and deployment with `400 INVALID_REQUEST`, because the runtime would
+ignore it.
 
 ## Authentication and startup
 

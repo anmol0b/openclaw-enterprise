@@ -431,6 +431,7 @@ export {
 } from "./state/platform-state.ts";
 export {
   CLAUDE_CLI_AGENT_RUNTIME_ID,
+  ClaudeCodeToolPolicyError,
   harnessIdForAgentRuntime,
   resolveConfiguredAgentRuntimeId,
   resolveConfiguredHarnessId,
