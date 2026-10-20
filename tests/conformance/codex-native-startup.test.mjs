@@ -1113,6 +1113,12 @@ test("Codex runtime retries a reliability failure of its login or model check, n
         "http_5xx",
       ],
       [
+        "a login proxy 5xx naming a TLS handshake",
+        "unexpected status 503: tls handshake eof",
+        "http_5xx",
+      ],
+      ["a login proxy 5xx naming a handshake failure", "status 502: handshake failure", "http_5xx"],
+      [
         "a login 401 beside a transport timeout",
         "HTTP status client error (401 Unauthorized) for url: operation timed out",
         "network",
@@ -1200,6 +1206,12 @@ test("Codex runtime retries a reliability failure of its login or model check, n
         "Error: unexpected status 502 Bad Gateway: upstream certificate verify failed",
         "http_5xx",
       ],
+      [
+        "a proxy 5xx naming a TLS handshake",
+        "unexpected status 503: tls handshake eof",
+        "http_5xx",
+      ],
+      ["a proxy 5xx naming an unknown issuer", "status 502: unknown issuer", "http_5xx"],
       [
         "a quoted credential rejection beside network text",
         'error sending request: "status 401 Unauthorized"',
@@ -1301,6 +1313,9 @@ test("a no-retry marker anywhere in the output vetoes a retry, whatever its clas
     "usage_limit_reached",
     "exceeded your current quota",
     "upstream certificate verify failed",
+    "unexpected status 503: TLS handshake eof",
+    "status 502: Handshake Failure",
+    "status 504: unknown issuer",
     "failed to lookup address information: Name does not resolve",
     "Name has no usable address",
     // A marker far before the classifier's 8 KiB window still counts.

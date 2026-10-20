@@ -157,7 +157,7 @@ allow the WebSocket upgrade. Compatible endpoints use HTTPS Responses streaming,
 Secret-backed Codex uses [Compute configuration](drivers/kubernetes-compute.md#configuration);
 OpenShell sources supply their own endpoint. Dedicated Codex retries once, after
 1-1.5 seconds, a timeout, transient failure (provider 5xx or overload, dropped
-connection, kill) or `network`/`http_5xx` exit naming no credential, certificate
+connection, kill) or `network`/`http_5xx` exit naming no credential, TLS error
 or limit; nothing else retries, except TLS or DNS failures Codex prints only as
 a failed connection. Attempts cap at 30 seconds within one 61-second budget,
 delay included. Under `tini`, termination always exits at once. Exhausted

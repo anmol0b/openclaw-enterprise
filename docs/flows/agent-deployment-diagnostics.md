@@ -131,7 +131,7 @@ and Agent state stay unchanged.
 - A dedicated Codex model check cause whose detail ends `-attempt2`, such as
   `turn-failed-attempt2`, means the check was retried once, after a timeout, a
   transient failure or a network or 5xx exit, and the second attempt failed that
-  way. A failure whose output names a credential, certificate or limit is never
+  way. A failure whose output names a credential, TLS error or limit is never
   retried. Each failed access-token login attempt logs a `codex.login` line with
   its number and output class. An unreachable
   model provider is transient: each attempt waits out its 30-second limit, so

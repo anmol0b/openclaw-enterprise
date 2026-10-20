@@ -3377,17 +3377,23 @@ function codexProbeFailureClass(stderr, events, error) {
 const CODEX_RELIABILITY_FAILURE_CLASSES = ["network", "timeout", "http_5xx"];
 const CODEX_SECURITY_FAILURE_CLASSES = ["http_401_403", "http_other", "tls"];
 // The class names the most specific status or transport text, so a 401 beside network
-// text, or a proxy 5xx naming a certificate, can still class as reliability. Output that
-// names a credential, a 401, 403 or 429, a rate or usage limit, a certificate or a host
-// name that cannot resolve fails the same way again (the model check's event rules hold
-// these too), so it vetoes a retry whatever its class. URLs are dropped first: Codex
-// names the request URL in a transport error, and a configured endpoint's host or path
-// must not turn its retries off. The text is capped by the native process's output limit
-// and neither pattern has nested repetition: matching is linear.
-const CODEX_NO_RETRY_MARKERS = /unauthori[sz]ed|forbidden|credential|api.?key|\b40[13]\b|\b429\b|too many requests|rate.?limit|usage.?limit|quota|certificate|name does not resolve|name has no usable address/i;
+// text, or a proxy 5xx naming a TLS failure, can still class as reliability. Output that
+// names a credential, a 401, 403 or 429, a rate or usage limit, any of the classifier's
+// TLS markers or a host name that cannot resolve fails the same way again (the model
+// check's event rules hold these too), so it vetoes a retry whatever its class. URLs are
+// dropped first: Codex names the request URL in a transport error, and a configured
+// endpoint's host or path must not turn its retries off. The text is capped by the
+// native process's output limit and neither pattern has nested repetition: matching is
+// linear.
+const CODEX_NO_RETRY_MARKERS = /unauthori[sz]ed|forbidden|credential|api.?key|\b40[13]\b|\b429\b|too many requests|rate.?limit|usage.?limit|quota|name does not resolve|name has no usable address/i;
 function codexNoRetryOutput(...texts) {
-  return texts.some((text) => typeof text === "string" &&
-    CODEX_NO_RETRY_MARKERS.test(text.replace(/\bhttps?:\/\/[^\s)]*/gi, "")));
+  return texts.some((text) => {
+    if (typeof text !== "string") return false;
+    const output = text.replace(/\bhttps?:\/\/[^\s)]*/gi, "");
+    const lower = output.toLowerCase();
+    return CODEX_NO_RETRY_MARKERS.test(output) ||
+      CODEX_TLS_FAILURE_MARKERS.some((marker) => lower.includes(marker));
+  });
 }
 // The wait before retry n: 1 s, doubling, plus up to half again at random so runtimes
 // that failed together (a restarted gateway) do not all retry at the same moment.
