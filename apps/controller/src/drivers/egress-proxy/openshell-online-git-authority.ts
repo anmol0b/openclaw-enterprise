@@ -64,7 +64,7 @@ export interface OpenShellOnlineGitAuthorityOptions extends Omit<
     request: PreparedGitHubUseRequest,
     expectedInstalled: OpenShellOnlineGitBinding["installed"],
     signal: AbortSignal,
-  ) => Promise<boolean>;
+  ) => Promise<boolean | "draft_already_opened">;
   /** Told once per request the authority itself refuses, with the reason class (finding 2133).
    * A request with no live binding is the lookup's to report. Never the request's content. */
   readonly onDeny?: (denial: OpenShellOnlineGitDenial) => void;
@@ -85,6 +85,7 @@ export type OpenShellOnlineGitDenialReason =
   | "ref_not_allowed"
   | "approval_denied"
   | "approval_failed"
+  | "draft_already_opened"
   | "aborted";
 
 export interface OpenShellOnlineGitDenial {
@@ -367,7 +368,7 @@ export function createOpenShellOnlineGitAuthority(
         .update(Buffer.from([0]))
         .update(request.body)
         .digest("hex");
-      let allowed: boolean;
+      let allowed: boolean | "draft_already_opened";
       try {
         allowed = await options.approve(
           {
@@ -390,6 +391,12 @@ export function createOpenShellOnlineGitAuthority(
       } catch {
         // The owner did not answer; nothing was recorded as possible use, so deny.
         return deny("approval_failed", selected.operation);
+      }
+      if (allowed === "draft_already_opened" && !signal.aborted) {
+        // The grant's one draft create was already used (finding 2147). The helper says so
+        // instead of the generic refusal; nothing about the earlier draft is disclosed.
+        deny("draft_already_opened", selected.operation);
+        return { reasonCode: "draft_already_opened" };
       }
       if (allowed !== true) {
         return deny("approval_denied", selected.operation);

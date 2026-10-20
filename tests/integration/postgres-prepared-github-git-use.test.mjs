@@ -503,6 +503,7 @@ for (const loseCommitAcknowledgment of [false, true]) {
         },
       ]);
       // A repeated decision, a new request ID, or a new operation cannot cause a second create.
+      // The refusal names the spent draft so the helper can say so (finding 2147).
       for (const retry of [
         request,
         { ...request, exchangeId: randomUUID() },
@@ -512,7 +513,10 @@ for (const loseCommitAcknowledgment of [false, true]) {
           pull: { ...request.pull, operationId: randomUUID() },
         },
       ]) {
-        assert.equal(await store.authorizeOpenShellRequest(retry, installed, signal), false);
+        assert.equal(
+          await store.authorizeOpenShellRequest(retry, installed, signal),
+          "draft_already_opened",
+        );
       }
       const native = await f.owner.use(request);
       assert.equal(native.kind, "recorded");
@@ -524,7 +528,7 @@ for (const loseCommitAcknowledgment of [false, true]) {
           installed,
           signal,
         ),
-        false,
+        "draft_already_opened",
       );
       assert.equal(
         (

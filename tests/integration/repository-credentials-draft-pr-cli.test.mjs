@@ -199,6 +199,20 @@ tls.connect = (options, ...rest) => connect({ ...options, host: "127.0.0.1", por
         },
         "Draft not created: the repository route refused it (online_authorization_denied); GitHub did not receive it.",
       ],
+      // Finding 2147: the grant's one draft create was already used, by any version or Agent.
+      [
+        "draft already opened",
+        {
+          status: 403,
+          body: {
+            error: "middleware_denied",
+            middleware: "oce-prepared-git",
+            reason_code: "draft_already_opened",
+            layer: "l7",
+          },
+        },
+        "Draft not created: this repository binding already opened its draft pull request (one per review branch and base); GitHub did not receive this one. Find the earlier draft at GitHub; for another draft, ask an operator for a new review branch.",
+      ],
       [
         "route failure",
         { status: 503, body: { error: "middleware_failed", detail: "unavailable", layer: "l7" } },

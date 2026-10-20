@@ -14,6 +14,20 @@ import {
 
 type Wire = Record<string, unknown>;
 const deny = { decision: 2, reason_code: "online_authorization_denied" };
+
+/** A denial whose stable reason code the supervisor shows the workload instead of the generic
+ * one. OpenShell accepts `[a-z][a-z0-9_]{0,63}`; anything else denies with the generic code. */
+export interface OpenShellOnlineReasonedDenial {
+  readonly reasonCode: string;
+}
+
+export type OpenShellOnlineDecision = "allow" | "deny" | OpenShellOnlineReasonedDenial;
+
+function denial(result: OpenShellOnlineDecision): Wire {
+  return typeof result === "object" && /^[a-z][a-z0-9_]{0,63}$/.test(result.reasonCode)
+    ? { decision: 2, reason_code: result.reasonCode }
+    : deny;
+}
 const boundedId = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(value);
 
@@ -53,7 +67,7 @@ export interface OpenShellOnlineAuthorityOptions {
   readonly authorize: (
     request: OpenShellOnlineRequest,
     signal: AbortSignal,
-  ) => Promise<"allow" | "deny">;
+  ) => Promise<OpenShellOnlineDecision>;
   readonly budgetMs?: number;
 }
 
@@ -84,7 +98,7 @@ export interface OpenShellOnlineHttpAuthorityOptions extends Omit<
   readonly authorize: (
     request: OpenShellOnlineHttpRequest,
     signal: AbortSignal,
-  ) => Promise<"allow" | "deny">;
+  ) => Promise<OpenShellOnlineDecision>;
 }
 
 function httpRequestView(
@@ -248,7 +262,7 @@ export function createOpenShellOnlineAuthority(options: OpenShellOnlineAuthority
 
 function createAuthority<T>(
   options: Omit<OpenShellOnlineAuthorityOptions, "authorize"> & {
-    readonly authorize: (request: T, signal: AbortSignal) => Promise<"allow" | "deny">;
+    readonly authorize: (request: T, signal: AbortSignal) => Promise<OpenShellOnlineDecision>;
   },
   view: (request: Wire, sandboxId: string, deadlineAt: string) => T | undefined,
 ): Server {
@@ -343,7 +357,11 @@ function createAuthority<T>(
         .then((result) =>
           callback(
             null,
-            result === "allow" && !controller.signal.aborted && !expired() ? { decision: 1 } : deny,
+            controller.signal.aborted || expired()
+              ? deny
+              : result === "allow"
+                ? { decision: 1 }
+                : denial(result),
           ),
         )
         .catch(() => callback(null, deny))

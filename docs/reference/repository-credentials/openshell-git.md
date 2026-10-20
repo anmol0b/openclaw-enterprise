@@ -177,6 +177,14 @@ records a local attempt ID before sending. A local ID does not make GitHub
 creation idempotent. If a push or draft-create response is lost, inspect GitHub
 for the commit or draft before any new attempt. Do not retry another way.
 
+The draft limit belongs to the grant: the repository, review branch and base. Every
+version and every Agent bound to that grant shares it, and closing or merging the
+draft does not reset it. A second create from any of them is refused before GitHub,
+and the helper says the binding already opened its draft. OCE does not see GitHub's
+reply on this route, so it records no pull request number; find the draft at GitHub.
+For another draft, enroll a new review branch in the registry and bind it: a
+redeploy or rebind with the same branch does not reset the limit.
+
 During the accepted trial, use an authorized test repository to verify clone,
 pull of an independently known commit, push to the allowed branch, and draft
 creation from the same admitted Agent. Independently

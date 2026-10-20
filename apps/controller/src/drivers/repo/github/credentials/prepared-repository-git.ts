@@ -36,6 +36,15 @@ function pullReceipt(row: PullRow, conflict = false): OperationReceipt {
   return { kind: "recorded", status: 201, body: { operationId, receiptId, ...result } };
 }
 
+/** The grant's one draft create was already claimed: on the OpenShell route a second one is
+ * refused before GitHub, whatever happened to the first (finding 2147). */
+class DraftAlreadyOpened extends Error {
+  constructor() {
+    super("PREPARED_REPOSITORY_DRAFT_ALREADY_OPENED");
+    this.name = "DraftAlreadyOpened";
+  }
+}
+
 const adoption = "prepared_repository_git";
 const families = "occ.prepared_github_families";
 const attempts = "occ.prepared_github_attempts";
@@ -260,16 +269,16 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
     q: PreparedGitHubUseRequest,
     installed: { preparationAttemptId: string; materialVersion: string },
     signal: AbortSignal,
-  ): Promise<boolean> {
+  ): Promise<boolean | "draft_already_opened"> {
     if (!installed?.preparationAttemptId || !installed.materialVersion) {
       return false;
     }
     try {
       const result = await this.transaction((c) => this.recordUse(c, q, signal, installed));
       return !("kind" in result) && !signal.aborted && Date.now() < Date.parse(result.sendStartBy);
-    } catch {
+    } catch (error) {
       // A lost commit acknowledgment may leave a receipt. Never retry or turn it into an allow.
-      return false;
+      return error instanceof DraftAlreadyOpened ? "draft_already_opened" : false;
     }
   }
 
@@ -366,7 +375,7 @@ export class PreparedRepositoryGitStore extends PreparedGitHubPostgres {
       } = await c.query(`SELECT * FROM ${pulls} WHERE grant_id=$1`, [q.grantId]);
       if (prior) {
         if (installed) {
-          return fail();
+          throw new DraftAlreadyOpened();
         }
         const row = prior as PullRow;
         return pullReceipt(

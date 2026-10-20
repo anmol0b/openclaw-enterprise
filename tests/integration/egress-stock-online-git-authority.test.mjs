@@ -241,6 +241,7 @@ test(
   { timeout: 10000 },
   async (t) => {
     const approvals = [];
+    const denials = [];
     let allow = true;
     const { client, keys } = await openShellOnlineGitWire(t, {
       lookupBinding: async () => binding,
@@ -248,6 +249,7 @@ test(
         approvals.push(q);
         return allow;
       },
+      onDeny: (denial) => denials.push(denial),
     });
     const bearer = token(keys, "supervisor", binding.sandboxId);
     const payload = {
@@ -310,6 +312,20 @@ test(
     assert.notEqual(first.pull.operationId, approvals[1].pull.operationId);
     assert.notEqual(first.exchangeId, approvals[1].exchangeId);
     assert.equal(first.requestDigestSha256, approvals[1].requestDigestSha256);
+    assert.deepEqual(await invoke(client, "EvaluateHttpRequest", q, bearer), {
+      decision: 2,
+      reason_code: "online_authorization_denied",
+    });
+    assert.equal(denials.at(-1).reason, "approval_denied");
+    // Finding 2147: the grant's one draft was already claimed. The supervisor gets a reason
+    // code the helper can name; the worker log says the same.
+    allow = "draft_already_opened";
+    assert.deepEqual(await invoke(client, "EvaluateHttpRequest", q, bearer), {
+      decision: 2,
+      reason_code: "draft_already_opened",
+    });
+    assert.equal(denials.at(-1).reason, "draft_already_opened");
+    assert.equal(denials.at(-1).operation, "create-draft-pull");
   },
 );
 

@@ -70,7 +70,12 @@ test(
         )
       ).rows;
     assert.equal((await receipts()).length, 1, "initial fixture custody already records one use");
-    const evaluate = async (input, operation, signedSandbox = sandboxId) => {
+    const evaluate = async (
+      input,
+      operation,
+      signedSandbox = sandboxId,
+      reason = "online_authorization_denied",
+    ) => {
       const before = await receipts();
       const result = await invoke(
         client,
@@ -88,10 +93,7 @@ test(
         },
         token(keys, "supervisor", signedSandbox),
       );
-      assert.deepEqual(
-        result,
-        operation ? { decision: 1 } : { decision: 2, reason_code: "online_authorization_denied" },
-      );
+      assert.deepEqual(result, operation ? { decision: 1 } : { decision: 2, reason_code: reason });
       const after = await receipts();
       if (operation === "create-draft-pull") {
         const { rows } = await f.pool.query(
@@ -173,7 +175,8 @@ test(
       ),
     };
     await evaluate(draft, "create-draft-pull");
-    await evaluate(draft);
+    // The refusal names the spent draft (finding 2147).
+    await evaluate(draft, undefined, sandboxId, "draft_already_opened");
 
     // Withdraw the real admission without running retirement. The real TLS App
     // fixture still accepts its issued token before AND after a fresh request with signed identity.
