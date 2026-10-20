@@ -156,3 +156,37 @@ Agent repository binding, confirm a fresh fetch is denied, and confirm ordinary
 chat still works. Withdrawal cannot erase an existing clone or recall a sent push.
 These checks do not prove that every sandbox must use the middleware or that the
 connection from OpenShell to GitHub uses verified TLS.
+
+## Route state, restarts and recovery
+
+The worker verifies each admitted Sandbox's Git route itself: the exact Sandbox,
+its supervisor instance and the installed provider generation, re-read through the
+Gateway every few seconds and on every request. A deployment waits as
+`REPOSITORY_GIT_ROUTE_PENDING` until that route is verified and the prepared
+material is installed. A route the worker has closed for good (the Sandbox or its
+supervisor was replaced, a provider write's outcome is unknown, or access was
+withdrawn) fails the deployment with `REPOSITORY_GIT_ROUTE_BLOCKED`; an active
+version in that state keeps serving chat, but every Git request answers 403 until
+a new version deploys.
+
+A read the worker cannot complete is not a verdict. While the Gateway Pod is being
+replaced (an upgrade, node drain or restart), or a read times out, the route closes
+and Git requests are denied; the worker reads again with a bounded backoff (1 s
+doubling to 10 s) and reopens the route, without a new version, once the same
+installation verifies. Nothing is rewritten or replayed meanwhile. A worker restart
+still requires a new version: the restarted worker refuses to adopt a Sandbox it did
+not prepare.
+
+The worker log says which it was. `worker.error` with
+`OPENSHELL_GIT_RECONCILIATION_REQUIRED` carries the `reason` (for example
+`execution_replaced`, `supervisor_replaced`, `write_unknown`, or
+`gateway_unauthorized` when the Gateway refuses the worker's identity), the Namespace,
+Agent, revision and `repositoryRef`; `worker.openshell-git-route-warning` reports a
+route closed by a failed read (`gateway_unavailable`, `timeout`, `read_failed`) and
+`worker.openshell-git-route` its restoration with the outage's `durationMs`. When
+the provider rejects the App key, preparation is quarantined and
+`PREPARED_GITHUB_RECOVERY_REQUIRED` names the `reason`, revision and
+`repositoryRef`; restore the key, then deploy a new version. Each request the
+worker refuses logs one `worker.openshell-git-denied` line with its `reason`
+(`route_unobserved`, `route_blocked`, `ref_not_allowed`, `approval_denied`, and so
+on), the Sandbox ID and the request ID the supervisor's own log shows.

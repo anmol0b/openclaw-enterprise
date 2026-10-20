@@ -65,6 +65,34 @@ export interface OpenShellOnlineGitAuthorityOptions extends Omit<
     expectedInstalled: OpenShellOnlineGitBinding["installed"],
     signal: AbortSignal,
   ) => Promise<boolean>;
+  /** Told once per request the authority itself refuses, with the reason class (finding 2133).
+   * A request with no live binding is the lookup's to report. Never the request's content. */
+  readonly onDeny?: (denial: OpenShellOnlineGitDenial) => void;
+}
+
+/** Why the authority refused a request it could attribute to a live binding, or a request
+ * whose shape it rejected before approval. */
+export type OpenShellOnlineGitDenialReason =
+  | "binding_mismatch"
+  | "request_invalid"
+  | "encoding_unsupported"
+  | "draft_rejected"
+  | "origin_mismatch"
+  | "route_unsupported"
+  | "discovery_body"
+  | "body_empty"
+  | "body_too_large"
+  | "ref_not_allowed"
+  | "approval_denied"
+  | "approval_failed"
+  | "aborted";
+
+export interface OpenShellOnlineGitDenial {
+  readonly reason: OpenShellOnlineGitDenialReason;
+  readonly sandboxId: string;
+  readonly requestId: string;
+  readonly revisionId: string;
+  readonly operation?: PreparedGitHubUseRequest["operation"];
 }
 
 function matchesOrigin(origin: string, request: OpenShellOnlineHttpRequest): boolean {
@@ -201,23 +229,29 @@ function draftScope(
     : undefined;
 }
 
+type Selection =
+  | { readonly selected: Pick<PreparedGitHubUseRequest, "operation" | "pull"> }
+  | { readonly denied: OpenShellOnlineGitDenialReason };
+
 function operation(
   request: OpenShellOnlineHttpRequest,
   binding: OpenShellOnlineGitBinding,
   head: RequestHead,
-): Pick<PreparedGitHubUseRequest, "operation" | "pull"> | undefined {
+): Selection {
   if (request.target.path.startsWith("/repos/")) {
     if (head.contentEncoding !== "identity") {
-      return undefined;
+      return { denied: "encoding_unsupported" };
     }
     const pull = draftScope(request, binding, head);
-    return pull ? { operation: "create-draft-pull", pull } : undefined;
+    return pull
+      ? { selected: { operation: "create-draft-pull", pull } }
+      : { denied: "draft_rejected" };
   }
   if (
     !matchesOrigin(binding.gitOrigin ?? "https://github.com", request) ||
     head.headers["x-github-api-version"] !== undefined
   ) {
-    return undefined;
+    return { denied: "origin_mismatch" };
   }
   const route = classifyRoute(head, {
     repository: binding.repository,
@@ -225,34 +259,37 @@ function operation(
     targetBytes: 8192,
     graphql: "deny",
   });
+  if (!route || route.kind === "api") {
+    return { denied: "route_unsupported" };
+  }
   // Git gzips upload-pack bodies over 1024 bytes. That body is opaque here (only its size is
   // bounded, and the digest binds the encoded bytes), so gzip is admitted there alone. Discovery
   // has no body; receive-pack and draft create bodies are inspected, so they stay identity.
-  if (
-    !route ||
-    route.kind === "api" ||
-    (head.contentEncoding !== "identity" && route.kind !== "git-fetch")
-  ) {
-    return undefined;
+  if (head.contentEncoding !== "identity" && route.kind !== "git-fetch") {
+    return { denied: "encoding_unsupported" };
   }
   if (route.kind === "git-discovery") {
     if (request.body.byteLength !== 0 || head.headers["content-type"] !== undefined) {
-      return undefined;
+      return { denied: "discovery_body" };
     }
     return {
-      operation: route.effect === "write" ? "advertise-receive-pack" : "advertise-upload-pack",
+      selected: {
+        operation: route.effect === "write" ? "advertise-receive-pack" : "advertise-upload-pack",
+      },
     };
   }
   if (!request.body.byteLength) {
-    return undefined;
+    return { denied: "body_empty" };
   }
   if (route.kind === "git-fetch") {
     // Never parse or trust this body: it may be gzip, and the upstream decides what it means.
-    return request.body.byteLength <= 1024 * 1024 ? { operation: "upload-pack" } : undefined;
+    return request.body.byteLength <= 1024 * 1024
+      ? { selected: { operation: "upload-pack" } }
+      : { denied: "body_too_large" };
   }
   return allowsReceivePackInput([binding.pushRef])(request.body) === true
-    ? { operation: "receive-pack" }
-    : undefined;
+    ? { selected: { operation: "receive-pack" } }
+    : { denied: "ref_not_allowed" };
 }
 
 /** Authorize the stock sender's inspected request. The worker separately verifies installation
@@ -271,13 +308,39 @@ export function createOpenShellOnlineGitAuthority(
         { sandboxId, bindingId, requestId, workspace },
         signal,
       );
-      if (signal.aborted || !binding || !validBinding(binding, request)) {
+      if (!binding) {
         return "deny";
       }
-      const head = requestHead(request);
-      const selected = head && operation(request, binding, head);
-      if (!selected || signal.aborted) {
+      const deny = (
+        reason: OpenShellOnlineGitDenialReason,
+        selected?: PreparedGitHubUseRequest["operation"],
+      ): "deny" => {
+        options.onDeny?.({
+          reason,
+          sandboxId,
+          requestId,
+          revisionId: binding.executionId,
+          ...(selected === undefined ? {} : { operation: selected }),
+        });
         return "deny";
+      };
+      if (signal.aborted) {
+        return deny("aborted");
+      }
+      if (!validBinding(binding, request)) {
+        return deny("binding_mismatch");
+      }
+      const head = requestHead(request);
+      if (!head) {
+        return deny("request_invalid");
+      }
+      const selection = operation(request, binding, head);
+      if ("denied" in selection) {
+        return deny(selection.denied);
+      }
+      const { selected } = selection;
+      if (signal.aborted) {
+        return deny("aborted", selected.operation);
       }
       const { sessionId, providerInstanceId, repositoryId, grantId, pushRef, executionId } =
         binding;
@@ -304,25 +367,34 @@ export function createOpenShellOnlineGitAuthority(
         .update(Buffer.from([0]))
         .update(request.body)
         .digest("hex");
-      const allowed = await options.approve(
-        {
-          sessionId,
-          providerInstanceId,
-          repositoryId,
-          grantId,
-          pushRef,
-          ...selected,
-          exchangeId: randomUUID(),
-          requestDigestSha256,
-          deadlineAt: request.deadlineAt,
-        },
-        {
-          preparationAttemptId: binding.installed.preparationAttemptId,
-          materialVersion: binding.installed.materialVersion,
-        },
-        signal,
-      );
-      return allowed === true && !signal.aborted ? "allow" : "deny";
+      let allowed: boolean;
+      try {
+        allowed = await options.approve(
+          {
+            sessionId,
+            providerInstanceId,
+            repositoryId,
+            grantId,
+            pushRef,
+            ...selected,
+            exchangeId: randomUUID(),
+            requestDigestSha256,
+            deadlineAt: request.deadlineAt,
+          },
+          {
+            preparationAttemptId: binding.installed.preparationAttemptId,
+            materialVersion: binding.installed.materialVersion,
+          },
+          signal,
+        );
+      } catch {
+        // The owner did not answer; nothing was recorded as possible use, so deny.
+        return deny("approval_failed", selected.operation);
+      }
+      if (allowed !== true) {
+        return deny("approval_denied", selected.operation);
+      }
+      return signal.aborted ? deny("aborted", selected.operation) : "allow";
     },
   });
 }

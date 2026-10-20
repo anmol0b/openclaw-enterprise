@@ -37,8 +37,10 @@ interface Options extends Omit<PreparedRepositoryGitConfiguration, "issuerCaPath
   implementation: string;
   backendId: string;
   registry: GitHubRepositoryRegistry;
+  /** `context` names the affected revision and repository binding, never a credential. */
   report?: (
     code: "PREPARED_GITHUB_RECOVERY_REQUIRED" | "PREPARED_GITHUB_MAINTENANCE_FAILED",
+    context?: Readonly<Record<string, string>>,
   ) => void;
   startWorker?: boolean;
 }
@@ -217,7 +219,13 @@ export async function startPreparedGitHubGitOwner(options: Options) {
           deadlineMonoMs: clock.monotonicNow() + 25_000,
         });
         if (outcome === "quarantined" || outcome === "blocked") {
-          options.report?.("PREPARED_GITHUB_RECOVERY_REQUIRED");
+          // Say which binding needs recovery (finding 2135); the provider's answer stays out.
+          options.report?.("PREPARED_GITHUB_RECOVERY_REQUIRED", {
+            reason: outcome,
+            namespaceId: source.session.namespaceId,
+            revisionId: source.session.revisionId,
+            repositoryRef: source.session.binding.repositoryRef,
+          });
         }
       }
     } finally {

@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import {
+  DependencyUnavailableError,
+  SandboxGatewayUnavailableError,
+} from "@openclaw-enterprise/occ";
 import { isGitHubWireCredential } from "../repo/github/credentials/wire-credential.ts";
 import type {
   OpenShellGatewayClient,
@@ -67,13 +71,21 @@ export interface OpenShellPreparedGitInstalled {
   readonly networkInstanceId: string;
 }
 
+/** The class of a failed gateway read behind a refusal: a fixed token, never the gateway's
+ * text or an error object (finding 2136). An unknown write carries none. */
+export type OpenShellPreparedGitReadFailure =
+  "gateway_unavailable" | "gateway_request_failed" | "timeout";
+
 export class OpenShellPreparedGitProviderError extends Error {
   readonly outcome: "refused" | "unknown";
+  /** Set only on a refusal that happened because a read before the write failed. */
+  readonly readFailure: OpenShellPreparedGitReadFailure | undefined;
 
-  constructor(outcome: "refused" | "unknown") {
+  constructor(outcome: "refused" | "unknown", readFailure?: OpenShellPreparedGitReadFailure) {
     super(`OpenShell prepared Git provider ${outcome}; operator reconciliation is required.`);
     this.name = "OpenShellPreparedGitProviderError";
     this.outcome = outcome;
+    this.readFailure = readFailure;
   }
 }
 
@@ -82,6 +94,24 @@ const OWNER = "openclaw.dev/prepared-git-binding";
 
 function refuse(): never {
   throw new OpenShellPreparedGitProviderError("refused");
+}
+
+/** Classifies a failed gateway read behind a refusal. The provider's own refusals (refuse(),
+ * a mismatched profile) classify as nothing: the write was refused, not merely unobserved. */
+function readFailure(error: unknown): OpenShellPreparedGitReadFailure | undefined {
+  if (error instanceof OpenShellPreparedGitProviderError) {
+    return undefined;
+  }
+  if (error instanceof SandboxGatewayUnavailableError) {
+    return "gateway_unavailable";
+  }
+  if (error instanceof DependencyUnavailableError) {
+    return "gateway_request_failed";
+  }
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+    return "timeout";
+  }
+  return undefined;
 }
 
 function origin(value: string): URL {
@@ -347,10 +377,14 @@ export class OpenShellPreparedGitProvider {
         signal,
       );
       return this.binding(provider, profileVersion, token.expiresAt, credentialState);
-    } catch {
-      // Gateway error details and echoed payloads may contain private material. Do not attach
-      // a cause. A lost write reply stays unknown; do not automatically retry or delete it.
-      throw new OpenShellPreparedGitProviderError(writing ? "unknown" : "refused");
+    } catch (error) {
+      // Gateway error details and echoed payloads may contain private material: no cause, only
+      // the failed read's class as a token. A lost write reply stays unknown; do not
+      // automatically retry or delete it.
+      throw new OpenShellPreparedGitProviderError(
+        writing ? "unknown" : "refused",
+        writing ? undefined : readFailure(error),
+      );
     }
   }
 
@@ -507,8 +541,13 @@ export class OpenShellPreparedGitProvider {
         refuse();
       }
       return this.binding(updated, previous.profileVersion, token.expiresAt);
-    } catch {
-      throw new OpenShellPreparedGitProviderError(writing ? "unknown" : "refused");
+    } catch (error) {
+      // Refused before the write for a read the gateway did not answer, the rotation is
+      // observed again later; an unknown write is never retried (finding 2136).
+      throw new OpenShellPreparedGitProviderError(
+        writing ? "unknown" : "refused",
+        writing ? undefined : readFailure(error),
+      );
     }
   }
 }

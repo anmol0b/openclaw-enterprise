@@ -249,6 +249,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
   startWorker(
     report: (
       code: "PREPARED_GITHUB_RECOVERY_REQUIRED" | "PREPARED_GITHUB_MAINTENANCE_FAILED",
+      context?: Readonly<Record<string, string>>,
     ) => void,
   ) {
     const stop = new AbortController();
@@ -262,7 +263,7 @@ export class PostgresPreparedGitHubLifecycle implements PreparedGitHubEgressLife
             delay = 100;
           }
           if (outcome === "quarantined" || outcome === "blocked" || outcome === "issuer-mismatch") {
-            report("PREPARED_GITHUB_RECOVERY_REQUIRED");
+            report("PREPARED_GITHUB_RECOVERY_REQUIRED", { reason: outcome });
           }
         })
         .catch(() => {

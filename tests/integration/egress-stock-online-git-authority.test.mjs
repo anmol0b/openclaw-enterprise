@@ -58,6 +58,7 @@ test(
   async (t) => {
     const approvals = [];
     const identities = [];
+    const denials = [];
     let current = true;
     let unavailable = false;
     const { client, keys } = await openShellOnlineGitWire(t, {
@@ -72,6 +73,7 @@ test(
         approvals.push({ q, installed });
         return current;
       },
+      onDeny: (denial) => denials.push(denial),
     });
     const bearer = token(keys, "supervisor", binding.sandboxId);
     const evaluate = async (q, auth = bearer) =>
@@ -121,6 +123,7 @@ test(
     assert.ok(Date.parse(q.deadlineAt) > Date.now());
     // A new request using the same valid supervisor token must ask the owner again.
     current = false;
+    assert.deepEqual(denials, []);
     assert.equal(await evaluate(pushRequest()), 2);
     assert.equal(
       await evaluate({ ...fetch, context: { ...fetch.context, request_id: randomUUID() } }),
@@ -129,6 +132,37 @@ test(
     current = true;
     unavailable = true;
     assert.equal(await evaluate(pushRequest()), 2);
+    // Each denial the authority decides is reported once, with its reason class and the
+    // request's identity, never its content (finding 2133).
+    assert.deepEqual(
+      denials.map(({ reason, operation, sandboxId, revisionId }) => ({
+        reason,
+        operation,
+        sandboxId,
+        revisionId,
+      })),
+      [
+        {
+          reason: "approval_denied",
+          operation: "receive-pack",
+          sandboxId: binding.sandboxId,
+          revisionId: binding.executionId,
+        },
+        {
+          reason: "approval_denied",
+          operation: "upload-pack",
+          sandboxId: binding.sandboxId,
+          revisionId: binding.executionId,
+        },
+        {
+          reason: "approval_failed",
+          operation: "receive-pack",
+          sandboxId: binding.sandboxId,
+          revisionId: binding.executionId,
+        },
+      ],
+    );
+    assert.ok(denials.every((denial) => typeof denial.requestId === "string" && denial.requestId));
   },
 );
 
@@ -137,12 +171,14 @@ test(
   { timeout: 10000 },
   async (t) => {
     let approvals = 0;
+    const denials = [];
     const { client, keys } = await openShellOnlineGitWire(t, {
       lookupBinding: async () => binding,
       approve: async () => {
         approvals++;
         return true;
       },
+      onDeny: (denial) => denials.push(denial.reason),
     });
     const bearer = token(keys, "supervisor", binding.sandboxId);
     const evaluate = async (q, auth = bearer) =>
@@ -175,6 +211,15 @@ test(
     for (const q of cases) {
       assert.equal(await evaluate(q), 2);
     }
+    // The reasons an operator reads for the inspected refusals above, in their order.
+    assert.deepEqual(denials.slice(0, 3), [
+      "ref_not_allowed",
+      "ref_not_allowed",
+      "ref_not_allowed",
+    ]);
+    assert.ok(denials.includes("route_unsupported"));
+    assert.ok(denials.includes("encoding_unsupported"));
+    assert.ok(!denials.includes("approval_denied"));
     for (const query of [
       "service=[REDACTED]",
       "service=git-upload-pack&service=git-receive-pack",

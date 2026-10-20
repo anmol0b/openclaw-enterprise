@@ -1911,7 +1911,9 @@ export type ComputePendingReason =
   | "NAMESPACE_POD_QUOTA_EXCEEDED"
   | "WORKSPACE_NODE_PENDING"
   | "WORKSPACE_SETUP_RETRYING"
-  | "HARNESS_CREDENTIAL_BOOTSTRAP_PENDING";
+  | "HARNESS_CREDENTIAL_BOOTSTRAP_PENDING"
+  /** The worker has not yet verified the Sandbox's prepared Git route (OpenShell). */
+  | "REPOSITORY_GIT_ROUTE_PENDING";
 
 export interface ComputeReadiness extends Scope {
   readonly namespaceId: string;

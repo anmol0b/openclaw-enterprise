@@ -3,6 +3,11 @@ import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentRevision } from "@openclaw-enterprise/contracts";
+import {
+  DependencyUnavailableError,
+  SandboxGatewayUnavailableError,
+  TransientDependencyError,
+} from "@openclaw-enterprise/occ";
 import type { startPreparedGitHubGitOwner } from "../../backends/repository-credentials/prepared-git-owner.ts";
 import type { EgressAuthorityConfiguration } from "../../composition/egress-authority.ts";
 import { REPOSITORY_CLIENT_BIN } from "../compute/kubernetes/repository-native-configuration.ts";
@@ -17,6 +22,7 @@ import type {
 } from "../sandbox/openshell-gateway-client.ts";
 import {
   OpenShellPreparedGitProvider,
+  OpenShellPreparedGitProviderError,
   type OpenShellPreparedGitBinding,
   type OpenShellPreparedGitInstalled,
 } from "./openshell-prepared-git-provider.ts";
@@ -36,6 +42,50 @@ type Owner = Pick<
   "readOpenShellMaterial" | "authorizeOpenShellRequest"
 >;
 type MaterialIdentity = Omit<OpenShellRepositoryMaterial, "value">;
+
+/**
+ * Why a revision's Git route is closed for good. The entry stays as a tombstone until a new
+ * revision: the installation no longer verifies, a provider write's outcome is unknown, or the
+ * worker withdrew it. Never a failed read (see OpenShellGitObservationFailure).
+ */
+export type OpenShellGitRouteBlockReason =
+  | "withdrawn"
+  | "bootstrap_failed"
+  | "execution_replaced"
+  | "supervisor_replaced"
+  | "sandbox_mismatch"
+  | "grant_changed"
+  | "material_mismatch"
+  | "provider_missing"
+  | "provider_overlap"
+  | "write_unknown"
+  | "write_refused"
+  | "gateway_unauthorized"
+  | "unknown";
+
+/**
+ * Why the installation could not be observed this time: the gateway did not answer, another
+ * gateway request failed, the read ran out of time, or the material store did not answer. The
+ * route stays closed, nothing is written or replayed, and the worker observes again with a
+ * bounded backoff (finding 2136).
+ */
+export type OpenShellGitObservationFailure =
+  "gateway_unavailable" | "gateway_request_failed" | "timeout" | "read_failed";
+
+/** The route's state for one revision, as Compute readiness and operators see it. */
+export type OpenShellGitRouteState =
+  | { readonly state: "none" }
+  | { readonly state: "bootstrapping" }
+  | {
+      readonly state: "pending";
+      readonly reason: "unverified" | "material_unavailable" | "unobserved";
+      readonly failure?: OpenShellGitObservationFailure;
+    }
+  | { readonly state: "installed" }
+  | { readonly state: "blocked"; readonly reason: OpenShellGitRouteBlockReason };
+
+export type OpenShellGitRuntimeEmit = (event: Readonly<Record<string, unknown>>) => void;
+
 interface Entry {
   readonly revision: Readonly<AgentRevision>;
   readonly client: OpenShellGatewayClient;
@@ -49,8 +99,25 @@ interface Entry {
   supervisor?: OpenShellPreparedGitInstalled;
   material?: MaterialIdentity;
   installed?: OpenShellPreparedGitInstalled | undefined;
-  blocked?: true;
+  blocked?: OpenShellGitRouteBlockReason;
   nextRefreshAt?: number;
+  /** Why the route is closed while nothing blocks it. */
+  pending?: "unverified" | "material_unavailable" | undefined;
+  /** The last failed read, kept until a read succeeds; `failures` sizes the backoff. */
+  unobserved?:
+    | {
+        readonly failure: OpenShellGitObservationFailure;
+        readonly since: number;
+        readonly failures: number;
+      }
+    | undefined;
+  nextObserveAt?: number | undefined;
+  /** When an installed route was last closed by a failed read; reported once it is restored. */
+  closedAt?: number | undefined;
+}
+interface EntryState {
+  entry?: Entry;
+  failed?: true;
 }
 /** The runtime image's PATH, then the draft helper's directory. The image's own `gh` stays
  * first: the broker `gh` shim beside the helper has no repository manifest in this sandbox. */
@@ -65,13 +132,107 @@ const binaries = [
   "/usr/local/bin/node",
   "/usr/bin/node",
 ];
+const OBSERVE_TIMEOUT_MS = 5000;
+const REFRESH_INTERVAL_MS = 10_000;
+// A failed read is observed again after 1 s, doubling to this cap. A replaced OpenShell
+// Gateway Pod answers again within about 30 s; the route is back on the next read after that.
+const OBSERVE_BACKOFF_CAP_MS = 10_000;
+
+/** One of the runtime's own verifications failed: the installation no longer verifies. */
+class OpenShellGitRouteError extends Error {
+  readonly reason: OpenShellGitRouteBlockReason;
+
+  constructor(reason: OpenShellGitRouteBlockReason, message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "OpenShellGitRouteError";
+    this.reason = reason;
+  }
+}
+
+/** The revision's route is a tombstone: Compute fails the revision with that cause instead of
+ * retrying a preparation that can never succeed (a new revision is required). */
+export class OpenShellGitRouteBlockedError extends Error {
+  readonly reason: OpenShellGitRouteBlockReason;
+
+  constructor(reason: OpenShellGitRouteBlockReason) {
+    super(`OpenShell Git revision binding is unavailable: ${reason}.`);
+    this.name = "OpenShellGitRouteBlockedError";
+    this.reason = reason;
+  }
+}
+
+/** A read did not produce evidence. It says nothing about the installation. */
+class OpenShellGitObservationError extends Error {
+  readonly failure: OpenShellGitObservationFailure;
+
+  constructor(failure: OpenShellGitObservationFailure, cause: unknown) {
+    super(`OpenShell Git installation could not be observed: ${failure}.`, { cause });
+    this.name = "OpenShellGitObservationError";
+    this.failure = failure;
+  }
+}
+
+function observationFailure(
+  error: unknown,
+  signal: AbortSignal,
+): OpenShellGitObservationFailure | undefined {
+  if (error instanceof OpenShellGitObservationError) {
+    return error.failure;
+  }
+  if (error instanceof SandboxGatewayUnavailableError) {
+    return "gateway_unavailable";
+  }
+  if (error instanceof DependencyUnavailableError || error instanceof TransientDependencyError) {
+    return "gateway_request_failed";
+  }
+  if (
+    signal.aborted ||
+    (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
+  ) {
+    return "timeout";
+  }
+  return undefined;
+}
+
+// gRPC PERMISSION_DENIED and UNAUTHENTICATED: the gateway answered and refused this worker's
+// identity. Never retried (owner rule: retry network and timeouts, never an auth failure).
+const GRPC_PERMISSION_DENIED = 7;
+const GRPC_UNAUTHENTICATED = 16;
+
+function refusedIdentity(error: unknown): boolean {
+  const code = (error as { readonly code?: unknown } | null)?.code;
+  return code === GRPC_PERMISSION_DENIED || code === GRPC_UNAUTHENTICATED;
+}
+
+/** Runs a read. A failure that is not one of the runtime's own verifications is unavailable
+ * evidence (the provider's observe() treats its reads the same way), never a verdict. */
+async function read<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof OpenShellGitRouteError || error instanceof OpenShellGitObservationError) {
+      throw error;
+    }
+    if (refusedIdentity(error)) {
+      throw new OpenShellGitRouteError(
+        "gateway_unauthorized",
+        "OpenShell Git gateway refused the worker's identity.",
+      );
+    }
+    throw new OpenShellGitObservationError(
+      observationFailure(error, signal) ?? "read_failed",
+      error,
+    );
+  }
+}
 
 /** Worker-local authority. A restart deliberately requires a new revision; persisted labels
  * alone cannot adopt an old supervisor or resume a provider write whose result was lost. */
 export class OpenShellGitRuntime {
   private readonly entries = new Map<string, Promise<Entry>>();
+  private readonly states = new Map<string, EntryState>();
   private owner: Owner | undefined;
-  private report: (() => void) | undefined;
+  private emit: OpenShellGitRuntimeEmit | undefined;
   private stopped = new AbortController();
   private running: Promise<void> = Promise.resolve();
   private timer?: ReturnType<typeof setTimeout>;
@@ -186,10 +347,22 @@ export class OpenShellGitRuntime {
       })();
       // Retain a rejected bootstrap as a stopped attempt, never silently replay its writes.
       this.entries.set(revision.id, pending);
+      const state: EntryState = {};
+      this.states.set(revision.id, state);
+      void pending.then(
+        (entry) => {
+          state.entry = entry;
+        },
+        () => {
+          state.failed = true;
+        },
+      );
     }
     const entry = await pending;
+    if (entry.blocked) {
+      throw new OpenShellGitRouteBlockedError(entry.blocked);
+    }
     if (
-      entry.blocked ||
       entry.client !== client ||
       entry.binding.workspace !== workspace ||
       entry.binding.sandbox !== sandbox ||
@@ -259,7 +432,7 @@ export class OpenShellGitRuntime {
     // Keep the tombstone to prevent adoption/recreation under the same execution identity.
     void this.entries.get(revisionId)?.then(
       (entry) => {
-        entry.blocked = true;
+        entry.blocked ??= "withdrawn";
         entry.installed = undefined;
       },
       () => {},
@@ -271,13 +444,42 @@ export class OpenShellGitRuntime {
       void pending.then(
         (entry) => {
           if (entry.revision.namespaceId === namespaceId) {
-            entry.blocked = true;
+            entry.blocked ??= "withdrawn";
             entry.installed = undefined;
           }
         },
         () => {},
       );
     }
+  }
+
+  /**
+   * The route's state for a revision this worker prepared. Compute readiness holds a
+   * revision until the route is installed and fails it while the route is blocked, so a
+   * deployment never reports success over a closed route (findings 2135, 2136).
+   */
+  route(revisionId: string): OpenShellGitRouteState {
+    const state = this.states.get(revisionId);
+    if (state === undefined) {
+      return { state: "none" };
+    }
+    if (state.failed) {
+      return { state: "blocked", reason: "bootstrap_failed" };
+    }
+    const entry = state.entry;
+    if (entry === undefined) {
+      return { state: "bootstrapping" };
+    }
+    if (entry.blocked) {
+      return { state: "blocked", reason: entry.blocked };
+    }
+    if (entry.installed) {
+      return { state: "installed" };
+    }
+    if (entry.unobserved) {
+      return { state: "pending", reason: "unobserved", failure: entry.unobserved.failure };
+    }
+    return { state: "pending", reason: entry.pending ?? "unverified" };
   }
 
   private overlapsGit(host: string): boolean {
@@ -301,7 +503,10 @@ export class OpenShellGitRuntime {
     for (const name of providers) {
       const provider = await client.getProvider(workspace, name, signal);
       if (!provider) {
-        throw new Error("OpenShell inference provider is unavailable.");
+        throw new OpenShellGitRouteError(
+          "provider_missing",
+          "OpenShell inference provider is unavailable.",
+        );
       }
       const profile = await client.getProviderProfile(
         provider.profileWorkspace || workspace,
@@ -324,7 +529,8 @@ export class OpenShellGitRuntime {
           ),
         )
       ) {
-        throw new Error(
+        throw new OpenShellGitRouteError(
+          "provider_overlap",
           "OpenShell Git cannot share an unverified or overlapping credential provider.",
         );
       }
@@ -332,14 +538,22 @@ export class OpenShellGitRuntime {
   }
 
   private async observation(entry: Entry, signal: AbortSignal) {
-    await this.checkOtherProviders(
-      entry.client,
-      entry.binding.workspace,
-      entry.otherProviders,
+    await read(
+      () =>
+        this.checkOtherProviders(
+          entry.client,
+          entry.binding.workspace,
+          entry.otherProviders,
+          signal,
+        ),
       signal,
     );
-    const sandbox = await entry.client.getSandbox(
-      { workspace: entry.binding.workspace, name: entry.binding.sandbox },
+    const sandbox = await read(
+      () =>
+        entry.client.getSandbox(
+          { workspace: entry.binding.workspace, name: entry.binding.sandbox },
+          signal,
+        ),
       signal,
     );
     if (!sandbox?.id || !entry.verify) {
@@ -348,7 +562,15 @@ export class OpenShellGitRuntime {
     if (![2, "SANDBOX_PHASE_READY"].includes(sandbox.phase as string | number)) {
       return;
     }
-    entry.verify(sandbox);
+    try {
+      entry.verify(sandbox);
+    } catch (error) {
+      throw new OpenShellGitRouteError(
+        "sandbox_mismatch",
+        "OpenShell Git sandbox no longer matches its admitted content.",
+        error,
+      );
+    }
     if (
       (sandbox.restartCount ?? 0) !== 0 ||
       ![1, "SANDBOX_RESTART_POLICY_NEVER"].includes(
@@ -356,9 +578,13 @@ export class OpenShellGitRuntime {
       ) ||
       (entry.sandboxId && entry.sandboxId !== sandbox.id)
     ) {
-      throw new Error("OpenShell Git execution was replaced.");
+      throw new OpenShellGitRouteError(
+        "execution_replaced",
+        "OpenShell Git execution was replaced.",
+      );
     }
     entry.sandboxId = sandbox.id;
+    // observe() answers undefined, never throws, for a read it could not complete.
     const observed = await entry.provider.observe(entry.binding, sandbox.id, signal);
     if (!observed) {
       return;
@@ -371,35 +597,155 @@ export class OpenShellGitRuntime {
           observed[key as keyof OpenShellPreparedGitInstalled],
       )
     ) {
-      throw new Error("OpenShell Git supervisor was replaced.");
+      throw new OpenShellGitRouteError(
+        "supervisor_replaced",
+        "OpenShell Git supervisor was replaced.",
+      );
     }
     entry.supervisor ??= observed;
     return observed;
   }
 
-  private async reconcile(entry: Entry): Promise<void> {
-    if (
-      entry.blocked ||
-      !entry.verify ||
-      !this.owner ||
-      (entry.installed && performance.now() < (entry.nextRefreshAt ?? 0))
-    ) {
+  private identity(entry: Entry): Readonly<Record<string, string>> {
+    const binding = entry.revision.repositoryCredentials?.bindings[0];
+    return {
+      namespaceId: entry.revision.namespaceId,
+      agentId: entry.revision.agentId,
+      revisionId: entry.revision.id,
+      ...(binding === undefined ? {} : { repositoryRef: binding.repositoryRef }),
+    };
+  }
+
+  private pending(entry: Entry, reason: "unverified" | "material_unavailable"): void {
+    entry.installed = undefined;
+    entry.pending = reason;
+    entry.unobserved = undefined;
+    entry.nextObserveAt = undefined;
+  }
+
+  private installedNow(entry: Entry, installed: OpenShellPreparedGitInstalled): void {
+    entry.installed = installed;
+    entry.nextRefreshAt = performance.now() + REFRESH_INTERVAL_MS;
+    entry.pending = undefined;
+    entry.unobserved = undefined;
+    entry.nextObserveAt = undefined;
+    if (entry.closedAt !== undefined) {
+      this.emit?.({
+        event: "worker.openshell-git-route",
+        status: "restored",
+        durationMs: Math.round(performance.now() - entry.closedAt),
+        ...this.identity(entry),
+      });
+      entry.closedAt = undefined;
+    }
+  }
+
+  /** Closes the route for good and reports why; the entry is a tombstone from here on. */
+  private block(entry: Entry, reason: OpenShellGitRouteBlockReason): void {
+    entry.blocked = reason;
+    entry.installed = undefined;
+    entry.unobserved = undefined;
+    entry.closedAt = undefined;
+    this.emit?.({
+      event: "worker.error",
+      code: "OPENSHELL_GIT_RECONCILIATION_REQUIRED",
+      reason,
+      ...this.identity(entry),
+    });
+  }
+
+  /**
+   * Classifies a failed reconcile or lookup. The runtime's own verifications and an unknown
+   * provider write block the route: no retry, replacement, or token replay. A failed read
+   * only closes it until the next successful observation, with a bounded backoff.
+   */
+  private failed(entry: Entry, error: unknown, signal: AbortSignal): void {
+    if (entry.blocked) {
+      entry.installed = undefined;
       return;
     }
-    const signal = AbortSignal.any([this.stopped.signal, AbortSignal.timeout(5000)]);
+    let failure: OpenShellGitObservationFailure | undefined;
+    if (error instanceof OpenShellGitRouteError) {
+      this.block(entry, error.reason);
+      return;
+    }
+    if (error instanceof OpenShellPreparedGitProviderError) {
+      if (error.outcome === "unknown") {
+        this.block(entry, "write_unknown");
+        return;
+      }
+      // A refused write wrote nothing. Refused because the gateway did not answer, it is
+      // observed again; refused for any other reason, the provider no longer verifies.
+      failure = error.readFailure;
+      if (failure === undefined) {
+        this.block(entry, "write_refused");
+        return;
+      }
+    } else {
+      failure = observationFailure(error, signal);
+      if (failure === undefined) {
+        this.block(entry, "unknown");
+        return;
+      }
+    }
+    if (entry.installed) {
+      entry.closedAt ??= performance.now();
+    }
+    entry.installed = undefined;
+    const failures = (entry.unobserved?.failures ?? 0) + 1;
+    entry.unobserved = {
+      failure,
+      since: entry.unobserved?.since ?? performance.now(),
+      failures,
+    };
+    entry.nextObserveAt =
+      performance.now() + Math.min(1000 * 2 ** (failures - 1), OBSERVE_BACKOFF_CAP_MS);
+    if (failures === 1) {
+      this.emit?.({
+        event: "worker.openshell-git-route-warning",
+        status: "unobserved",
+        reason: failure,
+        ...this.identity(entry),
+      });
+    }
+  }
+
+  private async reconcile(entry: Entry): Promise<void> {
+    if (entry.blocked || !entry.verify || !this.owner) {
+      return;
+    }
+    const now = performance.now();
+    if (entry.installed ? now < (entry.nextRefreshAt ?? 0) : now < (entry.nextObserveAt ?? 0)) {
+      return;
+    }
+    const signal = AbortSignal.any([this.stopped.signal, AbortSignal.timeout(OBSERVE_TIMEOUT_MS)]);
     try {
       // Observe the bootstrap supervisor before delivering the first usable credential.
       const observed = await this.observation(entry, signal);
       if (!observed) {
-        entry.installed = undefined;
+        this.pending(entry, "unverified");
         return;
       }
-      const material = await this.owner.readOpenShellMaterial(entry.revision.id, signal);
+      const owner = this.owner;
+      const material = await read(
+        () => owner.readOpenShellMaterial(entry.revision.id, signal),
+        signal,
+      );
       if (!material) {
-        entry.installed = undefined;
+        this.pending(entry, "material_unavailable");
         return;
       }
-      const { binding, policy } = this.scope(entry.revision);
+      let scope: ReturnType<OpenShellGitRuntime["scope"]>;
+      try {
+        scope = this.scope(entry.revision);
+      } catch (error) {
+        throw new OpenShellGitRouteError(
+          "grant_changed",
+          "OpenShell Git admission no longer matches the registry grant.",
+          error,
+        );
+      }
+      const { binding, policy } = scope;
       if (
         material.repository !== entry.repository ||
         material.providerInstanceId !== binding.grant.providerInstanceId ||
@@ -408,7 +754,10 @@ export class OpenShellGitRuntime {
         material.pushRef !== policy.pushRefAllowlist![0] ||
         material.apiOrigin !== "https://api.github.com"
       ) {
-        throw new Error("OpenShell Git material does not match admission.");
+        throw new OpenShellGitRouteError(
+          "material_mismatch",
+          "OpenShell Git material does not match admission.",
+        );
       }
       if (
         !entry.material ||
@@ -418,7 +767,7 @@ export class OpenShellGitRuntime {
         if (entry.blocked || this.stopped.signal.aborted || signal.aborted) {
           return;
         }
-        entry.installed = undefined;
+        this.pending(entry, "unverified");
         entry.binding = await entry.provider.rotate(
           entry.binding,
           { value: material.value, expiresAt: material.expiresAt },
@@ -434,14 +783,12 @@ export class OpenShellGitRuntime {
         !this.stopped.signal.aborted &&
         !signal.aborted
       ) {
-        entry.installed = installed;
-        entry.nextRefreshAt = performance.now() + 10_000;
+        this.installedNow(entry, installed);
+      } else {
+        this.pending(entry, "unverified");
       }
-    } catch {
-      // This includes unknown provider writes: no retry, replacement, or token replay.
-      entry.blocked = true;
-      entry.installed = undefined;
-      this.report?.();
+    } catch (error) {
+      this.failed(entry, error, signal);
     }
   }
 
@@ -452,32 +799,52 @@ export class OpenShellGitRuntime {
     if (!this.owner || this.stopped.signal.aborted || signal.aborted) {
       return;
     }
+    let reason = "no_binding";
+    let denied: Entry | undefined;
     for (const pending of this.entries.values()) {
       const entry = await pending.catch(() => undefined);
       if (
         !entry ||
-        entry.blocked ||
-        !entry.installed ||
-        !entry.material ||
-        entry.sandboxId !== identity.sandboxId ||
         entry.bindingId !== identity.bindingId ||
         entry.binding.workspace !== identity.workspace
       ) {
         continue;
       }
+      // The binding is this entry's; from here the denial names the route's state.
+      denied = entry;
+      if (entry.blocked) {
+        reason = "route_blocked";
+        break;
+      }
+      if (entry.sandboxId !== identity.sandboxId) {
+        reason = "execution_mismatch";
+        break;
+      }
+      if (!entry.installed || !entry.material) {
+        reason = entry.unobserved ? "route_unobserved" : "route_pending";
+        break;
+      }
       const material = entry.material;
       try {
         const observed = await this.observation(entry, signal);
-        if (
-          entry.blocked ||
-          this.stopped.signal.aborted ||
-          signal.aborted ||
-          entry.material !== material ||
-          !observed ||
-          !isDeepStrictEqual(observed, entry.installed) ||
-          Date.parse(material.expiresAt) <= Date.now()
-        ) {
-          return;
+        if (entry.blocked || this.stopped.signal.aborted || signal.aborted) {
+          reason = entry.blocked ? "route_blocked" : "lookup_aborted";
+          break;
+        }
+        if (entry.material !== material) {
+          reason = "material_rotated";
+          break;
+        }
+        if (!observed || !isDeepStrictEqual(observed, entry.installed)) {
+          // The installation no longer reads as the one admitted: close the route until the
+          // worker's own reconcile verifies it again.
+          this.pending(entry, "unverified");
+          reason = "installation_changed";
+          break;
+        }
+        if (Date.parse(material.expiresAt) <= Date.now()) {
+          reason = "material_expired";
+          break;
         }
         return {
           sandboxId: identity.sandboxId,
@@ -497,16 +864,31 @@ export class OpenShellGitRuntime {
             materialVersion: material.materialVersion,
           },
         };
-      } catch {
-        entry.blocked = true;
-        entry.installed = undefined;
-        this.report?.();
-        return;
+      } catch (error) {
+        if (signal.aborted && !(error instanceof OpenShellGitRouteError)) {
+          // The request's own budget ran out: this request is denied, and the route stays as
+          // the worker's reconcile last left it.
+          reason = "lookup_aborted";
+          break;
+        }
+        this.failed(entry, error, signal);
+        reason = entry.blocked ? "route_blocked" : "route_unobserved";
+        break;
       }
     }
+    // One line per denial the worker decides (finding 2133); the supervisor's own log only
+    // says the middleware denied.
+    this.emit?.({
+      event: "worker.openshell-git-denied",
+      reason,
+      sandboxId: identity.sandboxId,
+      requestId: identity.requestId,
+      ...(denied === undefined ? {} : this.identity(denied)),
+    });
+    return undefined;
   }
 
-  async start(owner: Owner, report?: () => void): Promise<void> {
+  async start(owner: Owner, emit?: OpenShellGitRuntimeEmit): Promise<void> {
     if (this.owner || this.stopped.signal.aborted) {
       throw new Error("OpenShell Git worker already started or stopped.");
     }
@@ -517,7 +899,7 @@ export class OpenShellGitRuntime {
       readFile(config.issuerPublicKeyPath),
     ]);
     this.owner = owner;
-    this.report = report;
+    this.emit = emit;
     this.server = createOpenShellOnlineGitAuthority({
       registrationName: this.configuration.registrationName,
       budgetMs: 3000,
@@ -530,6 +912,9 @@ export class OpenShellGitRuntime {
       lookupBinding: (identity, signal) => this.lookup(identity, signal),
       approve: (request, installed, signal) =>
         owner.authorizeOpenShellRequest(request, installed, signal),
+      onDeny: (denial) => {
+        this.emit?.({ event: "worker.openshell-git-denied", ...denial });
+      },
     });
     try {
       await bindOpenShellEgressAuthority(
@@ -569,5 +954,6 @@ export class OpenShellGitRuntime {
     await this.running;
     this.owner = undefined;
     this.entries.clear();
+    this.states.clear();
   }
 }

@@ -100,6 +100,12 @@ export function deploymentProgressForWork(
       code = attempt.code;
       message = "Waiting for harness credential initialization to finish.";
       break;
+    case "REPOSITORY_GIT_ROUTE_PENDING":
+      // Fixed copy: never the repository, grant or the gateway's answer (finding 1045).
+      code = attempt.code;
+      message =
+        "Workloads are ready; waiting for the controller to verify this version's repository Git access. If this persists, check the worker log for repository credential or OpenShell gateway errors.";
+      break;
     case "DEPENDENCY_UNAVAILABLE":
       code = attempt.code;
       message = "A dependency was unavailable. The controller will retry.";
@@ -685,6 +691,8 @@ function deploymentErrorMessage(code: string): string {
       return "The approval behind a repository this revision binds changed since admission, for example the access levels or push rules approved for the Agent's Namespace. Deploy again to admit a revision with the current approval.";
     case "REPOSITORY_DRIVER_MISMATCH":
       return "The Installation no longer selects the repository credential Driver this revision was admitted with. Deploy again to admit a revision for the selected Driver, choosing approved repository access first if the deploy is refused. If the Installation has none, remove the Agent's repository access or ask an admin to select one.";
+    case "REPOSITORY_GIT_ROUTE_BLOCKED":
+      return "This version's repository Git access was closed by the controller: its Sandbox or supervisor was replaced, a credential write's outcome is unknown, or the access was withdrawn. The worker log names the reason (OPENSHELL_GIT_RECONCILIATION_REQUIRED). Deploy a new version.";
     case "REPOSITORY_CREDENTIAL_DEADLINE_EXCEEDED":
       return "This revision's repository access deadline, fixed when the revision was admitted, has passed. Deploy again to admit a revision with a new deadline.";
     // Refusals the worker decides again on every pass (finding 1039). The status never names

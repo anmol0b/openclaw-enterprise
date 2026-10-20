@@ -1,4 +1,7 @@
-import type { OpenShellGitRuntime } from "../../egress-proxy/openshell-git-runtime.ts";
+import {
+  OpenShellGitRouteBlockedError,
+  type OpenShellGitRuntime,
+} from "../../egress-proxy/openshell-git-runtime.ts";
 import { networkPolicySpecToJson } from "../../kubernetes/network-policy.ts";
 import {
   assertExecutionAdmission,
@@ -6530,6 +6533,18 @@ export class KubernetesComputeDriver implements ComputeDriver {
             sandboxDriver.provisionHarness!(harnessContext),
           );
         } catch (error) {
+          if (error instanceof OpenShellGitRouteBlockedError) {
+            // The worker closed this revision's prepared Git route for good (a replaced
+            // execution or supervisor, an unknown provider write, a withdrawal): no pass can
+            // reopen it, so the revision fails with that cause (finding 2136).
+            const runtimeFailure: RuntimeFailureEvidence = {
+              component: "agent",
+              check: "repository-git-route",
+              code: "REPOSITORY_ROUTE_BLOCKED",
+              checkedAt: new Date().toISOString(),
+            };
+            return { ...result, runtimeFailure };
+          }
           if (!(error instanceof SandboxWorkspaceSetupRefusedError)) {
             throw error;
           }
@@ -6749,6 +6764,26 @@ export class KubernetesComputeDriver implements ComputeDriver {
           }
           if (harness.state !== "serving") {
             return incomplete();
+          }
+        }
+        if (this.openShellGit !== undefined && revision.repositoryCredentials !== undefined) {
+          // The worker delivers this revision's prepared Git material through the OpenShell
+          // middleware route. A Sandbox whose route is not yet verified is not ready, and one
+          // whose route is blocked (a replaced execution or supervisor, an unknown provider
+          // write) never will be without a new revision: the deployment fails with that cause
+          // instead of reporting success over a closed route (findings 2135, 2136).
+          const route = this.openShellGit.route(revision.id);
+          if (route.state === "blocked") {
+            const runtimeFailure: RuntimeFailureEvidence = {
+              component: "agent",
+              check: "repository-git-route",
+              code: "REPOSITORY_ROUTE_BLOCKED",
+              checkedAt: new Date().toISOString(),
+            };
+            return { ...result, runtimeFailure };
+          }
+          if (route.state !== "installed") {
+            return incomplete("REPOSITORY_GIT_ROUTE_PENDING");
           }
         }
         return ready();

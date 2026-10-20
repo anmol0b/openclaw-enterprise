@@ -166,7 +166,8 @@ try {
         ...(issuerCaPath ? { ca: Buffer.from(await readPublicCaBundle(issuerCaPath)) } : {}),
         pool,
         registry: drivers.repositoryRegistry,
-        report: (code) => emitOccLogEvent(logger, { event: "worker.error", code }),
+        report: (code, context) =>
+          emitOccLogEvent(logger, { event: "worker.error", code, ...context }),
       });
     }
   }
@@ -175,12 +176,7 @@ try {
     if (!preparedRepositoryGit) {
       throw new Error("OpenShell Git requires its live prepared GitHub owner.");
     }
-    await openShellGit.start(preparedRepositoryGit, () =>
-      emitOccLogEvent(logger, {
-        event: "worker.error",
-        code: "OPENSHELL_GIT_RECONCILIATION_REQUIRED",
-      }),
-    );
+    await openShellGit.start(preparedRepositoryGit, (event) => emitOccLogEvent(logger, event));
   }
   let metrics;
   if (metricsSettings !== undefined) {
