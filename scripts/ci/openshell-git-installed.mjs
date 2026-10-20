@@ -705,14 +705,21 @@ async function exec(client, target, name, args = []) {
 }
 
 async function diagnose(stack) {
+  const print = (label, result) => {
+    const text = String(result.stdout ?? "") + String(result.stderr ?? "");
+    console.error(`--- ${label}\n${text.trim().split("\n").slice(-40).join("\n")}`);
+  };
+  for (const container of [fixture.originContainer, fixture.modelContainer]) {
+    print(
+      container,
+      await run("docker", ["logs", "--tail", "40", container]).catch((error) => error.result ?? {}),
+    );
+  }
   if (!stack) {
     return;
   }
-  const show = async (label, args) => {
-    const result = await kubectl(stack, args).catch((error) => error.result ?? { stdout: "" });
-    const lines = String(result.stdout).trim().split("\n");
-    console.error(`--- ${label}\n${lines.slice(-40).join("\n")}`);
-  };
+  const show = async (label, args) =>
+    print(label, await kubectl(stack, args).catch((error) => error.result ?? {}));
   await show("pods", ["get", "pods", "--all-namespaces", "-o", "wide"]);
   await show("worker log", [
     "-n",

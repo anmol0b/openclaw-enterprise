@@ -105,10 +105,11 @@ this route cannot combine with. Set `approvalPolicy: never` for unattended
 Codex commands, as the reference describes.
 
 For a synthetic origin instead of GitHub, also set
-`OCC_DEVELOPMENT_OPENSHELL_GIT_FIXTURE_NETWORK` to a Docker network holding
-it, with its one address in `upstream-cidrs.json` and outside the private and
-special-use ranges OpenShell refuses, and add its CA as `issuer-ca.crt`. The
-launcher attaches the node and answers `github.com` and `api.github.com` with
-that address in cluster DNS. `OCC_DEVELOPMENT_OPENSHELL_SUPERVISOR_CA_FILE`
-names a PEM bundle the supervisor image must also trust, such as that CA.
+`OCC_DEVELOPMENT_OPENSHELL_GIT_FIXTURE_NETWORK` to a Docker network (Docker 28
+or newer) holding it, with its one address in `upstream-cidrs.json` and outside
+the private and special-use ranges OpenShell refuses. Its CA is then required
+twice: as `issuer-ca.crt` for the worker, and in the PEM bundle named by
+`OCC_DEVELOPMENT_OPENSHELL_SUPERVISOR_CA_FILE`, which the launcher adds to a
+local copy of the supervisor image. The launcher attaches the node and answers
+`github.com` and `api.github.com` with that address in cluster DNS.
 `scripts/ci/openshell-git-installed.mjs` runs this profile end to end.

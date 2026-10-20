@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json/v2"
 	"encoding/pem"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -196,21 +198,144 @@ func TestOpenShellGitFixtureAddressMustBeReachableFromSandboxes(t *testing.T) {
 	if _, err := openShellGitFixtureAddress([]string{"11.112.0.10/32", "11.112.0.11/32"}); err == nil {
 		t.Fatal("a fixture network needs exactly one upstream address")
 	}
+	api := filepath.Join(t.TempDir(), "api-version")
 	fakeProfileCommands(t, map[string]string{
-		"docker": `"network inspect occ-fixture") echo '[{"IPAM":{"Config":[{"Subnet":"11.112.0.8/29"}]}}]' ;;`,
+		"docker": `"network inspect occ-fixture") echo '[{"IPAM":{"Config":[{"Subnet":"11.112.0.8/29"}]}}]' ;;
+"version --format {{.Server.APIVersion}}") cat ` + shellQuote(api) + ` ;;`,
 	})
+	if err := os.WriteFile(api, []byte("1.48\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ca := writeTestCA(t)
+	caPEM, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := func(cidr string) *developmentRepositoryInputs {
+		return &developmentRepositoryInputs{upstreamCIDRs: []string{cidr}, issuerCA: caPEM}
+	}
 	r := newRunner(Options{})
 	r.engine = "docker"
 	r.env[openShellGitFixtureNetworkSelector] = "occ-fixture"
-	if err := r.checkOpenShellGitFixture(context.Background(), &developmentRepositoryInputs{upstreamCIDRs: []string{"11.112.0.10/32"}}); err != nil {
+	r.env[openShellSupervisorCASelector] = ca
+	if err := r.checkOpenShellGitFixture(context.Background(), fixture("11.112.0.10/32")); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.checkOpenShellGitFixture(context.Background(), &developmentRepositoryInputs{upstreamCIDRs: []string{"11.112.0.18/32"}}); err == nil || !strings.Contains(err.Error(), "does not contain") {
+	if err := r.checkOpenShellGitFixture(context.Background(), fixture("11.112.0.18/32")); err == nil || !strings.Contains(err.Error(), "does not contain") {
 		t.Fatalf("an address outside the fixture network was accepted: %v", err)
 	}
+	// The worker and the supervisor must both trust the synthetic origin's CA.
+	if err := r.checkOpenShellGitFixture(context.Background(), &developmentRepositoryInputs{upstreamCIDRs: []string{"11.112.0.10/32"}}); err == nil || !strings.Contains(err.Error(), "issuer-ca.crt") {
+		t.Fatalf("a fixture without its issuer CA was accepted: %v", err)
+	}
+	delete(r.env, openShellSupervisorCASelector)
+	if err := r.checkOpenShellGitFixture(context.Background(), fixture("11.112.0.10/32")); err == nil || !strings.Contains(err.Error(), openShellSupervisorCASelector) {
+		t.Fatalf("a fixture without supervisor trust was accepted: %v", err)
+	}
+	r.env[openShellSupervisorCASelector] = ca
+	// Gateway priority on network connect needs Docker Engine 28 (API 1.48).
+	if err := os.WriteFile(api, []byte("1.47\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.checkOpenShellGitFixture(context.Background(), fixture("11.112.0.10/32")); err == nil || !strings.Contains(err.Error(), "Docker Engine 28") {
+		t.Fatalf("an engine without gateway priority was accepted: %v", err)
+	}
+	for version, want := range map[string]bool{"1.48": true, "1.52": true, "2.0": true, "1.47": false, "1": false, "x.y": false, "": false} {
+		if got := dockerAPIAtLeast(version, 1, 48); got != want {
+			t.Errorf("dockerAPIAtLeast(%q) = %v", version, got)
+		}
+	}
 	r.engine = "podman"
-	if err := r.checkOpenShellGitFixture(context.Background(), &developmentRepositoryInputs{upstreamCIDRs: []string{"11.112.0.10/32"}}); err == nil {
+	if err := r.checkOpenShellGitFixture(context.Background(), fixture("11.112.0.10/32")); err == nil {
 		t.Fatal("Podman cannot keep the k3d network as the node's default route")
+	}
+}
+
+// The route admits the OpenShell Driver, requires a transport the middleware
+// serves and reads the origin's CA only when the operator supplied one.
+func TestOpenShellGitRepositoryInputs(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("private-key.pem", string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})))
+	write("upstream-cidrs.json", `["11.112.0.2/32"]`)
+	policy := map[string]any{"namespaceId": developmentNamespacePlaceholder, "profiles": []string{"git-write"}, "pushRefAllowlist": []string{"refs/heads/review/agent"}}
+	writeRegistry := func() {
+		t.Helper()
+		registry := map[string]any{
+			"version": 1, "backendId": "repository-backend", "providerInstanceId": "github-production",
+			"appId": "123", "githubInstallationId": "456", "maximumDurationSeconds": 3600,
+			"repositories": []any{map[string]any{"repositoryRef": "project", "repositoryId": "789", "repository": "example/project", "namespaces": []any{policy}}},
+		}
+		data, err := json.Marshal(registry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write("registry.json", string(data))
+	}
+	r := newRunner(Options{})
+	r.env["OCC_DEVELOPMENT_REPOSITORY_INPUT_DIRECTORY"] = directory
+	load := func() (*developmentRepositoryInputs, error) {
+		writeRegistry()
+		return r.loadDevelopmentRepositoryInputs("openshell", true)
+	}
+	for _, transport := range []map[string]any{{}, {"transport": "git-and-draft-pr"}, {"transport": "git-and-draft-pr", "pullRequestBase": ""}, {"transport": "credential-proxy"}} {
+		delete(policy, "transport")
+		delete(policy, "pullRequestBase")
+		for k, v := range transport {
+			policy[k] = v
+		}
+		if _, err := load(); err == nil || !strings.Contains(err.Error(), "OpenShell Git route requires transport") {
+			t.Fatalf("transport %v accepted: %v", transport, err)
+		}
+	}
+	policy["transport"] = "git-only"
+	inputs, err := load()
+	if err != nil || !inputs.openShellGit || !inputs.prepared() || inputs.preparedPort != 443 || inputs.issuerCA != nil {
+		t.Fatalf("git-only route input refused or misread: %v %+v", err, inputs)
+	}
+	policy["transport"], policy["pullRequestBase"] = "git-and-draft-pr", "main"
+	if _, err := load(); err != nil {
+		t.Fatalf("draft route input refused: %v", err)
+	}
+	// Without the route, OpenShell still refuses repository inputs.
+	if _, err := r.loadDevelopmentRepositoryInputs("openshell", false); err == nil {
+		t.Fatal("repository inputs accepted with OpenShell but without the route")
+	}
+	ca, err := os.ReadFile(writeTestCA(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("issuer-ca.crt", string(ca))
+	if inputs, err = load(); err != nil || string(inputs.issuerCA) != string(ca) {
+		t.Fatalf("issuer CA not read: %v", err)
+	}
+	write("issuer-ca.crt", "not a certificate")
+	if _, err := load(); err == nil || !strings.Contains(err.Error(), "issuer-ca.crt") {
+		t.Fatalf("invalid issuer CA accepted: %v", err)
+	}
+	if err := os.Remove(filepath.Join(directory, "issuer-ca.crt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(directory, "issuer-ca.crt"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := load(); err == nil {
+		t.Fatal("an issuer CA directory was accepted")
 	}
 }
 
@@ -537,5 +662,70 @@ assert.equal(loaded.preparedRepositoryGit.apiOrigin,'https://api.github.com');
 		"openshell-git-middleware-values.json", "--set", "agentSandbox.preflight.enabled=false", "--set", "fullnameOverride=openshell-gateway")
 	if err := verifyOpenShellGatewayChart(out, state, []gatewayMiddleware{openShellGitGatewayMiddleware(state)}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The derived supervisor image is staged from an unstarted container: its
+// bundle gains the selected CA readable by the non-root supervisor, and every
+// staging artifact is removed, including the image when a later step fails.
+func TestOpenShellSupervisorTrustDerivesAndCleansUp(t *testing.T) {
+	work := t.TempDir()
+	captured := filepath.Join(work, "captured.crt")
+	failRemove := filepath.Join(work, "fail-remove")
+	container := "openclaw-development-supervisor-trust-c1"
+	derived := "openclaw-development/openshell-supervisor-trust:c1"
+	commands := fakeProfileCommands(t, map[string]string{
+		"docker": `"image inspect supervisor@sha256:abc") echo '[{}]' ;;
+"image inspect ` + derived + `") exit 1 ;;
+"create --name ` + container + ` supervisor@sha256:abc") echo created ;;
+"cp ` + container + `:/etc/ssl/certs/ca-certificates.crt "*) printf 'BASE\n' > "$3" ;;
+"cp "*" ` + container + `:/etc/ssl/certs/ca-certificates.crt") cp "$2" ` + shellQuote(captured) + `; stat -c %a "$2" > ` + shellQuote(captured) + `.mode ;;
+"commit ` + container + ` ` + derived + `") echo sha256:def ;;
+"rm --force ` + container + `") test -e ` + shellQuote(failRemove) + ` && exit 1; echo removed ;;
+"image rm ` + derived + `") echo untagged ;;`,
+	})
+	ca := writeTestCA(t)
+	caPEM, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(Options{})
+	r.engine = "docker"
+	state := &developmentState{Cluster: "c1"}
+	// A restrictive umask must not narrow the bundle the supervisor reads.
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	image, release, err := r.trustOpenShellSupervisor(context.Background(), state, work, "supervisor@sha256:abc", true, ca)
+	if err != nil || image != derived {
+		t.Fatalf("derive: %q %v", image, err)
+	}
+	bundle, err := os.ReadFile(captured)
+	if err != nil || !strings.HasPrefix(string(bundle), "BASE\n") || !strings.HasSuffix(string(bundle), string(caPEM)) {
+		t.Fatalf("bundle does not append the CA: %v", err)
+	}
+	if mode, _ := os.ReadFile(captured + ".mode"); strings.TrimSpace(string(mode)) != "644" {
+		t.Fatalf("bundle mode %q: the non-root supervisor must read it", mode)
+	}
+	if _, err := os.Stat(filepath.Join(work, "supervisor-ca-certificates.crt")); !os.IsNotExist(err) {
+		t.Fatalf("local bundle copy left behind: %v", err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	log := strings.Join(commands(), "\n")
+	for _, want := range []string{"docker rm --force " + container, "docker image rm " + derived} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("missing %q in:\n%s", want, log)
+		}
+	}
+	if err := os.WriteFile(failRemove, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	before := len(commands())
+	if _, _, err := r.trustOpenShellSupervisor(context.Background(), state, work, "supervisor@sha256:abc", true, ca); err == nil {
+		t.Fatal("a failed staging cleanup was ignored")
+	}
+	if after := strings.Join(commands()[before:], "\n"); !strings.Contains(after, "docker image rm "+derived) {
+		t.Fatalf("the committed image survived a failed cleanup:\n%s", after)
 	}
 }

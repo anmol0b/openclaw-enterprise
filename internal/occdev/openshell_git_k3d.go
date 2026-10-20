@@ -237,6 +237,18 @@ func (r *runner) checkOpenShellGitFixture(ctx context.Context, inputs *developme
 	if err != nil {
 		return err
 	}
+	// A synthetic origin's certificate chains to a private CA: the worker and
+	// the supervisor must both trust it, or every Git request fails at runtime.
+	if len(inputs.issuerCA) == 0 || r.env[openShellSupervisorCASelector] == "" {
+		return fmt.Errorf("%s requires the origin's CA as issuer-ca.crt in the repository inputs and in %s", openShellGitFixtureNetworkSelector, openShellSupervisorCASelector)
+	}
+	version, err := r.output(ctx, r.engine, "version", "--format", "{{.Server.APIVersion}}")
+	if err != nil {
+		return fmt.Errorf("read the Docker Engine API version: %w", err)
+	}
+	if !dockerAPIAtLeast(strings.TrimSpace(string(version)), 1, 48) {
+		return fmt.Errorf("%s requires Docker Engine 28 or newer (API 1.48) for network gateway priority; the engine reports API %q", openShellGitFixtureNetworkSelector, strings.TrimSpace(string(version)))
+	}
 	data, err := r.output(ctx, r.engine, "network", "inspect", network)
 	if err != nil {
 		return fmt.Errorf("fixture network %s is unavailable: %w", network, err)
@@ -257,6 +269,20 @@ func (r *runner) checkOpenShellGitFixture(ctx context.Context, inputs *developme
 		}
 	}
 	return fmt.Errorf("fixture network %s does not contain the fixture address %s", network, address)
+}
+
+// dockerAPIAtLeast compares a Docker Engine API version such as "1.48".
+func dockerAPIAtLeast(version string, major, minor int) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) != 2 {
+		return false
+	}
+	gotMajor, err1 := strconv.Atoi(parts[0])
+	gotMinor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return gotMajor > major || (gotMajor == major && gotMinor >= minor)
 }
 
 // attachOpenShellGitFixture puts the node on the fixture network and pins the
@@ -331,15 +357,24 @@ func (r *runner) trustOpenShellSupervisor(ctx context.Context, state *developmen
 		err = os.Remove(bundle)
 	}
 	if err == nil {
+		// exclusiveWrite sets the mode past the umask, and cp keeps it: the
+		// supervisor reads the bundle as a non-root user.
 		err = exclusiveWrite(bundle, append(append(bytes.TrimRight(base, "\n"), '\n'), extra...), 0644)
 	}
 	if err == nil {
 		err = r.run(ctx, r.engine, "cp", bundle, container+":"+bundlePath)
 	}
+	committed := false
 	if err == nil {
 		_, err = r.output(ctx, r.engine, "commit", container, derived)
+		committed = err == nil
 	}
 	err = errors.Join(err, removeContainer())
+	if err != nil && committed {
+		if _, removeErr := r.output(context.WithoutCancel(ctx), r.engine, "image", "rm", derived); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove the trusted supervisor staging image: %w", removeErr))
+		}
+	}
 	if removeErr := os.Remove(bundle); removeErr != nil && !os.IsNotExist(removeErr) {
 		err = errors.Join(err, removeErr)
 	}
