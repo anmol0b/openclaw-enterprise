@@ -545,6 +545,14 @@
       "tag": "0068_legacy_revision_execution_admission",
       "breakpoints": true,
       "sha256": "76aff98b9d5d220ba089ea32ad0c7b2c34ab3b4c7adb3ea614d7fb31d246ee36"
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1787000000069,
+      "tag": "0069_openshell_git_routes",
+      "breakpoints": true,
+      "sha256": "03c19cdc8e4c41b41b47886ad30b54f67ae78c99a86aaffc1d6f954187c8e3e2"
     }
   ],
   "initialSchemaStates": {
@@ -572,7 +580,7 @@
     "main": "bd490d16dd23ec1ea722bb370155e9454fb52187bd2b16cd8a0fe277e3e41bde",
     "repositoryCredentials": "5f9359057412199ea7a5659bdedbef664fb6da7bcd99d7a552f01a5782b904ea",
     "workspaceSetup": "3d7801c345eea875fb79adba4e04a4e2b24bad49ffe6ada62cc58117c5cce134",
-    "completed": "6aa99bf0d1ec3fa97f58816120c33ab6b477849cea82410f4d242014def2e60a",
+    "completed": "c3d7198df23e214c890f1556b933d00d1306e9dc87014275d3fb256366038219",
     "repositoryRetention": "a66448129d9ae2adf076f1d7887d3c7151cdc68f635c6fac7984d4254604d074",
     "agentProvisioning": "baac9e369ace8610f96948c1a930e6387431b1d0a33cefa3893765e52f8f7a52",
     "backendCompleted": "a2ba6fc82fbf0047cea491efad4a9e58eacaed7c29ce8528accff331569c51dd",
@@ -612,7 +620,8 @@
     "preRevisionHarnessAuthShape": "9dc926f94d6d0a72b64b7ecf3fd90c4288890b3cde1bc3f5d0eb9678a91267e0",
     "prePreparedRepositoryGit": "dcc8a204d43d548fd9364c55fd0ea842112962702334419b119fdb61f43da6e6",
     "prePreparedRepositoryDraftPulls": "4dda00f5af0e094e204cfecafbda5c6021f36b29ac56a1f0fa7d6dd49a5841fe",
-    "preLegacyRevisionExecutionAdmission": "a3baa07a6df20acbc3c128d624a9da6620a7717f5ec017888e2f3d59173d7f85"
+    "preLegacyRevisionExecutionAdmission": "a3baa07a6df20acbc3c128d624a9da6620a7717f5ec017888e2f3d59173d7f85",
+    "preOpenShellGitRoutes": "6aa99bf0d1ec3fa97f58816120c33ab6b477849cea82410f4d242014def2e60a"
   },
   "ledgerCatalogs": {
     "initialized": "62946da6b1fc2b06df09e97dda4cf1831f170a2f3d5ff35a9f107af206c425dc",

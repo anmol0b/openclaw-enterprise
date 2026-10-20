@@ -51,6 +51,13 @@ export interface OpenShellPreparedGitBinding {
   };
 }
 
+/** The provider generation this worker's own last write left: the facts a restarted worker
+ * persists to re-adopt the route (finding 2128). Identity and versions only, never a token. */
+export type OpenShellPreparedGitGeneration = Pick<
+  OpenShellPreparedGitBinding,
+  "providerId" | "profileVersion" | "resourceVersion" | "expiresAt" | "credentialState"
+>;
+
 /** Exact current installation identity; timestamps and sequence are not identity fields. */
 export interface OpenShellPreparedGitInstalled {
   readonly workspace: string;
@@ -335,6 +342,49 @@ export class OpenShellPreparedGitProvider {
     token = Object.freeze({ ...token });
     this.token(token);
     return this.create(token, "active", signal);
+  }
+
+  /**
+   * The binding of a generation this worker's own earlier write left, from the persisted
+   * route of a restarted worker (finding 2128). No gateway read and no evidence: observe()
+   * verifies these facts against the gateway before the route reopens, and a generation
+   * that does not verify never reopens it. An expired active generation is restored as the
+   * unprivileged one: its token grants nothing, so the route reopens only once the normal
+   * preparation path rotates the provider (a stale generation refuses the conditional write).
+   */
+  restore(generation: OpenShellPreparedGitGeneration): OpenShellPreparedGitBinding {
+    const expires = Date.parse(generation.expiresAt);
+    if (
+      !generation.providerId ||
+      !/^[1-9]\d*$/.test(generation.profileVersion) ||
+      !/^[1-9]\d*$/.test(generation.resourceVersion) ||
+      (generation.credentialState === "active"
+        ? !Number.isFinite(expires)
+        : generation.credentialState !== "bootstrap")
+    ) {
+      refuse();
+    }
+    const expired = generation.credentialState !== "active" || expires <= Date.now();
+    return Object.freeze({
+      workspace: this.scope.workspace,
+      sandbox: this.scope.sandbox,
+      executionId: this.scope.executionId,
+      provider: this.provider,
+      providerId: generation.providerId,
+      profile: this.profile.id,
+      profileVersion: generation.profileVersion,
+      resourceVersion: generation.resourceVersion,
+      expiresAt: expired ? "" : generation.expiresAt,
+      credentialState: expired ? "bootstrap" : generation.credentialState,
+      update: "accepted",
+      supervisor: "unknown",
+      readiness: Object.freeze({
+        rpc: "GetSandboxProviderStatus",
+        workspace: this.scope.workspace,
+        sandbox: this.scope.sandbox,
+        provider: this.provider,
+      }),
+    });
   }
 
   /** Creates an unprivileged provider so the sandbox can start before token preparation. */

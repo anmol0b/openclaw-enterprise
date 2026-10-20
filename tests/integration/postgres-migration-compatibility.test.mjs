@@ -1807,6 +1807,7 @@ test(
       [65, "prePreparedRepositoryGit"],
       [66, "prePreparedRepositoryDraftPulls"],
       [67, "preLegacyRevisionExecutionAdmission"],
+      [68, "preOpenShellGitRoutes"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -2218,6 +2219,7 @@ test(
       [65, "prePreparedRepositoryGit"],
       [66, "prePreparedRepositoryDraftPulls"],
       [67, "preLegacyRevisionExecutionAdmission"],
+      [68, "preOpenShellGitRoutes"],
     ]) {
       void context.test(history, async (child) => {
         const db = await historyDatabase(child, fixture, "providercontinuation");
@@ -2314,6 +2316,7 @@ test(
       [65, "prePreparedRepositoryGit"],
       [66, "prePreparedRepositoryDraftPulls"],
       [67, "preLegacyRevisionExecutionAdmission"],
+      [68, "preOpenShellGitRoutes"],
     ]) {
       void context.test(`prefix ${prefix} transaction`, async (child) => {
         const db = await historyDatabase(child, fixture, "rollback", { prefix });
@@ -2333,8 +2336,10 @@ test(
         // 0057 replaces the Harness validator, so reject that function replacement.
         // 0058 creates the policy table; 0059 has no DDL, so prefix 58 aborts in 0060 too.
         // Abort 0068 at its final VALIDATE: the decision backfill and the restored
-        // immutability trigger must roll back with it.
+        // immutability trigger must roll back with it. Abort 0069 at its final GRANT: the
+        // route table and its index roll back with it.
         const rollbackTag = [
+          [68, "GRANT"],
           [67, "ALTER TABLE"],
           [66, "GRANT"],
           [64, "ALTER TABLE"],

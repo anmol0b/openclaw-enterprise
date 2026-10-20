@@ -36,6 +36,7 @@
     "tests/integration/postgres-prepared-repository-git-broker.test.mjs",
     "tests/integration/postgres-prepared-github-git-use.test.mjs",
     "tests/integration/postgres-openshell-online-git-journey.test.mjs",
+    "tests/integration/postgres-openshell-git-routes.test.mjs",
     "tests/integration/postgres-egress-send-receipts.test.mjs",
     "tests/integration/postgres-protected-credential-free.test.mjs"
   ],
@@ -282,6 +283,12 @@
       "path": "tests/integration/postgres-openshell-online-git-journey.test.mjs",
       "expectedTests": [
         "OCE signed TLS Git authorization composes with PostgreSQL admission and material withdrawal"
+      ]
+    },
+    {
+      "path": "tests/integration/postgres-openshell-git-routes.test.mjs",
+      "expectedTests": [
+        "OpenShell Git routes persist identity and custody facts under one fenced holder"
       ]
     },
     {

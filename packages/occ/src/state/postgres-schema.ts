@@ -1961,6 +1961,86 @@ export const preparedRepositoryDraftPulls = occSchema.table(
   ],
 );
 
+// The identity keys of one verified OpenShell Git installation (the provider's
+// OpenShellPreparedGitInstalled), the only keys `observed` may carry.
+const openShellGitObservedKeys = sql`ARRAY['workspace', 'sandbox', 'sandboxId', 'executionId', 'provider',
+      'providerId', 'providerResourceVersion', 'profileVersion', 'credentialState',
+      'attachmentEpoch', 'providerEnvRevision', 'configRevision', 'policyHash',
+      'supervisorSessionId', 'processInstanceId', 'networkInstanceId']`;
+
+// A revision's OpenShell Git route as the worker that holds it last verified it, so a
+// restarted or replacement worker can re-adopt it (migration 0069, finding 2128). Identity
+// and custody facts only, never token material; `fence` names the adoption.
+export const openShellGitRoutes = occSchema.table(
+  "openshell_git_routes",
+  {
+    revisionId: text("revision_id")
+      .primaryKey()
+      .references(() => agentRevisions.id, { onDelete: "cascade" }),
+    namespaceId: text("namespace_id").notNull(),
+    agentId: text("agent_id").notNull(),
+    workspace: text("workspace").notNull(),
+    sandbox: text("sandbox").notNull(),
+    bindingId: text("binding_id").notNull(),
+    fence: bigint("fence", { mode: "number" }).notNull().default(1),
+    workerInstance: uuid("worker_instance").notNull(),
+    adoptedAt: timestamp("adopted_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    providerId: text("provider_id"),
+    profileVersion: text("profile_version"),
+    providerResourceVersion: text("provider_resource_version"),
+    credentialState: text("credential_state"),
+    materialExpiresAt: timestamp("material_expires_at", { withTimezone: true }),
+    materialVersion: uuid("material_version"),
+    preparationAttemptId: uuid("preparation_attempt_id"),
+    observed: jsonb("observed"),
+    writePending: text("write_pending"),
+    blocked: text("blocked"),
+  },
+  (t) => [
+    index("openshell_git_routes_namespace").on(t.namespaceId),
+    check("openshell_git_routes_binding_id_check", sql`${t.bindingId} ~ '^[A-Za-z0-9_-]{32}$'`),
+    check("openshell_git_routes_fence_check", sql`${t.fence} >= 1`),
+    check("openshell_git_routes_profile_version_check", sql`${t.profileVersion} ~ '^[1-9][0-9]*$'`),
+    check(
+      "openshell_git_routes_provider_resource_version_check",
+      sql`${t.providerResourceVersion} ~ '^[1-9][0-9]*$'`,
+    ),
+    check(
+      "openshell_git_routes_credential_state_check",
+      sql`${t.credentialState} IN ('bootstrap', 'active')`,
+    ),
+    check(
+      "openshell_git_routes_write_pending_check",
+      sql`${t.writePending} IN ('bootstrap', 'rotate')`,
+    ),
+    check(
+      "openshell_git_routes_check",
+      sql`(${t.providerId} IS NULL) = (${t.profileVersion} IS NULL)
+    AND (${t.providerId} IS NULL) = (${t.providerResourceVersion} IS NULL)
+    AND (${t.providerId} IS NULL) = (${t.credentialState} IS NULL)`,
+    ),
+    check(
+      "openshell_git_routes_check1",
+      sql`(${t.credentialState} = 'active') = (${t.materialExpiresAt} IS NOT NULL)`,
+    ),
+    check(
+      "openshell_git_routes_check2",
+      sql`(${t.materialVersion} IS NULL) = (${t.preparationAttemptId} IS NULL)`,
+    ),
+    check(
+      "openshell_git_routes_observed_check",
+      sql`${t.observed} IS NULL OR (jsonb_typeof(${t.observed}) = 'object'
+    AND ${t.observed} ?& ${openShellGitObservedKeys}
+    AND (${t.observed} - ${openShellGitObservedKeys}) = '{}'::jsonb)`,
+    ),
+  ],
+);
+
 export const sandboxPolicies = occSchema.table(
   "sandbox_policies",
   {

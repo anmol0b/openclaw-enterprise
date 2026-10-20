@@ -2,6 +2,7 @@ import { unlink, writeFile } from "node:fs/promises";
 import { createPostgresPool, PostgresPlatformState } from "@openclaw-enterprise/occ";
 import { startPreparedGitHubGitOwner } from "./backends/repository-credentials/prepared-git-owner.ts";
 import { startRepositoryReceiptServer } from "./backends/repository-credentials/receipt-server.ts";
+import { PostgresOpenShellGitRouteStore } from "./drivers/egress-proxy/openshell-git-route-store.ts";
 import {
   loadInstallationConfiguration,
   loadOperationalLoggingConfiguration,
@@ -176,7 +177,13 @@ try {
     if (!preparedRepositoryGit) {
       throw new Error("OpenShell Git requires its live prepared GitHub owner.");
     }
-    await openShellGit.start(preparedRepositoryGit, (event) => emitOccLogEvent(logger, event));
+    // Routes persist so a restarted worker re-adopts them instead of requiring a new
+    // revision (finding 2128).
+    await openShellGit.start(
+      preparedRepositoryGit,
+      (event) => emitOccLogEvent(logger, event),
+      new PostgresOpenShellGitRouteStore(pool),
+    );
   }
   let metrics;
   if (metricsSettings !== undefined) {

@@ -1,4 +1,5 @@
 import { routedRevision } from "../helpers/kubernetes-routed-scenarios.mjs";
+import { routeStore } from "../fixtures/openshell-git-route-store.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
@@ -5557,15 +5558,36 @@ test(
     let material;
     let approved = true;
     let approvalCount = 0;
-    await runtime.start({
-      readOpenShellMaterial: async () => material,
-      authorizeOpenShellRequest: async () => {
-        approvalCount++;
-        return approved;
+    const routes = routeStore();
+    await runtime.start(
+      {
+        readOpenShellMaterial: async () => material,
+        authorizeOpenShellRequest: async () => {
+          approvalCount++;
+          return approved;
+        },
       },
-    });
+      undefined,
+      routes,
+    );
     await drivers.sandboxDriver.provisionHarness({ ...context, revision, requirements });
     assert.equal(writes, 0);
+    // The route is on record for a restarted worker (finding 2128): the bootstrap generation
+    // this worker wrote, under its own fence, the binding id the Sandbox presents, no token.
+    {
+      const route = routes.rows.get(revision.id);
+      assert.equal(route.fence, 1);
+      assert.equal(route.writePending, undefined);
+      assert.equal(route.generation.credentialState, "bootstrap");
+      assert.match(route.generation.resourceVersion, /^[1-9]\d*$/);
+      assert.equal(
+        route.bindingId,
+        created.spec.policy.network_middlewares["oce-prepared-git"].config.fields.binding_id
+          .stringValue,
+      );
+      assert.equal(route.namespaceId, revision.namespaceId);
+      assert.equal(route.sandbox, created.name);
+    }
     assert.equal(created.spec.restart_policy, "SANDBOX_RESTART_POLICY_NEVER");
     assert.equal(created.spec.environment.GITHUB_TOKEN, undefined);
     assert.equal(created.spec.environment.OPENCLAW_REPOSITORY_ENROLLMENT, undefined);
@@ -6085,6 +6107,19 @@ tls.connect = (options, ...rest) => {
     installedVersion = "2";
     await until(async () => (await evaluate()) === 1);
     assert.ok(approvalCount > 0);
+    // The installed route's facts follow: the written generation, the material reference and
+    // the verified observation, still no token.
+    await until(() => routes.rows.get(revision.id).material?.materialVersion === "material-one");
+    {
+      const route = routes.rows.get(revision.id);
+      assert.equal(route.generation.credentialState, "active");
+      assert.equal(route.generation.resourceVersion, "2");
+      assert.equal(route.material.preparationAttemptId, "attempt-one");
+      assert.equal(route.observed.supervisorSessionId, "supervisor-one");
+      assert.equal(route.observed.sandboxId, "sandbox-id");
+      assert.equal(route.writePending, undefined);
+      assert.ok(!routes.dump().includes("synthetic-installation-token"), "a token was persisted");
+    }
     approved = false;
     assert.equal(await evaluate(), 2, "every request checks current owner authorization");
     approved = true;

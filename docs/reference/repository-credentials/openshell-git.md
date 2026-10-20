@@ -258,27 +258,54 @@ provides an attested reconnect identity (a planned change), continuity across a
 Gateway restart rests on that principal and the supervisor's own claims. No
 material is issued or replayed on adoption.
 
-A worker restart still requires a new version: the restarted worker refuses to
-adopt a Sandbox it did not prepare. The Agent stays active and chat works, but
-every Git request answers 403 (`no_binding`) until a new version deploys; meanwhile
-each maintenance pass logs `worker.compute-prepare-failed` with
-`KUBERNETES_PREPARATION_FAILED`.
+A worker restart (a rollout, an OOM kill, a node drain, an upgrade) does not
+require a new version either. The worker records each route it prepares in
+PostgreSQL (`occ.openshell_git_routes`): the Sandbox, the binding id the Sandbox
+presents, the provider generation it wrote, a reference to the material that
+generation carries and the last verified observation. Never a token. The restarted
+(or replacement) worker adopts the route from that record on its first maintenance
+pass, re-observes the installation and reopens the route only when the full
+observation verifies as the recorded one: the same Sandbox ID, provider, profile
+version and attachment epoch, the same supervisor process and network instance
+IDs, and the recorded generation at the Gateway. It then reads the material again
+from prepared custody: the same version needs no provider write, a newer one (the
+material was renewed while the worker was down) installs by the ordinary rotation.
+Nothing is replayed. Git requests are denied (`no_binding`, then `route_pending`)
+from the restart until that first verified read, typically well under a minute.
+A route that does not verify, a route whose previous worker stopped in the middle
+of a provider write (its outcome is unknown) and a withdrawn route are closed for
+good with their reason, as above: the Agent stays active and needs a new version.
+The record is a fence as well: a worker whose record another worker has adopted
+drops its copy of the route as `worker_replaced` (logged as a
+`worker.openshell-git-route-warning` with `status: closed`), serves no new request
+after that check and writes nothing more, so the worker holding the work-queue
+claim is the only one that rotates it; a request already past its fence check is
+still answered with the same material. The dropped copy is no tombstone: a worker
+that holds the claim again re-adopts the record (each adoption moves the fence).
+A request whose fence check the store does not answer is denied as
+`store_unavailable` without closing the route. A Sandbox prepared by a release
+before this record existed is not adopted: a restart still requires a new version
+for it, logged as `worker_restarted`.
 
 The worker log says which it was. `worker.error` with
 `OPENSHELL_GIT_RECONCILIATION_REQUIRED` carries the `reason` (for example
-`execution_replaced`, `supervisor_replaced`, `write_unknown`, `worker_restarted`
-once per version when a restarted or other worker finds a Sandbox it did not prepare, or
-`gateway_unauthorized` when the Gateway refuses the worker's identity), the Namespace,
-Agent, revision and `repositoryRef`; `worker.openshell-git-route-warning` reports a
+`execution_replaced`, `supervisor_replaced`, `write_unknown`,
+`worker_restarted` once per version when a restarted or other worker finds a Sandbox
+without a route record, or `gateway_unauthorized` when the Gateway refuses the
+worker's identity), the Namespace, Agent, revision and `repositoryRef`;
+`worker.openshell-git-route-warning` reports a
 route closed by a failed read (`status: unobserved` with `gateway_unavailable`,
 `timeout`, `read_failed`) or, on the first request refused for it, material the
 version had and lost (`status: pending`, `reason: material_unavailable`), and
-`worker.openshell-git-route` its
+`worker.openshell-git-route` a route adopted from its record after a restart
+(`status: adopted`, `reason: worker_restarted`, with the adoption `fence`) and its
 restoration with the outage's `durationMs` (`reason: supervisor_reconnected` when
-it reopened on a new supervisor session). Each request the worker refuses logs one
+it reopened on a new supervisor session, `reason: worker_restarted` when a restarted
+worker reopened it: that duration counts from the adoption, not from the restart).
+Each request the worker refuses logs one
 `worker.openshell-git-denied` line with its `reason` (`route_unobserved`,
-`material_unavailable`, `route_blocked`, `ref_not_allowed`, `approval_denied`, and
-so on), the Sandbox ID and the request ID the supervisor's own log shows.
+`material_unavailable`, `route_blocked`, `store_unavailable`, `ref_not_allowed`,
+`approval_denied`, and so on), the Sandbox ID and the request ID the supervisor's own log shows.
 
 ## GitHub App key rotated or revoked
 
