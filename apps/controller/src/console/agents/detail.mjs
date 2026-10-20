@@ -1323,6 +1323,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         showLeaveBlock();
         return;
       }
+      if (draftEditorBlocksNavigation()) {
+        // Show the refusal at the editor without adding a visit the reader never made.
+        showLeaveBlock();
+        openVersionDetail({ animate: true });
+        return;
+      }
       // The load this navigation starts is the next one.
       linkedVersionView = { key: linkedKey(revision, tab), load: consoleLoads + 1, deploy };
       context.navigate(target(revision, tab));
@@ -5093,17 +5099,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       return true;
     }
     if (draftEditorBlocksNavigation()) {
-      history.replaceState(
-        history.state,
-        "",
-        context.pageUrl(target(selected, selectedTab), namespaceId),
-      );
       showLeaveBlock();
       // A recovery link refused here would look dead again: its refusal shows with the editor.
       if (takeLinkedVersionView(linkedKey(nextRevision, nextTab))) {
         openVersionDetail({ animate: true });
       }
-      return true;
+      return "blocked";
     }
     if (nextRevision !== selected) {
       return false;

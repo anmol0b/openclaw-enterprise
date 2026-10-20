@@ -3638,6 +3638,8 @@ export const scenarios = {
       "Change a draft setting. Focus Save Configuration and press Enter; “Checking Configuration…” takes focus while Save is disabled.",
       "If you stay in the editor, focus returns to Edit Configuration with “Configuration saved.” as its description.",
       "Edit and save once more. Move focus to the Agents link before the save finishes; focus stays on the link.",
+      "Visit Plugins, then Channels, then Configuration. Edit and save a setting, then use browser Back while the save is in progress. Configuration stays open to show the result.",
+      "After “Configuration saved.”, use Back once to return to Channels. Forward returns to Configuration without saving again.",
     ],
   },
   configurationSaveRefused: {
@@ -3990,6 +3992,10 @@ export const scenarios = {
     ],
     description:
       "Reopening the desired configuration keeps the Agent default and each explicit override. Saving changes updates the draft; admitted revisions retain their prior access.",
+    steps: [
+      "Visit Channels, return to Repositories, change a selection, then press browser Back. The selection stays, with a note to save or cancel before leaving.",
+      "Cancel the edit. Back returns to Channels; Forward opens Repositories with the saved selection.",
+    ],
   },
   repositoryEditorNotConfigured: {
     group: "Pages/Agent detail",
@@ -4536,6 +4542,8 @@ export const scenarios = {
       "Recovery comes first: v7 failed its startup model check, while selected v6 may have stopped. The detailed record preserves the reported cause without assuming a credential problem.",
     steps: [
       "Open v7 Logs and confirm the failed version, then go Back. Open Configuration goes to the draft without deploying, scrolls it into view and focuses its Configuration tab.",
+      "From the draft, open Channels, then Repositories. Select example/application without saving, then follow Open Configuration in the recovery card.",
+      "Focus returns to Repositories with your selection intact and a reminder to save or cancel. Choose Cancel, then go Back once to Channels and Forward to Repositories.",
       "At phone width, the failure, both recovery links, and selected version are still near the top.",
     ],
   },
