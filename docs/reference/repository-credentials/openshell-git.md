@@ -13,6 +13,23 @@ not close either gap. This is not a general hardened credential-isolation claim.
 Qualify your actual deployment before admitting a real repository credential;
 chart renders and source tests do not establish an AWS deployment result.
 
+## Prerequisites
+
+Check these before the trial; each one stops Git or the Agent:
+
+- **Kernel.** The Driver requires Landlock (`hard_requirement`), and Sandboxes need
+  Landlock ABI v3 or later, Linux 6.2 or newer. A node on an older kernel, such as
+  the 5.15 kernel of Ubuntu 22.04, fails Sandbox startup.
+- **Supervisor trust.** The OpenShell supervisor makes its own TLS connections to
+  GitHub and the model endpoint, using its image's CA bundle. If a private CA or a
+  TLS-inspecting proxy sits on either path, use a supervisor image that trusts that
+  CA; otherwise the model probe times out and Git requests fail.
+- **Unattended commands.** With
+  `plugins.entries.codex.config.appServer.approvalPolicy: on-request` and no
+  approver, Codex declines the shell commands it asks about, so Git never runs. For
+  an unattended trial, set it to `never`, which removes the approval step.
+- **PATH.** Draft creation needs the helper on PATH; see the login-shell note below.
+
 ## Prepare the installation
 
 Start with the [repository installation inputs](../../guides/repository-credentials/installation.md)
