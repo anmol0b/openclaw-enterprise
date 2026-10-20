@@ -7683,6 +7683,7 @@ export class OpenClawController {
     additions: readonly SandboxNetworkGrant[],
     version: number,
     defaults?: SandboxPolicySnapshot["defaults"],
+    scope?: { readonly repositoryCredentials: boolean },
   ): SandboxPolicySnapshot {
     try {
       validateSandboxNetworkGrants(additions);
@@ -7712,11 +7713,36 @@ export class OpenClawController {
       );
     }
     try {
-      return driver.admitNetworkPolicy(additions, version, defaults);
-    } catch {
+      return driver.admitNetworkPolicy(additions, version, defaults, scope);
+    } catch (error) {
+      // A Driver's named refusal, such as a grant beside its repository route (finding 2144).
+      if (error instanceof ResourceStateConflictError) {
+        throw error;
+      }
       throw new ResourceStateConflictError(
         "The Sandbox Driver cannot enforce the complete requested policy.",
       );
+    }
+  }
+
+  /**
+   * Finding 2144: a Sandbox Driver may reach repository hosts only through its own route, so
+   * a repository binding saved beside the Agent's network grants gets the Driver's overlap
+   * check here, before deploy. Other policy refusals stay with save, apply and deploy.
+   */
+  private refuseRepositoryNetworkOverlap(policy: Readonly<SandboxPolicy> | undefined): void {
+    const driver = this.sandboxDriver();
+    if (policy === undefined || policy.additions.length === 0 || !driver?.admitNetworkPolicy) {
+      return;
+    }
+    try {
+      driver.admitNetworkPolicy(policy.additions, policy.version, undefined, {
+        repositoryCredentials: true,
+      });
+    } catch (error) {
+      if (error instanceof ResourceStateConflictError) {
+        throw error;
+      }
     }
   }
 
@@ -7754,7 +7780,9 @@ export class OpenClawController {
       if (additions.length > 0) {
         await this.refuseProtectedExecutionPolicy(state, namespaceId, agent, "additions");
       }
-      this.admitAgentNetworkPolicy(additions, expectedVersion + 1);
+      this.admitAgentNetworkPolicy(additions, expectedVersion + 1, undefined, {
+        repositoryCredentials: (agent.repositoryBindings?.length ?? 0) > 0,
+      });
       const updated = await state.sandboxPolicies.save(
         {
           id: previous.id,
@@ -7826,6 +7854,7 @@ export class OpenClawController {
         policy.additions,
         policy.version,
         revision.sandboxPolicy.defaults,
+        { repositoryCredentials: revision.repositoryCredentials !== undefined },
       );
       const id = crypto.randomUUID();
       const updated = await state.sandboxPolicies.save(
@@ -8285,6 +8314,13 @@ export class OpenClawController {
         },
         savedConfiguration,
       );
+      // The reverse of the policy save's check: a binding added beside a saved grant that
+      // reaches the repository hosts (finding 2144).
+      if ((repositoryBindings ?? agent.repositoryBindings ?? []).length > 0) {
+        this.refuseRepositoryNetworkOverlap(
+          await state.sandboxPolicies.find(namespace.id, agent.id),
+        );
+      }
       const updated = await state.agents.updateConfiguration(
         namespace.id,
         agent.id,
@@ -8697,10 +8733,11 @@ export class OpenClawController {
         );
       }
       const policy = await state.sandboxPolicies.find(namespace.id, lockedAgent.id);
+      const policyScope = { repositoryCredentials: repositoryCredentials !== undefined };
       const sandboxPolicy =
         (policy?.additions.length ?? 0) > 0
-          ? this.admitAgentNetworkPolicy(policy!.additions, policy!.version)
-          : sandbox?.admitNetworkPolicy?.([], policy?.version ?? 1);
+          ? this.admitAgentNetworkPolicy(policy!.additions, policy!.version, undefined, policyScope)
+          : sandbox?.admitNetworkPolicy?.([], policy?.version ?? 1, undefined, policyScope);
       if ((policy?.additions.length ?? 0) > 0 && sandboxPolicy === undefined) {
         throw new ResourceStateConflictError(
           "The selected Sandbox Driver cannot enforce this Agent's network policy.",

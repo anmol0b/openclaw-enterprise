@@ -1645,10 +1645,16 @@ export interface SandboxDriver extends Driver {
     readonly portRanges: boolean;
     readonly live: boolean;
   };
+  /**
+   * `scope.repositoryCredentials` marks a policy for an Agent or revision with repository
+   * bindings, which a Driver may route only through its own repository path; it refuses an
+   * overlapping policy with a `ResourceStateConflictError` whose message names the rule.
+   */
   admitNetworkPolicy?(
     additions: readonly SandboxNetworkGrant[],
     version: number,
     defaults?: SandboxPolicySnapshot["defaults"],
+    scope?: { readonly repositoryCredentials?: boolean },
   ): SandboxPolicySnapshot;
   observeNetworkPolicy?(
     context: SandboxLogContext,

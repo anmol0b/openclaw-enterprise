@@ -5812,10 +5812,111 @@ tls.connect = (options, ...rest) => {
       );
     }
     // The same policy is fine without the Git route.
-    new OpenShellSandboxDriver(collisionConfiguration, {
+    const routeless = new OpenShellSandboxDriver(collisionConfiguration, {
       id: drivers.sandboxDriver.id,
       backend: backendFor(gateway),
     });
+
+    // Finding 2144: an Agent network grant must not open a route beside the middleware either,
+    // on any port. Admission refuses it for a repository-bound Agent, naming the grant.
+    const sandboxDriver = drivers.sandboxDriver;
+    const allowed = {
+      id: "docs",
+      binary: "/usr/bin/curl",
+      host: "docs.github.com",
+      ports: [{ from: 443, to: 443 }],
+    };
+    const repositoryScope = { repositoryCredentials: true };
+    assert.deepEqual(
+      sandboxDriver.admitNetworkPolicy([allowed], 2, undefined, repositoryScope).additions,
+      [allowed],
+    );
+    for (const [host, port] of [
+      ["github.com", 22],
+      ["api.github.com", 443],
+      ["*.github.com", 443],
+    ]) {
+      const direct = { ...allowed, id: "git-direct", host, ports: [{ from: port, to: port }] };
+      assert.throws(
+        () => sandboxDriver.admitNetworkPolicy([allowed, direct], 2, undefined, repositoryScope),
+        {
+          name: "ResourceStateConflictError",
+          message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove network grant git-direct (${host}).`,
+        },
+        host,
+      );
+      // Without a repository binding, or without the Git route, the grant is admitted.
+      assert.equal(sandboxDriver.admitNetworkPolicy([direct], 2).additions[0].host, host);
+      assert.equal(
+        routeless.admitNetworkPolicy([direct], 2, undefined, repositoryScope).additions[0].host,
+        host,
+      );
+    }
+    // Revision defaults get the same check; the Driver's own policies were checked at startup.
+    const defaults = sandboxDriver.admitNetworkPolicy([], 1).defaults;
+    assert.throws(
+      () =>
+        sandboxDriver.admitNetworkPolicy(
+          [],
+          1,
+          { ...defaults, mirror: { name: "mirror", endpoints: [{ host: "github.com" }] } },
+          repositoryScope,
+        ),
+      /remove sandbox network policy mirror\.$/,
+    );
+    // Backstop at provisioning: a revision admitted with such a grant never gets a Sandbox.
+    const direct = {
+      ...allowed,
+      id: "git-direct",
+      host: "github.com",
+      ports: [{ from: 443, to: 443 }],
+    };
+    const bypassRevision = {
+      ...revision,
+      id: "rev_00000000-0000-4000-8000-000000002144",
+      sandboxPolicy: {
+        driverId: sandboxDriver.id,
+        implementation: sandboxDriver.implementation,
+        version: 2,
+        defaults,
+        additions: [direct],
+      },
+    };
+    const createdBefore = created;
+    await assert.rejects(
+      sandboxDriver.provisionHarness({ ...context, revision: bypassRevision, requirements }),
+      {
+        name: "SandboxRevisionUnsupportedError",
+        code: "SANDBOX_HARNESS_UNSUPPORTED",
+        message: /remove network grant git-direct \(github\.com\)\.$/,
+      },
+    );
+    assert.equal(created, createdBefore, "no Sandbox is created");
+    // Backstop at live application: the running Git Sandbox's policy is never widened.
+    const getSandbox = gateway.getSandbox;
+    const updatePolicy = gateway.updatePolicy;
+    let policyUpdates = 0;
+    gateway.getSandbox = async ({ name }) => ({ ...sandboxes.get(name), resourceVersion: "1" });
+    gateway.updatePolicy = async () => {
+      policyUpdates++;
+    };
+    try {
+      await assert.rejects(
+        sandboxDriver.applyNetworkPolicy(
+          { namespace: context.namespace, revision, signal: AbortSignal.timeout(2_000) },
+          {
+            snapshot: { ...bypassRevision.sandboxPolicy },
+            expectedProviderVersion: "1",
+            operationId: randomUUID(),
+          },
+        ),
+        { name: "ResourceStateConflictError", message: /remove network grant git-direct/ },
+      );
+      assert.equal(policyUpdates, 0);
+    } finally {
+      gateway.getSandbox = getSandbox;
+      gateway.updatePolicy = updatePolicy;
+    }
 
     assert.equal(
       created.spec.policy.network_middlewares["oce-prepared-git"].on_error,

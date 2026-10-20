@@ -136,10 +136,13 @@ retirement must find the provider resource even if that Pod is already gone.
 ## Optional network policy operations
 
 `networkPolicy` declares `wildcards`, `portRanges`, and `live` support.
-`admitNetworkPolicy(additions, version, defaults?)` validates every requested
+`admitNetworkPolicy(additions, version, defaults?, scope?)` validates every requested
 constraint and returns a detached snapshot of Driver identity, version, defaults,
 and additions. The snapshot is consumed by provisioning; changed startup defaults
-cannot reinterpret an admitted revision.
+cannot reinterpret an admitted revision. `scope.repositoryCredentials` marks an
+Agent with repository bindings: a Driver that routes repository hosts only through
+its own path refuses a rule that reaches them with a `ResourceStateConflictError`
+naming the rule.
 
 `observeNetworkPolicy(context, snapshot)` returns the provider resource version,
 policy version, load state, and whether the complete candidate matches.

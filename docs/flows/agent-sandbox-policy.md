@@ -47,6 +47,10 @@ and checks editing, expected version, pending work, complete ceiling coverage,
 and Driver admission. While the active revision runs under protected execution
 (its egress is governed by the Credential Proxy routes), additions and live
 application are refused with `409`; the policy view reports `protectedExecution`.
+For an Agent with repository bindings (or a Git-bound active revision), Driver
+admission gets `repositoryCredentials`: the OpenShell Driver with its Git route
+refuses a grant or default reaching `github.com`/`api.github.com` with a `409`
+naming it. Adding a binding beside such a saved grant, deploy, and provisioning refuse it too.
 `apps/controller/src/http/sandbox-policy.ts` records the
 nonsecret approved additions with their version in the same transaction.
 The required facet argument currently admits `networking` only. Other facets

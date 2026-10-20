@@ -42,7 +42,10 @@ If a read fails, retry that read. Manual policy editing remains available when
 logs or recommendations are unavailable. If saving reports a stale version,
 refresh and review the current additions. An Agent whose running version uses
 protected execution (the Credential Proxy) refuses additions and live application
-until a version without it runs; the editor says so. After a timeout or unconfirmed
+until a version without it runs; the editor says so. With OpenShell Git, an Agent
+with a repository binding cannot add a grant for `github.com` or `api.github.com`
+(any port or matching wildcard): those hosts go only through the Git route, so
+save, binding, deploy and apply refuse it and name the grant. After a timeout or unconfirmed
 application, refresh and inspect the recorded state before another explicit
 request; do not assume the provider rejected the change.
 

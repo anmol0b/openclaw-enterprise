@@ -127,7 +127,10 @@ for `github.com` and `api.github.com`. Do not hand-author its binding identifier
 Those hosts come only from this route: if another Sandbox Driver network policy
 (`policy.networkPolicies`, such as a `source-control` policy) also allows them, the
 Installation refuses to start and names that policy. The Driver still needs at
-least one policy, such as the model endpoint's.
+least one policy, such as the model endpoint's. An Agent network grant for those
+hosts on any port is refused the same way: saving it for an Agent with a repository
+binding, adding the binding beside it, deploy and live application each fail with a
+`409` that names the grant.
 Retain HTTPS, hostname verification and authenticated Gateway JWTs; do not enable
 `allow_insecure_transport`. This policy attachment still has the stock enforcement
 and origin-TLS limits stated above.

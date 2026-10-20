@@ -9,6 +9,9 @@ import { KubernetesComputeDriver } from "../../apps/controller/src/drivers/compu
 import { SshComputeDriver } from "../../apps/controller/src/drivers/compute/ssh/index.ts";
 import { OCCPluginDriver } from "../../apps/controller/src/drivers/plugin/index.ts";
 import { GitHubRepoDriver } from "../../apps/controller/src/drivers/repo/github/driver.ts";
+import { OpenShellGateway } from "../../apps/controller/src/backends/openshell.ts";
+import { OpenShellGitRuntime } from "../../apps/controller/src/drivers/egress-proxy/openshell-git-runtime.ts";
+import { OpenShellSandboxDriver } from "../../apps/controller/src/drivers/sandbox/openshell.ts";
 import { UnixRepositoryCredentialControlClient } from "../../apps/controller/src/backends/repository-credentials/control-client.ts";
 import { validateGitHubRepositoryRegistry } from "../../apps/controller/src/drivers/repo/github/credentials/registry.ts";
 import { InMemoryAuditSink } from "../../packages/audit/src/index.ts";
@@ -136,6 +139,7 @@ async function fixture(
     repositories = true,
     harness = "openclaw",
     configurationDriver = createTestConfigurationDriver(),
+    controllerOptions = {},
   } = {},
 ) {
   const installation = {
@@ -177,7 +181,11 @@ async function fixture(
     : [];
 
   async function compose(registry, Driver) {
-    const controller = new OpenClawController(installation, { state, backends });
+    const controller = new OpenClawController(installation, {
+      state,
+      backends,
+      ...controllerOptions,
+    });
     for (const driver of [iam, compute, configurationDriver, secretDriver]) {
       controller.registerDriver(driver);
       controller.selectDriver(driver.capability, driver.id);
@@ -1142,4 +1150,159 @@ test("Provisioning refuses repository bindings on a topology Agent create refuse
   assert.equal(refused.error.code, "RESOURCE_CONFLICT");
   assert.equal(refused.error.message, created.error.message);
   assert.deepEqual((await f.request("GET", f.collection)).data, []);
+});
+
+test("OpenShell Git refuses an Agent network grant to the Git hosts at save, binding and deploy", async (t) => {
+  // Finding 2144: with the OpenShell Git route, github.com and api.github.com are reachable only
+  // through its middleware. An approved grant for them would add a direct route beside it, so
+  // the policy save, the binding save (the reverse order), deploy and live application refuse
+  // it with a message naming the grant. The Driver's provisioning backstop is covered in
+  // sandbox-driver-startup.
+  const grant = (id, host, port = 443) => ({
+    id,
+    binary: "/usr/bin/git",
+    host,
+    ports: [{ from: port, to: port }],
+  });
+  const docs = grant("docs", "docs.github.com");
+  const direct = grant("git-direct", "github.com", 22);
+  class OpenShellGitComputeDriver extends KubernetesComputeDriver {
+    // Stands in for the Kubernetes Driver composed with drivers.repo.openShell, which admits
+    // dedicated Codex repository bindings in the selected OpenShell Sandbox.
+    validateRepositoryCredentials(harness) {
+      assert.deepEqual([harness.id, harness.mode], ["codex", "dedicated"]);
+    }
+  }
+  const f = await fixture(t, {
+    harness: "codex",
+    compute: kubernetesCompute(OpenShellGitComputeDriver),
+    controllerOptions: { sandboxNetworkPolicyCeiling: [docs, direct] },
+  });
+  const sandbox = new OpenShellSandboxDriver(
+    {
+      gateway: { workspaceMode: "operator" },
+      kubernetes: {
+        runtimeClassName: "openshell-sandbox",
+        serviceAccount: { mode: "gatewayConfigured" },
+        sandboxDataMount: {
+          subPath: "workspace",
+          mountPath: "/sandbox/enterprise",
+          readOnly: false,
+        },
+      },
+      policy: {
+        process: { runAsUser: "1000", runAsGroup: "1000" },
+        networkPolicies: [
+          {
+            name: "model",
+            binaries: [{ path: "/usr/bin/codex" }],
+            endpoints: [{ host: "api.openai.com", ports: [443] }],
+          },
+        ],
+      },
+    },
+    {
+      id: "repository-admission-openshell",
+      implementation: "openshell",
+      backend: {
+        id: "openshell",
+        drivers: { sandbox: "repository-admission-openshell" },
+        client: new OpenShellGateway({ serviceName: "openshell-gateway" }),
+      },
+      // Admission reads only the route's host check; nothing starts it.
+      openShellGit: new OpenShellGitRuntime(
+        {},
+        validateGitHubRepositoryRegistry(f.registry, backendId),
+      ),
+    },
+  );
+  f.controller.registerDriver(sandbox);
+  f.controller.selectDriver("sandbox", sandbox.id);
+  const message =
+    "OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove network grant git-direct (github.com).";
+  const policyPath = (agent) => `${f.collection}/${agent.id}/sandbox-policy/networking`;
+  const enableEditing = async (agent) => {
+    const enabled = await f.request("PATCH", `${policyPath(agent)}/editing`, { enabled: true });
+    assert.equal(enabled.status, 200, JSON.stringify(enabled));
+  };
+  const additions = async (agent) =>
+    (await f.request("GET", policyPath(agent))).data.policy.additions;
+
+  // Policy save on a repository-bound Agent.
+  const bound = await f.createAgent({ executionMode: "dedicated", repositoryBindings: selection });
+  await enableEditing(bound);
+  const refused = await f.request("PUT", policyPath(bound), {
+    expectedVersion: 1,
+    additions: [docs, direct],
+  });
+  assert.equal(refused.status, 409, JSON.stringify(refused));
+  assert.equal(refused.error.code, "RESOURCE_CONFLICT");
+  assert.equal(refused.error.message, message);
+  assert.deepEqual(await additions(bound), []);
+  const saved = await f.request("PUT", policyPath(bound), {
+    expectedVersion: 1,
+    additions: [docs],
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved));
+
+  // The reverse order: the grant first, then the binding.
+  const unbound = await f.createAgent({ executionMode: "dedicated" });
+  await enableEditing(unbound);
+  const granted = await f.request("PUT", policyPath(unbound), {
+    expectedVersion: 1,
+    additions: [direct],
+  });
+  assert.equal(granted.status, 200, "without a binding the grant is an ordinary one");
+  const binding = await f.request("PATCH", `${f.collection}/${unbound.id}`, {
+    configurationId: f.configuration.id,
+    repositoryBindings: selection,
+  });
+  assert.equal(binding.status, 409, JSON.stringify(binding));
+  assert.equal(binding.error.message, message);
+  assert.equal(
+    (await f.request("GET", `${f.collection}/${unbound.id}`)).data.repositoryBindings,
+    undefined,
+  );
+
+  // Deploy refuses a pair stored before these checks, and creates no revision.
+  await f.prepareDeployment(bound);
+  const stored = async (agent, grants) =>
+    f.state.transact(async (unit) => {
+      const policy = await unit.sandboxPolicies.find(f.namespace.id, agent.id);
+      const { application: _application, ...rest } = policy;
+      assert.ok(
+        await unit.sandboxPolicies.save(
+          { ...rest, version: policy.version + 1, additions: grants },
+          policy.version,
+        ),
+      );
+    });
+  await stored(bound, [direct]);
+  const deployPath = `${f.collection}/${bound.id}/deploy`;
+  const deploy = await f.request("POST", deployPath);
+  assert.equal(deploy.status, 409, JSON.stringify(deploy));
+  assert.equal(deploy.error.message, message);
+  assert.deepEqual((await f.request("GET", `${f.collection}/${bound.id}/revisions`)).data, []);
+
+  // Live application to the active Git-bound revision refuses it too.
+  await stored(bound, [docs]);
+  const deployed = await f.request("POST", deployPath);
+  assert.equal(deployed.status, 202, JSON.stringify(deployed));
+  assert.ok(deployed.data.repositoryCredentials);
+  const revision = await f.state.read((view) =>
+    view.revisions.findRevision(f.namespace.id, bound.id, deployed.data.id),
+  );
+  assert.deepEqual(revision.sandboxPolicy.additions, [docs]);
+  await f.state.transact((unit) =>
+    unit.agents.compareAndSetActiveRevision(f.namespace.id, bound.id, undefined, deployed.data.id),
+  );
+  await stored(bound, [docs, direct]);
+  const version = (await f.request("GET", policyPath(bound))).data.policy.version;
+  const applied = await f.request("POST", `${policyPath(bound)}/apply`, {
+    expectedVersion: version,
+    revisionId: deployed.data.id,
+  });
+  assert.equal(applied.status, 409, JSON.stringify(applied));
+  assert.equal(applied.error.message, message);
+  assert.equal((await f.request("GET", policyPath(bound))).data.policy.application, undefined);
 });

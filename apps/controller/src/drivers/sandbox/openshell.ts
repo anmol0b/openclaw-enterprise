@@ -30,6 +30,7 @@ import {
   ConfigurationHarnessError,
   configurationSettingMessage,
   DependencyUnavailableError,
+  ResourceStateConflictError,
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
   SandboxNamespaceRefusedError,
@@ -1950,6 +1951,10 @@ function networkPolicyBinaries(policy: OpenShellNetworkPolicyRule) {
   }));
 }
 
+function gitRouteOverlapMessage(rule: string): string {
+  return `OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove ${rule}.`;
+}
+
 function assertNoRepositoryEnrollment(
   context: SandboxHarnessContext,
   runtime?: OpenShellGitRuntime,
@@ -2830,6 +2835,22 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     const codex = context.revision.harness.id === "codex";
     const client = this.gatewayClientForNamespace(sandbox.namespaceName);
     const workspace = workspaceName(context.namespace);
+    // Backstop for the admission check (finding 2144): the revision's own policy is immutable,
+    // so a retry cannot clear an overlap.
+    const gitOverlap =
+      context.revision.repositoryCredentials === undefined ||
+      context.requirements.proxyWiring !== undefined
+        ? undefined
+        : this.gitRouteOverlap(
+            context.revision.sandboxPolicy?.defaults ?? networkPolicies(this.options),
+            context.revision.sandboxPolicy?.additions ?? [],
+          );
+    if (gitOverlap !== undefined) {
+      throw new SandboxRevisionUnsupportedError(
+        "SANDBOX_HARNESS_UNSUPPORTED",
+        gitRouteOverlapMessage(gitOverlap),
+      );
+    }
     const git =
       context.revision.repositoryCredentials === undefined
         ? undefined
@@ -3531,11 +3552,18 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     additions: readonly SandboxNetworkGrant[],
     version: number,
     defaults?: SandboxPolicySnapshot["defaults"],
+    scope?: { readonly repositoryCredentials?: boolean },
   ): SandboxPolicySnapshot {
     openShellAgentNetworkRules(additions);
     const rules = defaults ?? networkPolicies(this.options);
     if (Object.keys(rules).some((name) => name.startsWith(AGENT_POLICY_PREFIX))) {
       throw new Error("Default policy uses a reserved Agent policy name.");
+    }
+    if (scope?.repositoryCredentials === true) {
+      const overlap = this.gitRouteOverlap(rules, additions);
+      if (overlap !== undefined) {
+        throw new ResourceStateConflictError(gitRouteOverlapMessage(overlap));
+      }
     }
     return immutableCopy({
       driverId: this.id,
@@ -3544,6 +3572,33 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       defaults: rules as OpenClawConfigurationDocument,
       additions,
     });
+  }
+
+  /**
+   * With the OpenShell Git route, github.com and api.github.com are reachable only through its
+   * middleware, which authorizes, audits and denies each request. A rule beside it would skip
+   * all three, on any port (finding 2144). Names the first such rule: an Agent network grant,
+   * then a default policy. The Driver's own policies are checked at construction (2131).
+   */
+  private gitRouteOverlap(
+    defaults: Readonly<Record<string, unknown>>,
+    additions: readonly SandboxNetworkGrant[],
+  ): string | undefined {
+    return this.openShellGit?.overlappingPolicy([
+      ...additions.map((grant) => ({
+        name: `network grant ${grant.id} (${grant.host})`,
+        endpoints: [{ host: grant.host }],
+      })),
+      ...Object.entries(defaults).map(([name, rule]) => {
+        const endpoints = asRecord(rule)?.endpoints;
+        return {
+          name: `sandbox network policy ${name}`,
+          endpoints: (Array.isArray(endpoints) ? endpoints : []).map((endpoint) => ({
+            host: String(asRecord(endpoint)?.host ?? ""),
+          })),
+        };
+      }),
+    ]);
   }
 
   private async policyTarget(context: SandboxLogContext) {
@@ -3622,6 +3677,14 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       client.updatePolicy === undefined
     ) {
       throw new Error("Live policy application is unsupported.");
+    }
+    // Backstop for the admission check (finding 2144): never add a Git route bypass live.
+    const overlap =
+      context.revision.repositoryCredentials === undefined
+        ? undefined
+        : this.gitRouteOverlap(input.snapshot.defaults, input.snapshot.additions);
+    if (overlap !== undefined) {
+      throw new ResourceStateConflictError(gitRouteOverlapMessage(overlap));
     }
     const baseline = asRecord(sandbox.spec?.policy);
     if (baseline === undefined) {
