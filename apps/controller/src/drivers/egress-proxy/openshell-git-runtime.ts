@@ -250,6 +250,16 @@ async function read<T>(operation: () => Promise<T>, signal: AbortSignal): Promis
   }
 }
 
+function revisionIdentity(revision: Readonly<AgentRevision>): Readonly<Record<string, string>> {
+  const binding = revision.repositoryCredentials?.bindings[0];
+  return {
+    namespaceId: revision.namespaceId,
+    agentId: revision.agentId,
+    revisionId: revision.id,
+    ...(binding === undefined ? {} : { repositoryRef: binding.repositoryRef }),
+  };
+}
+
 /** Worker-local authority. A restart deliberately requires a new revision; persisted labels
  * alone cannot adopt an old supervisor or resume a provider write whose result was lost. */
 export class OpenShellGitRuntime {
@@ -326,6 +336,14 @@ export class OpenShellGitRuntime {
         await this.checkOtherProviders(client, workspace, otherProviders, signal);
         const current = await client.getSandbox({ workspace, name: sandbox }, signal);
         if (current) {
+          // The rejected bootstrap is retained below, so this logs once per revision while
+          // every later pass (maintenance included) rethrows the same failure.
+          this.emit?.({
+            event: "worker.error",
+            code: "OPENSHELL_GIT_RECONCILIATION_REQUIRED",
+            reason: "worker_restarted",
+            ...revisionIdentity(revision),
+          });
           throw new Error("OpenShell Git requires a new revision after worker restart.");
         }
         const info = await client.getGatewayInfo?.(signal);
@@ -635,13 +653,7 @@ export class OpenShellGitRuntime {
   }
 
   private identity(entry: Entry): Readonly<Record<string, string>> {
-    const binding = entry.revision.repositoryCredentials?.bindings[0];
-    return {
-      namespaceId: entry.revision.namespaceId,
-      agentId: entry.revision.agentId,
-      revisionId: entry.revision.id,
-      ...(binding === undefined ? {} : { repositoryRef: binding.repositoryRef }),
-    };
+    return revisionIdentity(entry.revision);
   }
 
   private pending(entry: Entry, reason: "unverified" | "material_unavailable"): void {

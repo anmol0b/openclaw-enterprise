@@ -177,11 +177,14 @@ and Git requests are denied; the worker reads again with a bounded backoff (1 s
 doubling to 10 s) and reopens the route, without a new version, once the same
 installation verifies. Nothing is rewritten or replayed meanwhile. A worker restart
 still requires a new version: the restarted worker refuses to adopt a Sandbox it did
-not prepare.
+not prepare. The Agent stays active and chat works, but every Git request answers
+403 (`no_binding`) until a new version deploys; meanwhile each maintenance pass logs
+`worker.compute-prepare-failed` with `KUBERNETES_PREPARATION_FAILED`.
 
 The worker log says which it was. `worker.error` with
 `OPENSHELL_GIT_RECONCILIATION_REQUIRED` carries the `reason` (for example
-`execution_replaced`, `supervisor_replaced`, `write_unknown`, or
+`execution_replaced`, `supervisor_replaced`, `write_unknown`, `worker_restarted`
+once per version when a restarted or other worker finds a Sandbox it did not prepare, or
 `gateway_unauthorized` when the Gateway refuses the worker's identity), the Namespace,
 Agent, revision and `repositoryRef`; `worker.openshell-git-route-warning` reports a
 route closed by a failed read (`gateway_unavailable`, `timeout`, `read_failed`) and

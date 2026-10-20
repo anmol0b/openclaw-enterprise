@@ -572,3 +572,28 @@ test("a deploying revision whose route verified is ready before its material exi
   assert.equal(f.runtime.route(f.revision.id).state, "blocked");
   assert.equal(readiness(), "blocked");
 });
+
+test("a restarted worker names why it cannot adopt a revision's Sandbox, once per revision", async () => {
+  // Finding 2140: after a worker restart the Sandbox survives, but this worker never prepared
+  // it. Each later pass rethrows the retained failure; the cause is logged once, with the
+  // Agent, revision and repositoryRef, so the operator knows a new revision is required.
+  const f = fixture();
+  f.runtime.entries.clear();
+  f.runtime.states.clear();
+  for (let pass = 0; pass < 3; pass += 1) {
+    await assert.rejects(f.prepare(), /requires a new revision after worker restart/);
+  }
+  assert.deepEqual(f.errors(), [
+    {
+      event: "worker.error",
+      code: "OPENSHELL_GIT_RECONCILIATION_REQUIRED",
+      reason: "worker_restarted",
+      namespaceId: "namespace-a",
+      agentId: "agent-one",
+      revisionId: "rev-one",
+      repositoryRef: "application",
+    },
+  ]);
+  assert.equal(f.calls.getSandbox, 1, "the retained failure is not re-observed");
+  assert.equal(openShellGitRouteReadiness(f.runtime.route(f.revision.id)), "blocked");
+});
