@@ -1034,6 +1034,25 @@ export class PostgresWorkQueue {
     return renewed.rows[0] === undefined ? undefined : asClaimedWork(renewed.rows[0]);
   }
 
+  /** Record a deployment effect in the same transaction as the effect, without ending its claim. */
+  async recordDeploymentEffect(claim: WorkClaim, code: string): Promise<void> {
+    validateClaim(claim);
+    const recorded = await this.client.query(
+      `WITH transitioned AS (
+         SELECT * FROM occ.controller_work
+         WHERE idempotency_key = $1
+           AND idempotency_key = 'agent_revision:' || revision_id || ':reconcile'
+           AND state = 'claimed' AND claim_token = $2::uuid
+           AND lease_expires_at > clock_timestamp()
+         FOR UPDATE
+       ), ${INSERT_EVIDENCE_SQL}`,
+      [claim.idempotencyKey, claim.claimToken, "success", safeFailureCode(code)],
+    );
+    if (recorded.rows.length === 0) {
+      throw new WorkClaimLostError();
+    }
+  }
+
   /**
    * Whether some Work could be claimed now. Work for an Agent or Namespace that
    * already has a claim (the caller's own included) does not count: no worker

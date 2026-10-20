@@ -752,6 +752,8 @@ export interface Agent extends Scope {
   readonly harnessAuth: HarnessAuthBinding | null;
   readonly credentialSources?: readonly AgentCredentialSourceBinding[];
   readonly executionMode: HarnessExecutionMode;
+  /** Desired Gateway administration mode; each deployment snapshots the selected value. */
+  readonly gatewayManagedMode: boolean;
   readonly plugins?: PluginDesiredState;
   readonly pluginApprovers?: PluginApprovers;
   readonly repositoryBindings?: readonly RepositoryBindingSelection[];
@@ -828,6 +830,8 @@ export interface AgentRevision extends Scope {
   readonly configurationKind: ConfigurationKind;
   readonly configurationGeneration: number;
   readonly configuration: OpenClawConfigurationDocument;
+  /** Absent on revisions admitted before Gateway managed mode existed. */
+  readonly gatewayManagedMode?: boolean;
   readonly harness: RevisionHarnessDescriptor;
   readonly compute: {
     readonly id: string;
@@ -850,7 +854,7 @@ export interface AgentRevision extends Scope {
 
 export type AgentRevisionMetadata = Pick<
   AgentRevision,
-  "id" | "namespaceId" | "agentId" | "revision" | "backendId" | "createdAt"
+  "id" | "namespaceId" | "agentId" | "revision" | "backendId" | "gatewayManagedMode" | "createdAt"
 >;
 
 /**
@@ -1947,6 +1951,8 @@ export interface ConfigurationValidationOptions {
 
 export interface ComputeDriver extends Driver {
   readonly supportsWorkspaceSetup?: true;
+  /** Enforces Gateway administration restrictions for managed Agent revisions. */
+  readonly supportsGatewayManagedMode?: true;
   readonly capability: "compute";
   /** Deployment must observe and provision Agent-owned runtime credentials before revision admission. */
   readonly requiresAgentRuntimeCredentials?: true;

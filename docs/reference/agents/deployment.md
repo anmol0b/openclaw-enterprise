@@ -78,6 +78,41 @@ Updating that Configuration, or naming another one, resolves it. See the
 [Harness execution topology flow](../../flows/harness-execution-topology.md) for
 runtime selection, identity boundaries, and activation.
 
+## Gateway managed mode
+
+OCE enables Gateway managed mode by default for each Agent. It prevents Gateway
+administrators from changing the Gateway configuration through OpenClaw, opening
+Gateway-local terminals, or running Gateway-hosted command jobs. It leaves the
+config watcher enabled for OCE updates. Authorized terminals relayed to a node,
+ordinary scheduled Agent turns, and Harness shell access are separate. Harness
+Gateway policies remain independent and must apply in either mode.
+
+OCE must pin an OpenClaw source commit that supports these controls and qualify
+the resulting runtime image before managed mode can enforce the complete
+restrictions. The repository's [default OpenClaw source pin](../../../deploy/runtime/Dockerfile)
+does not include the terminal and automation controls. A runtime built with that
+pin does not enforce those restrictions.
+
+An OCE Installation administrator can change `gatewayManagedMode` on the Agent
+draft. The value takes effect only when a new revision is deployed. Creating an
+Agent with the mode off, changing it, or deploying a value different from the
+active revision requires Installation `administer` in addition to the operation's
+normal permissions. The active revision records its own value; historical
+revisions may have no recorded value. Gateway administrators cannot change this
+setting from OpenClaw.
+
+Turning managed mode back on replaces the Gateway and restores OCE's admitted
+configuration, so changes made directly in the Gateway while the mode was off
+may be lost. Replacement can interrupt service. Compute Drivers must explicitly
+support managed mode. Kubernetes requires a configured Gateway runtime; SSH
+Compute rejects managed Agent revisions. Docker's Gateway wrapper requests the
+same restrictions, subject to Docker's existing [deployment limits](../drivers/docker-compute.md).
+
+This mode controls OpenClaw's administrative entry points. It is not filesystem
+isolation: a separate process or administrator with direct write access to the
+Gateway's configuration files can bypass the application controls. Use filesystem
+protection as additional hardening when that actor is in scope.
+
 ## Revisions and deployment
 
 An AgentRevision is the immutable admitted configuration for one deployment
@@ -86,7 +121,7 @@ active revision, identified by `activeRevisionId`. Deployment does not overwrite
 an earlier revision or make the new revision active immediately.
 
 The revision records the source `configurationId`, `configurationKind`, and
-`configurationGeneration`, its complete admitted native `configuration`
+`configurationGeneration`, `gatewayManagedMode`, its complete admitted native `configuration`
 document, the approved Harness identity/version/mode, selected Compute identity,
 nullable `backendId`, and `harnessAuth` with its resolved internal source snapshot.
 The auth snapshot contains no credential bytes; public revisions omit private

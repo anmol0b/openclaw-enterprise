@@ -86,6 +86,7 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     backendId: null,
     harnessAuth: apiKeyBinding,
     executionMode: "embedded",
+    gatewayManagedMode: true,
     sandboxPolicyEditing: false,
     servicePrincipalId: identifier("service-agent"),
     desiredRuntimeState: "stopped",
@@ -99,6 +100,7 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     namespaceId: namespace.id,
     agentId: agent.id,
     revision: 1,
+    gatewayManagedMode: true,
     backendId: null,
     configurationId: configuration.id,
     configurationKind: configuration.kind,
@@ -510,14 +512,17 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     // Revision metadata lists the same revisions, in the same order, without saved settings.
     assert.deepEqual(
       await state.revisions.listRevisionMetadata(namespace.id, agent.id),
-      listed.map(({ id, namespaceId, agentId, revision, backendId, createdAt }) => ({
-        id,
-        namespaceId,
-        agentId,
-        revision,
-        backendId,
-        createdAt,
-      })),
+      listed.map(
+        ({ id, namespaceId, agentId, revision, backendId, gatewayManagedMode, createdAt }) => ({
+          id,
+          namespaceId,
+          agentId,
+          revision,
+          backendId,
+          gatewayManagedMode,
+          createdAt,
+        }),
+      ),
     );
     assert.deepEqual(await state.revisions.listRevisionMetadata(identifier("ns"), agent.id), []);
     // A summary page carries metadata plus the fields that tell revisions apart, never the
@@ -535,6 +540,7 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
           configurationGeneration: item.configurationGeneration,
           harness: item.harness,
           createdAt: item.createdAt,
+          gatewayManagedMode: item.gatewayManagedMode,
         })),
       },
     );
@@ -919,6 +925,7 @@ export async function verifyPlatformStateStoreContract(store, options = {}) {
     configurationId: accountConfiguration.id,
     backendId: null,
     executionMode: "dedicated",
+    gatewayManagedMode: true,
     sandboxPolicyEditing: false,
     servicePrincipalId: identifier("service-agent"),
     harnessAuth: {

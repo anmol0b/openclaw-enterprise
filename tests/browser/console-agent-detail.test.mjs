@@ -42,6 +42,50 @@ import {
   waitForLiveControls,
 } from "./console-agents-test-support.mjs";
 
+test("an Installation admin must retain access to change Gateway managed mode for a future deployment", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  const installation = await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Managed Gateway", { ready: true });
+  const agent = await fixture.createAgent(namespace.id, "Managed Agent", nativeValues("managed"));
+  const { revision } = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+  const { page } = await newPage(t, fixture);
+  await login(
+    page,
+    fixture,
+    detailUrl(fixture, namespace.id, agent.id, "draft", "configuration").href,
+  );
+
+  const turnOff = page.getByRole("button", { name: "Turn off managed mode for next deployment" });
+  await turnOff.waitFor();
+  fixture.policy.restrictions.push({
+    id: "deny-managed-mode-change",
+    resourceKind: "installation",
+    resourceId: installation.id,
+    action: "administer",
+    effect: "deny",
+  });
+  await turnOff.click();
+  await page
+    .getByText(/Installation administration, Agent update and Configuration read access/)
+    .waitFor();
+  assert.equal(
+    (await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`)).data
+      .gatewayManagedMode,
+    true,
+  );
+  fixture.policy.restrictions.pop();
+  await turnOff.click();
+  await page.getByText("Managed mode saved. Deploy a new version to apply it.").waitFor();
+  await page.getByRole("button", { name: "Turn on managed mode for next deployment" }).waitFor();
+  const saved = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`);
+  assert.equal(saved.data.gatewayManagedMode, false);
+  assert.equal(saved.data.activeRevisionId, revision.id);
+  await page.getByRole("button", { name: "View version v1, current version" }).click();
+  await page.getByRole("heading", { name: "Configuration snapshot" }).waitFor();
+  const mode = page.locator(".configuration-summary dt", { hasText: "Gateway managed mode" });
+  assert.equal(await mode.locator("xpath=following-sibling::dd[1]").textContent(), "On");
+});
+
 test("Agent detail separates the current version, viewed version, and latest deployment", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();
@@ -842,7 +886,14 @@ test("Gateway password access saves the generated reference without changing adm
       `Gateway password access is enabled in the saved Configuration and included in v${freshV1.revision.revision}.`,
     )
     .waitFor();
-  assert.equal(await page.getByText(/Deploy a new version to apply it/).count(), 0);
+  assert.equal(
+    await page
+      .getByText(
+        "Gateway password access is enabled in the saved Configuration. Deploy a new version to apply it.",
+      )
+      .count(),
+    0,
+  );
 });
 
 test("Agent detail preserves admitted revision history while draft edits change current configuration", async (t) => {
@@ -2899,6 +2950,10 @@ test("a read-only principal sees Agent mutation controls disabled before any den
   await page.goto(draft.href);
   await page.getByText("Your access does not include deploying this Agent.").waitFor();
   assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
+  assert.equal(
+    await page.getByRole("button", { name: "Turn off managed mode for next deployment" }).count(),
+    0,
+  );
 
   // The summary is a probe, not an attempted operation: no write was sent and nothing was
   // audited as a denial for the summary or the gated operations.

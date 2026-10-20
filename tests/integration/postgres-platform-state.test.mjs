@@ -1986,7 +1986,7 @@ test(
     assert.equal(revisions.status, 200);
     assert.deepEqual(revisions.data, [
       revisionSummary({ ...healthyRevision.data, id: malformedRevisionId, revision: 2 }),
-      revisionSummary(healthyRevision.data),
+      { ...revisionSummary(healthyRevision.data), gatewayManagedMode: true },
     ]);
     const validDetail = await request(api, "GET", `${revisionPath}/${revision.id}`);
     assert.equal(validDetail.status, 200);

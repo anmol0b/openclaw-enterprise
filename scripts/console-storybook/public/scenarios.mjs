@@ -3259,6 +3259,19 @@ export const scenarios = {
     ],
     gap: "The fixture simulates admission and worker completion; it does not verify a live Agent.",
   },
+  managedModeDraft: {
+    group: "Pages/Agent detail",
+    name: "Gateway managed mode",
+    path: draft,
+    deployed: true,
+    description:
+      "An OCE Installation administrator changes managed mode for the next deployment. The current version keeps its recorded setting until a new version is deployed.",
+    steps: [
+      "Turn off managed mode for the next deployment and check the saved draft.",
+      "Open the current version and confirm that its recorded mode remains on.",
+    ],
+    gap: "The fixture simulates the save and does not run a Gateway.",
+  },
   longVersionHistory: {
     group: "Pages/Agent detail",
     name: "Long version history",

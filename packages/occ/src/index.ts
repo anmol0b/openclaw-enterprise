@@ -19,6 +19,7 @@ import {
   type RemovedAccessBinding,
 } from "./iam-policy-cleanup.ts";
 import { deploymentDiagnostics } from "./deployment-diagnostics.ts";
+import { gatewayManagedModeDeploymentRequiresAdmin } from "./gateway-managed-mode.ts";
 import {
   deviceAuthorizationSession,
   type DeviceAuthorizationSession,
@@ -293,6 +294,10 @@ export {
 } from "./iam-policy-cleanup.ts";
 export type { RemovedAccessBinding } from "./iam-policy-cleanup.ts";
 export { operationRefusalHint } from "./state/controller-work.ts";
+export {
+  GATEWAY_MANAGED_MODE_TRANSITION,
+  gatewayManagedModeDeploymentRequiresAdmin,
+} from "./gateway-managed-mode.ts";
 export {
   ActivationFailedError,
   ComputePreparationFailedError,
@@ -675,6 +680,7 @@ export interface CreateAgentInput {
   readonly harnessAuth?: HarnessAuthBinding | null;
   readonly credentialSources?: readonly AgentCredentialSourceBinding[];
   readonly executionMode?: HarnessExecutionMode;
+  readonly gatewayManagedMode?: boolean;
   readonly plugins?: PluginDesiredState;
   readonly pluginApprovers?: PluginApprovers;
   readonly repositoryBindings?: readonly RepositoryBindingRequest[];
@@ -690,6 +696,7 @@ export interface ValidateAgentCreateInput {
   };
   readonly initialWorkspaceFiles?: InitialWorkspaceFiles;
   readonly executionMode?: HarnessExecutionMode;
+  readonly gatewayManagedMode?: boolean;
   readonly plugins?: PluginDesiredState;
   readonly pluginApprovers?: PluginApprovers;
 }
@@ -703,6 +710,7 @@ export interface UpdateAgentInput {
   /** Replaces the Agent's non-model sources; an empty list removes them. */
   readonly credentialSources?: readonly AgentCredentialSourceBinding[];
   readonly executionMode?: HarnessExecutionMode;
+  readonly gatewayManagedMode?: boolean;
   readonly plugins?: PluginDesiredState;
   readonly pluginApprovers?: PluginApprovers | null;
   readonly repositoryBindings?: readonly RepositoryBindingRequest[];
@@ -1191,6 +1199,16 @@ const HARNESS_DISPLAY_NAMES: Readonly<Record<string, string>> = Object.freeze({
 
 function validExecutionMode(value: unknown): value is HarnessExecutionMode {
   return value === "embedded" || value === "dedicated";
+}
+
+function normalizeGatewayManagedMode(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  if (typeof value !== "boolean") {
+    throw new ScopeViolationError("The Agent Gateway managed mode must be a boolean.");
+  }
+  return value;
 }
 
 // Agent save and deploy admission apply these rules to the same pair, with the same message.
@@ -2482,6 +2500,7 @@ export class OpenClawController {
     if (!validExecutionMode(executionMode)) {
       throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
     }
+    const gatewayManagedMode = normalizeGatewayManagedMode(input.gatewayManagedMode);
     const backendId = this.backendId(input.backendId);
     const plugins = normalizeAgentPlugins(input.plugins);
     const pluginApprovers = normalizeAgentPluginApprovers(input.pluginApprovers);
@@ -2533,6 +2552,7 @@ export class OpenClawController {
       ...(backendId === undefined ? {} : { backendId }),
       harnessAuth,
       executionMode,
+      ...(gatewayManagedMode ? {} : { gatewayManagedMode }),
       ...(plugins === undefined ? {} : { plugins }),
       ...(pluginApprovers === undefined ? {} : { pluginApprovers }),
       ...(input.repositoryBindings === undefined
@@ -2656,6 +2676,7 @@ export class OpenClawController {
           configuration: configurationInput,
           harnessAuth,
           executionMode,
+          gatewayManagedMode,
           ...(backendId === undefined ? {} : { backendId }),
           ...(plugins === undefined ? {} : { plugins }),
           ...(pluginApprovers === undefined ? {} : { pluginApprovers }),
@@ -7153,6 +7174,7 @@ export class OpenClawController {
     if (!validExecutionMode(executionMode)) {
       throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
     }
+    const gatewayManagedMode = normalizeGatewayManagedMode(input.gatewayManagedMode);
     const backendId = this.backendId(input.backendId);
     const plugins = normalizeAgentPlugins(input.plugins);
     const pluginApprovers = normalizeAgentPluginApprovers(input.pluginApprovers);
@@ -7164,6 +7186,7 @@ export class OpenClawController {
         namespaceId: input.namespaceId,
       };
       await this.authorize(principalId, "create", target);
+      await this.authorizeGatewayManagedModeChange(principalId, gatewayManagedMode === false);
       const namespace = await this.lockNamespace(state, input.namespaceId);
       // Checked after authorization: the conflict names the Namespace state.
       if (namespace.status !== "provisioning" && namespace.status !== "ready") {
@@ -7228,6 +7251,7 @@ export class OpenClawController {
           ? {}
           : { credentialSources }),
         executionMode,
+        gatewayManagedMode,
         ...(plugins === undefined ? {} : { plugins }),
         ...(pluginApprovers === undefined ? {} : { pluginApprovers }),
         ...(repositoryBindings === undefined ? {} : { repositoryBindings }),
@@ -7283,6 +7307,10 @@ export class OpenClawController {
       id: input.namespaceId,
       namespaceId: input.namespaceId,
     });
+    await this.authorizeGatewayManagedModeChange(
+      principalId,
+      normalizeGatewayManagedMode(input.gatewayManagedMode) === false,
+    );
     await this.read(async (state) => {
       const namespace = await this.exactNamespace(state, input.namespaceId);
       if (namespace.status !== "provisioning" && namespace.status !== "ready") {
@@ -7346,6 +7374,10 @@ export class OpenClawController {
     if (input.executionMode !== undefined && !validExecutionMode(input.executionMode)) {
       throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
     }
+    const gatewayManagedMode =
+      input.gatewayManagedMode === undefined
+        ? undefined
+        : normalizeGatewayManagedMode(input.gatewayManagedMode);
     const plugins = normalizeAgentPlugins(input.plugins);
     const pluginApprovers =
       input.pluginApprovers === null ? null : normalizeAgentPluginApprovers(input.pluginApprovers);
@@ -7365,6 +7397,12 @@ export class OpenClawController {
       }
       if (agent.status !== "active") {
         throw new AgentDeletingError();
+      }
+      if (gatewayManagedMode !== undefined) {
+        await this.authorizeGatewayManagedModeChange(
+          principalId,
+          gatewayManagedMode !== agent.gatewayManagedMode,
+        );
       }
       await this.authorize(principalId, "read", {
         kind: "configuration",
@@ -7456,6 +7494,7 @@ export class OpenClawController {
         pluginApprovers,
         repositoryAccess,
         requestedSources,
+        gatewayManagedMode,
       );
       if (!updated) {
         throw new ResourceStateConflictError("The Agent Configuration changed during its update.");
@@ -7619,6 +7658,25 @@ export class OpenClawController {
       if (lockedAgent.status !== "active") {
         throw new AgentDeletingError();
       }
+      const active =
+        lockedAgent.activeRevisionId === undefined
+          ? undefined
+          : await state.revisions.findRevisionForBrowsing(
+              namespace.id,
+              lockedAgent.id,
+              lockedAgent.activeRevisionId,
+            );
+      if (lockedAgent.activeRevisionId !== undefined && active === undefined) {
+        throw new ResourceStateConflictError("The active Agent revision is unavailable.");
+      }
+      await this.authorizeGatewayManagedModeChange(
+        principalId,
+        await gatewayManagedModeDeploymentRequiresAdmin(
+          lockedAgent.gatewayManagedMode,
+          active,
+          state.operations,
+        ),
+      );
       const backendId = this.backendId(lockedAgent.backendId);
       if (!validExecutionMode(lockedAgent.executionMode)) {
         throw new ScopeViolationError("The persisted Agent Harness execution mode is invalid.");
@@ -7855,6 +7913,7 @@ export class OpenClawController {
         configurationKind: configuration.kind,
         configurationGeneration: configuration.generation,
         configuration: admittedConfiguration,
+        gatewayManagedMode: lockedAgent.gatewayManagedMode,
         harness: revisionHarness,
         compute: { id: compute.id, implementation: compute.implementation },
         ...(sandbox === undefined ? {} : { sandboxDriverId: sandbox.id }),
@@ -7871,6 +7930,14 @@ export class OpenClawController {
         createdAt,
       };
       const computeAdmission = compute.admitRevision?.(freezeAgentRevision(revisionDraft));
+      if (
+        revisionDraft.gatewayManagedMode === true &&
+        compute.supportsGatewayManagedMode !== true
+      ) {
+        throw new ConfigurationHarnessError(
+          "Agent setting gatewayManagedMode is not supported by the selected Compute Driver.",
+        );
+      }
       const revision = await state.revisions.createRevision(
         freezeAgentRevision({
           ...revisionDraft,
@@ -10232,6 +10299,7 @@ export class OpenClawController {
             ? { credentialSources: [{ sourceId: plan.harnessAuth.sourceId }] }
             : {}),
           executionMode: plan.executionMode,
+          gatewayManagedMode: plan.gatewayManagedMode,
           ...(plugins === undefined ? {} : { plugins }),
           ...(pluginApprovers === undefined ? {} : { pluginApprovers }),
           ...(repositoryBindings === undefined ? {} : { repositoryBindings }),
@@ -10312,6 +10380,7 @@ export class OpenClawController {
     readonly configuration: AgentProvisioningConfigurationInput;
     readonly harnessAuth: HarnessAuthBinding | null;
     readonly executionMode: HarnessExecutionMode;
+    readonly gatewayManagedMode: boolean;
   } {
     const plan = asRecord(record.plan);
     let configuration: AgentProvisioningConfigurationInput;
@@ -10332,7 +10401,20 @@ export class OpenClawController {
       configuration,
       harnessAuth: normalizeProvisioningHarnessAuth(plan?.harnessAuth ?? null),
       executionMode,
+      gatewayManagedMode: normalizeGatewayManagedMode(plan?.gatewayManagedMode),
     };
+  }
+
+  private async authorizeGatewayManagedModeChange(
+    principalId: string,
+    required: boolean,
+  ): Promise<void> {
+    if (required) {
+      await this.authorize(principalId, "administer", {
+        kind: "installation",
+        id: this.installation.id,
+      });
+    }
   }
 
   private async provisioningGrantSources(

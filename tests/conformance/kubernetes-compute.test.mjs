@@ -16727,6 +16727,73 @@ function workspaceSetupFixture(
   return { driver, revision, namespace, objects, records, state, setup, context };
 }
 
+test("managed embedded Gateway replaces an unmanaged predecessor before reporting ready", async () => {
+  const { driver, revision, namespace, objects, state } = workspaceSetupFixture(true);
+  const unmanaged = { ...revision, gatewayManagedMode: false };
+  const managed = {
+    ...revision,
+    id: "managed-successor",
+    revision: revision.revision + 1,
+    gatewayManagedMode: true,
+  };
+  const gatewayName = `gateway-${digest(revision.agentId)}`;
+  const gatewayKey = `Deployment:${namespace}:${gatewayName}`;
+  const serviceKey = `Service:${namespace}:${gatewayName}`;
+
+  state.ready = true;
+  assert.equal((await driver.prepareRevision(unmanaged, authContext(unmanaged))).ready, true);
+  await driver.activateRevision(unmanaged, authContext(unmanaged));
+  const unmanagedContainer = objects.get(gatewayKey).spec.template.spec.containers[0];
+  assert.equal(
+    unmanagedContainer.env.find(({ name }) => name === "OPENCLAW_CONFIG_PATH").value,
+    "/home/node/.openclaw/openclaw.json",
+  );
+
+  // The worker uses this declaration to stop the old Gateway before preparing
+  // the candidate. A stale or out-of-order call cannot count the old Gateway as ready.
+  assert.equal(driver.requiresStoppedPredecessors(unmanaged), false);
+  assert.equal(driver.requiresStoppedPredecessors(managed), true);
+  assert.equal((await driver.prepareRevision(managed, authContext(managed))).ready, false);
+  assert.equal(
+    objects.get(gatewayKey).metadata.annotations["openclaw.dev/agent-revision-id"],
+    unmanaged.id,
+  );
+  await driver.stopRevision(unmanaged);
+
+  state.ready = false;
+  assert.equal((await driver.prepareRevision(managed, authContext(managed))).ready, false);
+  assert.equal(
+    objects.get(gatewayKey).metadata.annotations["openclaw.dev/agent-revision-id"],
+    managed.id,
+  );
+  assert.equal(
+    objects.get(serviceKey).spec.selector["app.kubernetes.io/name"],
+    `${gatewayName}-inactive`,
+  );
+  state.ready = true;
+  assert.equal((await driver.prepareRevision(managed, authContext(managed))).ready, true);
+  assert.equal(
+    objects.get(serviceKey).spec.selector["app.kubernetes.io/name"],
+    `${gatewayName}-inactive`,
+  );
+  await driver.activateRevision(managed, authContext(managed));
+  assert.equal(objects.get(serviceKey).spec.selector["app.kubernetes.io/name"], gatewayName);
+});
+
+test("Kubernetes rejects managed mode when it cannot control the Gateway launch", async () => {
+  const { driver, revision } = workspaceSetupFixture(true, false);
+  const managed = { ...revision, gatewayManagedMode: true };
+  const failure = {
+    name: "ConfigurationHarnessError",
+    message:
+      "Agent setting gatewayManagedMode requires a supported Gateway runtime on Kubernetes Compute.",
+  };
+  assert.equal(driver.requiresStoppedPredecessors(managed), false);
+  assert.throws(() => driver.admitRevision(managed), failure);
+  await assert.rejects(driver.prepareRevision(managed, authContext(managed)), failure);
+  await assert.rejects(driver.activateRevision(managed, authContext(managed)), failure);
+});
+
 test("external ChatGPT source preparation delivers the exact placeholder and account only to its Harness", async (t) => {
   const account = {
     accountId: "workspace-external",

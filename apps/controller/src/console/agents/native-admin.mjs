@@ -2,7 +2,7 @@ import { button, element } from "../dom.mjs";
 import { message } from "./list.mjs";
 
 const warning =
-  "Manage configuration in OCE. Changes in the admin console aren’t saved to Agent versions and can be overwritten by deployment.";
+  "Gateway managed mode restricts administrative changes by default. OCE deployments can overwrite changes made while managed mode is off.";
 
 function unavailableText(status) {
   switch (status) {
@@ -37,7 +37,7 @@ export function renderNativeAdminAccess(context, path) {
   const scope = element(
     "p",
     { id: "native-admin-scope" },
-    "Full native administration, including gateway conversations and credentials.",
+    "Opens this Agent’s Gateway console, including conversations and credentials.",
   );
   const caution = element("p", { id: "native-admin-warning" }, warning);
   const section = element(

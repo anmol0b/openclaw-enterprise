@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
+import { inflateRawSync } from "node:zlib";
 import {
   createDockerDevelopmentComputeDriverFromEnv,
   DockerComputeDriver,
@@ -549,11 +552,58 @@ test("Docker Compute rejects unsupported native gateway settings before Docker e
   assert.doesNotThrow(() => driver.validateGatewaySettings({ gateway: { bind: "lan" } }));
 });
 
-async function gatewayContainerLaunch(configuration = {}) {
+test("Docker prepares configuration before starting a managed Gateway", async () => {
+  const { body, environment } = await gatewayContainerLaunch({}, { gatewayManagedMode: true });
+  const program = inflateRawSync(Buffer.from(body.Cmd.slice(2).join(""), "base64")).toString();
+  const nativeRequire = createRequire(import.meta.url);
+  const events = [];
+  runInNewContext(program, {
+    process: { env: { ...environment }, on() {} },
+    require(specifier) {
+      if (specifier === "node:fs") {
+        return {
+          chmodSync() {},
+          mkdirSync() {},
+          readdirSync: () => [],
+          writeFileSync(path) {
+            events.push({ event: "config", path });
+          },
+        };
+      }
+      if (specifier === "node:child_process") {
+        return {
+          spawn(_command, args, { env }) {
+            events.push({
+              event: "gateway",
+              args: [...args],
+              readonly: env.OPENCLAW_CONFIG_READONLY,
+              disableGatewayLocalTerminals: env.OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS,
+              disableCronHostExecution: env.OPENCLAW_DISABLE_CRON_HOST_EXECUTION,
+            });
+            return { on() {} };
+          },
+        };
+      }
+      return nativeRequire(specifier);
+    },
+  });
+  assert.deepEqual(events, [
+    { event: "config", path: environment.OPENCLAW_CONFIG_PATH },
+    {
+      event: "gateway",
+      args: ["/app/openclaw.mjs", "gateway", "--port", environment.OPENCLAW_GATEWAY_PORT],
+      readonly: "1",
+      disableGatewayLocalTerminals: "1",
+      disableCronHostExecution: "1",
+    },
+  ]);
+});
+
+async function gatewayContainerLaunch(configuration = {}, revisionOverrides = {}) {
   const driver = new DockerComputeDriver({
     images: { gateway: "gateway:local", agent: "agent:local" },
   });
-  const revision = dockerGatewayRevision(driver, configuration);
+  const revision = { ...dockerGatewayRevision(driver, configuration), ...revisionOverrides };
   const createdContainers = [];
   const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "test-openai-api-key";

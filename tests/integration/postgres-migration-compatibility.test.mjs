@@ -1533,6 +1533,20 @@ async function assertUpgradedAuthentication(db) {
 
 async function canonicalData(db) {
   const result = { presets: [] };
+  const migrationOwnedColumns = {
+    account: ["authentication_version", "identity_only"],
+    agents: [
+      "repository_bindings",
+      "repository_access",
+      "harness_auth_credential_source_id",
+      "plugin_approvers",
+      "credential_sources",
+      "sandbox_policy_editing",
+      "gateway_managed_mode",
+    ],
+    agent_revisions: ["gateway_managed_mode"],
+    controller_work: ["work_kind"],
+  };
   const hasPresets =
     (await db.app.query("SELECT to_regclass('occ.presets') AS relation")).rows[0].relation !== null;
   for (const table of [
@@ -1554,27 +1568,12 @@ async function canonicalData(db) {
     "session",
     ...(hasPresets ? ["presets"] : []),
   ]) {
-    const ignoredColumns =
-      table === "account"
-        ? ["authentication_version", "identity_only"]
-        : table === "agents"
-          ? [
-              "repository_bindings",
-              "repository_access",
-              "harness_auth_credential_source_id",
-              "plugin_approvers",
-              "credential_sources",
-              "sandbox_policy_editing",
-            ]
-          : table === "controller_work"
-            ? ["work_kind"]
-            : [];
     result[table] = (
       await db.app.query(
         // New migration-owned compatibility columns may be defaulted onto
         // existing rows; every previously stored field must remain identical.
         `SELECT to_jsonb(t) - $1::pg_catalog.text[] AS value FROM occ."${table}" t ORDER BY to_jsonb(t)::pg_catalog.text`,
-        [ignoredColumns],
+        [migrationOwnedColumns[table] ?? []],
       )
     ).rows;
   }
@@ -1651,6 +1650,7 @@ test(
       [56, "preCanonicalHarnessAuth"],
       [57, "preSandboxPolicies"],
       [58, "preSandboxPolicyAdministrator"],
+      [59, "preGatewayManagedMode"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -1664,6 +1664,18 @@ test(
         assert.deepEqual(await runHistoryMigration(db), { ok: true, history });
         await assertCompletedHistory(db, receipts);
         assert.deepEqual(await canonicalData(db), before);
+        if (history === "preGatewayManagedMode") {
+          assert.deepEqual(
+            (
+              await db.app.query(
+                `SELECT a.gateway_managed_mode AS desired, r.gateway_managed_mode AS admitted
+                 FROM occ.agents a JOIN occ.agent_revisions r
+                   ON r.namespace_id = a.namespace_id AND r.agent_id = a.id`,
+              )
+            ).rows,
+            [{ desired: true, admitted: null }],
+          );
+        }
         await assertUpgradedAuthentication(db);
         if (prefix === 55) {
           const upgradedReceipts = await historyReceipts(db.migrator);

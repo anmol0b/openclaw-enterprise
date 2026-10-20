@@ -12273,6 +12273,10 @@
                                   { "const": "dedicated", "type": "string" }
                                 ]
                               },
+                              "gatewayManagedMode": {
+                                "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                                "type": "boolean"
+                              },
                               "harnessAuth": {
                                 "anyOf": [
                                   {
@@ -12477,6 +12481,7 @@
                               "backendId",
                               "harnessAuth",
                               "executionMode",
+                              "gatewayManagedMode",
                               "desiredRuntimeState",
                               "status",
                               "createdAt"
@@ -12546,6 +12551,10 @@
                                   { "const": "dedicated", "type": "string" }
                                 ]
                               },
+                              "gatewayManagedMode": {
+                                "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                                "type": "boolean"
+                              },
                               "id": {
                                 "pattern": "^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
                                 "type": "string"
@@ -12581,6 +12590,7 @@
                               "configurationId",
                               "backendId",
                               "executionMode",
+                              "gatewayManagedMode",
                               "desiredRuntimeState",
                               "status",
                               "createdAt",
@@ -12713,6 +12723,10 @@
                       { "const": "embedded", "type": "string" },
                       { "const": "dedicated", "type": "string" }
                     ]
+                  },
+                  "gatewayManagedMode": {
+                    "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                    "type": "boolean"
                   },
                   "harnessAuth": {
                     "anyOf": [
@@ -12978,6 +12992,10 @@
                             { "const": "dedicated", "type": "string" }
                           ]
                         },
+                        "gatewayManagedMode": {
+                          "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                          "type": "boolean"
+                        },
                         "harnessAuth": {
                           "anyOf": [
                             {
@@ -13179,6 +13197,7 @@
                         "backendId",
                         "harnessAuth",
                         "executionMode",
+                        "gatewayManagedMode",
                         "desiredRuntimeState",
                         "status",
                         "createdAt"
@@ -14534,6 +14553,10 @@
                       { "const": "dedicated", "type": "string" }
                     ]
                   },
+                  "gatewayManagedMode": {
+                    "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                    "type": "boolean"
+                  },
                   "harnessAuth": {
                     "anyOf": [
                       {
@@ -15588,6 +15611,10 @@
                       { "const": "dedicated", "type": "string" }
                     ]
                   },
+                  "gatewayManagedMode": {
+                    "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                    "type": "boolean"
+                  },
                   "initialWorkspaceFiles": {
                     "additionalProperties": false,
                     "properties": {
@@ -15774,6 +15801,10 @@
                             { "const": "embedded", "type": "string" },
                             { "const": "dedicated", "type": "string" }
                           ]
+                        },
+                        "gatewayManagedMode": {
+                          "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                          "type": "boolean"
                         },
                         "harnessAuth": {
                           "anyOf": [
@@ -15976,6 +16007,7 @@
                         "backendId",
                         "harnessAuth",
                         "executionMode",
+                        "gatewayManagedMode",
                         "desiredRuntimeState",
                         "status",
                         "createdAt"
@@ -16137,6 +16169,10 @@
                                 { "const": "embedded", "type": "string" },
                                 { "const": "dedicated", "type": "string" }
                               ]
+                            },
+                            "gatewayManagedMode": {
+                              "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                              "type": "boolean"
                             },
                             "harnessAuth": {
                               "anyOf": [
@@ -16342,6 +16378,7 @@
                             "backendId",
                             "harnessAuth",
                             "executionMode",
+                            "gatewayManagedMode",
                             "desiredRuntimeState",
                             "status",
                             "createdAt"
@@ -16411,6 +16448,10 @@
                                 { "const": "dedicated", "type": "string" }
                               ]
                             },
+                            "gatewayManagedMode": {
+                              "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                              "type": "boolean"
+                            },
                             "id": {
                               "pattern": "^agt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
                               "type": "string"
@@ -16446,6 +16487,7 @@
                             "configurationId",
                             "backendId",
                             "executionMode",
+                            "gatewayManagedMode",
                             "desiredRuntimeState",
                             "status",
                             "createdAt",
@@ -16584,6 +16626,10 @@
                       { "const": "embedded", "type": "string" },
                       { "const": "dedicated", "type": "string" }
                     ]
+                  },
+                  "gatewayManagedMode": {
+                    "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                    "type": "boolean"
                   },
                   "harnessAuth": {
                     "anyOf": [
@@ -16818,6 +16864,10 @@
                             { "const": "dedicated", "type": "string" }
                           ]
                         },
+                        "gatewayManagedMode": {
+                          "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                          "type": "boolean"
+                        },
                         "harnessAuth": {
                           "anyOf": [
                             {
@@ -17019,6 +17069,7 @@
                         "backendId",
                         "harnessAuth",
                         "executionMode",
+                        "gatewayManagedMode",
                         "desiredRuntimeState",
                         "status",
                         "createdAt"
@@ -17548,6 +17599,10 @@
                           "maxItems": 8,
                           "type": "array",
                           "uniqueItems": true
+                        },
+                        "gatewayManagedMode": {
+                          "description": "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
+                          "type": "boolean"
                         },
                         "harness": {
                           "additionalProperties": false,
@@ -21247,6 +21302,10 @@
                             "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$",
                             "type": "string"
                           },
+                          "gatewayManagedMode": {
+                            "description": "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
+                            "type": "boolean"
+                          },
                           "harness": {
                             "additionalProperties": false,
                             "properties": {
@@ -21462,6 +21521,10 @@
                               "maxItems": 8,
                               "type": "array",
                               "uniqueItems": true
+                            },
+                            "gatewayManagedMode": {
+                              "description": "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
+                              "type": "boolean"
                             },
                             "harness": {
                               "additionalProperties": false,
@@ -21741,6 +21804,10 @@
                               "format": "date-time",
                               "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$",
                               "type": "string"
+                            },
+                            "gatewayManagedMode": {
+                              "description": "Gateway administration mode admitted for this revision. Omitted if the revision predates managed mode.",
+                              "type": "boolean"
                             },
                             "id": {
                               "pattern": "^rev_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -23349,6 +23416,10 @@
                             { "const": "dedicated", "type": "string" }
                           ]
                         },
+                        "gatewayManagedMode": {
+                          "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                          "type": "boolean"
+                        },
                         "harnessAuth": {
                           "anyOf": [
                             {
@@ -23550,6 +23621,7 @@
                         "backendId",
                         "harnessAuth",
                         "executionMode",
+                        "gatewayManagedMode",
                         "desiredRuntimeState",
                         "status",
                         "createdAt"
@@ -23725,6 +23797,10 @@
                             { "const": "dedicated", "type": "string" }
                           ]
                         },
+                        "gatewayManagedMode": {
+                          "description": "Whether OCE restricts Gateway-local administration. Defaults on. Changing the setting requires Installation administer permission and takes effect on deployment.",
+                          "type": "boolean"
+                        },
                         "harnessAuth": {
                           "anyOf": [
                             {
@@ -23926,6 +24002,7 @@
                         "backendId",
                         "harnessAuth",
                         "executionMode",
+                        "gatewayManagedMode",
                         "desiredRuntimeState",
                         "status",
                         "createdAt"

@@ -1169,9 +1169,12 @@ test(
   },
 );
 
-for (const authMethod of ["api_key", "codex_pat"]) {
+for (const { authMethod, gatewayManagedMode } of [
+  { authMethod: "api_key", gatewayManagedMode: true },
+  { authMethod: "codex_pat", gatewayManagedMode: false },
+]) {
   test(
-    `${authMethod} provisioning grants existing Secret access and hands off one revision`,
+    `${authMethod} provisioning grants existing Secret access and hands off one revision with the requested Gateway mode`,
     { ...requiresPostgres, timeout: 60_000 },
     async (context) => {
       let deploymentReady = false;
@@ -1189,6 +1192,7 @@ for (const authMethod of ["api_key", "codex_pat"]) {
       ).length;
       const body = provisioningBody(namespace.id, secrets, {
         harnessAuth: { method: authMethod, source: secretRef(namespace.id, secrets.modelKey.id) },
+        gatewayManagedMode,
       });
       // Model-only references must obey the same Namespace boundary as channel Secrets.
       const foreign = structuredClone(body);
@@ -1252,11 +1256,14 @@ for (const authMethod of ["api_key", "codex_pat"]) {
       assert.match(status.configurationId, identifier("cfg"));
       fixture.cancelProvisioningAtTeardown(namespace.id, status.agentId);
       await assertProvisionedSecretAccess(fixture, namespace, status, secretCreateCallCount);
-      const revisions = await fixture.state.read((view) =>
-        view.revisions.listRevisions(namespace.id, status.agentId),
-      );
+      const { agent, revisions } = await fixture.state.read(async (view) => ({
+        agent: await view.agents.findAgent(namespace.id, status.agentId),
+        revisions: await view.revisions.listRevisions(namespace.id, status.agentId),
+      }));
+      assert.equal(agent.gatewayManagedMode, gatewayManagedMode);
       assert.equal(revisions.length, 1);
       assert.equal(revisions[0].id, status.revisionId);
+      assert.equal(revisions[0].gatewayManagedMode, gatewayManagedMode);
       assert.equal(revisions[0].configurationGeneration, 1);
       assert.equal(revisions[0].harnessAuth.method, authMethod);
       assert.deepEqual(revisions[0].harnessAuth.source, body.harnessAuth.source);

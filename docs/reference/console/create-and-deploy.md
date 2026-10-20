@@ -283,6 +283,9 @@ provider acceptance, runtime readiness, or a channel connection.
 
 Open **Create new version** and select **Deploy new version** after storing
 credentials, saving channel Secret bindings, and selecting harness authentication.
+An Installation administrator can turn [Gateway managed mode](../agents/deployment.md#gateway-managed-mode)
+on or off from the **Configuration** tab of the version draft. Save the setting,
+then deploy a new version to apply it; the current version remains unchanged until deployment.
 To change plugins, edit **Plugins**, select **Save plugin selections**, then
 deploy. This action uses the saved Configuration and Agent plugin map; it does
 not redeploy or roll back a viewed snapshot. Every accepted request creates an
@@ -291,7 +294,7 @@ retain their snapshots; see the
 [Agent detail guide](../../guides/console/agent-details.md#plugins-tab).
 
 The console rereads Agent and Configuration before admission. Refresh if
-generation, association, authentication, or plugins changed since loading.
+generation, association, authentication, plugins, or managed mode changed since loading.
 These reads are not atomic with admission.
 Teams-enabled drafts cannot deploy through this console path because Teams credential
 readiness is not exposed; use the operator deployment workflow for those Agents.

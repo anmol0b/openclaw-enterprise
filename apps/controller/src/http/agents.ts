@@ -41,6 +41,7 @@ function clientAgent(agent: Readonly<AgentRead>): Record<string, unknown> {
     configurationId: agent.configurationId,
     backendId: agent.backendId,
     executionMode: agent.executionMode,
+    gatewayManagedMode: agent.gatewayManagedMode,
     plugins: agent.plugins,
     pluginApprovers: agent.pluginApprovers,
     repositoryBindings: agent.repositoryBindings,
@@ -92,6 +93,9 @@ function clientRevision(revision: Readonly<AgentRevisionRead>): Record<string, u
     configurationKind: revision.configurationKind,
     configurationGeneration: revision.configurationGeneration,
     backendId: revision.backendId,
+    ...(revision.gatewayManagedMode === undefined
+      ? {}
+      : { gatewayManagedMode: revision.gatewayManagedMode }),
     configuration: revision.configuration,
     harness: revision.harness,
     compute: { id: revision.compute.id, implementation: revision.compute.implementation },
@@ -446,6 +450,9 @@ export function createAgentHandlers(options: AgentHandlerOptions) {
           agentId: summary.agentId,
           revision: summary.revision,
           backendId: summary.backendId,
+          ...(summary.gatewayManagedMode === undefined
+            ? {}
+            : { gatewayManagedMode: summary.gatewayManagedMode }),
           configurationId: summary.configurationId,
           configurationGeneration: summary.configurationGeneration,
           harness: summary.harness,

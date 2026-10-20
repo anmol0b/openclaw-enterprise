@@ -3,6 +3,27 @@
 
 const STARTUP_PHASE_EVENT = "runtime.startup_phase";
 
+// Apply OCE's managed-mode controls to each Gateway process, including respawns.
+export function gatewayLaunchHelper(managedMode: boolean): string {
+  return String.raw`
+function gatewayLaunch(readonlyConfiguration = false) {
+  const managedMode = ${managedMode};
+  const env = { ...process.env };
+  if (managedMode || readonlyConfiguration) {
+    env.OPENCLAW_CONFIG_READONLY = "1";
+  }
+  if (managedMode) {
+    env.OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS = "1";
+    env.OPENCLAW_DISABLE_CRON_HOST_EXECUTION = "1";
+  }
+  return {
+    args: ["/app/openclaw.mjs", "gateway", "--port", process.env.OPENCLAW_GATEWAY_PORT],
+    env,
+  };
+}
+`;
+}
+
 // One stderr JSON line per startup phase, for deploy-time measurement. Callers
 // pass fixed phase names only: never provider, model, credential or path values.
 // A failed phase may add a fixed upper-case cause code, which the Collector exports,

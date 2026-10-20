@@ -187,7 +187,9 @@ export interface AgentReadRepository {
 }
 
 export interface AgentRepository extends AgentReadRepository {
-  createAgent(agent: Agent): Promise<Readonly<Agent>>;
+  createAgent(
+    agent: Omit<Agent, "gatewayManagedMode"> & { readonly gatewayManagedMode?: boolean },
+  ): Promise<Readonly<Agent>>;
   setSandboxPolicyEditing(
     namespaceId: string,
     agentId: string,
@@ -206,6 +208,7 @@ export interface AgentRepository extends AgentReadRepository {
     pluginApprovers?: PluginApprovers | null,
     repositoryAccess?: RepositoryAccess | null,
     credentialSources?: readonly AgentCredentialSourceBinding[],
+    gatewayManagedMode?: boolean,
   ): Promise<Readonly<Agent> | undefined>;
   compareAndSetActiveRevision(
     namespaceId: string,
@@ -866,7 +869,10 @@ export type PlatformOperation =
 export interface PlatformOperationReadRepository {
   list(): Promise<readonly Readonly<PlatformOperation>[]>;
   findWork(idempotencyKey: string): Promise<Readonly<ControllerWork> | undefined>;
-  findWorkAttempt(idempotencyKey: string): Promise<Readonly<ControllerWorkAttempt> | undefined>;
+  findWorkAttempt(
+    idempotencyKey: string,
+    code?: string | readonly string[],
+  ): Promise<Readonly<ControllerWorkAttempt> | undefined>;
   /** True while credential withdrawal work for the revision is queued or claimed. */
   hasOutstandingCredentialWithdrawalWork(namespaceId: string, revisionId: string): Promise<boolean>;
 }
@@ -2461,6 +2467,7 @@ function repositories(
       } = agent;
       const saved = immutableCopy({
         ...withoutPlugins,
+        gatewayManagedMode: agent.gatewayManagedMode ?? true,
         ...(plugins === undefined ? {} : { plugins }),
         ...(pluginApprovers === undefined ? {} : { pluginApprovers }),
         ...(repositoryBindings === undefined ? {} : { repositoryBindings }),
@@ -2533,6 +2540,7 @@ function repositories(
       nextPluginApprovers,
       nextRepositoryAccess,
       nextCredentialSources,
+      gatewayManagedMode,
     ) => {
       const current = await agents.findAgent(namespaceId, agentId);
       if (!current) {
@@ -2602,6 +2610,7 @@ function repositories(
         configurationId,
         backendId: nextBackendId,
         executionMode: executionMode ?? current.executionMode,
+        gatewayManagedMode: gatewayManagedMode ?? current.gatewayManagedMode,
         harnessAuth: association,
         ...(agentCredentialSources === undefined || agentCredentialSources.length === 0
           ? {}
@@ -2677,8 +2686,25 @@ function repositories(
               .filter(
                 (revision) => revision.namespaceId === namespaceId && revision.agentId === agentId,
               )
-              .map(({ id, namespaceId, agentId, revision, backendId, createdAt }) =>
-                Object.freeze({ id, namespaceId, agentId, revision, backendId, createdAt }),
+              .map(
+                ({
+                  id,
+                  namespaceId,
+                  agentId,
+                  revision,
+                  backendId,
+                  gatewayManagedMode,
+                  createdAt,
+                }) =>
+                  Object.freeze({
+                    id,
+                    namespaceId,
+                    agentId,
+                    revision,
+                    backendId,
+                    ...(gatewayManagedMode === undefined ? {} : { gatewayManagedMode }),
+                    createdAt,
+                  }),
               )
           : [],
       ),
@@ -2705,6 +2731,7 @@ function repositories(
             backendId,
             configurationId,
             configurationGeneration,
+            gatewayManagedMode,
             harness,
             createdAt,
           }) =>
@@ -2716,6 +2743,7 @@ function repositories(
               backendId,
               configurationId,
               configurationGeneration,
+              ...(gatewayManagedMode === undefined ? {} : { gatewayManagedMode }),
               harness,
               createdAt,
             }),
@@ -2733,6 +2761,8 @@ function repositories(
         owner === undefined ||
         owner.servicePrincipalId !== revision.servicePrincipalId ||
         owner.backendId !== revision.backendId ||
+        (revision.gatewayManagedMode !== undefined &&
+          revision.gatewayManagedMode !== owner.gatewayManagedMode) ||
         !harnessAuthMatches(owner.harnessAuth, revision.harnessAuth) ||
         !credentialSourcesMatch(owner.credentialSources, revision.credentialSources)
       ) {
@@ -2758,6 +2788,7 @@ function repositories(
       } = revision;
       const saved = immutableCopy({
         ...withoutSecretBindings,
+        gatewayManagedMode: owner.gatewayManagedMode,
         ...(secretBindings === undefined ? {} : { secretBindings }),
         ...(plugins === undefined ? {} : { plugins }),
       });

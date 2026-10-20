@@ -178,6 +178,9 @@ function classifyReceipts(receipts, manifest) {
       if (receipts.length === 58) {
         return "preSandboxPolicyAdministrator";
       }
+      if (receipts.length === 59) {
+        return "preGatewayManagedMode";
+      }
       if (receipts.length === 57) {
         return "preSandboxPolicies";
       }
@@ -203,6 +206,9 @@ function classifyReceipts(receipts, manifest) {
     }
   } else {
     requireReceiptsMatchEntries(receipts, manifest.entries);
+  }
+  if (receipts.length === 59) {
+    return "preGatewayManagedMode";
   }
   if (receipts.length === 58) {
     return "preSandboxPolicyAdministrator";

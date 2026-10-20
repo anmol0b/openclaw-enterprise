@@ -111,6 +111,10 @@ Compare **New version queued**, **Deployment waiting for runtime**, and
 **Deployment retry after dependency failure**; switch versions and check
 **Since**.
 
+In **Pages → Agent detail → Gateway Managed Mode**, turn managed mode off for the
+next deployment. Compare the current version's recorded mode with the changed
+draft and check that the Console says deployment is required. The fixture simulates the save.
+
 **First deployment creates credentials** accepts **Deploy new version** without
 a separate credential action. Its initial state is not a Stop request; OCC
 generation is simulated.
