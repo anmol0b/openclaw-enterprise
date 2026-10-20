@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -281,15 +281,13 @@ test(
       'import test from "node:test";\ntest("private-case-canary", () => { throw new Error("::warning::private-message-canary"); });\n',
     );
     // Hold another failing file open to distinguish live reporting from a final summary.
-    const started = join(root, "started");
     const release = join(root, "release");
     await writeFile(
       join(root, second),
-      `import { writeFileSync, existsSync } from "node:fs";
+      `import { existsSync } from "node:fs";
      import { setTimeout } from "node:timers/promises";
      import test from "node:test";
      test("second failure", {timeout: 20000}, async () => {
-       writeFileSync(${JSON.stringify(started)}, "");
        while (!existsSync(${JSON.stringify(release)})) await setTimeout(50);
        throw new Error("second failure");
      });\n`,
@@ -317,8 +315,8 @@ test(
     let code;
     const commands = () => stderr.match(/^::.*$/gm) ?? [];
     try {
-      assert.ok(await waitFor(() => existsSync(started), 10_000), "second file started");
       // Match the entire workflow command: no child-controlled text or extra commands.
+      assert.ok(await waitFor(() => /^::.*\n/m.test(stderr), 10_000), "live workflow command");
       assert.deepEqual(commands(), [
         "::error title=Test lane failure::A test file reported failed tests and its cleanup passed. Final lane results will follow.",
       ]);
