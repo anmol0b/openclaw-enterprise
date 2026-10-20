@@ -1944,7 +1944,7 @@ for (const stage of ["check", "read"]) {
 
 // A permitted model stream outlives the 30-second operation deadline only through the
 // renewable lease: progress renews it, idling and the ceiling end it, and current
-// policy is checked again at every renewal. The test clock advances; nothing sleeps.
+// policy is checked on renewal and again before release. The test clock advances; nothing sleeps.
 async function leasedStreamFixture(t, overrides = () => ({}), peerLifetimeMs = 3_600_000) {
   const receipts = new EgressSendReceipts(new InMemoryPlatformState());
   const f = await syntheticDispatchFixture(t, receipts);
@@ -1956,7 +1956,8 @@ async function leasedStreamFixture(t, overrides = () => ({}), peerLifetimeMs = 3
     ...overrides(f),
   });
   const sandboxId = f.association.installation.sandboxId;
-  const signal = new AbortController().signal;
+  const controller = new AbortController();
+  const { signal } = controller;
   const ready = await proxy.resolve("synthetic-peer", sandboxId, f.request, signal);
   assert.equal(ready.kind, "ready");
   const decision = await proxy.authorizeSend(
@@ -1997,6 +1998,7 @@ async function leasedStreamFixture(t, overrides = () => ({}), peerLifetimeMs = 3
       return response && Buffer.from(response.body).toString();
     },
     safeBody,
+    abort: () => controller.abort(),
     async observation() {
       const stored = await receipts.recover(f.sender, {
         sender: f.sender,
@@ -2151,6 +2153,80 @@ test("a withdrawal cuts a model stream at its next renewal", async (t) => {
     code: "response_policy",
   });
 });
+
+for (const policy of ["withdrawn", "source changed", "unavailable", "never available"]) {
+  test(`a quiet stream cannot release bytes if policy is ${policy} during receipt persistence`, async (t) => {
+    let persisting = false;
+    let checkedUntil;
+    const s = await leasedStreamFixture(t, (f) => ({
+      check: async (use, evidence, stream) => {
+        const source = await f.ports.check(use, evidence, stream);
+        if (!stream || (!persisting && policy !== "never available")) return source;
+        checkedUntil = stream.until;
+        if (policy === "withdrawn") return { kind: "denied", code: "withdrawn" };
+        if (policy === "source changed") return { ...source, materialRefId: "replacement" };
+        throw new Error("synthetic policy outage");
+      },
+    }));
+    const lease = await s.renew(s.safeBody.length);
+    assert.ok(lease);
+    const saving = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    const observe = s.receipts.observe.bind(s.receipts);
+    t.mock.method(s.receipts, "observe", async (...args) => {
+      saving.resolve();
+      await resume.promise;
+      return observe(...args);
+    });
+
+    // No more progress. Finish inside the recheck interval, then change policy while
+    // the observation is pending and the proxy still holds the complete response.
+    s.f.advance(STREAM_LEASE_RECHECK_MS - 1);
+    const response = s.complete();
+    await saving.promise;
+    persisting = true;
+    resume.resolve();
+    assert.equal(await response, undefined, "the upstream response must not be released");
+    assert.equal(checkedUntil, lease.renewBy, "release uses the current lease deadline");
+    assert.deepEqual(await s.observation(), {
+      kind: "response",
+      dispatch: "confirmed",
+      status: 200,
+    });
+    assert.equal(await s.complete(), undefined, "the observed response cannot be claimed again");
+  });
+}
+
+for (const loss of ["lease expires", "exchange closes", "owner changes"]) {
+  test(`a final policy check cannot release the response after the ${loss}`, async (t) => {
+    const checking = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    let finishing = false;
+    const s = await leasedStreamFixture(t, (f) => ({
+      check: async (...args) => {
+        if (finishing && args[2]) {
+          checking.resolve();
+          await resume.promise;
+        }
+        return f.ports.check(...args);
+      },
+    }));
+    const lease = await s.renew(s.safeBody.length);
+    finishing = true;
+    const response = s.complete();
+    await checking.promise;
+    if (loss === "lease expires") s.f.advance(Date.parse(lease.renewBy) - s.f.ports.now());
+    if (loss === "exchange closes") s.abort();
+    if (loss === "owner changes") s.f.replaceCustody();
+    resume.resolve();
+    assert.equal(await response, undefined);
+    assert.deepEqual(await s.observation(), {
+      kind: "response",
+      dispatch: "confirmed",
+      status: 200,
+    });
+  });
+}
 
 test("stream progress beyond the response bound is refused", async (t) => {
   const s = await leasedStreamFixture(t);

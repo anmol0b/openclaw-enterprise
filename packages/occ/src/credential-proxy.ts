@@ -139,7 +139,12 @@ interface OperationRecord {
   phase: "resolved" | "checking" | "permitted" | "renewing" | "protecting" | "observing";
   /** Liveness bound: the request deadline until the first stream renewal. */
   expiresAt: number;
-  stream?: { readonly bodyBytes: number; readonly ceiling: number; readonly checkedAt: number };
+  /** Null when progress kept the original deadline without a successful policy check. */
+  stream?: {
+    readonly bodyBytes: number;
+    readonly ceiling: number;
+    readonly checkedAt: number;
+  } | null;
   timer?: ReturnType<typeof setTimeout>;
   release?: () => void;
 }
@@ -773,9 +778,9 @@ export class CredentialProxy {
   /**
    * Renew the permitted operation while the origin's response streams. Only progress
    * renews: the first frame needs the response head (within the operation deadline) and
-   * each later frame more body bytes. Current policy is checked again on a renewal (at
-   * most every STREAM_LEASE_RECHECK_MS), so a withdrawal cuts the stream within that
-   * window; an unavailable authority keeps the current bound without extending it. A lost
+   * each later frame more body bytes. Progress can trigger a policy check no sooner than
+   * STREAM_LEASE_RECHECK_MS after the last successful check; silence triggers no check.
+   * An unavailable authority keeps the current bound without extending it. A lost
    * owner (custody or peer expiry) cuts without an observation: there is no stream left
    * to observe for. Nothing here releases bytes.
    */
@@ -819,14 +824,7 @@ export class CredentialProxy {
     // Capacity stays charged until the policy check and any observation settle.
     record.charge.holds += 1;
     try {
-      let decision: ProtectedEgressSource | EgressRefusal;
-      try {
-        decision = await this.ports.check(record.use, undefined, {
-          until: new Date(record.expiresAt).toISOString(),
-        });
-      } catch {
-        decision = { kind: "unavailable", code: "authority" };
-      }
+      const decision = await this.checkStreamPolicy(record);
       const now = this.ports.now();
       if (
         this.records.get(handle) !== record ||
@@ -855,6 +853,7 @@ export class CredentialProxy {
         return undefined;
       }
       if (!("key" in decision)) {
+        record.stream ??= null;
         return lease();
       }
       const ceiling = Math.min(createdAt + STREAM_LEASE_CEILING_MS, Date.parse(peer.expiresAt));
@@ -872,6 +871,18 @@ export class CredentialProxy {
     }
   }
 
+  private async checkStreamPolicy(
+    record: OperationRecord,
+  ): Promise<ProtectedEgressSource | EgressRefusal> {
+    try {
+      return await this.ports.check(record.use, undefined, {
+        until: new Date(record.expiresAt).toISOString(),
+      });
+    } catch {
+      return { kind: "unavailable", code: "authority" };
+    }
+  }
+
   /** Store only observation metadata. Returning policy bytes is not supplier application proof. */
   async protectResponse(
     handle: string,
@@ -883,7 +894,7 @@ export class CredentialProxy {
     if (!record || record.phase !== "protecting") {
       return undefined;
     }
-    // Consume even while persistence is pending; no second stream/body can reuse this response.
+    // Claim the response before any await; a second stream cannot take it during observation or release.
     record.phase = "observing";
     record.charge.holds += 1;
     try {
@@ -914,13 +925,29 @@ export class CredentialProxy {
         observed,
         rejected ? { classification: "credential_rejected", evidence: record.evidence } : undefined,
       );
-      // Persistence may outlive the original deadline or cancellation. Never release late bytes.
-      return this.records.get(handle) === record &&
+      // The receipt records the upstream response and any credential rejection, not delivery.
+      // If persistence outlived our custody, there is no response left to authorize.
+      const stillOwnsResponse = () =>
+        this.records.get(handle) === record &&
         !signal.aborted &&
         record.expiresAt > this.ports.now() &&
-        this.owns(record.association, record.use)
-        ? safe
-        : undefined;
+        this.owns(record.association, record.use);
+      if (safe === undefined || !stillOwnsResponse()) {
+        return undefined;
+      }
+      if (record.stream !== undefined) {
+        // Policy may have changed during a quiet stream or while committing the observation.
+        // Check it last, then recheck local custody without another await before returning bytes.
+        const policy = await this.checkStreamPolicy(record);
+        if (
+          !("key" in policy) ||
+          !isDeepStrictEqual(policy, record.source) ||
+          !stillOwnsResponse()
+        ) {
+          return undefined;
+        }
+      }
+      return safe;
     } finally {
       this.discard(handle, record);
       this.releaseCharge(record.charge);

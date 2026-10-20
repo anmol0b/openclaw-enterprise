@@ -68,16 +68,21 @@ approved copy available until its owner can make that transition safely.
 
 The supervisor withholds the complete bounded response, including the last trailer,
 until Credential Proxy permits its release. The 30-second operation deadline bounds
-the first response byte. While a model response streams, the supervisor reports
-progress on the exchange; each report with new bytes renews the lease for five
-minutes, up to fifteen minutes after the request was created (or the exchange
-credential's expiry, if sooner). Policy is checked again on renewal, at most every
-15 seconds, so a withdrawal cuts the stream within that window. A stream that
-idles past its lease or reaches the ceiling is discarded; nothing is released.
-Policy can remove or block provider bytes even
-after the origin acted. A positive credential rejection fences only that material
-version. An observed response or a decision to release bytes does not prove delivery
-to the Agent and cannot authorize a replay.
+the first response byte. The supervisor reports that first byte and subsequent progress.
+With current permission, a report can renew the lease for five minutes, up to fifteen
+minutes after the request was created (or the exchange credential's expiry, if sooner).
+After a successful check, new bytes can trigger the next policy check no sooner than
+15 seconds later. A quiet stream triggers no checks and is discarded if its lease expires.
+
+Credential Proxy records the upstream response, then checks current policy before releasing
+a leased response. If permission was withdrawn while the stream was quiet or while the
+observation was being saved, the proxy withholds the bytes. It also withholds them if it
+cannot confirm permission for the same source, the lease expires, or the exchange closes.
+A withdrawal after that check cannot recall bytes already released.
+
+The receipt describes what the proxy observed upstream, even when it later withholds the
+response. A positive credential rejection fences only that material version. Neither the
+receipt nor permission to release the response proves delivery to the Agent or permits a retry.
 
 Response protection checks joined assistant text in envelopes, independent items,
 and added-item seeds extended by streamed deltas. Safe projections may disagree;
