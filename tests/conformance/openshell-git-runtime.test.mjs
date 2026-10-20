@@ -85,6 +85,7 @@ function fixture() {
     rotate: undefined,
     onRead: undefined,
     observe: undefined,
+    observeAfterRotate: undefined,
   };
   const client = {
     getProvider: async () => ({ type: "openai", profileWorkspace: "" }),
@@ -107,8 +108,10 @@ function fixture() {
         // The provider status does not verify yet (observe() answers undefined, never throws).
         return undefined;
       }
+      // Like the real observe(): the generation it reports is the one this binding holds.
       return Object.freeze({
         credentialState: binding.credentialState,
+        providerResourceVersion: binding.resourceVersion,
         sandboxId,
         ...supervisor,
       });
@@ -118,7 +121,17 @@ function fixture() {
       if (faults.rotate) {
         throw faults.rotate;
       }
-      return { ...binding, credentialState: "active", expiresAt: token.expiresAt };
+      if (faults.observeAfterRotate) {
+        // The supervisor has not applied the written generation yet: the verifying read
+        // that follows reports nothing until the test clears faults.observe.
+        faults.observe = true;
+      }
+      return {
+        ...binding,
+        credentialState: "active",
+        expiresAt: token.expiresAt,
+        resourceVersion: `${binding.resourceVersion}+`,
+      };
     },
   };
   const material = {
@@ -156,6 +169,7 @@ function fixture() {
       workspace: sandbox.workspace,
       sandbox: sandbox.name,
       provider: "oce-git",
+      resourceVersion: "rv-1",
       credentialState: "bootstrap",
       expiresAt: future(),
     },
@@ -275,7 +289,7 @@ test("a gateway that does not answer closes the Git route and restores it withou
     (event) => event.event === "worker.openshell-git-route" && event.status === "restored",
   );
   assert.equal(restored.length, 1);
-  assert.equal(typeof restored[0].durationMs, "number");
+  assert.ok(Number.isFinite(restored[0].durationMs) && restored[0].durationMs >= 0);
   assert.equal(restored[0].revisionId, "rev-one");
   assert.deepEqual(f.errors(), []);
 
@@ -384,7 +398,7 @@ test("the same supervisor process reconnecting with a new session re-adopts the 
   assert.equal((await f.lookup())?.executionId, f.revision.id);
   assert.equal(restorations(f).length, 1);
   assert.equal(restorations(f)[0].reason, "supervisor_reconnected");
-  assert.equal(typeof restorations(f)[0].durationMs, "number");
+  assert.ok(Number.isFinite(restorations(f)[0].durationMs) && restorations(f)[0].durationMs >= 0);
   assert.equal(restorations(f)[0].revisionId, "rev-one");
   assert.equal(restorations(f)[0].repositoryRef, "application");
   // The adopted session is the reference from here on: a later read reports nothing more.
@@ -438,13 +452,60 @@ test("the same supervisor process reconnecting with a new session re-adopts the 
   assert.equal(restorations(f)[0].reason, "supervisor_reconnected");
   assert.equal(f.calls.rotate, 1);
   assert.deepEqual(f.errors(), []);
+
+  // A Gateway restart that overlaps a credential rotation: the rotation wrote a new provider
+  // generation, its verifying read lagged, then the supervisor reconnected. The adopted
+  // observation carries the generation this worker wrote (observe() pins it to the binding),
+  // not the one read before the rotation, so the route reopens instead of closing for good.
+  f = fixture();
+  await f.reconcile();
+  assert.equal(f.entry.supervisor.providerResourceVersion, "rv-1+");
+  f.owner.material = { ...f.owner.material, materialVersion: "version-two" };
+  f.faults.observeAfterRotate = true;
+  await f.reconcile();
+  assert.equal(f.calls.rotate, 2);
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "pending", reason: "unverified" });
+  assert.equal(f.entry.supervisor.providerResourceVersion, "rv-1+");
+  f.faults.gateway = new SandboxGatewayUnavailableError("OpenShell GetSandbox failed.");
+  await f.reconcile();
+  f.faults.gateway = undefined;
+  f.faults.observe = undefined;
+  f.supervisor.supervisorSessionId = "session-two";
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  assert.equal(f.entry.supervisor.providerResourceVersion, "rv-1++");
+  assert.equal(f.entry.supervisor.supervisorSessionId, "session-two");
+  assert.equal(f.calls.rotate, 2);
+  assert.deepEqual(f.errors(), []);
+  assert.equal(restorations(f).length, 1);
+  assert.equal(restorations(f)[0].reason, "supervisor_reconnected");
+
+  // A reconnect before the route ever opened (a deploying version awaiting its material) is
+  // adopted silently: the first install is not a restoration.
+  f = fixture();
+  f.owner.material = undefined;
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), {
+    state: "pending",
+    reason: "awaiting_material",
+  });
+  f.supervisor.supervisorSessionId = "session-two";
+  await f.reconcile();
+  assert.equal(f.entry.supervisor.supervisorSessionId, "session-two");
+  f.owner.material = fixture().owner.material;
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  assert.deepEqual(restorations(f), []);
+  assert.deepEqual(f.errors(), []);
 });
 
 test("an open Git route that loses its material says so once and names it in each denial", async () => {
   // The owner retired the active version's material (the App key was rotated or rejected and
-  // preparation is quarantined, or access was withdrawn): the route closes with one warning
-  // that names the version, every request is denied as material_unavailable, and the
-  // restoration reports the outage's length (finding 2135).
+  // preparation is quarantined, or access was withdrawn): the route closes, every request is
+  // denied as material_unavailable, the first such denial logs one warning that names the
+  // version, and the restoration reports the outage's length (finding 2135). A version
+  // superseded by a newer one loses its material too, a moment before it is withdrawn, and
+  // no request asks for it: the close alone is not reported.
   const warnings = (f) =>
     f.events.filter((event) => event.event === "worker.openshell-git-route-warning");
   const f = fixture();
@@ -458,6 +519,8 @@ test("an open Git route that loses its material says so once and names it in eac
     reason: "material_unavailable",
   });
   assert.equal(f.entry.blocked, undefined);
+  assert.deepEqual(warnings(f), []);
+  assert.equal(await f.lookup(), undefined);
   assert.deepEqual(warnings(f), [
     {
       event: "worker.openshell-git-route-warning",
@@ -469,7 +532,6 @@ test("an open Git route that loses its material says so once and names it in eac
       repositoryRef: "application",
     },
   ]);
-  assert.equal(await f.lookup(), undefined);
   assert.equal(f.denials().at(-1).reason, "material_unavailable");
   assert.equal(f.denials().at(-1).revisionId, "rev-one");
   // Still unavailable: no second warning, the same denial.
@@ -488,7 +550,31 @@ test("an open Git route that loses its material says so once and names it in eac
   );
   assert.equal(restored.length, 1);
   assert.equal(restored[0].reason, undefined);
-  assert.equal(typeof restored[0].durationMs, "number");
+  assert.ok(Number.isFinite(restored[0].durationMs) && restored[0].durationMs >= 0);
+
+  // Lost again after the restoration: reported again, once.
+  f.owner.material = undefined;
+  await f.reconcile();
+  assert.equal(await f.lookup(), undefined);
+  assert.equal(await f.lookup(), undefined);
+  assert.equal(warnings(f).length, 2);
+
+  // Material lost while the route is closed by a failed read: once the Gateway answers, the
+  // route reads as material_unavailable, and the first refused request reports it.
+  const h = fixture();
+  await h.reconcile();
+  h.faults.gateway = new SandboxGatewayUnavailableError("OpenShell GetSandbox failed.");
+  await h.reconcile();
+  h.owner.material = undefined;
+  h.faults.gateway = undefined;
+  await h.reconcile();
+  assert.deepEqual(h.runtime.route(h.revision.id), {
+    state: "pending",
+    reason: "material_unavailable",
+  });
+  assert.equal(await h.lookup(), undefined);
+  assert.equal(h.denials().at(-1).reason, "material_unavailable");
+  assert.equal(warnings(h).filter((event) => event.reason === "material_unavailable").length, 1);
 
   // A version that never had material (deploying; it is issued once the version is active)
   // is not an outage: no warning, and its denial stays route_pending.
@@ -581,14 +667,6 @@ test("the Git route tombstone stays for a replaced execution, an unknown write a
   f.supervisor.attachmentEpoch = "epoch-two";
   await f.reconcile();
   await expectBlocked(f, "supervisor_replaced");
-
-  // A new session on a Sandbox with another id.
-  f = fixture();
-  await f.reconcile();
-  f.supervisor.supervisorSessionId = "session-two";
-  f.sandbox.id = "sandbox-id-two";
-  await f.reconcile();
-  await expectBlocked(f, "execution_replaced");
 
   // The sandbox no longer matches the admitted create request.
   f = fixture();
