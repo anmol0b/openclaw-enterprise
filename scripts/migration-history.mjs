@@ -261,6 +261,9 @@ function classifyReceipts(receipts, manifest) {
   if (receipts.length === 64) {
     return "prePreparedRepositoryDraftPulls";
   }
+  if (receipts.length === 65) {
+    return "preLegacyRevisionExecutionAdmission";
+  }
   refuse("an incomplete or unsupported development history is installed");
 }
 
