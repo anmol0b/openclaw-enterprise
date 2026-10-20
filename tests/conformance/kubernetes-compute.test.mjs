@@ -10534,6 +10534,36 @@ async function exerciseEmbeddedReplacement({
     gatewayEnvironment.OPENCLAW_HARNESS_AGENT_RUNTIME?.value,
     agentRuntimeId === "claude-cli" ? "claude-cli" : undefined,
   );
+  // Claude Code transcripts live on the Agent's private state claim, so `claude --resume`
+  // finds a conversation after a restart or redeploy; the rest of its configuration
+  // directory (the credential's settings file) stays on the Pod-local home.
+  const gatewayPod = replaced.spec.template.spec;
+  const transcriptMounts = gatewayPod.containers[0].volumeMounts.filter(
+    ({ mountPath }) => mountPath === "/home/node/.claude/projects",
+  );
+  const preparation = gatewayPod.initContainers.find(
+    ({ name }) => name === "prepare-private-state",
+  ).args[0];
+  if (agentRuntimeId === "claude-cli") {
+    assert.deepEqual(transcriptMounts, [
+      {
+        name: "openclaw-gateway-state",
+        mountPath: "/home/node/.claude/projects",
+        subPath: "claude-projects",
+        readOnly: false,
+      },
+    ]);
+    assert.match(preparation, /"\/runtime-state\/home\/\.claude"/u);
+    assert.match(preparation, /"\/gateway-state\/claude-projects"/u);
+  } else {
+    assert.deepEqual(transcriptMounts, []);
+    assert.doesNotMatch(preparation, /claude/u);
+  }
+  assert.equal(
+    gatewayPod.containers[0].volumeMounts.some(({ mountPath }) => mountPath === "/home/node/.claude"),
+    false,
+    "the Claude Code settings file never reaches the claim",
+  );
   const probeConfiguration = JSON.parse(gatewayEnvironment.OPENCLAW_HARNESS_PROBE_CONFIG.value);
   assert.equal(probeConfiguration.agents.defaults.model, modelRef);
   assert.deepEqual(probeConfiguration.agents.defaults.models, {

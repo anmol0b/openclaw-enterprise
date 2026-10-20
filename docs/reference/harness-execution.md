@@ -9,7 +9,6 @@ execution mode and a compatible model and Harness in its Configuration.
 | Harness  | Agent execution mode | Workloads and support                                                                                                                                                    |
 | -------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | OpenClaw | `embedded`           | One gateway executes the built-in Harness; available on Kubernetes and SSH.                                                                                              |
-| OpenClaw | `embedded`           | With the [Claude Code agent runtime](#claude-code-agent-runtime), the same gateway spawns the image's pinned Claude Code binary for each turn; Kubernetes only.          |
 | Codex    | `dedicated`          | A gateway connects to a separate Codex Harness; available on Kubernetes.                                                                                                 |
 | OpenClaw | `dedicated`          | Experimental native worker enabled by the pinned runtime; requires full-facet Sandbox provisioning and supported [workload projections](#optional-sandbox-provisioning). |
 
@@ -43,7 +42,7 @@ Native models use `provider/model`: the first slash separates the provider,
 and the remaining ID may contain slashes, as in `openai/vendor/model`.
 Catalog IDs accept the complete ID with or without its provider prefix.
 Supported `agentRuntime.id` values are `openclaw`, `codex`, and `claude-cli`
-(the [Claude Code agent runtime](#claude-code-agent-runtime) of embedded
+(the [Claude Code agent runtime](claude-code-runtime.md) of embedded
 OpenClaw, accepted only on `anthropic/*` models). OCC checks model,
 Agent-entry, and provider policies, rejecting explicit conflicts. All Agent
 entries must resolve to one primary model, agent runtime, and Harness.
@@ -76,49 +75,6 @@ dedicated execution's `main` Agent rules apply only at deployment. Admission
 preserves fallback order in the immutable version but does not implement fallback
 execution or allow changing topology.
 
-## Claude Code agent runtime
-
-An embedded OpenClaw Agent can execute its turns through Claude Code instead of
-OpenClaw's own Anthropic client. Select it per model with the runtime policy
-OpenClaw's Anthropic plugin defines:
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "anthropic/claude-sonnet-4-5",
-      "models": { "anthropic/claude-sonnet-4-5": { "agentRuntime": { "id": "claude-cli" } } }
-    }
-  },
-  "models": { "providers": { "anthropic": { "baseUrl": "https://api.anthropic.com" } } }
-}
-```
-
-The Harness stays OpenClaw in `embedded` mode: the gateway process spawns the
-runtime image's pinned Claude Code binary for each turn, so tools run in the
-gateway Pod as they do for every embedded Agent. Every selectable model must be
-`anthropic/*` with the same policy; a dedicated Agent, another provider, or
-`openai`-style fallbacks are refused at save or deployment with `400 INVALID_REQUEST`.
-The [console](console/create-and-deploy.md) does not offer the choice yet; set it
-in the Configuration.
-
-Authentication is the ordinary `api_key` [binding](#harness-authentication): the
-Secret holds an Anthropic API key, a Claude Code setup token (`sk-ant-oat…`,
-sent as a bearer), or the bearer token of an Anthropic-compatible endpoint named
-by the provider's literal `baseUrl`. At startup the gateway first runs the usual
-[model probe](#harness-authentication) through OpenClaw's HTTP client, so a
-rejected credential or unreachable endpoint fails the deployment with the same
-codes. Only then does the entrypoint prepare a Pod-local Claude Code
-configuration directory (`$HOME/.claude`, on the runtime-state volume, `0700`,
-settings `0600`) carrying the endpoint, the credential, and
-`DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING` and
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`. Claude Code reads that directory
-because OpenClaw's backend scrubs `ANTHROPIC_*` and `CLAUDE_CODE_*` variables
-from the child's environment. A binary missing from the image or not at the
-pinned `OCE_CLAUDE_CODE_VERSION` holds the gateway unready with `UNAVAILABLE`,
-logged as startup phase `claude-code-runtime`. Model egress rules are unchanged:
-the endpoint must be reachable on public TCP/443.
-
 ## Admission and immutable execution
 
 Deployment authorizes the exact Agent, Configuration, and selected managed
@@ -144,14 +100,13 @@ revoked authority, or a missing required Driver fail closed; see
 The Agent's [harnessAuth binding](agents.md#harness-authentication) is the sole
 model-auth selector. Kubernetes supports these combinations:
 
-| Binding                                     | Topology                               | Credential consumer                                                                                                                   |
-| ------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `api_key` with an OCC Secret                | Embedded OpenClaw                      | Combined gateway/Harness receives `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, selected by its native model provider.                     |
-| `api_key` with an OCC Secret                | Embedded OpenClaw, Claude Code runtime | The gateway receives `ANTHROPIC_API_KEY` and, after the probe, hands it to Claude Code through its Pod-local configuration directory. |
-| `api_key` with an OCC Secret                | Dedicated OpenClaw                     | Only the native Harness receives `OPENAI_API_KEY`.                                                                                    |
-| `api_key` with an OCC Secret                | Dedicated Codex                        | Only Codex receives `OPENAI_API_KEY` and logs in through stdin.                                                                       |
-| `codex_pat` with a Secret or ServiceAccount | Dedicated Codex                        | Only Codex receives `CODEX_ACCESS_TOKEN`; native login validates its account identity.                                                |
-| `credential_source`                         | Dedicated Harness                      | The Harness receives only a placeholder; the Sandbox egress proxy inserts the key from the Credential Gateway.                        |
+| Binding                                     | Topology           | Credential consumer                                                                                               |
+| ------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `api_key` with an OCC Secret                | Embedded OpenClaw  | Combined gateway/Harness receives `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, selected by its native model provider. |
+| `api_key` with an OCC Secret                | Dedicated OpenClaw | Only the native Harness receives `OPENAI_API_KEY`.                                                                |
+| `api_key` with an OCC Secret                | Dedicated Codex    | Only Codex receives `OPENAI_API_KEY` and logs in through stdin.                                                   |
+| `codex_pat` with a Secret or ServiceAccount | Dedicated Codex    | Only Codex receives `CODEX_ACCESS_TOKEN`; native login validates its account identity.                            |
+| `credential_source`                         | Dedicated Harness  | The Harness receives only a placeholder; the Sandbox egress proxy inserts the key from the Credential Gateway.    |
 
 A selected Sandbox uses only Compute's
 [rendered login mode and Secret projections](drivers/sandbox.md#provisioning-inputs).
