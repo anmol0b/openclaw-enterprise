@@ -4,6 +4,7 @@ import {
   isResponsesEvent,
   type ItemContentEvent,
   type ItemEvent,
+  type ResponseOutputContent,
   type ResponsesEvent,
 } from "./openai-responses.ts";
 
@@ -21,9 +22,14 @@ interface ResponseProtection {
   fragmentOverlap: number;
 }
 
+// A refusal part's text is shown to the Agent like output_text, so it is protected alike.
+function partText(part: ResponseOutputContent): string {
+  return part.type === "refusal" ? part.refusal : part.text;
+}
+
 // The supported assistant consumer joins message parts without a delimiter.
-function assistantText(parts: readonly { text: string }[]): string {
-  return parts.map((part) => part.text).join("");
+function assistantText(parts: readonly ResponseOutputContent[]): string {
+  return parts.map(partText).join("");
 }
 
 function withoutPlan(text: string): string {
@@ -102,6 +108,8 @@ export function protectedResponseOutput(value: unknown, scan: Scan): boolean {
         const part = asRecord(entry);
         if (part?.type === "output_text" && typeof part.text === "string") {
           parts.push(part.text);
+        } else if (part?.type === "refusal" && typeof part.refusal === "string") {
+          parts.push(part.refusal);
         }
       }
       // Citation and Plan visibility start afresh for each completed assistant message.
@@ -316,7 +324,7 @@ class ResponsesStream {
         argumentBytes: 0,
         textTails:
           item.type === "message"
-            ? item.content.map((part) => part.text.slice(-this.policy.fragmentOverlap))
+            ? item.content.map((part) => partText(part).slice(-this.policy.fragmentOverlap))
             : [],
       });
       return (
@@ -351,18 +359,22 @@ class ResponsesStream {
     if (!item || item.done || item.id !== event.item_id) {
       return false;
     }
-    if (event.type === "response.output_text.delta" && event.delta !== undefined) {
+    // Refusal text is assistant-visible like output_text: one joined stream for both.
+    const assistantDelta =
+      event.type === "response.output_text.delta" || event.type === "response.refusal.delta";
+    if (assistantDelta && event.delta !== undefined) {
       this.assistant?.chunks.push(event.delta);
       this.assistant?.plan.push(event.delta);
     }
     if (event.delta !== undefined) {
       // Codex exposes output deltas without item IDs. Protect the concatenation the
       // consumer sees, including across two distinct, otherwise valid output items.
-      const text = (this.fragments.get(event.type) ?? "") + event.delta;
+      const key = assistantDelta ? "response.output_text.delta" : event.type;
+      const text = (this.fragments.get(key) ?? "") + event.delta;
       if (this.policy.leaked(text)) {
         return false;
       }
-      this.fragments.set(event.type, text.slice(-this.policy.fragmentOverlap));
+      this.fragments.set(key, text.slice(-this.policy.fragmentOverlap));
     }
     if (event.type.startsWith("response.function_call_arguments.")) {
       return item.type === "function_call" && acceptArguments(item, event, this.policy.scan);
@@ -382,14 +394,17 @@ class ResponsesStream {
       if (event.content_index !== item.textTails.length || !event.part) {
         return false;
       }
-      item.textTails.push(event.part.text.slice(-this.policy.fragmentOverlap));
+      item.textTails.push(partText(event.part).slice(-this.policy.fragmentOverlap));
       return true;
     }
     const previous = item.textTails[event.content_index];
     if (previous === undefined) {
       return false;
     }
-    if (event.type === "response.output_text.delta" && event.delta !== undefined) {
+    if (
+      (event.type === "response.output_text.delta" || event.type === "response.refusal.delta") &&
+      event.delta !== undefined
+    ) {
       const snapshot = previous + event.delta;
       if (this.policy.leaked(snapshot)) {
         return false;

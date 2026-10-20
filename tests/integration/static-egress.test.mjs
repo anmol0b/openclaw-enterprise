@@ -709,6 +709,101 @@ test("Responses output text assembled across parts and messages cannot reveal se
   }
 });
 
+test("Responses refusal parts pass as assistant content and cannot reveal selected material", async (t) => {
+  const f = await staticEgressFixture(t);
+  const check = responseChecks(f);
+  // A provider safety refusal streams as a `refusal` content part with refusal deltas.
+  const refusalEvents = (refusal) => {
+    const events = responseEvents();
+    const middle = Math.floor(refusal.length / 2);
+    return events.flatMap((event) => {
+      const next = structuredClone(event);
+      if (next.part) {
+        next.part = { type: "refusal", refusal: event.type.endsWith(".added") ? "" : refusal };
+      }
+      if (next.type === "response.output_text.delta") {
+        return [
+          { ...next, type: "response.refusal.delta", delta: refusal.slice(0, middle) },
+          { ...next, type: "response.refusal.delta", delta: refusal.slice(middle) },
+        ];
+      }
+      if (next.type === "response.output_text.done") {
+        delete next.text;
+        return [{ ...next, type: "response.refusal.done", refusal }];
+      }
+      for (const item of [next.item, ...(next.response?.output ?? [])]) {
+        if (item?.type === "message" && item.content.length > 0) {
+          item.content = [{ type: "refusal", refusal }];
+        }
+      }
+      return [next];
+    });
+  };
+  for (const stream of [false, true]) {
+    const request = stream
+      ? wire.request
+      : { model: "fixture-model", input: "hello", store: false };
+    await check.events(
+      refusalEvents("I can't help with that."),
+      false,
+      `refusal passes, stream=${stream}`,
+      stream,
+      request,
+    );
+    for (const material of reflectedMaterial) {
+      await check.events(
+        refusalEvents(`I can't help with ${material}.`),
+        true,
+        `refusal reflecting material, stream=${stream}`,
+        stream,
+        request,
+      );
+    }
+  }
+  // Split across an output_text delta and a refusal delta in the next part: the consumer may
+  // join both, so the assistant stream protects their concatenation.
+  const mixed = (text) => {
+    const [created, item, part, delta, ...rest] = responseEvents();
+    const middle = Math.floor(text.length / 2);
+    return [
+      created,
+      item,
+      part,
+      { ...delta, delta: text.slice(0, middle) },
+      { ...part, content_index: 1, part: { type: "refusal", refusal: "" } },
+      {
+        ...delta,
+        type: "response.refusal.delta",
+        content_index: 1,
+        delta: text.slice(middle),
+      },
+      ...rest,
+    ];
+  };
+  await check.events(mixed("ordinary response"), false, "benign output_text and refusal deltas");
+  for (const material of reflectedMaterial) {
+    await check.events(mixed(material), true, "output_text and refusal deltas assembling material");
+  }
+  // Split across refusal deltas only: the terminal snapshot stays harmless.
+  for (const material of reflectedMaterial) {
+    const events = refusalEvents(material).map((event) => {
+      if (event.type === "response.refusal.done") {
+        return { ...event, refusal: "redacted" };
+      }
+      if (event.part?.refusal) {
+        return { ...event, part: { ...event.part, refusal: "redacted" } };
+      }
+      for (const item of [event.item, ...(event.response?.output ?? [])]) {
+        if (item?.type === "message" && item.content.length > 0) {
+          item.content = [{ type: "refusal", refusal: "redacted" }];
+        }
+      }
+      return event;
+    });
+    await check.events(events, true, "refusal deltas assembling the material");
+  }
+});
+
 test("Responses assistant projections protect independent items and seeded deltas", async (t) => {
   const f = await staticEgressFixture(t);
   const check = responseChecks(f);

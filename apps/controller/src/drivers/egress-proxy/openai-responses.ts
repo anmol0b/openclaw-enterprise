@@ -297,10 +297,15 @@ export const validChatRequest = object(
 );
 
 const empty = array(() => false, 0);
-const outputContent = object(
+const outputText = object(
   { type: oneOf("output_text"), text },
   { annotations: empty, logprobs: empty },
 );
+// A provider safety refusal arrives as a documented `refusal` part of the assistant message
+// (openai-python ResponseOutputRefusal). Its text is assistant-visible, so the stream scans
+// it like output_text.
+const outputRefusal = object({ type: oneOf("refusal"), refusal: text });
+const outputContent: Validator = (value) => outputText(value) || outputRefusal(value);
 const outputMessage = object(
   { type: oneOf("message"), id: text, role: oneOf("assistant"), content: array(outputContent) },
   { status, phase },
@@ -424,8 +429,10 @@ const response = object(
 );
 
 // The stream needs only this projection of the closed wire shapes checked below.
+export type ResponseOutputContent =
+  { type: "output_text"; text: string } | { type: "refusal"; refusal: string };
 type ResponseOutputItem =
-  | { type: "message"; content: { type: "output_text"; text: string }[] }
+  | { type: "message"; content: ResponseOutputContent[] }
   | { type: "reasoning" | "custom_tool_call" }
   | { type: "function_call"; arguments: string };
 export type ItemEvent = {
@@ -440,7 +447,7 @@ export type ItemContentEvent = {
   delta?: string;
   arguments?: string;
   content_index?: number;
-  part?: { type: "output_text"; text: string };
+  part?: ResponseOutputContent;
 };
 export type ResponsesEvent = { type: string; sequence_number?: number } & (
   | { response: { id: string; status: string; output: ResponseOutputItem[] } }
@@ -491,6 +498,7 @@ export function isResponsesEvent(value: unknown, model: string): value is Respon
   }
   for (const [prefix, index, field] of [
     ["response.output_text", "content_index", "text"],
+    ["response.refusal", "content_index", "refusal"],
     ["response.reasoning_text", "content_index", "text"],
     ["response.reasoning_summary_text", "summary_index", "text"],
     ["response.function_call_arguments", undefined, "arguments"],
