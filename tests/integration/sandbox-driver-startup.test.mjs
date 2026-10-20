@@ -2,6 +2,8 @@ import { routedRevision } from "../helpers/kubernetes-routed-scenarios.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { createServer as createHttpsServer } from "node:https";
 import { fileURLToPath } from "node:url";
 import { resolveGitHubRepositoryBinding } from "../../apps/controller/src/drivers/repo/github/credentials/registry.ts";
 import {
@@ -5593,6 +5595,200 @@ test(
     assert.equal(credential.status, 0, credential.stderr);
     assert.match(credential.stdout, /username=x-access-token/);
     assert.ok(credential.stdout.includes("password=" + marker));
+
+    // Finding 2126: the documented `oce-github pr-create --draft` must run from this sandbox.
+    // Landlock admits the image's repository client, PATH reaches it after the image's own gh,
+    // and the helper routes like Git: OpenShell strips every proxy variable and mediates the
+    // connection, so the helper must not require one.
+    assert.ok(created.spec.policy.filesystem.read_only.includes("/opt/oce/repository-credentials"));
+    const searchPath = created.spec.environment.PATH.split(":");
+    assert.equal(searchPath.at(-1), "/opt/oce/repository-credentials/bin");
+    assert.ok(searchPath.indexOf("/usr/local/bin") >= 0);
+    assert.ok(
+      searchPath.indexOf("/usr/local/bin") <
+        searchPath.indexOf("/opt/oce/repository-credentials/bin"),
+    );
+    assert.ok(
+      !Object.keys(created.spec.environment).some((name) => /_proxy$/i.test(name)),
+      "the sandbox spec carries no proxy routing",
+    );
+    {
+      const leaf = (...args) => {
+        const result = spawnSync("openssl", args, { cwd: tls.directory, encoding: "utf8" });
+        assert.equal(result.status, 0, result.stderr || result.error?.message);
+      };
+      await writeFile(
+        join(tls.directory, "github.ext"),
+        "basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:api.github.com\n",
+      );
+      leaf(
+        "req",
+        "-new",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:prime256v1",
+        "-nodes",
+        "-keyout",
+        "github.key",
+        "-out",
+        "github.csr",
+        "-subj",
+        "/CN=api.github.com",
+      );
+      leaf(
+        "x509",
+        "-req",
+        "-in",
+        "github.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-days",
+        "1",
+        "-out",
+        "github.pem",
+        "-extfile",
+        "github.ext",
+      );
+      // Stands in for OpenShell's transparent mediation: it terminates TLS for the original
+      // destination with the sandbox CA (NODE_EXTRA_CA_CERTS) and applies the middleware.
+      const exchanges = [];
+      const mediator = createHttpsServer(
+        {
+          cert: await readFile(join(tls.directory, "github.pem")),
+          key: await readFile(join(tls.directory, "github.key")),
+        },
+        async (req, res) => {
+          let text = "";
+          for await (const chunk of req) {
+            text += chunk;
+          }
+          exchanges.push({
+            servername: req.socket.servername,
+            method: req.method,
+            url: req.url,
+            authorization: req.headers.authorization,
+            operationHeader: req.headers["x-oce-operation-id"],
+            body: JSON.parse(text),
+          });
+          const side = (ref) => ({ ref, repo: { full_name: "example/project" } });
+          res.writeHead(201, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              number: 7,
+              html_url: "https://github.com/example/project/pull/7",
+              state: "open",
+              draft: true,
+              head: side("review/task"),
+              base: side("main"),
+            }),
+          );
+        },
+      );
+      mediator.listen(0, "127.0.0.1");
+      await once(mediator, "listening");
+      t.after(() => mediator.close());
+      // The sandbox network namespace sends any TCP connection to the mediator; record the
+      // destination the helper itself selected.
+      const redirect = `import tls from "node:tls";
+const connect = tls.connect;
+tls.connect = (options, ...rest) => {
+  process.stderr.write("destination " + options.host + ":" + options.port + "\\n");
+  return connect({ ...options, host: "127.0.0.1", port: ${mediator.address().port} }, ...rest);
+};`;
+      // OpenShell's provider placeholder; the supervisor resolves it in the mediated request.
+      const placeholder = "openshell:resolve:env:" + marker;
+      const helper = fileURLToPath(
+        new URL(
+          "../../apps/controller/src/drivers/repo/github/credentials/client/draft-pr.ts",
+          import.meta.url,
+        ),
+      );
+      const draft = (extra = {}) =>
+        new Promise((resolve, reject) => {
+          const child = spawn(
+            process.execPath,
+            [
+              "--import",
+              "data:text/javascript," + encodeURIComponent(redirect),
+              helper,
+              "pr-create",
+              "--draft",
+              "--head",
+              "review/task",
+              "--base",
+              "main",
+              "--title",
+              "Review the proposed change",
+              "--body",
+              "Describe the change.",
+            ],
+            {
+              // Only the Sandbox's own environment plus what OpenShell injects into children.
+              env: {
+                ...created.spec.environment,
+                PATH: process.env.PATH,
+                HOME: tls.directory,
+                TMPDIR: tls.directory,
+                GITHUB_TOKEN: placeholder,
+                NODE_EXTRA_CA_CERTS: tls.rootCertificatePath,
+                ...extra,
+              },
+              stdio: ["ignore", "pipe", "pipe"],
+            },
+          );
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (chunk) => (stdout += chunk));
+          child.stderr.on("data", (chunk) => (stderr += chunk));
+          child.on("error", reject);
+          child.on("close", (code) => resolve({ code, stdout, stderr }));
+        });
+      const sent = await draft();
+      assert.equal(sent.code, 0, sent.stderr);
+      assert.match(sent.stderr, /^local draft attempt [0-9a-f-]{36}$/m);
+      assert.match(sent.stderr, /^destination api\.github\.com:443$/m);
+      assert.deepEqual(JSON.parse(sent.stdout), {
+        url: "https://github.com/example/project/pull/7",
+        number: 7,
+        head: "review/task",
+        base: "main",
+        draft: true,
+      });
+      assert.equal(exchanges.length, 1, "exactly one request");
+      assert.deepEqual(exchanges[0], {
+        servername: "api.github.com",
+        method: "POST",
+        url: "/repos/example/project/pulls",
+        authorization: "Bearer " + placeholder,
+        operationHeader: undefined,
+        body: {
+          title: "Review the proposed change",
+          head: "review/task",
+          base: "main",
+          body: "Describe the change.",
+          draft: true,
+          maintainer_can_modify: false,
+        },
+      });
+      // A proxy the Agent sets itself is ignored; OpenShell owns the route.
+      const unproxied = await draft({
+        HTTPS_PROXY: "http://127.0.0.1:9",
+        https_proxy: "http://127.0.0.1:9",
+      });
+      assert.equal(unproxied.code, 0, unproxied.stderr);
+      assert.match(unproxied.stderr, /^destination api\.github\.com:443$/m);
+      assert.equal(exchanges.length, 2);
+      assert.deepEqual(exchanges[1], exchanges[0]);
+      // The client-side binding checks still refuse a mismatched branch before any send.
+      const refused = await draft({ OCE_OPENSHELL_GIT_PUSH_REF: "refs/heads/main" });
+      assert.equal(refused.code, 1);
+      assert.doesNotMatch(refused.stderr, /^destination /m);
+      assert.equal(exchanges.length, 2);
+    }
     const collisionConfiguration = structuredClone(configuration.drivers.sandbox.configuration);
     collisionConfiguration.policy.networkPolicies.push({
       name: "overlap",

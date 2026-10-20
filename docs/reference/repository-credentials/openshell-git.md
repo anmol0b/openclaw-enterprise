@@ -124,8 +124,9 @@ branch and draft checks; keep independent GitHub branch protection.
 binds a live revision to its installed credential and authorizes each request; other
 sandbox repository bindings remain refused.
 
-From the admitted Agent shell, use its managed proxy environment and ordinary
-GitHub URLs. Replace the repository and branch below with the enrolled values:
+From the admitted Agent shell, use ordinary GitHub URLs. OpenShell strips proxy
+variables and routes the sandbox's connections itself. Replace the repository and
+branch below with the enrolled values:
 
 ```bash
 git clone https://github.com/example-org/example-repo.git
@@ -137,11 +138,14 @@ oce-github pr-create --draft --head review/agent-change --base main \
   --title 'Review the proposed change' --body 'Describe the change and validation.'
 ```
 
-The helper sends one draft-create request through the selected OpenShell proxy.
-It accepts explicit `--body` text, not `--body-file`, and records a local attempt
-ID before sending. A local ID does not make GitHub creation idempotent. If a push
-or draft-create response is lost, inspect GitHub for the commit or draft before
-any new attempt. Do not bypass the proxy or retry directly.
+With `git-and-draft-pr`, the Sandbox can read the image's repository client and
+its PATH ends with `/opt/oce/repository-credentials/bin`. If a login shell resets
+PATH, call `/opt/oce/repository-credentials/bin/oce-github`. Like Git, the helper
+sends its one draft-create request to `api.github.com` and OpenShell routes it
+through the middleware; the helper ignores proxy variables. It accepts explicit `--body` text, not `--body-file`, and
+records a local attempt ID before sending. A local ID does not make GitHub
+creation idempotent. If a push or draft-create response is lost, inspect GitHub
+for the commit or draft before any new attempt. Do not retry another way.
 
 During the accepted trial, use an authorized test repository to verify clone,
 pull of an independently known commit, push to the allowed branch, and draft

@@ -10,7 +10,7 @@ import {
 } from "./manifest.ts";
 import { readPrivateFile } from "./private-files.ts";
 
-/** Exactly one HTTPS exchange, with the broker or through the selected OpenShell proxy. */
+/** Exactly one HTTPS exchange, with the broker or with GitHub through OpenShell's mediation. */
 export async function createDraftPull(args: string[], manifestRoot?: string) {
   const { values: q, positionals } = parseArgs({
     args,
@@ -61,12 +61,11 @@ export async function createDraftPull(args: string[], manifestRoot?: string) {
   );
   try {
     check?.();
-    // The managed Agent shell reaches the bound broker through its HTTPS proxy. Never use
-    // NO_PROXY or retry directly after a proxy failure. TLS authenticates the broker end to end.
-    const proxy = process.env.https_proxy ?? process.env.HTTPS_PROXY;
-    if (openShell && !proxy) {
-      throw new Error("openshell-https-proxy-required");
-    }
+    // A managed Agent shell reaches the bound broker through its HTTPS proxy; TLS authenticates
+    // the broker end to end. OpenShell strips proxy variables and mediates every connection from
+    // the sandbox network namespace, as for Git there: connect to the GitHub API origin and
+    // ignore a proxy the Agent set itself. Never use NO_PROXY or retry another way.
+    const proxy = openShell ? undefined : (process.env.https_proxy ?? process.env.HTTPS_PROXY);
     const agent = new Agent({
       keepAlive: false,
       ...(proxy ? { proxyEnv: { HTTPS_PROXY: proxy } } : {}),

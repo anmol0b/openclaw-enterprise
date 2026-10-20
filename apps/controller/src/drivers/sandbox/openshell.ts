@@ -2907,6 +2907,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         Object.fromEntries(git.environment.map(({ name, value }) => [name, value])),
       );
       Object.assign(create.spec.policy, { network_middlewares: git.middlewares });
+      const readOnly = create.spec.policy.filesystem.read_only;
+      readOnly.push(...git.readOnlyPaths.filter((path) => !readOnly.includes(path)));
       create.spec.restart_policy = "SANDBOX_RESTART_POLICY_NEVER";
       await this.openShellGit!.bind(context.revision.id, (observed) =>
         verifyExistingSandbox(observed, { ...create, requestId: requestIds[0]! }),

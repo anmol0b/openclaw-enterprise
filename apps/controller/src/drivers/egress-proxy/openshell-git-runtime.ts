@@ -1,9 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentRevision } from "@openclaw-enterprise/contracts";
 import type { startPreparedGitHubGitOwner } from "../../backends/repository-credentials/prepared-git-owner.ts";
 import type { EgressAuthorityConfiguration } from "../../composition/egress-authority.ts";
+import { REPOSITORY_CLIENT_BIN } from "../compute/kubernetes/repository-native-configuration.ts";
 import {
   resolveGitHubRepositoryBinding,
   type GitHubRepositoryRegistry,
@@ -50,6 +52,9 @@ interface Entry {
   blocked?: true;
   nextRefreshAt?: number;
 }
+/** The runtime image's PATH, then the draft helper's directory. The image's own `gh` stays
+ * first: the broker `gh` shim beside the helper has no repository manifest in this sandbox. */
+const OPENSHELL_GIT_DRAFT_PATH = `/app/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${REPOSITORY_CLIENT_BIN}`;
 const binaries = [
   "/usr/bin/git",
   "/usr/lib/git-core/git-remote-https",
@@ -193,9 +198,14 @@ export class OpenShellGitRuntime {
     ) {
       throw new Error("OpenShell Git revision binding is unavailable.");
     }
+    // `oce-github pr-create --draft` runs from the image's repository client; Landlock and
+    // PATH must admit it only where the grant allows a draft.
+    const draft = scope.policy.transport === "git-and-draft-pr";
     return {
       provider: entry.binding.provider,
+      readOnlyPaths: draft ? [dirname(REPOSITORY_CLIENT_BIN)] : [],
       environment: [
+        ...(draft ? [{ name: "PATH", value: OPENSHELL_GIT_DRAFT_PATH }] : []),
         { name: "OCE_OPENSHELL_GIT_REPOSITORY", value: scope.repository },
         { name: "OCE_OPENSHELL_GIT_PUSH_REF", value: scope.policy.pushRefAllowlist![0]! },
         { name: "OCE_OPENSHELL_GIT_API_ORIGIN", value: "https://api.github.com" },
