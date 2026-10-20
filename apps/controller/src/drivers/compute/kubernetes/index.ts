@@ -1322,6 +1322,10 @@ const WORKSPACE_NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 // The node Secret key naming the revision whose node readiness last saw paired or connected;
 // the device itself is the Agent's (finding 1671).
 const WORKSPACE_NODE_ENROLLED_REVISION_KEY = "enrolledRevisionId";
+// After the OpenShell Git route verifies a credential install, the node is read as connected
+// only once this long has passed: the Sandbox's connection reset must reach the Gateway first
+// (the node reconnects about 1 s after it; finding 2141).
+const OPENSHELL_GIT_RECONNECT_SETTLE_MS = 2_000;
 const GATEWAY_PRIVATE_STATE_CATEGORIES = Object.freeze([
   ["state", "/home/node/.openclaw/state"],
   ["agent", "/home/node/.openclaw/agents/main/agent"],
@@ -7428,17 +7432,71 @@ export class KubernetesComputeDriver implements ComputeDriver {
         "The exact AgentRevision gateway has not applied its workspace node.",
       );
     }
+    const gitInstalledAt = this.openShellGitMaterialSettled(revision);
     if (!(await this.workspaceNodeReady(revision, namespace))) {
       throw new ActivationPendingError(
         "WORKSPACE_NODE_PENDING",
         "The exact AgentRevision Harness node is not ready.",
       );
     }
+    if (gitInstalledAt !== undefined) {
+      const installedAfterRead = this.openShellGit!.materialInstalledAt(revision.id);
+      if (installedAfterRead === undefined) {
+        // The route closed while the node was read (a failed read, lost material, or a
+        // renewal under way): the next pass verifies the install again.
+        throw new ActivationPendingError(
+          "REPOSITORY_GIT_MATERIAL_PENDING",
+          "The exact AgentRevision Sandbox's repository Git credential install was not verified after its node was read.",
+        );
+      }
+      if (installedAfterRead !== gitInstalledAt) {
+        // A new install landed while the node was read: that read may predate its reset.
+        throw new ActivationPendingError(
+          "WORKSPACE_NODE_RECONNECT_PENDING",
+          "The exact AgentRevision Sandbox installed a repository Git credential while its node was read.",
+        );
+      }
+    }
     if (repositoryMaterial !== undefined && !repositoryMaterialCurrent(repositoryMaterial)) {
       throw new DependencyUnavailableError(
         "The exact repository credential runtime generation is not ready.",
       );
     }
+  }
+
+  /**
+   * The worker issues a version's first prepared Git token only once the version is active
+   * (finding 2139), and OpenShell 0.1.4 answers every credential install with a policy
+   * runtime reload that closes each connection out of the Sandbox, the workspace node's
+   * WebSocket to the Gateway included (finding 2141). Activation therefore completes only
+   * once the route has verified that first install and, a settle margin later, the node has
+   * been read as connected (`workspaceNodeReady`, right after this, and the install must
+   * still be the same one once that read returns): the verifying read can land within the
+   * same second as the reload, before the Gateway sees the drop, so a read inside the
+   * margin proves nothing and the next pass reads again. A version whose material is never
+   * issued (the App key was rejected, finding 2135) waits here until the convergence
+   * deadline instead of succeeding with every Git request denied. Later renewals (about
+   * every 50 minutes) repeat the reset; that is OpenShell's to scope, and the guide says so.
+   * Returns the install time a Git-bound revision must still show after the node read.
+   */
+  private openShellGitMaterialSettled(revision: AgentRevision): number | undefined {
+    if (this.openShellGit === undefined || revision.repositoryCredentials === undefined) {
+      return undefined;
+    }
+    const installedAt = this.openShellGit.materialInstalledAt(revision.id);
+    if (installedAt === undefined) {
+      throw new ActivationPendingError(
+        "REPOSITORY_GIT_MATERIAL_PENDING",
+        "The exact AgentRevision Sandbox has not installed its repository Git credential.",
+      );
+    }
+    if (this.now() < installedAt + OPENSHELL_GIT_RECONNECT_SETTLE_MS) {
+      throw new ActivationPendingError(
+        "WORKSPACE_NODE_RECONNECT_PENDING",
+        "The exact AgentRevision Harness node is not read until its repository Git credential install has settled.",
+      );
+    }
+    return installedAt;
   }
 
   async deactivateRevision(revision: AgentRevision): Promise<void> {

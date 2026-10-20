@@ -813,13 +813,19 @@ export class SandboxNamespaceRefusedError extends Error {
 }
 
 /** A step of dedicated activation that completes by itself once a workload catches up. */
-export type ActivationPendingCode = "WORKSPACE_NODE_PENDING" | "WORKSPACE_NODE_BINDING_PENDING";
+export type ActivationPendingCode =
+  | "WORKSPACE_NODE_PENDING"
+  | "WORKSPACE_NODE_BINDING_PENDING"
+  | "REPOSITORY_GIT_MATERIAL_PENDING"
+  | "WORKSPACE_NODE_RECONNECT_PENDING";
 
 /**
  * Activation found its workloads ready but is still waiting for one of them:
- * the Gateway has not applied the workspace node it was handed, or the Harness
- * node has not connected to the Gateway. The worker records `code` so status
- * names the wait. The message stays in the controller.
+ * the Gateway has not applied the workspace node it was handed, the Harness
+ * node has not connected to the Gateway, the Sandbox has not installed the
+ * version's first repository Git credential, or the node has not reconnected
+ * after that install reset the Sandbox's connections. The worker records
+ * `code` so status names the wait. The message stays in the controller.
  */
 export class ActivationPendingError extends Error {
   readonly code: ActivationPendingCode;

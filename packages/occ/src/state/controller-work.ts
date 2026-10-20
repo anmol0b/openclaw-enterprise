@@ -96,6 +96,17 @@ export function deploymentProgressForWork(
       code = attempt.code;
       message = "Workloads are ready; waiting for the Gateway to apply the workspace node.";
       break;
+    case "REPOSITORY_GIT_MATERIAL_PENDING":
+      // Fixed copy, like REPOSITORY_GIT_ROUTE_PENDING (finding 1045).
+      code = attempt.code;
+      message =
+        "Workloads are ready; waiting for the Sandbox to install this version's repository Git credential. If this persists, check the worker log for repository credential (PREPARED_GITHUB_RECOVERY_REQUIRED) or OpenShell gateway errors.";
+      break;
+    case "WORKSPACE_NODE_RECONNECT_PENDING":
+      code = attempt.code;
+      message =
+        "Workloads are ready; waiting for the workspace node to reconnect after the repository Git credential was installed.";
+      break;
     case "HARNESS_CREDENTIAL_BOOTSTRAP_PENDING":
       code = attempt.code;
       message = "Waiting for harness credential initialization to finish.";

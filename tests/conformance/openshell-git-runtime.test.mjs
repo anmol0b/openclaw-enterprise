@@ -368,6 +368,53 @@ test("a gateway that does not answer closes the Git route and restores it withou
   assert.deepEqual(f.errors(), []);
 });
 
+// OpenShell resets every Sandbox connection when it installs a credential (finding 2141);
+// Compute activation waits for the node to be back after the time the route reports here.
+test("the route reports when it verified its current material installed", async () => {
+  const f = fixture();
+  assert.equal(f.runtime.materialInstalledAt(f.revision.id), undefined);
+  const before = Date.now();
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  const first = f.runtime.materialInstalledAt(f.revision.id);
+  assert.ok(typeof first === "number" && first >= before && first <= Date.now());
+  // The clock is the wall clock: let it move between verifications so a time refreshed on
+  // every read, or kept across new material, would show.
+  const later = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  // Re-reading the same installation keeps its time.
+  await later();
+  await f.reconcile();
+  assert.equal(f.runtime.materialInstalledAt(f.revision.id), first);
+
+  // A closed route has no installed material to time; the same installation verifying
+  // again reports the original time (no new install happened).
+  f.faults.gateway = new SandboxGatewayUnavailableError("OpenShell GetSandbox failed.");
+  await f.reconcile();
+  assert.equal(f.runtime.route(f.revision.id).state, "pending");
+  assert.equal(f.runtime.materialInstalledAt(f.revision.id), undefined);
+  f.faults.gateway = undefined;
+  await later();
+  await f.reconcile();
+  assert.equal(f.runtime.materialInstalledAt(f.revision.id), first);
+  assert.equal(f.calls.rotate, 1);
+
+  // New material installs at a new time.
+  f.owner.material = { ...f.owner.material, materialVersion: "version-two" };
+  await later();
+  await f.reconcile();
+  assert.equal(f.calls.rotate, 2);
+  const second = f.runtime.materialInstalledAt(f.revision.id);
+  assert.ok(typeof second === "number" && second > first, `${second} > ${first}`);
+
+  // Lost material closes the route; its time goes with it.
+  f.owner.material = undefined;
+  await f.reconcile();
+  assert.equal(f.runtime.route(f.revision.id).state, "pending");
+  assert.equal(f.runtime.materialInstalledAt(f.revision.id), undefined);
+  assert.deepEqual(f.errors(), []);
+});
+
 test("the same supervisor process reconnecting with a new session re-adopts the Git route", async () => {
   const restorations = (f) =>
     f.events.filter(

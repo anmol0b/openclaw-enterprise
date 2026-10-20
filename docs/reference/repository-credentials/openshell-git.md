@@ -198,6 +198,23 @@ the deployment with `REPOSITORY_GIT_ROUTE_BLOCKED`; an active version in that
 state keeps serving chat, but every Git request answers 403 until a new version
 deploys.
 
+Installing the material resets the Sandbox's connections. OpenShell 0.1.4
+(`5a7728c3`) folds every attached provider's record version into the Sandbox's
+provider environment revision and answers a change with a policy runtime reload
+that closes each connection out of the Sandbox: the workspace node's WebSocket to
+the Gateway and any in-flight model stream included
+(`crates/openshell-server/src/grpc/policy.rs`,
+`crates/openshell-supervisor-network/src/opa.rs`). Activation therefore reports
+`REPOSITORY_GIT_MATERIAL_PENDING` until the route verifies the first install,
+`WORKSPACE_NODE_RECONNECT_PENDING` for about 2 s after it, then
+`WORKSPACE_NODE_PENDING` until the Gateway reports the node connected again, so
+the deployment succeeds only once the node is back. Stated limit: each later
+renewal (about every 50 minutes: tokens live an hour and the worker renews ten
+minutes early) repeats the reset. Chat answers 500 for about 1-7 s while the node
+reconnects, and other open tunnels close with it; the request can be retried.
+Scoping the reset to the changed provider is OpenShell's to do and is being taken
+upstream.
+
 A read the worker cannot complete is not a verdict. While the Gateway Pod is being
 replaced (an upgrade, node drain or restart), or a read times out, the route closes
 and Git requests are denied; the worker reads again with a bounded backoff (1 s
@@ -249,10 +266,11 @@ so on), the Sandbox ID and the request ID the supervisor's own log shows.
 Known gap: when GitHub rejects the App's private key (rotated at GitHub without
 updating the Secret, or revoked), nothing in Agent status or deployment status
 says so. The active version keeps its status, chat works, and every Git request
-from its Sandbox (reads included) answers 403. A new version still deploys and
-reports success, because its material is requested only after it activates; then
-its Git requests answer 403 the same way. Surfacing this at deploy time is a
-planned follow-up.
+from its Sandbox (reads included) answers 403. A new version's material is
+requested only after it activates, so its deployment waits as
+`REPOSITORY_GIT_MATERIAL_PENDING` (the status points at the worker log) and fails
+at the convergence deadline; it does not report success with Git denied. Naming
+the cause in deployment status is a planned follow-up.
 
 Detection is in the worker log. Preparation for the active version is
 quarantined, and maintenance logs `worker.error` with

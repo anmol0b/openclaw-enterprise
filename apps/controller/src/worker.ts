@@ -183,6 +183,8 @@ const REVISION_PENDING_CODES: Readonly<Record<string, string>> = Object.freeze({
 const REVISION_READINESS_CODES: ReadonlySet<string> = new Set([
   "REVISION_INCOMPLETE",
   "WORKSPACE_NODE_BINDING_PENDING",
+  "REPOSITORY_GIT_MATERIAL_PENDING",
+  "WORKSPACE_NODE_RECONNECT_PENDING",
   ...Object.values(REVISION_PENDING_CODES),
 ]);
 
