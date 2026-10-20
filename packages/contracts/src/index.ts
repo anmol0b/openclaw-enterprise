@@ -1184,7 +1184,7 @@ export interface SandboxHarnessContext extends SandboxNamespaceContext {
    * `provisionHarness` waits for a just-created Harness may use it to see the Harness serve
    * and stop waiting early; without it the Driver keeps its configured wait.
    */
-  readonly harnessTransportToken?: () => Promise<string>;
+  readonly readHarnessTransportToken?: () => Promise<string>;
 }
 
 /**

@@ -3016,9 +3016,9 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     const deadline = Date.now() + startupDelayMs;
     const remaining = (): number => Math.max(0, deadline - Date.now());
     let transportToken: string | undefined;
-    if (codex && context.harnessTransportToken !== undefined) {
+    if (codex && context.readHarnessTransportToken !== undefined) {
       try {
-        transportToken = await context.harnessTransportToken();
+        transportToken = await context.readHarnessTransportToken();
       } catch {
         context.signal.throwIfAborted();
       }
@@ -3029,7 +3029,12 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     while (remaining() > 0) {
       try {
-        const status = await this.harnessStatus({ ...context, transportToken });
+        // Each read ends with the bound, so a gateway that does not answer cannot stretch it.
+        const status = await this.harnessStatus({
+          ...context,
+          transportToken,
+          signal: AbortSignal.any([context.signal, AbortSignal.timeout(Math.max(1, remaining()))]),
+        });
         if (status.state !== "starting") {
           return;
         }

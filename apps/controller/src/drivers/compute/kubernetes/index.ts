@@ -6164,7 +6164,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
           requirements,
           workspaceNodeEnrolled: nodeEnrolled,
           // Lets the provider end its startup wait once the new Harness answers.
-          harnessTransportToken: () => this.sandboxTransportTokenText(revision),
+          readHarnessTransportToken: () => this.sandboxTransportTokenText(revision),
         };
         let sandbox: SandboxResourceRef;
         try {
