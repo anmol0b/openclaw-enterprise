@@ -4,7 +4,12 @@ import type {
 } from "@openclaw-enterprise/contracts";
 import { asRecord, isNonEmptyString, splitModelRef } from "@openclaw-enterprise/utils";
 
-import { agentEntryMessage, ConfigurationHarnessError, modelProviderMessage } from "./errors.ts";
+import {
+  agentEntryMessage,
+  ConfigurationHarnessError,
+  keyedSettingPath,
+  modelProviderMessage,
+} from "./errors.ts";
 import { providerModelsListError } from "./model-provider-settings.ts";
 
 /**
@@ -47,6 +52,119 @@ export function selectsClaudeCodeRuntime(values: Readonly<OpenClawConfigurationD
       return Array.isArray(rows) ? rows : [];
     }),
   ].some(namesClaudeCode);
+}
+
+// The OpenClaw capability each Claude Code native tool carries in the pinned Anthropic plugin
+// (projectClaudeNativeToolAuthority): Read and Grep read, Write write, Edit edit, WebFetch
+// web_fetch, WebSearch web_search. The pinned Gateway gates those native calls by its exec
+// security setting and plugin hooks only, never by the Configuration's tool policy, which it
+// applies to OpenClaw's own tools (finding 2142). Bash is host-owned: OpenClaw removes it and
+// routes shell work through its exec tool, so exec and process policy still holds.
+const CLAUDE_CODE_NATIVE_CAPABILITIES: readonly string[] = [
+  "read",
+  "write",
+  "edit",
+  "web_fetch",
+  "web_search",
+];
+// The pinned tool catalog's groups that contain one of those capabilities.
+const CLAUDE_CODE_NATIVE_GROUPS: Readonly<Record<string, readonly string[]>> = {
+  "group:fs": ["read", "write", "edit"],
+  "group:web": ["web_fetch", "web_search"],
+  "group:openclaw": CLAUDE_CODE_NATIVE_CAPABILITIES,
+};
+// Built-in profiles narrower than `full` (see openclaw-tool-denial.ts).
+const RESTRICTIVE_TOOL_PROFILES: ReadonlySet<string> = new Set(["minimal", "coding", "messaging"]);
+
+/** The native capabilities a tool policy list names: by `*` glob, name, or catalog group. */
+function nativeCapabilitiesNamed(list: unknown): Set<string> {
+  const named = new Set<string>();
+  for (const value of Array.isArray(list) ? list : []) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    const entry = value.trim().toLowerCase();
+    const group = CLAUDE_CODE_NATIVE_GROUPS[entry];
+    if (group !== undefined) {
+      group.forEach((capability) => named.add(capability));
+      continue;
+    }
+    const pattern = new RegExp(
+      `^${entry.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`,
+    );
+    CLAUDE_CODE_NATIVE_CAPABILITIES.filter((capability) => pattern.test(capability)).forEach(
+      (capability) => named.add(capability),
+    );
+  }
+  return named;
+}
+
+/**
+ * The setting (relative to its `tools` object) of the first restriction that would reach one
+ * of Claude Code's native capabilities, or undefined: a deny list naming one, a nonempty
+ * allowlist that leaves one out, or a built-in profile narrower than `full` whose `alsoAllow`
+ * does not add every one back.
+ */
+function unenforceableNativeRestriction(policy: unknown): string | undefined {
+  const tools = asRecord(policy);
+  if (tools === undefined) {
+    return undefined;
+  }
+  if (nativeCapabilitiesNamed(tools.deny).size > 0) {
+    return "deny";
+  }
+  const covers = (list: unknown) =>
+    nativeCapabilitiesNamed(list).size === CLAUDE_CODE_NATIVE_CAPABILITIES.length;
+  if (Array.isArray(tools.allow) && tools.allow.length > 0 && !covers(tools.allow)) {
+    return "allow";
+  }
+  if (
+    typeof tools.profile === "string" &&
+    RESTRICTIVE_TOOL_PROFILES.has(tools.profile.trim().toLowerCase()) &&
+    !covers(tools.alsoAllow)
+  ) {
+    return "profile";
+  }
+  return undefined;
+}
+
+/**
+ * Refuses a Claude Code Configuration whose tool policy would restrict a native capability the
+ * runtime cannot restrict, so an Agent never runs with a policy it silently ignores. Checks
+ * top-level `tools`, each `agents.entries` entry's `tools`, and their `byProvider` objects for
+ * the anthropic provider (every Claude Code model is `anthropic/*`). Deny lists naming only
+ * OpenClaw tools, such as `exec` and `process`, stay valid.
+ */
+function requireEnforceableClaudeCodeToolPolicy(
+  values: Readonly<OpenClawConfigurationDocument>,
+): void {
+  const refusal = (path: string) =>
+    `Configuration setting ${path} restricts Claude Code's native file or web tools (read, write, edit, web_fetch, web_search), which the Claude Code agent runtime cannot enforce: remove that restriction or use the default agent runtime.`;
+  const check = (policy: unknown, message: (setting: string) => string) => {
+    const tools = asRecord(policy);
+    const setting = unenforceableNativeRestriction(tools);
+    if (setting !== undefined) {
+      throw new ConfigurationHarnessError(message(setting));
+    }
+    for (const [key, value] of Object.entries(asRecord(tools?.byProvider) ?? {})) {
+      const provider = key.trim().toLowerCase();
+      if (provider !== "anthropic" && !provider.startsWith("anthropic/")) {
+        continue;
+      }
+      const providerSetting = unenforceableNativeRestriction(value);
+      if (providerSetting !== undefined) {
+        throw new ConfigurationHarnessError(
+          message(`${keyedSettingPath("byProvider", key)}.${providerSetting}`),
+        );
+      }
+    }
+  };
+  check(values.tools, (setting) => refusal(`tools.${setting}`));
+  for (const [key, entry] of Object.entries(asRecord(asRecord(values.agents)?.entries) ?? {})) {
+    check(asRecord(entry)?.tools, (setting) =>
+      agentEntryMessage(key, (path) => refusal(`${path}.tools.${setting}`)),
+    );
+  }
 }
 
 function configuredRuntime(value: unknown): string | undefined {
@@ -519,5 +637,9 @@ export function resolveConfiguredAgentRuntimeId(
       "The configured Agent models select conflicting Harness runtimes.",
     );
   }
-  return [...resolved][0]!;
+  const runtime = [...resolved][0]!;
+  if (runtime === CLAUDE_CLI_AGENT_RUNTIME_ID) {
+    requireEnforceableClaudeCodeToolPolicy(values);
+  }
+  return runtime;
 }

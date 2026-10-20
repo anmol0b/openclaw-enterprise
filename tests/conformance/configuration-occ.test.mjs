@@ -1195,6 +1195,68 @@ test("the Claude Code agent runtime resolves to the OpenClaw Harness on anthropi
   );
 });
 
+test("a Claude Code Configuration refuses tool policy its native tools would ignore", () => {
+  // Finding 2142: the pinned runtime gates Claude Code's native Read/Grep/Write/Edit/WebFetch/
+  // WebSearch by exec security and hooks only, so a policy restricting their capabilities
+  // would be silently ignored. Policy on OpenClaw-only tools (exec is host-owned) still holds.
+  const model = "anthropic/claude-sonnet-4-5";
+  const claudeCode = (extra = {}, entries = undefined) => ({
+    agents: {
+      defaults: { model, models: { [model]: { agentRuntime: { id: "claude-cli" } } } },
+      ...(entries === undefined ? {} : { entries }),
+    },
+    ...extra,
+  });
+  const refusal = (path) =>
+    new ConfigurationHarnessError(
+      `Configuration setting ${path} restricts Claude Code's native file or web tools (read, write, edit, web_fetch, web_search), which the Claude Code agent runtime cannot enforce: remove that restriction or use the default agent runtime.`,
+    );
+  for (const [tools, path] of [
+    [{ deny: ["write"] }, "tools.deny"],
+    [{ deny: ["exec", "Edit"] }, "tools.deny"],
+    [{ deny: ["web_*"] }, "tools.deny"],
+    [{ deny: ["*"] }, "tools.deny"],
+    [{ deny: ["group:fs"] }, "tools.deny"],
+    [{ deny: ["group:web"] }, "tools.deny"],
+    [{ deny: ["group:openclaw"] }, "tools.deny"],
+    [{ allow: ["exec", "read"] }, "tools.allow"],
+    [{ profile: "coding" }, "tools.profile"],
+    [{ profile: "minimal", alsoAllow: ["group:fs"] }, "tools.profile"],
+    [{ byProvider: { anthropic: { deny: ["read"] } } }, "tools.byProvider.anthropic.deny"],
+    [
+      { byProvider: { "anthropic/claude-sonnet-4-5": { allow: ["read"] } } },
+      'tools.byProvider["anthropic/claude-sonnet-4-5"].allow',
+    ],
+  ]) {
+    assert.throws(() => resolveConfiguredAgentRuntimeId(claudeCode({ tools })), refusal(path));
+  }
+  assert.throws(
+    () => resolveConfiguredAgentRuntimeId(claudeCode({}, { ops: { tools: { deny: ["write"] } } })),
+    refusal("agents.entries.ops.tools.deny"),
+  );
+  for (const tools of [
+    { deny: ["exec", "process"] },
+    { deny: ["bash", "sessions_*", "group:runtime"] },
+    { allow: ["*"] },
+    { allow: [] },
+    { allow: ["group:fs", "group:web", "exec"] },
+    { profile: "full" },
+    { profile: "coding", alsoAllow: ["group:fs", "web_fetch", "web_search"] },
+    { alsoAllow: ["exec"] },
+    { byProvider: { openai: { deny: ["write"] } } },
+  ]) {
+    assert.equal(resolveConfiguredAgentRuntimeId(claudeCode({ tools })), "claude-cli");
+  }
+  // The default runtime enforces the same policy itself.
+  assert.equal(
+    resolveConfiguredAgentRuntimeId({
+      agents: { defaults: { model } },
+      tools: { deny: ["write"] },
+    }),
+    "openclaw",
+  );
+});
+
 test("Compute recognises a Claude Code selection without resolving the model policy", () => {
   // The lenient scan runs before validation, so partial or conflicting documents still answer.
   for (const values of [
