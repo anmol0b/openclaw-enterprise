@@ -12,7 +12,7 @@ import {
 } from "../fixtures/skipper-private-git-origin.mjs";
 import { cleanEnvironment, run } from "../fixtures/repository-credentials/process.mjs";
 
-function api(fixture, method, path, authorization, body) {
+function api(fixture, method, path, authorization, body, afterHeaders) {
   return new Promise((resolve, reject) => {
     const req = request(
       new URL(path, fixture.origin),
@@ -37,7 +37,13 @@ function api(fixture, method, path, authorization, body) {
     );
     req.on("timeout", () => req.destroy(new Error("fixture request timed out")));
     req.on("error", reject);
-    req.end(body ? JSON.stringify(body) : undefined);
+    const send = () => req.end(body ? JSON.stringify(body) : undefined);
+    if (afterHeaders) {
+      req.flushHeaders();
+      afterHeaders().then(send, (error) => req.destroy(error));
+    } else {
+      send();
+    }
   });
 }
 
@@ -195,16 +201,40 @@ test(
     const draftPermissions = { metadata: "read", contents: "write", pull_requests: "write" };
     const draftToken = await issue(draftPermissions);
     assert.equal(draftToken.status, 201);
-    const draft = (token) =>
-      api(fixture, "POST", "/repos/" + fixture.repository + "/pulls", "Bearer " + token, {
-        title: "Review qualification",
-        body: "Native push independently inspected",
-        draft: true,
-        base: "main",
-        head: "qualification/approved",
-        maintainer_can_modify: false,
-      });
+    const draft = (token, afterHeaders) =>
+      api(
+        fixture,
+        "POST",
+        "/repos/" + fixture.repository + "/pulls",
+        "Bearer " + token,
+        {
+          title: "Review qualification",
+          body: "Native push independently inspected",
+          draft: true,
+          base: "main",
+          head: "qualification/approved",
+          maintainer_can_modify: false,
+        },
+        afterHeaders,
+      );
     assert.equal((await draft(token)).status, 403, "Git-only token must not create a draft");
+    assert.equal(await fixture.observePullRequest(), null);
+    // Revoke after the origin receives the headers, but before it can create the draft.
+    const interrupted = await issue(draftPermissions);
+    const authorization = "Bearer " + interrupted.body.token;
+    const before = fixture.snapshot().pullCreateRequests;
+    const withdrawn = await draft(interrupted.body.token, async () => {
+      const deadline = AbortSignal.timeout(5000);
+      while (fixture.snapshot().pullCreateRequests === before) {
+        deadline.throwIfAborted();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      assert.equal(
+        (await api(fixture, "DELETE", "/installation/token", authorization)).status,
+        204,
+      );
+    });
+    assert.equal(withdrawn.status, 403, "revoked draft authority cannot commit a pending request");
     assert.equal(await fixture.observePullRequest(), null);
     const { status, body: pull } = await draft(draftToken.body.token);
     assert.equal(status, 201, "separately scoped draft creation accepted at controlled provider");
@@ -292,7 +322,7 @@ test(
       401,
     );
     const snapshot = fixture.snapshot();
-    assert.equal(snapshot.issued, 4);
+    assert.equal(snapshot.issued, 5);
     assert.ok(snapshot.endpoints["upload-pack:200"] >= 2);
     assert.ok(snapshot.endpoints["receive-pack:200"] >= 4);
     assert.ok(snapshot.endpoints["other:404"] >= 1);

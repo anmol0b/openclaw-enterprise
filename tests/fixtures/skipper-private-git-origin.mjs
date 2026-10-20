@@ -268,6 +268,11 @@ export async function startSkipperPrivateGitOrigin({
             reply(422);
             return;
           }
+          // Reading the body and refs yielded; retirement during either must still win.
+          if (!authority.authorize(auth)) {
+            reply(403);
+            return;
+          }
           pullRequest = {
             id: 7001,
             number: 1,

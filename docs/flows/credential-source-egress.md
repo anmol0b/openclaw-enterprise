@@ -8,22 +8,17 @@ last_updated_session: authoring-run/bf50675b-2b74-4724-aeaf-8daecd2a5a29
 
 ## Overview
 
-For an admitted inference request, the trusted OpenShell supervisor resolves a
-static credential, obtains a fresh send decision, and submits the complete provider
-response for protection. OCC owns identity mapping, current IAM decisions, versioned
-Secret selection and response policy. The supervisor runs outside the Agent and
-owns injection and the business send.
+OCC maps identity, checks current IAM policy, selects the
+Secret version and sets response policy. Outside the Agent, the trusted OpenShell
+supervisor resolves the static credential, obtains fresh permission to send, injects it
+and submits the complete provider response for protection.
 
-Kubernetes Compute can release the fresh protected execution only after signing its
-startup challenge for the exact current installation. Other Computes refuse it.
-Production Credential Proxy owns private response acceptance on the authenticated installation
-exchange. This requires a matching supervisor, not the bundled legacy release. See
-the [profile and release cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff).
-
-This flow describes the implemented OCE side and the required counterpart contract.
-It does not prove a deployed supervisor or no-bypass networking. The
-[feature reference](../reference/credential-sources/protected-inference.md) owns
-supported operations and configuration.
+Only Kubernetes Compute can release a fresh protected execution, after signing its
+startup challenge for the exact current installation. Production Credential Proxy
+owns private response acceptance on the authenticated installation exchange. See
+the [profile and release cutoff](../reference/credential-sources/protected-inference.md#execution-admission-cutoff)
+and [supported configuration](../reference/credential-sources/protected-inference.md).
+The bundled legacy supervisor is incompatible.
 
 ## Entry Points
 
@@ -57,8 +52,8 @@ graph TD
   O -- "unsafe, late or failed" --> I["<b>Withhold response</b><br/>Effects may already exist"]
 ```
 
-The supervisor edges describe the required counterpart contract. Wire fixtures
-exercise that contract; deployed enforcement remains a separate qualification.
+Wire fixtures exercise the required supervisor contract. Qualify the deployed
+supervisor and no-bypass networking separately.
 
 ## Execution Trace
 
@@ -151,19 +146,16 @@ and the supervisor's Ed25519 signature over the domain
 `openshell-exchange-v1` plus a zero byte, challenge, and exact binary opening
 request. Request JSON cannot introduce a key. Bearer-only legacy RPCs refuse.
 
-The adapter creates a private capability for this stream and copies the decoded
-request before asynchronous work. OCC requires one exchange owner for identity
-verification, origin capture and live response custody. Before its first await,
-Credential Proxy rejects oversized bodies and exhausted capacity, reserves a
-resolution slot, and detaches one private request snapshot, including body bytes
-and headers. It then captures the peer, exchange identity and installation.
-Both authorization and response claiming must
-match that identity. Another stream cannot claim the response even with the same
-bearer, key, request ID or handle. Closing the stream invalidates its capability
-and signals cancellation. A canceled or expired handle drops its material
-reference immediately. If policy or receipt work is still running, the operation
-keeps its capacity slot until that work settles. An idle handle releases the slot
-when closed. Pipelining is refused.
+The adapter binds a private capability to this stream and copies the decoded
+request before asynchronous work. One owner verifies identity, captures origin
+and holds the response. Before its first await, Credential Proxy checks body size
+and capacity, reserves a slot and snapshots headers and body. Authorization and
+response claims must match the captured peer, exchange and installation. Reusing
+the bearer, key, request ID or handle on another stream cannot transfer custody.
+
+Closing invalidates the capability and signals cancellation. Canceled or expired
+handles drop their material reference immediately; pending policy or receipt work retains its
+slot until settled. Closing an idle handle frees its slot. Pipelining is refused.
 
 The Forwarder maps the captured peer to persisted installation state and
 classifies one exact route through its registered provider. It reserves the
@@ -287,12 +279,10 @@ replies. Blocked responses can still establish rejection. Receipts contain no
 bodies, headers, material values or credential-bearing handles. Persistence
 failure withholds bytes, and the deadline/cancellation check repeats after commit.
 
-Observation is distinct from final supplier proof: returning bytes on the
-exchange does not attest delivery to the downstream workload.
-Therefore post-send outcomes remain uncertain and unsettled;
-recovery reads the exact attempt and never retries. Material is erased after
-response handling or deadline. Pre-permission refusals can settle as undispatched;
-a possibly issued permission cannot become a refusal.
+Returning bytes does not prove downstream delivery. Post-send outcomes remain
+unsettled; recovery reads the exact attempt without retrying. Material is erased
+after response handling or at deadline. A pre-permission refusal can settle as
+undispatched; a possibly issued permission cannot.
 
 ### 5. Configure the regular Harness caller
 

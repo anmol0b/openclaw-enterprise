@@ -359,12 +359,12 @@ test("projection startup preserves unexpected stale entries and rejects unsafe p
   assert.equal((await lstat(privateKey)).isSymbolicLink(), true);
   assert.equal(await readFile(key, "utf8"), f.values["private-key.pem"]);
   await unlink(privateKey);
-  await writeFile(privateKey, f.values["private-key.pem"], { mode: 0o600 });
+  await writeFile(privateKey, f.values["private-key.pem"], { flag: "wx", mode: 0o600 });
   await unlink(key);
   await symlink(join(f.options.privateDirectory, "private-key.pem"), key);
   await assert.rejects(f.prepare(), { message: "invalid-projected-inputs" });
   await unlink(key);
-  await writeFile(key, Buffer.alloc(65537), { mode: 0o440 });
+  await writeFile(key, Buffer.alloc(65537), { flag: "wx", mode: 0o440 });
   await assert.rejects(f.prepare(), { message: "invalid-projected-inputs" });
   assert.equal((await readdir(f.options.privateDirectory)).length, 5);
 });

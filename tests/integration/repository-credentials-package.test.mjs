@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cp,
+  link,
   mkdtemp,
   mkdir,
   readFile,
@@ -572,6 +573,19 @@ test("credential artifact builder rejects dependencies outside its emitted closu
       assert.match(built.stderr, expected);
     });
   }
+  await t.test("a hard link to a module outside the emitted root", async () => {
+    const outside = join(temporary, "outside.js");
+    await writeFile(outside, "export {};\n");
+    await rm(clientEntry);
+    await link(outside, clientEntry);
+    const built = spawnSync(
+      process.execPath,
+      [join(temporary, "scripts/build-repository-credentials.mjs"), "--client-only"],
+      { encoding: "utf8", timeout: 10000 },
+    );
+    assert.equal(built.status, 1);
+    assert.match(built.stderr, /Invalid client runtime module/);
+  });
 });
 
 test("emitted credential Docker contexts contain only staged runtime inputs", async () => {

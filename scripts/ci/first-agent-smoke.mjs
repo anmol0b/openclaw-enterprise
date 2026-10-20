@@ -431,11 +431,17 @@ async function buildImages({ preparedGit = false } = {}) {
 // ---------------------------------------------------------------------------
 // run
 
-function createApi(origin, key) {
+export function createApi(origin, key) {
   return async (method, path, body) => {
+    const url = new URL(path, origin);
+    assert.equal(
+      url.origin,
+      origin,
+      "refusing to send the smoke key outside the controller origin",
+    );
     let response;
     try {
-      response = await fetch(new URL(path, origin), {
+      response = await fetch(url, {
         method,
         redirect: "error",
         signal: AbortSignal.timeout(30_000),

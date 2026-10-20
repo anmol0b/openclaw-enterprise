@@ -39,9 +39,11 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
       const text = Buffer.concat(body).toString();
       if (req.method === "POST" && req.url === "/app/installations/7303/access_tokens") {
         try {
-          const [header, claims, signature] = (req.headers.authorization ?? "")
-            .replace(/^Bearer /i, "")
-            .split(".");
+          const bearer = /^Bearer ([\w-]+)\.([\w-]+)\.([\w-]+)$/i.exec(
+            req.headers.authorization ?? "",
+          );
+          assert.ok(bearer, "expected a bearer with three compact JWT segments");
+          const [, header, claims, signature] = bearer;
           assert.ok(
             verify(
               "RSA-SHA256",
@@ -50,7 +52,12 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
               Buffer.from(signature, "base64url"),
             ),
           );
-          assert.equal(String(JSON.parse(Buffer.from(claims, "base64url")).iss), identity.app_id);
+          assert.equal(JSON.parse(Buffer.from(header, "base64url")).alg, "RS256");
+          const { iss, iat, exp } = JSON.parse(Buffer.from(claims, "base64url"));
+          const now = Math.floor(Date.now() / 1000);
+          assert.equal(String(iss), identity.app_id);
+          assert.ok(Number.isSafeInteger(iat) && Number.isSafeInteger(exp));
+          assert.ok(iat <= now && now < exp && exp - iat <= 600);
           assert.deepEqual(JSON.parse(text), {
             repository_ids: [repository.id],
             permissions: { metadata: "read" },
@@ -79,9 +86,6 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
         res.writeHead(204).end();
         return;
       }
-      const gate = gates.shift();
-      const selected = gate?.response ?? nextResponse ?? "normal";
-      nextResponse = undefined;
       const exactCredentialFreeRead =
         req.method === "GET" &&
         req.url === "/repos/" + credentialFreeRepository.full_name &&
@@ -92,7 +96,7 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
       const entry = {
         exactCredentialFreeRead,
         number: observations.length + 1,
-        mode: selected,
+        mode: "denied",
         wireRequest: server.requestOnWire(req.socket),
         exactRead:
           issues > 0 &&
@@ -112,6 +116,11 @@ export async function startCustodyRepositoryOrigin(t, configuration) {
         return;
       }
       assert.ok(entry.wireRequest, "observe request on the TLS socket before parsing it");
+      // Count denied traffic, but reserve the controlled response for an admitted read.
+      const gate = gates.shift();
+      const selected = gate?.response ?? nextResponse ?? "normal";
+      nextResponse = undefined;
+      entry.mode = selected;
       if (gate) {
         gate.arrived.resolve(entry);
         await gate.send.promise;
