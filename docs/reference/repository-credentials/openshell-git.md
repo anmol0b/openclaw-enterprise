@@ -186,8 +186,8 @@ Gateway every few seconds and on every request. A deployment waits as
 `REPOSITORY_GIT_ROUTE_PENDING` until that route is verified. The prepared material
 is issued only once the version is active and installs within a few seconds; an
 active version that loses its material reports `REPOSITORY_GIT_ROUTE_PENDING`
-again. A route the worker has closed for good (the Sandbox or its supervisor was
-replaced, a provider write's outcome is unknown, or access was withdrawn) fails
+again. A route the worker has closed for good (the Sandbox or its supervisor process
+was replaced, a provider write's outcome is unknown, or access was withdrawn) fails
 the deployment with `REPOSITORY_GIT_ROUTE_BLOCKED`; an active version in that
 state keeps serving chat, but every Git request answers 403 until a new version
 deploys.
@@ -196,11 +196,29 @@ A read the worker cannot complete is not a verdict. While the Gateway Pod is bei
 replaced (an upgrade, node drain or restart), or a read times out, the route closes
 and Git requests are denied; the worker reads again with a bounded backoff (1 s
 doubling to 10 s) and reopens the route, without a new version, once the same
-installation verifies. Nothing is rewritten or replayed meanwhile. A worker restart
-still requires a new version: the restarted worker refuses to adopt a Sandbox it did
-not prepare. The Agent stays active and chat works, but every Git request answers
-403 (`no_binding`) until a new version deploys; meanwhile each maintenance pass logs
-`worker.compute-prepare-failed` with `KUBERNETES_PREPARATION_FAILED`.
+installation verifies. Nothing is rewritten or replayed meanwhile.
+
+A replaced Gateway Pod also gives every running Sandbox's supervisor a new control
+session when it reconnects. The worker adopts that session, so no version is
+redeployed, only when everything else it verified reads exactly as before: the same
+Sandbox ID, the same supervisor process and network instance IDs, the same provider
+generation, revisions and policy hash, credentials installed and policy active. Any
+other difference closes the route for good as `supervisor_replaced`. Stated limit:
+in OpenShell 0.1.4 (`5a7728c3`) the process and network instance IDs are reported
+by the supervisor itself (its hello and readiness messages:
+`crates/openshell-server/src/grpc/provider_readiness.rs`,
+`crates/openshell-supervisor-process/src/delegated.rs`,
+`crates/openshell-server/src/compute/mod.rs`), not attested by the Gateway, which
+authenticates only the sandbox principal for that Sandbox ID. Until OpenShell
+provides an attested reconnect identity (a planned change), continuity across a
+Gateway restart rests on that principal and the supervisor's own claims. No
+material is issued or replayed on adoption.
+
+A worker restart still requires a new version: the restarted worker refuses to
+adopt a Sandbox it did not prepare. The Agent stays active and chat works, but
+every Git request answers 403 (`no_binding`) until a new version deploys; meanwhile
+each maintenance pass logs `worker.compute-prepare-failed` with
+`KUBERNETES_PREPARATION_FAILED`.
 
 The worker log says which it was. `worker.error` with
 `OPENSHELL_GIT_RECONCILIATION_REQUIRED` carries the `reason` (for example
@@ -208,13 +226,39 @@ The worker log says which it was. `worker.error` with
 once per version when a restarted or other worker finds a Sandbox it did not prepare, or
 `gateway_unauthorized` when the Gateway refuses the worker's identity), the Namespace,
 Agent, revision and `repositoryRef`; `worker.openshell-git-route-warning` reports a
-route closed by a failed read (`gateway_unavailable`, `timeout`, `read_failed`) and
-`worker.openshell-git-route` its restoration with the outage's `durationMs`. When
-the provider rejects the App key, preparation is quarantined and
-`PREPARED_GITHUB_RECOVERY_REQUIRED` names the `reason`, revision and
-`repositoryRef`. A new version still deploys (its material is requested only after
-it activates); then Git answers 403 and the worker logs this line. Restore the key,
-then deploy a new version. Each request the worker refuses logs one
+route closed by a failed read (`status: unobserved` with `gateway_unavailable`,
+`timeout`, `read_failed`) or by material the version had and lost (`status:
+pending`, `reason: material_unavailable`), and `worker.openshell-git-route` its
+restoration with the outage's `durationMs` (`reason: supervisor_reconnected` when
+it reopened on a new supervisor session). Each request the worker refuses logs one
 `worker.openshell-git-denied` line with its `reason` (`route_unobserved`,
-`route_blocked`, `ref_not_allowed`, `approval_denied`, and so on), the Sandbox ID
-and the request ID the supervisor's own log shows.
+`material_unavailable`, `route_blocked`, `ref_not_allowed`, `approval_denied`, and
+so on), the Sandbox ID and the request ID the supervisor's own log shows.
+
+## GitHub App key rotated or revoked
+
+Known gap: when GitHub rejects the App's private key (rotated at GitHub without
+updating the Secret, or revoked), nothing in Agent status or deployment status
+says so. The active version keeps its status, chat works, and every Git request
+from its Sandbox (reads included) answers 403. A new version still deploys and
+reports success, because its material is requested only after it activates; then
+its Git requests answer 403 the same way. Surfacing this at deploy time is a
+planned follow-up.
+
+Detection is in the worker log. Preparation for the active version is
+quarantined, and each maintenance pass (every 5 s) logs `worker.error` with
+`PREPARED_GITHUB_RECOVERY_REQUIRED`, `reason: quarantined` (`blocked` once a later
+pass finds the quarantined attempt), the Namespace, revision and `repositoryRef`.
+The version's route logs one `worker.openshell-git-route-warning` with
+`reason: material_unavailable`, Compute readiness reports
+`REPOSITORY_GIT_ROUTE_PENDING`, and each refused request logs
+`worker.openshell-git-denied` with `reason: material_unavailable`. Alert on the
+first two lines.
+
+Recovery: put a key GitHub accepts in the `private-key.pem` entry of the Secret
+named by `repositoryCredentials.appKeySecretName` (the worker re-reads the mounted
+file on each pass; a Secret update reaches the mount within about a minute), then
+deploy a new version of each affected Agent. The quarantined
+preparation never issues again, so restoring the key alone does not reopen the
+old version's route. Material is still issued only to an Agent's active version,
+so an operator's test of the restored key is that new version's first `git fetch`.

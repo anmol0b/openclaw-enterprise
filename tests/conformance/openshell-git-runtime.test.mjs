@@ -76,9 +76,16 @@ function fixture() {
     supervisorSessionId: "session-one",
     processInstanceId: "process-one",
     networkInstanceId: "network-one",
+    attachmentEpoch: "epoch-one",
   };
   const calls = { getSandbox: 0, observe: 0, rotate: 0, material: 0 };
-  const faults = { gateway: undefined, material: undefined, rotate: undefined, onRead: undefined };
+  const faults = {
+    gateway: undefined,
+    material: undefined,
+    rotate: undefined,
+    onRead: undefined,
+    observe: undefined,
+  };
   const client = {
     getProvider: async () => ({ type: "openai", profileWorkspace: "" }),
     getProviderProfile: async () => ({
@@ -96,6 +103,10 @@ function fixture() {
   const provider = {
     observe: async (binding, sandboxId) => {
       calls.observe += 1;
+      if (faults.observe) {
+        // The provider status does not verify yet (observe() answers undefined, never throws).
+        return undefined;
+      }
       return Object.freeze({
         credentialState: binding.credentialState,
         sandboxId,
@@ -343,6 +354,156 @@ test("a gateway that does not answer closes the Git route and restores it withou
   assert.deepEqual(f.errors(), []);
 });
 
+test("the same supervisor process reconnecting with a new session re-adopts the Git route", async () => {
+  const restorations = (f) =>
+    f.events.filter(
+      (event) => event.event === "worker.openshell-git-route" && event.status === "restored",
+    );
+
+  // A replaced Gateway Pod: the read fails, then the same process reconnects to the new Pod
+  // under a new control session. The route reopens on the next verified read, with no new
+  // version, no provider write and no token replay (finding 2136, owner decision 10-20).
+  let f = fixture();
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  f.faults.gateway = new SandboxGatewayUnavailableError("OpenShell GetSandbox failed.");
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), {
+    state: "pending",
+    reason: "unobserved",
+    failure: "gateway_unavailable",
+  });
+  f.faults.gateway = undefined;
+  f.supervisor.supervisorSessionId = "session-two";
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  assert.equal(f.entry.blocked, undefined);
+  assert.deepEqual(f.errors(), []);
+  assert.equal(f.calls.rotate, 1);
+  assert.equal(f.entry.supervisor.supervisorSessionId, "session-two");
+  assert.equal((await f.lookup())?.executionId, f.revision.id);
+  assert.equal(restorations(f).length, 1);
+  assert.equal(restorations(f)[0].reason, "supervisor_reconnected");
+  assert.equal(typeof restorations(f)[0].durationMs, "number");
+  assert.equal(restorations(f)[0].revisionId, "rev-one");
+  assert.equal(restorations(f)[0].repositoryRef, "application");
+  // The adopted session is the reference from here on: a later read reports nothing more.
+  await f.reconcile();
+  assert.equal((await f.lookup())?.executionId, f.revision.id);
+  assert.equal(restorations(f).length, 1);
+  assert.deepEqual(f.errors(), []);
+  // A second reconnect (another Gateway restart) is adopted the same way.
+  f.supervisor.supervisorSessionId = "session-three";
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  assert.equal(restorations(f).length, 2);
+  assert.deepEqual(f.errors(), []);
+
+  // The reconnect is first seen by a request: that request is denied as a changed
+  // installation, and the worker's own reconcile adopts the session and reopens the route.
+  f = fixture();
+  await f.reconcile();
+  f.supervisor.supervisorSessionId = "session-two";
+  assert.equal(await f.lookup(), undefined);
+  assert.equal(f.denials().at(-1).reason, "installation_changed");
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "pending", reason: "unverified" });
+  assert.deepEqual(f.errors(), []);
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  assert.equal((await f.lookup())?.executionId, f.revision.id);
+  assert.equal(restorations(f).length, 1);
+  assert.equal(restorations(f)[0].reason, "supervisor_reconnected");
+  assert.equal(f.calls.rotate, 1);
+
+  // The new session is adopted only once its observation verifies: while the provider
+  // status does not, the route waits (no adoption, no tombstone); then it reopens.
+  f = fixture();
+  await f.reconcile();
+  f.faults.gateway = new SandboxGatewayUnavailableError("OpenShell GetSandbox failed.");
+  await f.reconcile();
+  f.faults.gateway = undefined;
+  f.faults.observe = true;
+  f.supervisor.supervisorSessionId = "session-two";
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "pending", reason: "unverified" });
+  assert.equal(f.entry.supervisor.supervisorSessionId, "session-one");
+  assert.equal(await f.lookup(), undefined);
+  assert.equal(f.denials().at(-1).reason, "route_pending");
+  assert.deepEqual(f.errors(), []);
+  f.faults.observe = undefined;
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  assert.equal(f.entry.supervisor.supervisorSessionId, "session-two");
+  assert.equal(restorations(f).length, 1);
+  assert.equal(restorations(f)[0].reason, "supervisor_reconnected");
+  assert.equal(f.calls.rotate, 1);
+  assert.deepEqual(f.errors(), []);
+});
+
+test("an open Git route that loses its material says so once and names it in each denial", async () => {
+  // The owner retired the active version's material (the App key was rotated or rejected and
+  // preparation is quarantined, or access was withdrawn): the route closes with one warning
+  // that names the version, every request is denied as material_unavailable, and the
+  // restoration reports the outage's length (finding 2135).
+  const warnings = (f) =>
+    f.events.filter((event) => event.event === "worker.openshell-git-route-warning");
+  const f = fixture();
+  const material = f.owner.material;
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  f.owner.material = undefined;
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), {
+    state: "pending",
+    reason: "material_unavailable",
+  });
+  assert.equal(f.entry.blocked, undefined);
+  assert.deepEqual(warnings(f), [
+    {
+      event: "worker.openshell-git-route-warning",
+      status: "pending",
+      reason: "material_unavailable",
+      namespaceId: "namespace-a",
+      agentId: "agent-one",
+      revisionId: "rev-one",
+      repositoryRef: "application",
+    },
+  ]);
+  assert.equal(await f.lookup(), undefined);
+  assert.equal(f.denials().at(-1).reason, "material_unavailable");
+  assert.equal(f.denials().at(-1).revisionId, "rev-one");
+  // Still unavailable: no second warning, the same denial.
+  await f.reconcile();
+  assert.equal(await f.lookup(), undefined);
+  assert.equal(f.denials().at(-1).reason, "material_unavailable");
+  assert.equal(warnings(f).length, 1);
+  assert.deepEqual(f.errors(), []);
+  // Material again (a new preparation after recovery): the route reopens and reports it.
+  f.owner.material = material;
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  assert.equal((await f.lookup())?.executionId, f.revision.id);
+  const restored = f.events.filter(
+    (event) => event.event === "worker.openshell-git-route" && event.status === "restored",
+  );
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].reason, undefined);
+  assert.equal(typeof restored[0].durationMs, "number");
+
+  // A version that never had material (deploying; it is issued once the version is active)
+  // is not an outage: no warning, and its denial stays route_pending.
+  const g = fixture();
+  g.owner.material = undefined;
+  await g.reconcile();
+  assert.deepEqual(g.runtime.route(g.revision.id), {
+    state: "pending",
+    reason: "awaiting_material",
+  });
+  assert.equal(await g.lookup(), undefined);
+  assert.equal(g.denials().at(-1).reason, "route_pending");
+  assert.deepEqual(warnings(g), []);
+});
+
 test("the Git route tombstone stays for a replaced execution, an unknown write and withdrawal", async () => {
   const expectBlocked = async (f, reason) => {
     assert.deepEqual(f.runtime.route(f.revision.id), { state: "blocked", reason });
@@ -387,12 +548,47 @@ test("the Git route tombstone stays for a replaced execution, an unknown write a
   await f.reconcile();
   await expectBlocked(f, "execution_replaced");
 
-  // Another supervisor instance reports the installation.
+  // Another supervisor process reports the installation under a new session.
   f = fixture();
   await f.reconcile();
   f.supervisor.supervisorSessionId = "session-two";
+  f.supervisor.processInstanceId = "process-two";
   await f.reconcile();
   await expectBlocked(f, "supervisor_replaced");
+
+  // The same process under a new session, but on another network instance.
+  f = fixture();
+  await f.reconcile();
+  f.supervisor.supervisorSessionId = "session-two";
+  f.supervisor.networkInstanceId = "network-two";
+  await f.reconcile();
+  await expectBlocked(f, "supervisor_replaced");
+
+  // A changed process or network instance within the same session.
+  for (const key of ["processInstanceId", "networkInstanceId"]) {
+    f = fixture();
+    await f.reconcile();
+    f.supervisor[key] = `${key}-two`;
+    await f.reconcile();
+    await expectBlocked(f, "supervisor_replaced");
+  }
+
+  // A new session whose verified observation differs from the installation observed before
+  // (here the provider attachment epoch): adopted only when everything else reads the same.
+  f = fixture();
+  await f.reconcile();
+  f.supervisor.supervisorSessionId = "session-two";
+  f.supervisor.attachmentEpoch = "epoch-two";
+  await f.reconcile();
+  await expectBlocked(f, "supervisor_replaced");
+
+  // A new session on a Sandbox with another id.
+  f = fixture();
+  await f.reconcile();
+  f.supervisor.supervisorSessionId = "session-two";
+  f.sandbox.id = "sandbox-id-two";
+  await f.reconcile();
+  await expectBlocked(f, "execution_replaced");
 
   // The sandbox no longer matches the admitted create request.
   f = fixture();
