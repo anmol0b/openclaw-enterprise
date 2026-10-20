@@ -597,3 +597,43 @@ test("a restarted worker names why it cannot adopt a revision's Sandbox, once pe
   assert.equal(f.calls.getSandbox, 1, "the retained failure is not re-observed");
   assert.equal(openShellGitRouteReadiness(f.runtime.route(f.revision.id)), "blocked");
 });
+
+test("the Git route refuses overlapping policies at startup and again at deploy", async () => {
+  // Finding 2131: the Sandbox Driver checks its configured policies when it is built; prepare()
+  // keeps refusing hosts that reach github.com or api.github.com outside the route.
+  const f = fixture();
+  const policy = (name, host) => ({ name, endpoints: [{ host }] });
+  assert.equal(
+    f.runtime.overlappingPolicy([
+      policy("model", "api.openai.com"),
+      policy("docs", "docs.github.com"),
+    ]),
+    undefined,
+  );
+  for (const host of [
+    "github.com",
+    "API.GITHUB.COM",
+    "api.github.com.",
+    "*.github.com",
+    "bad host",
+  ]) {
+    assert.equal(
+      f.runtime.overlappingPolicy([policy("model", "api.openai.com"), policy("git", host)]),
+      "git",
+      host,
+    );
+    await assert.rejects(
+      f.runtime.prepare(
+        f.revision,
+        {},
+        f.sandbox.workspace,
+        f.sandbox.name,
+        AbortSignal.timeout(2_000),
+        ["openai"],
+        ["api.openai.com", host],
+      ),
+      /OpenShell Git cannot share overlapping network policy/,
+      host,
+    );
+  }
+});

@@ -107,6 +107,10 @@ OCE advertises the request-phase binding; policy admission calls `ValidateConfig
 The registration name must match `drivers.repo.openShell.registrationName`.
 OCE attaches the selected binding to the sandbox policy with `on_error: fail_closed`
 for `github.com` and `api.github.com`. Do not hand-author its binding identifier.
+Those hosts come only from this route: if another Sandbox Driver network policy
+(`policy.networkPolicies`, such as a `source-control` policy) also allows them, the
+Installation refuses to start and names that policy. The Driver still needs at
+least one policy, such as the model endpoint's.
 Retain HTTPS, hostname verification and authenticated Gateway JWTs; do not enable
 `allow_insecure_transport`. This policy attachment still has the stock enforcement
 and origin-TLS limits stated above.

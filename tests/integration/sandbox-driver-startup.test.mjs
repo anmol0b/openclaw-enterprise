@@ -5795,15 +5795,27 @@ tls.connect = (options, ...rest) => {
       endpoints: [{ host: "*.github.com", ports: [443] }],
       binaries: [{ path: "/usr/bin/curl" }],
     });
-    const collisionDriver = new OpenShellSandboxDriver(collisionConfiguration, {
+    // Finding 2131: an overlapping policy fails the Installation at startup, naming the
+    // policy, instead of the first Agent deploy.
+    const collision = () =>
+      new OpenShellSandboxDriver(collisionConfiguration, {
+        id: drivers.sandboxDriver.id,
+        backend: backendFor(gateway),
+        openShellGit: runtime,
+      });
+    for (const host of ["*.github.com", "api.github.com", "github.com"]) {
+      collisionConfiguration.policy.networkPolicies.at(-1).endpoints[0].host = host;
+      assert.throws(
+        collision,
+        /only through its middleware route; remove those hosts from sandbox network policy overlap\./,
+        host,
+      );
+    }
+    // The same policy is fine without the Git route.
+    new OpenShellSandboxDriver(collisionConfiguration, {
       id: drivers.sandboxDriver.id,
       backend: backendFor(gateway),
-      openShellGit: runtime,
     });
-    await assert.rejects(
-      collisionDriver.provisionHarness({ ...context, revision, requirements }),
-      /overlapping network policy/,
-    );
 
     assert.equal(
       created.spec.policy.network_middlewares["oce-prepared-git"].on_error,

@@ -528,6 +528,18 @@ export class OpenShellGitRuntime {
     return { state: "pending", reason: entry.pending ?? "unverified" };
   }
 
+  /** The first policy that also reaches the Git hosts, which only the middleware route may. */
+  overlappingPolicy(
+    policies: readonly {
+      readonly name: string;
+      readonly endpoints: readonly { readonly host: string }[];
+    }[],
+  ): string | undefined {
+    return policies.find((policy) =>
+      policy.endpoints.some((endpoint) => this.overlapsGit(endpoint.host)),
+    )?.name;
+  }
+
   private overlapsGit(host: string): boolean {
     const normalized = host.toLowerCase().replace(/\.$/, "");
     if (!/^(?:\*\.)?[a-z0-9.-]+$/.test(normalized)) {

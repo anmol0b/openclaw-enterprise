@@ -2569,6 +2569,13 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     }
     this.options = options;
     this.openShellGit = selection.openShellGit;
+    // Fail at startup, not at the first Agent deploy (finding 2131).
+    const overlapping = this.openShellGit?.overlappingPolicy(options.policy.networkPolicies);
+    if (overlapping !== undefined) {
+      throw new OpenShellSandboxConfigurationFailure(
+        `OpenShell Git reaches github.com and api.github.com only through its middleware route; remove those hosts from sandbox network policy ${overlapping}.`,
+      );
+    }
     this.backend = selection.backend;
     this.operatorOwnedKubernetesResources = selection.operatorOwnedKubernetesResources === true;
   }
