@@ -1252,10 +1252,9 @@ test("OpenShell Git refuses an Agent network grant to the Git hosts at save, bin
   });
   assert.equal(refusedAddress.status, 409, JSON.stringify(refusedAddress));
   assert.equal(refusedAddress.error.code, "RESOURCE_CONFLICT");
-  assert.equal(
-    refusedAddress.error.message,
-    "OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove network grant git-address (140.82.112.3).",
-  );
+  const addressMessage =
+    "OpenShell Git reaches GitHub only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove network grant git-address (140.82.112.3).";
+  assert.equal(refusedAddress.error.message, addressMessage);
   assert.deepEqual(await additions(bound), []);
   const saved = await f.request("PUT", policyPath(bound), {
     expectedVersion: 1,
@@ -1281,6 +1280,19 @@ test("OpenShell Git refuses an Agent network grant to the Git hosts at save, bin
     (await f.request("GET", `${f.collection}/${unbound.id}`)).data.repositoryBindings,
     undefined,
   );
+  const addressed = await f.createAgent({ executionMode: "dedicated" });
+  await enableEditing(addressed);
+  const addressGranted = await f.request("PUT", policyPath(addressed), {
+    expectedVersion: 1,
+    additions: [address],
+  });
+  assert.equal(addressGranted.status, 200, "without a binding an IP-address grant is ordinary");
+  const addressBinding = await f.request("PATCH", `${f.collection}/${addressed.id}`, {
+    configurationId: f.configuration.id,
+    repositoryBindings: selection,
+  });
+  assert.equal(addressBinding.status, 409, JSON.stringify(addressBinding));
+  assert.equal(addressBinding.error.message, addressMessage);
 
   // Deploy refuses a pair stored before these checks, and creates no revision.
   await f.prepareDeployment(bound);

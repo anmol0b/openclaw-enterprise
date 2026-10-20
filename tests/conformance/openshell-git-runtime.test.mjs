@@ -888,12 +888,19 @@ test("the Git route refuses overlapping policies at startup and again at deploy"
     undefined,
   );
   const hosts = [
-    ...["github.com", "API.GITHUB.COM", "api.github.com.", "*.github.com", "bad host"].map(
-      (host) => [host, false],
-    ),
+    ...[
+      "github.com",
+      "API.GITHUB.COM",
+      "api.github.com.",
+      "*.github.com",
+      "bad host",
+      "github.com:443",
+    ].map((host) => [host, false]),
     ...[
       "140.82.112.3",
       "140.82.112.3.",
+      "140.82.112.3:443",
+      "127.0.0.1",
       "*.82.112.3",
       "0x8c.0x52.0x70.0x3",
       "0X8C.0X52.0X70.0X3",

@@ -130,8 +130,10 @@ Installation refuses to start and names that policy. The Driver still needs at
 least one policy, such as the model endpoint's. An Agent network grant for those
 hosts on any port is refused the same way: saving it for an Agent with a repository
 binding, adding the binding beside it, deploy and live application each fail with a
-`409` that names the grant. IP-address hosts (IPv4, IPv6 or a range) may lead to
-GitHub, so both checks refuse them too; use DNS hosts.
+`409` that names the grant. IP-address hosts (IPv4, IPv6 or a range, private and
+loopback included) may lead to GitHub, so both checks refuse them too; use DNS names,
+such as a Service name. The checks compare names only: a DNS name that resolves to
+GitHub is not detected.
 Retain HTTPS, hostname verification and authenticated Gateway JWTs; do not enable
 `allow_insecure_transport`. This policy attachment still has the stock enforcement
 and origin-TLS limits stated above.

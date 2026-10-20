@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentRevision } from "@openclaw-enterprise/contracts";
@@ -276,18 +277,19 @@ export interface OpenShellGitPolicyOverlap {
 }
 
 /**
- * Whether a policy host names an IP address rather than a DNS name: IPv6 in any form (bracketed
- * or not), a CIDR range, or an IPv4 address, which, like a URL parser, is any host whose last label
- * is numeric (so 0x8c.0x52.0x70.0x3 and 2354212867 count) and also a wildcard over one.
+ * Whether a policy host names an IP address (private and loopback ones included) rather than a DNS
+ * name: IPv6, bracketed or not, an address range, or IPv4, which, as for a URL parser, is any host
+ * whose last label is numeric (so 0x8c.0x52.0x70.0x3 and 2354212867 count), or a wildcard over one.
  */
 function isIpAddressHost(host: string): boolean {
   const normalized = host.trim().toLowerCase().replace(/\.$/, "");
-  if (normalized.includes(":") || normalized.startsWith("[")) {
+  const address = (/^\[([^\]]*)\]/.exec(normalized)?.[1] ?? normalized).split("/")[0]!;
+  if (isIP(address) !== 0) {
     return true;
   }
-  const address = normalized.split("/")[0]!;
-  const last = address.slice(address.lastIndexOf(".") + 1);
-  return /^(?:0x[0-9a-f]*|[0-9]+)$/.test(last);
+  const parts = address.split(":");
+  const name = parts.length === 2 ? parts[0]! : address;
+  return /^(?:0x[0-9a-f]*|[0-9]+)$/.test(name.slice(name.lastIndexOf(".") + 1));
 }
 
 /** Worker-local authority. A restart deliberately requires a new revision; persisted labels
@@ -594,6 +596,11 @@ export class OpenShellGitRuntime {
     );
   }
 
+  /**
+   * Provider endpoints keep the name check only: an IP-addressed endpoint, such as a self-hosted
+   * model server, is common there, and this check is against a provider that names the Git hosts
+   * or carries a GitHub token.
+   */
   private async checkOtherProviders(
     client: OpenShellGatewayClient,
     workspace: string,

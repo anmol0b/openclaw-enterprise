@@ -1957,7 +1957,7 @@ function networkPolicyBinaries(policy: OpenShellNetworkPolicyRule) {
 function gitRouteOverlapMessage({ name, host, ipAddress }: OpenShellGitPolicyOverlap): string {
   const rule = host === "" ? name : `${name} (${host})`;
   return ipAddress
-    ? `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove ${rule}.`
+    ? `OpenShell Git reaches GitHub only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove ${rule}.`
     : `OpenShell Git reaches github.com and api.github.com only through its middleware route, so an Agent with a repository binding cannot also allow them: remove ${rule}.`;
 }
 
@@ -2584,7 +2584,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     const overlapping = this.openShellGit?.overlappingPolicy(options.policy.networkPolicies);
     if (overlapping?.ipAddress === true) {
       throw new OpenShellSandboxConfigurationFailure(
-        `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there; use DNS hosts instead of ${overlapping.host} in sandbox network policy ${overlapping.name}.`,
+        `OpenShell Git reaches GitHub only through its middleware route, and an IP address may lead there; use a DNS name instead of ${overlapping.host} in sandbox network policy ${overlapping.name}.`,
       );
     }
     if (overlapping !== undefined) {

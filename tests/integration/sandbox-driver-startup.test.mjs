@@ -5817,7 +5817,7 @@ tls.connect = (options, ...rest) => {
       assert.throws(
         collision,
         {
-          message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there; use DNS hosts instead of ${host} in sandbox network policy overlap.`,
+          message: `OpenShell Git reaches GitHub only through its middleware route, and an IP address may lead there; use a DNS name instead of ${host} in sandbox network policy overlap.`,
         },
         host,
       );
@@ -5871,7 +5871,7 @@ tls.connect = (options, ...rest) => {
         () => sandboxDriver.admitNetworkPolicy([allowed, address], 2, undefined, repositoryScope),
         {
           name: "SandboxNetworkPolicyConflictError",
-          message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove network grant git-address (${host}).`,
+          message: `OpenShell Git reaches GitHub only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove network grant git-address (${host}).`,
         },
         host,
       );
@@ -5900,7 +5900,7 @@ tls.connect = (options, ...rest) => {
           ),
         {
           name: "SandboxNetworkPolicyConflictError",
-          message: `OpenShell Git reaches github.com and api.github.com only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove sandbox network policy mirror (${host}).`,
+          message: `OpenShell Git reaches GitHub only through its middleware route, and an IP address may lead there, so an Agent with a repository binding cannot allow one: remove sandbox network policy mirror (${host}).`,
         },
         host,
       );
@@ -5972,6 +5972,24 @@ tls.connect = (options, ...rest) => {
           },
         ),
         { name: "SandboxNetworkPolicyConflictError", message: /remove network grant git-direct/ },
+      );
+      await assert.rejects(
+        sandboxDriver.applyNetworkPolicy(
+          { namespace: context.namespace, revision, signal: AbortSignal.timeout(2_000) },
+          {
+            snapshot: {
+              ...bypassRevision.sandboxPolicy,
+              additions: [{ ...direct, id: "git-address", host: "140.82.112.3" }],
+            },
+            expectedProviderVersion: "1",
+            operationId: randomUUID(),
+          },
+        ),
+        {
+          name: "SandboxNetworkPolicyConflictError",
+          message:
+            /IP address may lead there.*: remove network grant git-address \(140\.82\.112\.3\)\.$/,
+        },
       );
       assert.equal(policyUpdates, 0);
     } finally {
