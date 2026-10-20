@@ -546,6 +546,43 @@ test("the same supervisor process reconnecting with a new session re-adopts the 
   assert.deepEqual(f.errors(), []);
 });
 
+test("another Agent's deploy leaves a running Agent's Git route open", async () => {
+  // Finding 2146: a sibling Agent's deploy moves the running Sandbox's provider environment
+  // revision (another attached provider changed). Its requests keep passing, before and after
+  // the worker's reconcile adopts the new revision, with no denial and no provider write.
+  const f = fixture();
+  f.supervisor.providerEnvRevision = "env-one";
+  f.supervisor.configRevision = "config-one";
+  f.supervisor.policyHash = "policy-one";
+  await f.reconcile();
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  f.supervisor.providerEnvRevision = "env-two";
+  assert.equal((await f.lookup())?.executionId, f.revision.id);
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
+  await f.reconcile();
+  assert.equal(f.entry.installed.providerEnvRevision, "env-two");
+  assert.equal((await f.lookup())?.executionId, f.revision.id);
+  assert.deepEqual(f.denials(), []);
+  assert.equal(f.calls.rotate, 1);
+  assert.deepEqual(f.errors(), []);
+
+  // The installation itself still has to read the same: a changed policy or configuration
+  // closes the route until the reconcile verifies it again.
+  for (const [field, value] of [
+    ["policyHash", "policy-two"],
+    ["configRevision", "config-two"],
+    ["attachmentEpoch", "epoch-two"],
+  ]) {
+    const g = fixture();
+    g.supervisor.providerEnvRevision = "env-one";
+    await g.reconcile();
+    g.supervisor[field] = value;
+    g.supervisor.providerEnvRevision = "env-two";
+    assert.equal(await g.lookup(), undefined, field);
+    assert.equal(g.denials().at(-1).reason, "installation_changed", field);
+  }
+});
+
 test("an open Git route that loses its material says so once and names it in each denial", async () => {
   // The owner retired the active version's material (the App key was rotated or rejected and
   // preparation is quarantined, or access was withdrawn): the route closes, every request is

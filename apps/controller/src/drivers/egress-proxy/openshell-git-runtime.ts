@@ -270,6 +270,24 @@ async function read<T>(operation: () => Promise<T>, signal: AbortSignal): Promis
   }
 }
 
+/**
+ * Whether a request's observation reads as the installation the route admitted. The provider
+ * environment revision is Sandbox-wide: it moves when another provider attached to the Sandbox
+ * changes, as a sibling Agent's deploy does (finding 2146), while observe() pins this provider's
+ * own id, resource version and profile version. The worker's next reconcile adopts it.
+ */
+function sameInstallation(
+  observed: OpenShellPreparedGitInstalled,
+  installed: OpenShellPreparedGitInstalled | undefined,
+): boolean {
+  if (installed === undefined) {
+    return false;
+  }
+  const { providerEnvRevision: _observed, ...identity } = observed;
+  const { providerEnvRevision: _installed, ...admitted } = installed;
+  return isDeepStrictEqual(identity, admitted);
+}
+
 function revisionIdentity(revision: Readonly<AgentRevision>): Readonly<Record<string, string>> {
   const binding = revision.repositoryCredentials?.bindings[0];
   return {
@@ -731,7 +749,12 @@ export class OpenShellGitRuntime {
     }
     entry.sandboxId = sandbox.id;
     // observe() answers undefined, never throws, for a read it could not complete.
-    const observed = await entry.provider.observe(entry.binding, sandbox.id, signal);
+    const observed = await entry.provider.observe(
+      entry.binding,
+      sandbox.id,
+      signal,
+      entry.installed,
+    );
     if (!observed) {
       return;
     }
@@ -1070,7 +1093,7 @@ export class OpenShellGitRuntime {
           reason = "material_rotated";
           break;
         }
-        if (!observed || !isDeepStrictEqual(observed, entry.installed)) {
+        if (!observed || !sameInstallation(observed, entry.installed)) {
           // The installation no longer reads as the one admitted: close the route until the
           // worker's own reconcile verifies it again.
           this.pending(entry, "unverified");

@@ -399,11 +399,20 @@ export class OpenShellPreparedGitProvider {
     );
   }
 
-  /** Read current state, never a historical receipt. A stale or partial response grants nothing. */
+  /**
+   * Read current state, never a historical receipt. A stale or partial response grants nothing.
+   *
+   * `installed` is the observation this binding last verified. While the Gateway's desired
+   * snapshot has moved ahead of the supervisor only in the Sandbox-wide provider environment
+   * revision (another provider attached to the Sandbox changed, as a sibling Agent's deploy
+   * does; finding 2146), the supervisor still runs this provider's verified installation, so
+   * it is answered unchanged. Any other difference answers undefined.
+   */
   async observe(
     binding: OpenShellPreparedGitBinding,
     sandboxId: string,
     signal: AbortSignal,
+    installed?: OpenShellPreparedGitInstalled,
   ): Promise<OpenShellPreparedGitInstalled | undefined> {
     binding = Object.freeze({ ...binding });
     if (
@@ -438,8 +447,6 @@ export class OpenShellPreparedGitProvider {
       const observedAt = Date.parse(status.observedTime ?? "");
       const unspecified = "PROVIDER_READINESS_REASON_UNSPECIFIED";
       if (
-        status.state !== "PROVIDER_READINESS_STATE_READY" ||
-        (status.reason !== undefined && status.reason !== unspecified) ||
         status.receipt?.workspace !== binding.workspace ||
         status.receipt.provider !== binding.provider ||
         !desired ||
@@ -455,7 +462,7 @@ export class OpenShellPreparedGitProvider {
         !observed.sessionId ||
         !/^[1-9]\d*$/.test(observed.sequence) ||
         observed.attachmentEpoch !== desired.attachmentEpoch ||
-        observed.providerEnvRevision !== desired.providerEnvRevision ||
+        !/^[1-9]\d*$/.test(observed.providerEnvRevision) ||
         observed.configRevision !== desired.configRevision ||
         observed.policyHash !== desired.policyHash ||
         !observed.credentialsInstalled ||
@@ -470,6 +477,38 @@ export class OpenShellPreparedGitProvider {
         !Number.isFinite(observedAt) ||
         observedAt > evaluatedAt ||
         (binding.credentialState === "active" && !(Date.parse(binding.expiresAt) > Date.now()))
+      ) {
+        return undefined;
+      }
+      if (observed.providerEnvRevision !== desired.providerEnvRevision) {
+        // The Gateway reports this as pending (snapshot mismatch) until the supervisor's next
+        // settings poll installs the new environment. This provider's id, resource version and
+        // profile version are pinned above, and the attachment, configuration and policy are
+        // unchanged, so only another attached provider moved.
+        return installed !== undefined &&
+          status.state === "PROVIDER_READINESS_STATE_PENDING" &&
+          status.reason === "PROVIDER_READINESS_REASON_SNAPSHOT_MISMATCH" &&
+          installed.workspace === binding.workspace &&
+          installed.sandbox === binding.sandbox &&
+          installed.sandboxId === sandboxId &&
+          installed.executionId === binding.executionId &&
+          installed.provider === binding.provider &&
+          installed.providerId === binding.providerId &&
+          installed.providerResourceVersion === binding.resourceVersion &&
+          installed.profileVersion === binding.profileVersion &&
+          installed.credentialState === binding.credentialState &&
+          installed.attachmentEpoch === desired.attachmentEpoch &&
+          installed.configRevision === desired.configRevision &&
+          installed.policyHash === desired.policyHash &&
+          installed.supervisorSessionId === observed.sessionId &&
+          installed.processInstanceId === observed.processInstanceId &&
+          installed.networkInstanceId === status.networkInstanceId
+          ? installed
+          : undefined;
+      }
+      if (
+        status.state !== "PROVIDER_READINESS_STATE_READY" ||
+        (status.reason !== undefined && status.reason !== unspecified)
       ) {
         return undefined;
       }

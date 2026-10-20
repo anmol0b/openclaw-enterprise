@@ -48,6 +48,21 @@ async function wire(t) {
     "  string path_template = 9;",
     "  string path_template = 9;\n  bool stable_placeholder = 12;",
   );
+  // The remaining readiness reasons of openshell.proto at 5a7728c30.
+  proto = proto.replace(
+    "  PROVIDER_READINESS_REASON_CREDENTIALS_WITHHELD = 6;\n",
+    `  PROVIDER_READINESS_REASON_CREDENTIALS_WITHHELD = 6;
+  PROVIDER_READINESS_REASON_CREDENTIAL_INSTALL_FAILED = 7;
+  PROVIDER_READINESS_REASON_POLICY_ACTIVATION_FAILED = 8;
+  PROVIDER_READINESS_REASON_PROCESS_INSTALL_FAILED = 9;
+  PROVIDER_READINESS_REASON_SUPERVISOR_DISCONNECTED = 10;
+  PROVIDER_READINESS_REASON_SUPERVISOR_LEASE_EXPIRED = 11;
+  PROVIDER_READINESS_REASON_DESIRED_STATE_CHANGED = 12;
+  PROVIDER_READINESS_REASON_CREDENTIAL_EXPIRED = 13;
+  PROVIDER_READINESS_REASON_LOCAL_POLICY = 14;
+  PROVIDER_READINESS_REASON_SNAPSHOT_MISMATCH = 15;
+`,
+  );
   proto += `
     message GetProviderRequest { string name = 1; WorkspaceSelector workspace_scope = 2; }
     message GetProviderProfileRequest { string id = 1; WorkspaceSelector workspace_scope = 2; }
@@ -476,4 +491,92 @@ test("prepared Git refuses stale, partial, mismatched and unavailable installati
   );
   state.workspaceId = "replacement-workspace";
   assert.equal(await binding.observe(active, "sandbox-id", signal()), undefined);
+});
+
+test("prepared Git keeps its verified installation while only another attached provider moves", async (t) => {
+  // Finding 2146: a sibling Agent's deploy moves the Sandbox-wide provider environment revision
+  // of a running Sandbox. Until its supervisor's next settings poll installs it, the Gateway
+  // reports the provider as pending (snapshot mismatch); this provider's own installation is
+  // unchanged, so the verified observation stands. Anything else that moved still answers nothing.
+  const { state, binding } = await wire(t);
+  const active = await binding.prepare(token(), signal());
+  state.status = installedStatus(active);
+  const installed = await binding.observe(active, "sandbox-id", signal());
+  assert.equal(installed.providerEnvRevision, "101");
+  const sibling = () => {
+    const status = installedStatus(active);
+    status.state = "PROVIDER_READINESS_STATE_PENDING";
+    status.reason = "PROVIDER_READINESS_REASON_SNAPSHOT_MISMATCH";
+    status.receipt.desired.provider_env_revision = "102";
+    return status;
+  };
+  state.status = sibling();
+  assert.equal(await binding.observe(active, "sandbox-id", signal(), installed), installed);
+  assert.equal(
+    await binding.observe(active, "sandbox-id", signal()),
+    undefined,
+    "without a verified installation, a pending snapshot verifies nothing",
+  );
+  for (const mutate of [
+    (status) => {
+      status.reason = "PROVIDER_READINESS_REASON_WAITING_FOR_SUPERVISOR";
+    },
+    (status) => {
+      status.state = "PROVIDER_READINESS_STATE_READY";
+    },
+    (status) => {
+      status.state = "PROVIDER_READINESS_STATE_WITHHELD";
+    },
+    (status) => {
+      status.receipt.desired.config_revision = "203";
+    },
+    (status) => {
+      status.receipt.desired.policy_hash = "other-policy";
+    },
+    (status) => {
+      status.receipt.desired.attachment_epoch = "attachment-two";
+    },
+    (status) => {
+      status.receipt.desired.provider_resource_version = "99";
+    },
+    (status) => {
+      status.observed.session_id = "other-session";
+    },
+    (status) => {
+      status.observed.process_instance_id = "other-process";
+    },
+    (status) => {
+      status.network_instance_id = "other-network";
+    },
+    (status) => {
+      status.observed.provider_env_revision = "";
+    },
+    (status) => {
+      status.observed.credentials_installed = false;
+    },
+    (status) => {
+      status.evaluated_time.seconds = "1";
+    },
+  ]) {
+    state.status = sibling();
+    mutate(state.status);
+    assert.equal(await binding.observe(active, "sandbox-id", signal(), installed), undefined);
+  }
+  // A verified installation of another binding generation is not this one.
+  state.status = sibling();
+  assert.equal(
+    await binding.observe(active, "sandbox-id", signal(), {
+      ...installed,
+      providerResourceVersion: "0",
+    }),
+    undefined,
+  );
+  assert.equal(await binding.observe(active, "other-sandbox", signal(), installed), undefined);
+  // Once the supervisor installs the new environment, the read verifies as usual.
+  state.status = installedStatus(active);
+  state.status.receipt.desired.provider_env_revision = "102";
+  state.status.observed.provider_env_revision = "102";
+  const moved = await binding.observe(active, "sandbox-id", signal(), installed);
+  assert.equal(moved.providerEnvRevision, "102");
+  assert.deepEqual({ ...moved, providerEnvRevision: "101" }, installed);
 });
