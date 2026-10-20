@@ -5499,11 +5499,13 @@ test(
       { id: "codex", mode: "dedicated" },
       drivers.sandboxDriver.id,
     );
-    assert.throws(() =>
-      drivers.computeDriver.validateRepositoryCredentials(
-        { id: "openclaw", mode: "embedded" },
-        drivers.sandboxDriver.id,
-      ),
+    assert.throws(
+      () =>
+        drivers.computeDriver.validateRepositoryCredentials(
+          { id: "openclaw", mode: "embedded" },
+          drivers.sandboxDriver.id,
+        ),
+      { message: /[Rr]epository credentials require/ },
     );
     const { context, revision, requirements } = runtimeSandboxFixture(drivers.sandboxDriver);
     const inferenceProvider = requirements.credentialAttachments[0].ref;

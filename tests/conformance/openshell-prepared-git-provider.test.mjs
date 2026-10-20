@@ -318,7 +318,10 @@ test("prepared Git rejects credential and scope widening before provisioning", a
     { apiOrigin: "https://*.github.com" },
     { workspace: "" },
   ]) {
-    assert.throws(() => new OpenShellPreparedGitProvider(client, { ...scope, ...widened }));
+    assert.throws(
+      () => new OpenShellPreparedGitProvider(client, { ...scope, ...widened }),
+      OpenShellPreparedGitProviderError,
+    );
   }
   assert.equal(state.requests.length, 0);
 });

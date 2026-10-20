@@ -220,7 +220,9 @@ test(
     );
 
     // Compare-and-delete must preserve a concurrently changed ref on mismatch.
-    await assert.rejects(fixture.deleteApprovalRef(fixture.initialSha));
+    await assert.rejects(fixture.deleteApprovalRef(fixture.initialSha), {
+      message: /^command failed/,
+    });
     assert.equal((await fixture.readRefs())[fixture.approvalRef], sha);
     await fixture.deleteApprovalRef(sha);
     assert.deepEqual(await fixture.readRefs(), { "refs/heads/main": fixture.initialSha });
@@ -298,7 +300,7 @@ test(
     assert.equal(JSON.stringify(snapshot).includes(jwt), false);
     await fixture.close();
     await fixture.close();
-    await assert.rejects(api(fixture, "POST", issuePath, jwt, {}));
+    await assert.rejects(api(fixture, "POST", issuePath, jwt, {}), { code: "ECONNREFUSED" });
   },
 );
 

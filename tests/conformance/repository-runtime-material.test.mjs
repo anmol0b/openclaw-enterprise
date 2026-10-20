@@ -1581,7 +1581,9 @@ test("the owning active reconcile withdraws its admitted reader across the Crede
   otherCompute.compute.id = "other-compute";
   for (const unsupported of [legacy, unselected, otherCompute]) {
     assert.equal(driver.rejectedExecutionWithdrawal(unsupported), undefined);
-    assert.throws(() => driver.validateExecutionAdmission(unsupported));
+    assert.throws(() => driver.validateExecutionAdmission(unsupported), {
+      name: "DependencyUnavailableError",
+    });
   }
 
   const { id: revisionId, namespaceId, agentId, servicePrincipalId } = revision;

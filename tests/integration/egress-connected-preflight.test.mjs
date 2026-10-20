@@ -195,7 +195,9 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
   });
   const controller = selection(input);
   for (const field of Object.keys(controller)) {
-    assert.throws(() => validateConnectedInputs(input, { ...controller, [field]: "different" }));
+    assert.throws(() => validateConnectedInputs(input, { ...controller, [field]: "different" }), {
+      code: "ERR_ASSERTION",
+    });
   }
   const validate = (input) => validateConnectedInputs(input, selection(input));
   const mtls = {
@@ -222,8 +224,9 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
     { ...input.credentialConnector, path: "model-client" },
     { ...input.credentialConnector, verification: "discovered" },
   ]) {
-    assert.throws(() =>
-      validateConnectedInputs({ ...input, credentialConnector: pin }, controller),
+    assert.throws(
+      () => validateConnectedInputs({ ...input, credentialConnector: pin }, controller),
+      { code: "ERR_ASSERTION" },
     );
   }
   const fresh = {
@@ -234,10 +237,25 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
   const wholeExecution = (input) =>
     validateConnectedInputs(input, controller, { wholeExecution: true });
   assert.equal(wholeExecution(fresh), fresh);
-  assert.throws(() => validate(fresh), "legacy lane cannot silently broaden a connector grant");
-  assert.throws(() => wholeExecution(input), "fresh profile must not inherit connector authority");
-  assert.throws(() => wholeExecution({ ...fresh, credentialConnector: input.credentialConnector }));
-  assert.throws(() => wholeExecution({ ...fresh, authorityProfile: undefined }));
+  assert.throws(
+    () => validate(fresh),
+    { code: "ERR_ASSERTION" },
+    "legacy lane cannot silently broaden a connector grant",
+  );
+  assert.throws(
+    () => wholeExecution(input),
+    { code: "ERR_ASSERTION" },
+    "fresh profile must not inherit connector authority",
+  );
+  assert.throws(
+    () => wholeExecution({ ...fresh, credentialConnector: input.credentialConnector }),
+    {
+      code: "ERR_ASSERTION",
+    },
+  );
+  assert.throws(() => wholeExecution({ ...fresh, authorityProfile: undefined }), {
+    code: "ERR_ASSERTION",
+  });
   const rejectedAuth = [
     undefined,
     { mode: "unauthenticated" },
@@ -251,18 +269,20 @@ test("connected inputs accept exact bearer and mTLS shapes and only scoped HTTPS
   ];
   for (const auth of rejectedAuth) {
     const openShellBackend = { ...input.openShellBackend, auth };
-    assert.throws(() => validate({ ...input, openShellBackend }));
+    assert.throws(() => validate({ ...input, openShellBackend }), { code: "ERR_ASSERTION" });
   }
   // These guards precede credential reads and provider binding. Alias acceptance
   // must not admit ordinary providers, suffix lookalikes or implicit routing.
-  assert.throws(() => validate({ ...input, serviceKeyPath: "/fixture/not-the-controller-key" }));
+  assert.throws(() => validate({ ...input, serviceKeyPath: "/fixture/not-the-controller-key" }), {
+    code: "ERR_ASSERTION",
+  });
   for (const change of [
     { endpoint: "http://gateway.test:8443" },
     { rootCertificatePath: "relative.pem" },
     { insecureTransport: true },
   ]) {
     const openShellBackend = { ...input.openShellBackend, ...change };
-    assert.throws(() => validate({ ...input, openShellBackend }));
+    assert.throws(() => validate({ ...input, openShellBackend }), { code: "ERR_ASSERTION" });
   }
   for (const change of [
     { origin: "http://provider.test:9443/v1" },
@@ -320,7 +340,7 @@ test("the authenticated connected request stays on the runner's exact loopback c
     "http://127.0.0.1",
     "http://foreign.test:3000",
   ]) {
-    assert.throws(() => controller(origin));
+    assert.throws(() => controller(origin), { code: "ERR_ASSERTION" });
   }
   const binding = controller(`http://${local}`);
   const get = async (path) =>
@@ -336,7 +356,7 @@ test("the authenticated connected request stays on the runner's exact loopback c
     get("/" + "\\" + foreign + "/foreign"),
     /only go to the selected controller/,
   );
-  await assert.rejects(get("/redirect"));
+  await assert.rejects(get("/redirect"), TypeError);
   assert.equal(foreignRequests, 0, "neither request reached the foreign listener");
 });
 
@@ -361,7 +381,7 @@ test("connected database selection rejects missing, remote and redirected observ
     url({ search: "?host=database.test" }),
     url({ search: "?dbname=unowned" }),
   ]) {
-    assert.throws(() => validateConnectedDatabaseUrl(rejected));
+    assert.throws(() => validateConnectedDatabaseUrl(rejected), { code: "ERR_ASSERTION" });
   }
 });
 
@@ -370,7 +390,7 @@ test("connected receipt observation preserves proto3 zero and uint64 precision",
   assert.equal(connectedReceiptRevision("0"), "0");
   assert.equal(connectedReceiptRevision("18446744073709551615"), "18446744073709551615");
   for (const rejected of [null, 1, 9007199254740992, "01", "-1", "18446744073709551616"]) {
-    assert.throws(() => connectedReceiptRevision(rejected));
+    assert.throws(() => connectedReceiptRevision(rejected), { code: "ERR_ASSERTION" });
   }
 });
 
@@ -383,7 +403,9 @@ test("connected failed-turn observation rejects partial text without a completed
     { method: "item/started", params: { item: { type: "agentMessage", text: "visible" } } },
     { method: "item/completed", params: { item: { type: "agentMessage", text: "visible" } } },
   ]) {
-    assert.throws(() => assertNoConnectedAssistantOutput({ assistant: "", items: [event] }));
+    assert.throws(() => assertNoConnectedAssistantOutput({ assistant: "", items: [event] }), {
+      code: "ERR_ASSERTION",
+    });
   }
 });
 

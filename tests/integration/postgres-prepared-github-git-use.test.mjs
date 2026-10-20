@@ -35,7 +35,9 @@ test(
     await prepare(f);
     const before = f.gh.trace.length;
     assert.equal(await read("rev_" + randomUUID()), undefined);
-    await assert.rejects(f.owner.readOpenShellMaterial(f.revision.id, AbortSignal.abort()));
+    await assert.rejects(f.owner.readOpenShellMaterial(f.revision.id, AbortSignal.abort()), {
+      name: "AbortError",
+    });
     const material = await read();
     assert.ok(material?.value);
     assert.equal(material.sessionId, f.sessionId);
@@ -174,7 +176,9 @@ test(
     // GitHub commits DELETE then drops its response. Real provider state, rather
     // than a patched owner return value, establishes the ambiguous outcome.
     f.gh.disconnectAfterMutation("DELETE", "/installation/token");
-    await assert.rejects(f.owner.maintain());
+    await assert.rejects(f.owner.maintain(), {
+      message: /provider-unavailable|revocation is unconfirmed/,
+    });
     const retained = () =>
       f.pool.query(
         "SELECT custody, sealed IS NOT NULL AS retained FROM occ.prepared_github_attempts WHERE id=$1",

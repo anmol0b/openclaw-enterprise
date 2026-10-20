@@ -361,7 +361,9 @@ test("protected admission requires the actual counterpart and exact loaded polic
     1,
     "failed candidate cannot leave admitted source metadata",
   );
-  await assert.rejects(f.egress.configureRevision(f.context));
+  await assert.rejects(f.egress.configureRevision(f.context), {
+    name: "DependencyUnavailableError",
+  });
   f.observed.available = true;
   const expectedPolicy = structuredClone(f.observed.policy);
   assert.equal(await f.egress.verifyInstallation(f.context, f.installation), true);
@@ -410,6 +412,7 @@ test("protected admission requires the actual counterpart and exact loaded polic
   };
   await assert.rejects(
     f.egress.withdrawBinding(f.context, f.context.plan.routes[0].binding.binding),
+    { message: "Protected Sandbox ownership differs from admission." },
   );
   assert.equal(f.observed.deleted.length, 0);
   f.observed.sandbox.annotations = originalAnnotations;

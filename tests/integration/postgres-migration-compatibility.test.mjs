@@ -2421,7 +2421,7 @@ test(
       ["catalog-object", 25, "CREATE TABLE occ.unexplained(id integer)"],
       [
         "draft-pull-privilege",
-        65,
+        67,
         "GRANT DELETE ON occ.prepared_repository_draft_pulls TO occ_app",
       ],
       ["ledger-grant", 25, "GRANT SELECT ON drizzle.__drizzle_migrations TO occ_app"],

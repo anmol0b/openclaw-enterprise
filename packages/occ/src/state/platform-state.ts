@@ -8,7 +8,6 @@ import type {
   EgressInstallation,
   EgressMaterialEvidence,
 } from "@openclaw-enterprise/contracts";
-import { isDeepStrictEqual } from "node:util";
 import { validateSandboxNetworkGrants } from "@openclaw-enterprise/contracts";
 import { RepositoryTransactionLifetime } from "../ports/transaction.ts";
 import { bindPlatformUnitOfWork } from "../ports/platform-unit-of-work.ts";

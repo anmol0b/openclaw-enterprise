@@ -19,6 +19,7 @@ import { kubernetesNamespaceName } from "../../apps/controller/src/drivers/compu
 import { createControllerWorker } from "../../apps/controller/src/worker.ts";
 import { admitLoggingConfiguration } from "../../packages/contracts/src/index.ts";
 import { validateSelectedBackendDrivers } from "../../packages/occ/src/index.ts";
+import { spawnSync } from "node:child_process";
 import { captureChild, concurrencyLimit, settled } from "../helpers/child-processes.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 import { createInstallationDriverConfiguration as installation } from "../helpers/installation-driver-configuration.mjs";
@@ -1910,7 +1911,11 @@ test("closed Installation observes only its operator-bound Namespace, including 
     assert.equal(result.failure, "permanent");
     assert.equal(result.namespaceReady, false);
   }
-  await assert.rejects(configurationDriver.controlNamespace(core, id));
-  await assert.rejects(secretDriver.readyNamespace(core, id));
+  await assert.rejects(configurationDriver.controlNamespace(core, id), {
+    message: /control-plane storage namespace|requires exactly one namespace/,
+  });
+  await assert.rejects(secretDriver.readyNamespace(core, id), {
+    message: /Kubernetes Secret namespace verification/,
+  });
   assert.deepEqual(writes, []);
 });
