@@ -1087,12 +1087,14 @@ const migrationScripts = readFile(join(repositoryRoot, "package.json"), "utf8").
   (text) => JSON.parse(text).scripts,
 );
 
-async function runHistoryMigration(db, mode = "development", checkOnly = false, refusal) {
+// flag is one migration command option (--check or --expect-empty) or undefined.
+async function runHistoryMigration(db, mode = "development", flag, refusal) {
   const script = (await migrationScripts)[
     mode === "production" ? "db:migrate:production" : "db:migrate"
   ];
   assert.equal(typeof script, "string");
-  const args = ["-c", `${script} "$@"`, "sh", ...(checkOnly ? ["--check"] : [])];
+  const args = ["-c", `${script} "$@"`, "sh", ...(flag === undefined ? [] : [flag])];
+  const checkOnly = flag === "--check";
   try {
     const { stdout } = await execFileAsync("sh", args, {
       cwd: repositoryRoot,
@@ -1119,6 +1121,12 @@ async function runHistoryMigration(db, mode = "development", checkOnly = false, 
         assert.match(output, refusal);
       }
       return { ok: false, code: "MIGRATION_HISTORY_UNSUPPORTED" };
+    }
+    if (error.code === 1 && output.includes('"code":"MIGRATION_HISTORY_NOT_EMPTY"')) {
+      assert.ok(
+        output.includes("use --check to inspect migration history without applying changes"),
+      );
+      return { ok: false, code: "MIGRATION_HISTORY_NOT_EMPTY" };
     }
     if (error.code === 1 && output.includes('"code":"MIGRATION_FAILED"')) {
       return { ok: false, code: "MIGRATION_FAILED" };
@@ -1166,7 +1174,7 @@ async function assertHistoryRefused(db, refusal) {
     ["development", false],
     ["production", false],
   ]) {
-    assert.deepEqual(await runHistoryMigration(db, mode, checkOnly, refusal), {
+    assert.deepEqual(await runHistoryMigration(db, mode, checkOnly ? "--check" : undefined, refusal), {
       ok: false,
       code: "MIGRATION_HISTORY_UNSUPPORTED",
     });
@@ -1729,6 +1737,32 @@ async function canonicalData(db) {
 }
 
 test(
+  "First installation requires empty migration history under the migration lock",
+  requiresHistoryPostgres,
+  async (context) => {
+    const fixture = await migrationHistoryFixture();
+    const db = await historyDatabase(context, fixture, "first_install");
+    const firstInstall = () => runHistoryMigration(db, "production", "--expect-empty");
+    const refused = { ok: false, code: "MIGRATION_HISTORY_NOT_EMPTY" };
+    // Concurrent callers both intend a first installation. Only the lock winner may migrate.
+    const results = await Promise.all([firstInstall(), firstInstall()]);
+    assert.deepEqual(
+      results.sort((a, b) => Number(b.ok) - Number(a.ok)),
+      [{ ok: true, history: "empty" }, refused],
+    );
+    await assertCompletedHistory(db);
+
+    const before = await historySnapshot(db);
+    assert.deepEqual(await firstInstall(), refused);
+    assert.deepEqual(await historySnapshot(db), before);
+    assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
+      ok: true,
+      history: "completed",
+    });
+  },
+);
+
+test(
   "Canonical migration commands preserve main data and serialize fresh/repeat runners",
   concurrentHistoryPostgres,
   async (context) => {
@@ -1739,7 +1773,7 @@ test(
         async (child) => {
           const db = await historyDatabase(child, fixture, "fresh", { schemas });
           const before = await historySnapshot(db);
-          assert.deepEqual(await runHistoryMigration(db, "development", true), {
+          assert.deepEqual(await runHistoryMigration(db, "development", "--check"), {
             ok: true,
             history: "empty",
           });
@@ -1818,7 +1852,7 @@ test(
         });
         const before = await canonicalData(db);
         const receipts = await historyReceipts(db.migrator);
-        assert.deepEqual(await runHistoryMigration(db, "production", true), {
+        assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
           ok: true,
           history,
         });
@@ -2011,7 +2045,7 @@ test(
       )
     ).rows;
     const receipts = await historyReceipts(db.migrator);
-    assert.deepEqual(await runHistoryMigration(db, "production", true), {
+    assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
       ok: true,
       history: "repositoryCredentials",
     });
@@ -2050,7 +2084,7 @@ test(
     const seeded = await seedProviderCompletedData(db);
     const receipts = await historyReceipts(db.migrator);
     assert.equal(receipts.length, 31);
-    assert.deepEqual(await runHistoryMigration(db, "production", true), {
+    assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
       ok: true,
       history: "providerCompleted",
     });
@@ -2164,7 +2198,7 @@ test(
       ).rows,
       [{ table_name: "account", column_name: "provider_id" }],
     );
-    assert.deepEqual(await runHistoryMigration(db, "production", true), {
+    assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
       ok: true,
       history: "preCodexPatSources",
     });
@@ -2228,7 +2262,7 @@ test(
         await installCanonicalPrefix(db, prefix);
         const receipts = await historyReceipts(db.migrator);
         assert.equal(receipts.length, prefix);
-        assert.deepEqual(await runHistoryMigration(db, "production", true), {
+        assert.deepEqual(await runHistoryMigration(db, "production", "--check"), {
           ok: true,
           history,
         });
@@ -2551,7 +2585,7 @@ test(
             await assertCompletedHistory(db);
           }
           const data = await canonicalData(db);
-          assert.deepEqual(await runHistoryMigration(db, "development", true), {
+          assert.deepEqual(await runHistoryMigration(db, "development", "--check"), {
             ok: true,
             history,
           });
