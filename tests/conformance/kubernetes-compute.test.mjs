@@ -10451,6 +10451,7 @@ async function exerciseEmbeddedReplacement(scenario) {
   });
 
   const expected = { namespaceId: tenant.id, agentId, revisionId: replacement.id };
+  assert.equal(driver.requiresStoppedPredecessors(replacement), false);
   assert.deepEqual(await driver.prepareRevision(replacement, authContext(replacement)), {
     ...expected,
     ready: true,
@@ -12911,7 +12912,7 @@ test("an owner cancellation ends a Kubernetes retry wait at once", async () => {
   assert.ok(Date.now() - started < 1_500);
 });
 
-test("revision lifecycle rejects another driver or missing identity before cluster access", async () => {
+test("revision lifecycle rejects invalid ownership and unsupported workloads before cluster access", async () => {
   const driver = createKubernetesComputeDriver(options());
   const revision = {
     id: "revision-a-1",
@@ -12938,6 +12939,16 @@ test("revision lifecycle rejects another driver or missing identity before clust
     servicePrincipalId: "service-principal-agent-a",
     createdAt: tenant.createdAt,
   };
+
+  const managed = { ...revision, gatewayManagedMode: true };
+  const unsupportedManaged = {
+    name: "ConfigurationHarnessError",
+    message:
+      "Agent setting gatewayManagedMode requires a supported Gateway runtime on Kubernetes Compute.",
+  };
+  assert.throws(() => driver.admitRevision(managed), unsupportedManaged);
+  await assert.rejects(driver.prepareRevision(managed), unsupportedManaged);
+  await assert.rejects(driver.activateRevision(managed), unsupportedManaged);
 
   for (const provider of ["slack", "msteams"]) {
     for (const configuration of [{ enabled: true }, { accounts: { support: { enabled: true } } }]) {
@@ -16754,20 +16765,6 @@ function workspaceSetupFixture(
   const context = { ...authContext(revision, control), workspaceSetup: setup };
   return { driver, revision, namespace, objects, records, state, setup, context };
 }
-
-test("Kubernetes rejects managed mode when it cannot control the Gateway launch", async () => {
-  const { driver, revision } = workspaceSetupFixture(true, false);
-  const managed = { ...revision, gatewayManagedMode: true };
-  const failure = {
-    name: "ConfigurationHarnessError",
-    message:
-      "Agent setting gatewayManagedMode requires a supported Gateway runtime on Kubernetes Compute.",
-  };
-  assert.equal(driver.requiresStoppedPredecessors(managed), false);
-  assert.throws(() => driver.admitRevision(managed), failure);
-  await assert.rejects(driver.prepareRevision(managed, authContext(managed)), failure);
-  await assert.rejects(driver.activateRevision(managed, authContext(managed)), failure);
-});
 
 test("external ChatGPT source preparation delivers the exact placeholder and account only to its Harness", async (t) => {
   const account = {

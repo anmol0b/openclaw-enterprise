@@ -7703,29 +7703,7 @@ test("IAM and audit dependency failures fail closed without orphaned state", asy
   assertOnlyDefaultNamespace(stillUnchanged);
 });
 
-test("managed revision admission refuses a Compute Driver that does not declare support", async () => {
-  const controller = await configuredController();
-  delete controller.fixture.computeDriver.supportsGatewayManagedMode;
-  await bootstrap(controller);
-  const namespace = await createNamespace(controller, "managed-mode-admission");
-  await controller.fixture.controller.handleNamespaceLifecycle(
-    controller.fixture.principal.id,
-    namespace.id,
-    "ready",
-  );
-  const agent = await createAgent(controller, namespace.id, "managed-mode-agent");
-  await bindHarnessKey(controller.fixture, namespace.id, agent);
-  const agentPath = `/namespaces/${namespace.id}/agents/${agent.id}`;
-  const deployed = await controller.request("POST", `${agentPath}/deploy`);
-  assert.equal(deployed.status, 400, JSON.stringify(deployed.body));
-  assert.equal(
-    deployed.body.error.message,
-    "Agent setting gatewayManagedMode is not supported by the selected Compute Driver.",
-  );
-  assert.deepEqual((await controller.request("GET", `${agentPath}/revisions`)).data, []);
-});
-
-test("runtime auth admits SSH revisions without source permissions but retains deployment authorization and exact grammar", async () => {
+test("SSH admission rejects managed mode and validates runtime authentication and deployment authorization", async () => {
   const computeDriver = new SshComputeDriver({
     ssh: { identityFile: "/tmp/ssh-test-key", knownHostsFile: "/tmp/ssh-test-hosts" },
     hosts: { runtime: { address: "127.0.0.1", user: "root" } },
@@ -7782,12 +7760,20 @@ test("runtime auth admits SSH revisions without source permissions but retains d
       name: "Runtime Agent",
       configurationId: configuration.id,
       harnessAuth: { method: "runtime" },
-      gatewayManagedMode: false,
     },
   });
   assert.equal(created.status, 201);
   assert.deepEqual(created.data.harnessAuth, { method: "runtime" });
   const path = `${collection}/${created.data.id}`;
+  const rejected = await controller.request("POST", `${path}/deploy`);
+  assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
+  assert.equal(
+    rejected.body.error.message,
+    "Agent setting gatewayManagedMode is not supported by the selected Compute Driver.",
+  );
+  assert.deepEqual((await controller.request("GET", `${path}/revisions`)).data, []);
+  const updated = await controller.request("PATCH", path, { body: { gatewayManagedMode: false } });
+  assert.equal(updated.status, 200, JSON.stringify(updated.body));
   const deployed = await controller.request("POST", `${path}/deploy`);
   assert.equal(deployed.status, 202, JSON.stringify(deployed.body));
   assert.deepEqual(deployed.data.harnessAuth, { method: "runtime" });

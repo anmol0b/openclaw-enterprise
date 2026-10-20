@@ -42,77 +42,6 @@ import {
   waitForLiveControls,
 } from "./console-agents-test-support.mjs";
 
-test("saving Gateway managed mode preserves a concurrent Configuration reassignment and the current version", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  const installation = await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Managed Gateway", { ready: true });
-  const agent = await fixture.createAgent(namespace.id, "Managed Agent", nativeValues("managed"));
-  const { revision } = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
-  const { page } = await newPage(t, fixture);
-  await login(
-    page,
-    fixture,
-    detailUrl(fixture, namespace.id, agent.id, "draft", "configuration").href,
-  );
-
-  const turnOff = page.getByRole("button", { name: "Turn off managed mode for next deployment" });
-  await turnOff.waitFor();
-  fixture.policy.restrictions.push({
-    id: "deny-managed-mode-change",
-    resourceKind: "installation",
-    resourceId: installation.id,
-    action: "administer",
-    effect: "deny",
-  });
-  await turnOff.click();
-  await page
-    .getByText(/Installation administration, Agent update and Configuration read access/)
-    .waitFor();
-  assert.equal(
-    (await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`)).data
-      .gatewayManagedMode,
-    true,
-  );
-  fixture.policy.restrictions.pop();
-  await page.getByRole("button", { name: "Edit Configuration", exact: true }).click();
-  const editor = page.getByLabel("Configuration JSON");
-  const unsavedConfiguration = JSON.stringify(nativeValues("unsaved"), null, 2);
-  await editor.fill(unsavedConfiguration);
-  const saving = await holdRequests(
-    t,
-    page,
-    `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}`,
-    {
-      method: "PATCH",
-    },
-  );
-  await turnOff.click();
-  await saving.requested;
-  await page.getByText("Saving managed mode. Wait before deploying.").waitFor();
-  assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
-  // Another Agent update lands before the browser's save. The flag must not restore the old binding.
-  const reassigned = await fixture.createConfiguration(namespace.id, nativeValues("reassigned"));
-  await fixture.updateAgent(namespace.id, agent.id, { configurationId: reassigned.id });
-  saving.release();
-  await page.getByRole("button", { name: "Turn on managed mode for next deployment" }).waitFor();
-  assert.equal(await editor.inputValue(), unsavedConfiguration);
-  const saved = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`);
-  assert.equal(saved.data.gatewayManagedMode, false);
-  assert.equal(saved.data.configurationId, reassigned.id);
-  assert.equal(saved.data.activeRevisionId, revision.id);
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  await page.getByRole("button", { name: "Deploy new version" }).click();
-  await page
-    .getByText("Configuration or authentication changed. Reload this draft before deploying.")
-    .waitFor();
-  await page.getByRole("button", { name: "View version v1, current version" }).click();
-  await page.getByRole("heading", { name: "Configuration snapshot" }).waitFor();
-  const mode = page.locator(".configuration-summary dt", {
-    hasText: "Requested Gateway managed mode",
-  });
-  assert.equal(await mode.locator("xpath=following-sibling::dd[1]").textContent(), "On");
-});
-
 test("Agent detail separates the current version, viewed version, and latest deployment", async (t) => {
   const fixture = await createConsoleAppFixture(t);
   await fixture.bootstrap();
@@ -991,6 +920,23 @@ test("Agent detail preserves admitted revision history while draft edits change 
   await expectNoText(page, /"marker": "rev-one"|"marker": "rev-two"/);
   assertRevisionUrl(page, "draft");
 
+  const deploy = page.getByRole("button", { name: "Deploy new version" });
+  assert.equal(await deploy.isEnabled(), true);
+  const savingMode = await holdRequests(
+    t,
+    page,
+    `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}`,
+    {
+      method: "PATCH",
+      once: true,
+    },
+  );
+  await page.getByRole("button", { name: "Turn off managed mode for next deployment" }).click();
+  await savingMode.requested;
+  assert.equal(await deploy.isDisabled(), true);
+  savingMode.release();
+  await page.getByRole("button", { name: "Turn on managed mode for next deployment" }).waitFor();
+
   await page.getByRole("button", { name: "Edit Configuration" }).click();
   await openAdvancedSettings(page);
   const editor = page.getByLabel("Configuration JSON");
@@ -1051,6 +997,10 @@ test("Agent detail preserves admitted revision history while draft edits change 
   await page.getByRole("tab", { name: "Configuration", exact: true }).click();
   assert.deepEqual(JSON.parse(await editor.inputValue()), editedValues);
   await page.getByLabel("Available versions").selectOption(second.revision.id);
+  const requestedMode = page.locator(".configuration-summary dt", {
+    hasText: "Requested Gateway managed mode",
+  });
+  assert.equal(await requestedMode.locator("xpath=following-sibling::dd[1]").textContent(), "On");
   await page.getByRole("button", { name: "Edit current Configuration" }).click();
   await waitForLiveControls(page, ["configuration-json"]);
   assert.deepEqual(JSON.parse(await editor.inputValue()), editedValues);
@@ -1140,6 +1090,19 @@ test("Agent detail preserves admitted revision history while draft edits change 
   await editor.fill(JSON.stringify(nativeValues("after-cancel")));
   await page.getByRole("button", { name: "Save Configuration" }).click();
   await page.getByText(/generation 7/).waitFor();
+
+  // Saving an Agent setting preserves both an unsaved editor and a concurrent reassignment.
+  await page.getByRole("button", { name: "Edit Configuration" }).click();
+  const unsaved = JSON.stringify(nativeValues("unsaved"));
+  await editor.fill(unsaved);
+  const reassigned = await fixture.createConfiguration(namespace.id, nativeValues("reassigned"));
+  await fixture.updateAgent(namespace.id, agent.id, { configurationId: reassigned.id });
+  await page.getByRole("button", { name: "Turn on managed mode for next deployment" }).click();
+  await page.getByRole("button", { name: "Turn off managed mode for next deployment" }).waitFor();
+  assert.equal(await editor.inputValue(), unsaved);
+  const savedAgent = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`);
+  assert.equal(savedAgent.data.gatewayManagedMode, true);
+  assert.equal(savedAgent.data.configurationId, reassigned.id);
 });
 
 test("Agent detail saves plugin changes for the next revision without changing admitted revisions", async (t) => {

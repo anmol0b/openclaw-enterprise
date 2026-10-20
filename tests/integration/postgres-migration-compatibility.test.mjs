@@ -1650,6 +1650,7 @@ test(
       [56, "preCanonicalHarnessAuth"],
       [57, "preSandboxPolicies"],
       [58, "preSandboxPolicyAdministrator"],
+      [59, "preGatewayManagedMode"],
     ]) {
       void context.test(`populated canonical ${history}`, async (child) => {
         const db = await historyDatabase(child, fixture, "main", { prefix });
@@ -1664,6 +1665,28 @@ test(
         await assertCompletedHistory(db, receipts);
         assert.deepEqual(await canonicalData(db), before);
         await assertUpgradedAuthentication(db);
+        if (history === "preGatewayManagedMode") {
+          await db.app.query(
+            `INSERT INTO occ.agent_revisions
+               (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
+             SELECT $1, namespace_id, agent_id, revision_number + 1, backend_id, admitted_spec, now()
+             FROM occ.agent_revisions`,
+            [`rev_${randomUUID()}`],
+          );
+          assert.deepEqual(
+            (
+              await db.app.query(
+                `SELECT a.gateway_managed_mode AS desired, r.gateway_managed_mode AS admitted
+                 FROM occ.agents a JOIN occ.agent_revisions r
+                   ON r.namespace_id = a.namespace_id AND r.agent_id = a.id ORDER BY r.revision_number`,
+              )
+            ).rows,
+            [
+              { desired: true, admitted: false },
+              { desired: true, admitted: true },
+            ],
+          );
+        }
         if (prefix === 55) {
           const upgradedReceipts = await historyReceipts(db.migrator);
           const sessions = await db.app.query("SELECT count(*)::integer AS count FROM occ.session");
@@ -1688,41 +1711,6 @@ test(
         );
       });
     }
-  },
-);
-
-test(
-  "Gateway managed mode migration preserves old revision behavior and defaults new revisions to managed",
-  requiresHistoryPostgres,
-  async (context) => {
-    const fixture = await migrationHistoryFixture();
-    const db = await historyDatabase(context, fixture, "main", { prefix: 59 });
-    await seedCanonicalData(db, { preset: true });
-    const before = await canonicalData(db);
-    const receipts = await historyReceipts(db.migrator);
-    assert.deepEqual(await runHistoryMigration(db), { ok: true, history: "preGatewayManagedMode" });
-    await assertCompletedHistory(db, receipts);
-    assert.deepEqual(await canonicalData(db), before);
-    await db.app.query(
-      `INSERT INTO occ.agent_revisions
-         (id, namespace_id, agent_id, revision_number, backend_id, admitted_spec, admitted_at)
-       SELECT $1, namespace_id, agent_id, revision_number + 1, backend_id, admitted_spec, now()
-       FROM occ.agent_revisions`,
-      [`rev_${randomUUID()}`],
-    );
-    assert.deepEqual(
-      (
-        await db.app.query(
-          `SELECT a.gateway_managed_mode AS desired, r.gateway_managed_mode AS admitted
-           FROM occ.agents a JOIN occ.agent_revisions r
-             ON r.namespace_id = a.namespace_id AND r.agent_id = a.id ORDER BY r.revision_number`,
-        )
-      ).rows,
-      [
-        { desired: true, admitted: false },
-        { desired: true, admitted: true },
-      ],
-    );
   },
 );
 

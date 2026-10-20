@@ -566,20 +566,14 @@ test("Docker prepares configuration before starting a managed Gateway", async ()
           mkdirSync() {},
           readdirSync: () => [],
           writeFileSync(path) {
-            events.push({ event: "config", path });
+            events.push({ path });
           },
         };
       }
       if (specifier === "node:child_process") {
         return {
           spawn(_command, args, { env }) {
-            events.push({
-              event: "gateway",
-              args: [...args],
-              readonly: env.OPENCLAW_CONFIG_READONLY,
-              disableGatewayLocalTerminals: env.OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS,
-              disableCronHostExecution: env.OPENCLAW_DISABLE_CRON_HOST_EXECUTION,
-            });
+            events.push({ args: [...args], env });
             return { on() {} };
           },
         };
@@ -587,16 +581,18 @@ test("Docker prepares configuration before starting a managed Gateway", async ()
       return nativeRequire(specifier);
     },
   });
-  assert.deepEqual(events, [
-    { event: "config", path: environment.OPENCLAW_CONFIG_PATH },
-    {
-      event: "gateway",
-      args: ["/app/openclaw.mjs", "gateway", "--port", environment.OPENCLAW_GATEWAY_PORT],
-      readonly: "1",
-      disableGatewayLocalTerminals: "1",
-      disableCronHostExecution: "1",
-    },
+  assert.equal(events.length, 2);
+  const [configWrite, gatewayLaunch] = events;
+  assert.equal(configWrite.path, environment.OPENCLAW_CONFIG_PATH);
+  assert.deepEqual(gatewayLaunch.args, [
+    "/app/openclaw.mjs",
+    "gateway",
+    "--port",
+    environment.OPENCLAW_GATEWAY_PORT,
   ]);
+  assert.equal(gatewayLaunch.env.OPENCLAW_CONFIG_READONLY, "1");
+  assert.equal(gatewayLaunch.env.OPENCLAW_DISABLE_GATEWAY_LOCAL_TERMINALS, "1");
+  assert.equal(gatewayLaunch.env.OPENCLAW_DISABLE_CRON_HOST_EXECUTION, "1");
 });
 
 async function gatewayContainerLaunch(configuration = {}) {

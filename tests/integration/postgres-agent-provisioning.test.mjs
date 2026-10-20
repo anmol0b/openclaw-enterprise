@@ -787,6 +787,7 @@ test(
     assert.equal(row.configuration_id, null);
     assert.equal(row.status, "queued");
     assert.equal(row.completed_phase, "admitted");
+    assert.equal(row.plan.gatewayManagedMode, true);
     assert.equal(JSON.stringify(row).includes("model-api-key"), false);
 
     const resources = await fixture.pool.query(
@@ -949,7 +950,7 @@ test(
       ({ operation }) => operation === "create",
     ).length;
     const body = {
-      ...provisioningBody(namespace.id, secrets, { repositoryAccess }),
+      ...provisioningBody(namespace.id, secrets, { repositoryAccess, gatewayManagedMode: false }),
       pluginApprovers: [],
     };
     const admitted = await fixture.request("POST", `/namespaces/${namespace.id}/agents/provision`, {
@@ -1024,12 +1025,14 @@ test(
     const agentPath = `/namespaces/${namespace.id}/agents/${status.agentId}`;
     const agent = await fixture.request("GET", agentPath);
     assert.equal(agent.status, 200, JSON.stringify(agent.body));
+    assert.equal(agent.data.gatewayManagedMode, false);
     assert.deepEqual(agent.data.repositoryBindings, repositoryBindings);
     assert.deepEqual(agent.data.repositoryAccess, repositoryAccess);
     assert.deepEqual(agent.data.pluginApprovers, []);
     const revisionPath = `${agentPath}/revisions/${status.revisionId}`;
     const revision = await fixture.request("GET", revisionPath);
     assert.equal(revision.status, 200, JSON.stringify(revision.body));
+    assert.equal(revision.data.gatewayManagedMode, false);
     assert.deepEqual(revision.data.repositoryCredentials.bindings, repositoryBindings);
     assert.equal(revisions[0].repositoryCredentials.bindings[0].grant.repositoryId, "789");
     // Persist explicit intent even when equal to the default, then change only that default.
@@ -1169,10 +1172,7 @@ test(
   },
 );
 
-for (const { authMethod, gatewayManagedMode } of [
-  { authMethod: "api_key", gatewayManagedMode: true },
-  { authMethod: "codex_pat", gatewayManagedMode: false },
-]) {
+for (const authMethod of ["api_key", "codex_pat"]) {
   test(
     `${authMethod} provisioning grants existing Secret access and hands off one revision`,
     { ...requiresPostgres, timeout: 60_000 },
@@ -1192,7 +1192,6 @@ for (const { authMethod, gatewayManagedMode } of [
       ).length;
       const body = provisioningBody(namespace.id, secrets, {
         harnessAuth: { method: authMethod, source: secretRef(namespace.id, secrets.modelKey.id) },
-        gatewayManagedMode,
       });
       // Model-only references must obey the same Namespace boundary as channel Secrets.
       const foreign = structuredClone(body);
@@ -1256,14 +1255,11 @@ for (const { authMethod, gatewayManagedMode } of [
       assert.match(status.configurationId, identifier("cfg"));
       fixture.cancelProvisioningAtTeardown(namespace.id, status.agentId);
       await assertProvisionedSecretAccess(fixture, namespace, status, secretCreateCallCount);
-      const { agent, revisions } = await fixture.state.read(async (view) => ({
-        agent: await view.agents.findAgent(namespace.id, status.agentId),
-        revisions: await view.revisions.listRevisions(namespace.id, status.agentId),
-      }));
-      assert.equal(agent.gatewayManagedMode, gatewayManagedMode);
+      const revisions = await fixture.state.read((view) =>
+        view.revisions.listRevisions(namespace.id, status.agentId),
+      );
       assert.equal(revisions.length, 1);
       assert.equal(revisions[0].id, status.revisionId);
-      assert.equal(revisions[0].gatewayManagedMode, gatewayManagedMode);
       assert.equal(revisions[0].configurationGeneration, 1);
       assert.equal(revisions[0].harnessAuth.method, authMethod);
       assert.deepEqual(revisions[0].harnessAuth.source, body.harnessAuth.source);
