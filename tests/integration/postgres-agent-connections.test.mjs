@@ -471,6 +471,9 @@ test(
       entry.provider.startsWith("oce-cs-"),
     );
     assert.ok(configured, "the Refresh Driver configured OpenShell refresh custody");
+    // OpenShell mints into this key and substitutes it for the template's variable; the
+    // recording double accepts any key, so the test checks it.
+    assert.equal(configured.credentialKey, "CONNECTION_TOKEN");
     const redeemed = await fetch(templateBody("oce").tokenUrl, {
       method: "POST",
       body: new URLSearchParams({
