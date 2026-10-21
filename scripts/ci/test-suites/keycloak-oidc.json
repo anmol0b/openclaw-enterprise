@@ -25,6 +25,12 @@
         "unattached carol is refused after Keycloak sign-in, audited and given no account",
         "Console sign-out ends alice's OCE session, one click signs her in again while her Keycloak session lives, and disabling her keeps that session but refuses her next sign-in"
       ]
+    },
+    {
+      "path": "tests/integration/postgres-agent-connections.test.mjs",
+      "expectedTests": [
+        "a person connects their Keycloak account to their personal Agent and nobody else can use it"
+      ]
     }
   ]
 }
