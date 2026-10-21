@@ -8,14 +8,15 @@ author: mrunalp
 
 - **ID:** RFC-0023
 - **Created:** 2026-10-20
-- **Last updated:** 2026-10-20
+- **Last updated:** 2026-10-21
 - **RFC PR:** [#3068](https://github.com/openclaw/openclaw-enterprise/pull/3068)
 - **Implementation plan:** Not yet written; the next step is `$spec plan RFC-0023`
-- **Related:** [RFC-0016](0016-sandbox-credential-injection/index.md) and its
-  [Credential Refresh companion](0016-sandbox-credential-injection/credential-refresh.md);
-  [RFC-0010 personal access](0010-agent-access.md#access-contract);
-  [credential sources](../../docs/reference/credential-sources.md);
-  [per-Agent sandbox policies](../../docs/reference/sandbox-policies.md);
+- **Companion:** [Driver contracts, failure, and verification](contracts.md)
+- **Related:** [RFC-0016](../0016-sandbox-credential-injection/index.md) and its
+  [Credential Refresh companion](../0016-sandbox-credential-injection/credential-refresh.md);
+  [RFC-0010 personal access](../0010-agent-access.md#access-contract);
+  [credential sources](../../../docs/reference/credential-sources.md);
+  [per-Agent sandbox policies](../../../docs/reference/sandbox-policies.md);
   open [PR #2484](https://github.com/openclaw/openclaw-enterprise/pull/2484)
 
 ## Summary
@@ -38,7 +39,7 @@ Today a user who wants an Agent to read their Gmail must export a refresh token
 with a local sign-in tool, store it and the client secret as Namespace Secrets,
 register an `oauth2-refresh-token` source, bind it, grant the Agent's service
 principal `operate`, and deploy
-([credential sources](../../docs/reference/credential-sources.md)). The refresh
+([credential sources](../../../docs/reference/credential-sources.md)). The refresh
 token passes through the user's terminal and the OCC Secret store, and anyone with
 access to the Agent can use the mailbox.
 
@@ -47,7 +48,7 @@ help: Google's device-code flow does not permit Gmail scopes. Gmail needs the
 browser authorization-code flow, with an OCC callback.
 
 This proposal reuses the custody model of
-[device login](../../apps/controller/src/drivers/credential-refresh/openshell.ts),
+[device login](../../../apps/controller/src/drivers/credential-refresh/openshell.ts),
 which hands the grant to OpenShell without persisting the refresh token.
 
 ## Goals
@@ -55,7 +56,7 @@ which hands the grant to OpenShell without persisting the refresh token.
 - A user connects their own account in the console without handling a client
   secret, refresh token, or access token, then deploys their Agent.
 - Only the connecting user can use, deploy, or open an Agent that holds their
-  connection.
+  connection, until every copy of the credential is withdrawn.
 - Administrators add a provider by creating a connection template, not by
   changing OCE code or Installation configuration.
 - The credential reaches only the connection template's binary, endpoint, and
@@ -92,12 +93,14 @@ Agent's Namespace.
 | Field                               | Why it is needed                                                                                                                                |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `displayName`                       | The label on the **Connect** button and consent warning.                                                                                        |
+| `issuer`                            | The authorization server's identifier, an exact `https` URL. It scopes the client ID and is the expected `iss` for `accountIdentity: oidc`.     |
 | `authorizationUrl`, `tokenUrl`      | Where OCC sends the user, and where the Driver exchanges the code. Exact `https` URLs.                                                          |
-| `clientId`, `clientSecret`          | The administrator's OAuth client. OCC passes `clientSecret` to the Refresh Driver once and stores no value; see the contract changes.           |
+| `clientId`, `clientSecret`          | The administrator's OAuth client at `issuer`. The Refresh Driver keeps the secret; OCC stores no value.                                         |
 | `scopes`, `authorizationParameters` | The fixed access the user approves. Users cannot add scopes. Google needs `access_type=offline` and `prompt=consent` to return a refresh token. |
 | `endpoint`                          | The API `host`, `port`, `path`, and `access` (`read-only` or `full`) that receive the credential.                                               |
 | `envVar`, `binary`                  | The placeholder variable and the one executable that may send it.                                                                               |
 | `accountIdentity`                   | `none` (default) or `oidc`. With `oidc`, OCC also requests `openid email` and shows the connected address.                                      |
+| `jwksUri`                           | Optional with `oidc`. Without it, the Driver discovers the signing keys from `issuer`.                                                          |
 
 OCC rejects a connection template whose URLs are not `https` or whose `binary` is
 not in the Gateway's `toolBinaries`. Startup configuration keeps `toolBinaries` and
@@ -107,11 +110,10 @@ The callback URI is derived from the console origin as
 `https://<console-host>/oauth/callback`. Administrators register that exact URI
 with the provider. The connection template response shows it.
 
-With `accountIdentity: oidc`, the issuer must be an OpenID Connect provider. The
-Refresh Driver verifies the ID token from the code exchange against the issuer's
-signing keys, `aud` (the client ID), `iss`, expiry, and nonce, and returns only the
-verified `email`. OCC stores that address on the credential source and shows
-"Connected as alice@example.com" in Agent details and the connection list. The
+With `accountIdentity: oidc`, the Refresh Driver verifies the provider before it
+accepts the connection template version, and verifies each ID token against it
+([OIDC verification](contracts.md#oidc-account-identity)). OCC stores the verified
+address on the credential source and shows "Connected as alice@example.com". The
 consent screen lists the two extra scopes. Use it to catch a user who approved the
 wrong account; it does not affect who may use the Agent.
 
@@ -119,11 +121,11 @@ wrong account; it does not affect who may use the Agent.
 
 An edit never changes what an existing connection does. Changing any field except
 `displayName` creates a new connection template version. The credential source
-records the version and the values its owner approved: issuer URLs, client ID,
-scopes, authorization parameters, endpoint and access, variable, binary, and
-`accountIdentity`. OCC and both Drivers use only that record, so an administrator
-cannot redirect a user's refresh grant or credential. Source configuration is
-already immutable.
+records the version and the values its owner approved: issuer and its URLs, client
+registration, scopes, authorization parameters, endpoint and access, variable,
+binary, and OIDC settings. OCC and both Drivers use only that record, so an
+administrator cannot redirect a user's refresh grant or credential. Source
+configuration is already immutable.
 
 After a new version, existing connections keep working and Agent details show
 **Reconnect to apply changes**. Reconnecting asks for consent again and creates a
@@ -131,25 +133,34 @@ new source. To stop an old version, for example after an endpoint compromise,
 administrators disconnect the affected sources. OCC refuses to delete a connection
 template while any source references one of its versions.
 
-Rotating the client secret for the same client ID is not a consent change; see
-`registerClient`. A new client ID creates a new version.
+Rotating the client secret is not a consent change. The secret belongs to a client
+registration for one `issuer` and `clientId` pair. Rotation changes only sources
+that use that registration; the same client ID at another issuer stays independent
+([client registrations](contracts.md#client-registrations)).
 
 ### Personal Agents
 
 A connection belongs to the human who completed consent. OCC records that
-identity on the credential source. It applies the
-[RFC-0010 personal choice](0010-agent-access.md#access-contract) to every Agent
-that lists the source:
+identity on the credential source and applies the
+[RFC-0010 personal choice](../0010-agent-access.md#access-contract) to every Agent
+that holds the source:
 
 - Only the connection owner can bind the source to an Agent, and only to an Agent
   where the owner is the only human grantee.
-- While the binding exists, OCC refuses Agent grants to other humans and refuses
-  Slack, Teams, or other channel bindings, because channel members could invoke
-  the tool.
+- OCC refuses Agent grants to other humans and refuses Slack, Teams, or other
+  channel bindings, because channel members could invoke the tool.
 - Deploying, opening the native admin UI, and starting a chat require the owner's
   signed-in session. Service keys cannot deploy the Agent.
 - Installation administrators can stop the Agent, delete it, and disconnect the
   source. They cannot deploy it or use it.
+
+An Agent holds the source while its saved settings list it, a pending deployment
+includes it, or any deployed revision retains it. Removing the saved binding does
+not end the restriction: revisions keep their own source snapshots, and withdrawal
+is asynchronous. The restriction ends only when every revision's attachment
+reports `revoked`, or the revision is retired, with no pending deployment or
+reattachment that includes the source. A failed or stalled withdrawal keeps it in
+force; administrators can stop or delete the Agent.
 
 An administrator, or a user with `agent:create`, creates the Agent for the owner.
 The Agent's `connections` list names each required connection template, and
@@ -158,7 +169,7 @@ identity, so this boundary covers access paths, not individual messages.
 
 ### Presets and connection templates
 
-A [Preset](../../docs/reference/presets.md) is a Namespace copy of Agent launch
+A [Preset](../../../docs/reference/presets.md) is a Namespace copy of Agent launch
 settings that the creator edits; later Preset changes never affect the Agent. A
 connection template defines how one person's account is connected and where its
 credential may go, and only Installation administrators change it. A Preset
@@ -174,32 +185,17 @@ Preset stays valid.
 
 ### Driver contract changes
 
-These changes require review of this RFC before implementation.
+These changes require review of this RFC before implementation. The
+[companion](contracts.md) defines their inputs, results, and failure behavior.
 
-1. **`CredentialRefreshDriver`** gains optional methods beside the device methods:
-   - `startBrowserAuthorization(context, { connectionTemplateVersion, redirectUri })`
-     returns `{ authorizationUrl, privateState }`. The Driver creates the PKCE
-     verifier, a random `state`, and a nonce for `accountIdentity: oidc`.
-   - `completeBrowserAuthorization(context, privateState, { code, state })`
-     verifies `state`, exchanges the code, configures Gateway refresh custody, and
-     mints the first token. It returns `ready` with an optional verified
-     `accountEmail`, or a failure code, and never returns a token.
-   - `registerClient(clientId, clientSecret)` and `removeClient(clientId)`, because
-     OCE has no Installation-owned Secrets. The Driver stores the secret durably
-     for every API replica and across restarts. Registering again replaces it and
-     updates the refresh material of each source using that client ID, reporting
-     per-source failure in refresh status. OCC removes a client only when no
-     connection template version or source uses it, and stores no secret value.
+1. **`CredentialRefreshDriver`** gains browser authorization, client registration,
+   and OIDC provider verification. It keeps OAuth client secrets.
 2. **`CredentialGatewayDriver`** accepts an `access` field on tool-source
-   endpoints. OpenShell maps `read-only` to its enforced REST access, which permits
-   only `GET`, `HEAD`, and `OPTIONS`.
-3. **The OpenShell tool profile** uses the connection template's `binary` instead
-   of every `toolBinaries` entry, so other tool binaries cannot send the credential.
-4. **Attachment opens the endpoint.** The model source's provider profile already
-   allows `api.openai.com`
-   ([OpenShell Sandbox](../../docs/reference/drivers/openshell-sandbox.md)). Tool
-   sources must do the same for their endpoint and binary, without a per-Agent
-   addition or a ceiling change.
+   endpoints, so `read-only` permits only `GET`, `HEAD`, and `OPTIONS`.
+3. **The OpenShell tool profile** releases the credential only to the connection
+   template's `binary`.
+4. **Attachment opens the endpoint** for that binary, as the model source's
+   provider profile already does, without a per-Agent addition or ceiling change.
 
 Connections create sources of the existing `oauth2-refresh-token` type. The type
 keeps its Secret-backed registration path for manual use.
@@ -248,58 +244,19 @@ _Proposed flow; none of these paths is implemented._
 4. On `ready`, OCC adds the source to the Agent's `credentialSources` and grants
    the Agent's service principal exact source `operate`.
 5. Agent details show the connection with **Reconnect** and **Disconnect**.
-   Reconnect creates a new source and replaces the binding. Disconnect uses the
-   existing withdrawal and deletion paths.
+   Reconnect creates a new source and replaces the binding. Disconnect removes the
+   binding and requests withdrawal through the existing paths.
 
 Audit records connection start, completion, failure, reconnect, and disconnect
 with the actor, connection template ID, Agent ID, and source ID. It never records
 codes, tokens, or provider account content.
 
-### Failure and recovery
-
-| Condition                                                | Result                                           | Recovery                                       |
-| -------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------- |
-| Consent denied, popup closed, or session expired         | Pending source deleted                           | Connect again                                  |
-| `state` mismatch, reuse, or another user's session       | `400`; no exchange                               | The owner connects again                       |
-| Exchange refused or no refresh token returned            | Source deleted; `fix_configuration`              | Administrator corrects the connection template |
-| Timeout after the exchange started                       | Source stays `registering`                       | Delete and reconnect; OCC never replays a code |
-| Issuer revokes the grant                                 | `status.refresh.recoveryAction: reauthorize`     | **Reconnect** and redeploy                     |
-| Gateway or Refresh Driver unavailable                    | `503`; no source created                         | Retry                                          |
-| ID token missing or invalid with `accountIdentity: oidc` | Source deleted; `fix_configuration`              | Administrator corrects the connection template |
-| Connection template edited after consent                 | Source unchanged; **Reconnect to apply changes** | Owner reconnects; administrator can disconnect |
-
-### Provider limitations
-
-OpenShell refreshes access tokens. The operator guide documents provider rules,
-such as Google's: `gmail.readonly` is a restricted scope that public applications
-must verify, and External Testing applications issue seven-day refresh tokens.
-
 ## Delivery and verification
 
 An implementation plan will order the resource and IAM, Driver contracts,
 connection API and enforcement, console with Storybook coverage, and a Google Gmail
-operator guide.
-
-Required outcomes:
-
-- **HTTP and PostgreSQL integration.** Use a real Keycloak issuer with
-  authorization code, PKCE, and refresh tokens. Prove success, denied consent,
-  state reuse, a cross-session callback, an expired session, and a missing grant.
-  Prove that a second user cannot connect, deploy, chat with, or receive grants on
-  a connected Agent, that channel bindings are refused, and that codes and tokens
-  are absent from responses, logs, and audit.
-- **Real k3d and OpenShell.** Through the regular Agent create path, connect via
-  Keycloak and prove: a tool reaches its endpoint with no added network policy; a
-  write fails under `read-only`; another tool binary cannot send the placeholder;
-  rotate, revoke, and reconnect work; `accountIdentity: oidc` shows the address and
-  rejects a wrong audience or nonce; an edited `tokenUrl` or endpoint leaves an
-  existing source unchanged; client secret rotation keeps sources refreshing.
-- **Live Google proof.** Run manually with an authorized account: `gog` reads Gmail
-  through a dedicated Codex Agent, and a write method is denied. This proof is
-  outside CI.
-- **Dedicated Codex environment.** Verify that Codex shell commands receive the
-  connection template's variable. Codex may filter variable names that contain
-  `TOKEN`; if it does, Compute must allow exactly the connected variables.
+operator guide. The [companion](contracts.md#required-outcomes) lists the required
+integration, real-cluster, and live-provider outcomes.
 
 ## Rationale and alternatives
 
@@ -326,10 +283,10 @@ Required outcomes:
 
 ## References
 
-- [Credential sources](../../docs/reference/credential-sources.md)
-- [CredentialRefreshDriver contract](../../docs/reference/drivers/credential-refresh.md)
-- [OpenShell Credential Gateway](../../docs/reference/drivers/openshell-credential-gateway.md)
-- [Console Agent creation](../../docs/reference/console/create-and-deploy.md)
-- [Per-Agent sandbox policies](../../docs/reference/sandbox-policies.md)
-- [Shared Driver contracts](../../packages/contracts/src/index.ts)
+- [Credential sources](../../../docs/reference/credential-sources.md)
+- [CredentialRefreshDriver contract](../../../docs/reference/drivers/credential-refresh.md)
+- [OpenShell Credential Gateway](../../../docs/reference/drivers/openshell-credential-gateway.md)
+- [Console Agent creation](../../../docs/reference/console/create-and-deploy.md)
+- [Per-Agent sandbox policies](../../../docs/reference/sandbox-policies.md)
+- [Shared Driver contracts](../../../packages/contracts/src/index.ts)
 - [Google limited-input device scopes](https://developers.google.com/identity/protocols/oauth2/limited-input-device)
