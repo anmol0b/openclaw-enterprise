@@ -7730,7 +7730,7 @@ test(
     } else {
       const childResult = `NATIVE-CHILD-${randomUUID()}`;
       await turn(
-        `Use spawn_agent exactly once with fork_context=false. Give the child this task: use a native shell tool to execute node -e 'console.log(6*7, "${childResult}")', verify the output is 42 followed by that marker, then reply with exactly ${childMarker}. Wait for completion before replying. Do not run the command in the parent or ask the child to use Gateway tools.`,
+        `Use the advertised native spawn_agent schema to create exactly one fresh child with no inherited conversation. Discover the tool if needed. Give the child this task: use a native shell tool to execute node -e 'console.log(6*7, "${childResult}")', verify the output is 42 followed by that marker, then reply with exactly ${childMarker}. Wait for completion before replying. Do not run the command in the parent or ask the child to use Gateway tools.`,
         spawnMarker,
       );
       const binding = await native.readCodexSessionBinding(topology.agent, { sessionKey });

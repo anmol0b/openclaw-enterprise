@@ -1138,14 +1138,28 @@ export function findCodexPolicyChild(parent, childMarker) {
   const completedTurns = parent.turns.filter(
     (turn) => turn.status === "completed" && turn.error === null,
   );
-  const collabSpawns = completedTurns
-    .flatMap((turn) => turn.items)
-    .filter((item) => item.type === "collabAgentToolCall" && item.tool === "spawnAgent");
+  const completedItems = completedTurns.flatMap((turn) => turn.items);
+  const collabSpawns = completedItems.filter(
+    (item) => item.type === "collabAgentToolCall" && item.tool === "spawnAgent",
+  );
   const completedSpawns = collabSpawns.filter((item) => item.status === "completed");
   const senderBoundSpawns = completedSpawns.filter((item) => item.senderThreadId === parent.id);
   const spawns = senderBoundSpawns.filter((item) => item.prompt?.includes(childMarker));
+  // V2 records the started child rather than a collaboration call with its prompt.
+  // Bind that native identity to the turn carrying this test's unique child task.
+  const activities = completedTurns.flatMap((turn) =>
+    turn.items.filter((item) => item.type === "subAgentActivity").map((item) => ({ turn, item })),
+  );
+  const startedActivities = activities.filter(({ item }) => item.kind === "started");
+  const taskActivities = startedActivities.filter(({ turn }) =>
+    turn.items.some(
+      (item) =>
+        item.type === "userMessage" &&
+        item.content.some((part) => part.type === "text" && part.text.includes(childMarker)),
+    ),
+  );
   assert.equal(
-    spawns.length,
+    spawns.length + taskActivities.length,
     1,
     `one completed native spawn must match the child task: ${JSON.stringify({
       counts: {
@@ -1155,7 +1169,18 @@ export function findCodexPolicyChild(parent, childMarker) {
         completedSpawns: completedSpawns.length,
         senderBoundSpawns: senderBoundSpawns.length,
         markerBoundSpawns: spawns.length,
+        subAgentActivities: activities.length,
+        startedSubAgents: startedActivities.length,
+        taskBoundSubAgents: taskActivities.length,
       },
+      itemTypes: [...new Set(completedItems.map((item) => item.type))].slice(0, 20),
+      activities: activities.slice(-10).map(({ turn, item }) => ({
+        parentTurnId: turn.id,
+        childThreadId: item.agentThreadId,
+        kind: ["started", "interacted", "interrupted", "completed"].includes(item.kind)
+          ? item.kind
+          : "unknown",
+      })),
       recentTurns: parent.turns.slice(-10).map((turn) => ({
         status: ["completed", "inProgress", "failed", "interrupted"].includes(turn.status)
           ? turn.status
@@ -1165,8 +1190,20 @@ export function findCodexPolicyChild(parent, childMarker) {
       })),
     })}`,
   );
-  assert.equal(spawns[0].receiverThreadIds.length, 1, "the spawn must identify exactly one child");
-  return spawns[0].receiverThreadIds[0];
+  if (spawns.length === 1) {
+    assert.equal(
+      spawns[0].receiverThreadIds.length,
+      1,
+      "the spawn must identify exactly one child",
+    );
+    return spawns[0].receiverThreadIds[0];
+  }
+  const childId = taskActivities[0].item.agentThreadId;
+  assert.ok(
+    typeof childId === "string" && childId.length > 0,
+    "the activity must identify its child",
+  );
+  return childId;
 }
 
 export function assertCodexPolicyChild({

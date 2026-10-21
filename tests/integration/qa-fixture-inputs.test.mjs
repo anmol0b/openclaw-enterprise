@@ -2526,7 +2526,7 @@ test("Gateway policy evidence identifies a fresh native Codex child and its own 
     },
   ]);
   const childLine = metadata("child", [], "parent");
-  const fixture = () => ({
+  const fixture = (version = "v1") => ({
     childMarker: "child-done",
     childResult: "command-result",
     parent: {
@@ -2536,16 +2536,31 @@ test("Gateway policy evidence identifies a fresh native Codex child and its own 
           id: "parent-turn",
           status: "completed",
           error: null,
-          items: [
-            {
-              type: "collabAgentToolCall",
-              tool: "spawnAgent",
-              status: "completed",
-              senderThreadId: "parent",
-              receiverThreadIds: ["child"],
-              prompt: "run native work and reply child-done",
-            },
-          ],
+          items:
+            version === "v2"
+              ? [
+                  {
+                    type: "userMessage",
+                    content: [{ type: "text", text: "run native work and reply child-done" }],
+                  },
+                  {
+                    type: "subAgentActivity",
+                    id: "spawn-call",
+                    kind: "started",
+                    agentThreadId: "child",
+                    agentPath: "/root/policy_child",
+                  },
+                ]
+              : [
+                  {
+                    type: "collabAgentToolCall",
+                    tool: "spawnAgent",
+                    status: "completed",
+                    senderThreadId: "parent",
+                    receiverThreadIds: ["child"],
+                    prompt: "run native work and reply child-done",
+                  },
+                ],
         },
       ],
     },
@@ -2573,12 +2588,53 @@ test("Gateway policy evidence identifies a fresh native Codex child and its own 
     parentMetadata: parseCodexPolicyMetadata(parentLine, "parent"),
     childMetadata: parseCodexPolicyMetadata(childLine, "child"),
   });
-  const result = assertCodexPolicyChild(fixture());
-  assert.equal(result.childTurnId, "child-turn");
-  assert.equal(result.nativeCommandSucceeded, true);
-  assert.deepEqual(result.childGatewayTools, []);
-  assert.deepEqual(result.parentGatewayTools, [{ namespace: "openclaw", name: "agents_list" }]);
-  assert.equal(JSON.stringify(result).includes("private description"), false);
+  for (const version of ["v1", "v2"]) {
+    const result = assertCodexPolicyChild(fixture(version));
+    assert.equal(result.childTurnId, "child-turn");
+    assert.equal(result.nativeCommandSucceeded, true);
+    assert.deepEqual(result.childGatewayTools, []);
+    assert.deepEqual(result.parentGatewayTools, [{ namespace: "openclaw", name: "agents_list" }]);
+    assert.equal(JSON.stringify(result).includes("private description"), false);
+  }
+
+  for (const [label, mutate] of [
+    [
+      "activity in another turn",
+      (value) => {
+        const activity = value.parent.turns[0].items.pop();
+        value.parent.turns.push({
+          id: "other-turn",
+          status: "completed",
+          error: null,
+          items: [activity],
+        });
+      },
+    ],
+    [
+      "activity that did not start a child",
+      (value) => {
+        value.parent.turns[0].items[1].kind = "completed";
+      },
+    ],
+    [
+      "incomplete parent turn",
+      (value) => {
+        value.parent.turns[0].status = "inProgress";
+      },
+    ],
+    [
+      "activity identifying another child",
+      (value) => {
+        value.parent.turns[0].items[1].agentThreadId = "other-child";
+      },
+    ],
+  ]) {
+    await t.test(`rejects V2 ${label}`, () => {
+      const value = fixture("v2");
+      mutate(value);
+      assert.throws(() => assertCodexPolicyChild(value), assert.AssertionError);
+    });
+  }
 
   await t.test("reports bounded spawn predicates without private native content", () => {
     const value = fixture();
@@ -2619,6 +2675,9 @@ test("Gateway policy evidence identifies a fresh native Codex child and its own 
           completedSpawns: 2,
           senderBoundSpawns: 1,
           markerBoundSpawns: 0,
+          subAgentActivities: 0,
+          startedSubAgents: 0,
+          taskBoundSubAgents: 0,
         });
         assert.equal(diagnostic.recentTurns.length, 10);
         assert.deepEqual(diagnostic.recentTurns.slice(-5), [

@@ -20,7 +20,9 @@ The coordinating thread maintains the completion column and PR links. Each imple
 
 Dependent work may use explicit stacked PRs; OCE must not activate fields that its packaged OC does not enforce. Policy changes take effect through restart or deployment replacement after affected old work ends. Track source merge, runtime packaging and qualification separately. New scope decisions return to the author.
 
-At OCE `42889906`, offline native workspace initialization and four synthetic child-routing variants pass. The live Codex run recovered from initializer failures and verified workspace execution, scoped scheduling and foreign-job refusal with a human control. It stopped at the native-child check because no spawn was recorded; child execution, command-job and replacement checks remain unqualified. [OCE #3041](https://github.com/openclaw/openclaw-enterprise/pull/3041)'s client-store persistence is adopted. Exact `90d30`→`6796` durable-state upgrade proof remains work in D/E.
+At OCE `42889906`, offline native workspace initialization and four synthetic child-routing variants pass. The live Codex run verifies workspace execution, scoped scheduling and foreign-job refusal with a human control. Its child check recognizes only V1 spawn events; it cannot establish whether a V2 child ran. Child execution, command-job and replacement checks remain unqualified.
+
+At OCE `6b05fa22`, the native configuration-restart case and `90d30`→`6796` migration/restart checks pass. Identity, token-only authentication and ordered canary history survive on the same durable root, including [OCE #3041](https://github.com/openclaw/openclaw-enterprise/pull/3041)'s client store. This is native data compatibility without inference; it does not qualify an OCE fleet upgrade.
 
 ## Initial Gateway tool allowlist
 
