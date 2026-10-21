@@ -148,16 +148,11 @@ replaces Keycloak.
 
 ## Open decisions
 
-- **Client secret storage in the OpenShell Refresh Driver.** OpenShell has no
-  authorization-code strategy, so the Driver needs the client secret in the OCC
-  process for the code exchange. `GetProviderCredentials` returns stored credential
-  values by key, but only over the operator-TLS connection that the experimental
-  Codex sign-in already requires. Recommended: keep each client registration's
-  secret in a Driver-owned OpenShell provider and read it over operator TLS, making
-  operator TLS a prerequisite for browser connections. The alternative is
-  Driver-owned Kubernetes Secret storage, which needs Kubernetes access the Driver
-  does not have. Verify static-credential retrieval against a real gateway before
-  PR 1 step 3; if it fails, the owner chooses the alternative.
+- None. Client secret storage was resolved on 2026-10-21: OpenShell has no
+  Installation-level Workspace, so the OpenShell Credential Refresh Driver gains a
+  `clientWorkspace` setting naming an operator-provisioned Workspace. It stores one
+  Driver-owned provider per client registration there and reads secrets back over
+  operator TLS ([RFC companion](../rfcs/0023-agent-oauth-connections/contracts.md#client-registrations)).
 
 ## Delivery record
 
