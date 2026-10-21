@@ -312,19 +312,17 @@ Required outcomes:
 - **OCC exchanges the code and stores the refresh token as a Secret.** This needs no
   new Refresh Driver methods, but it puts a rotating refresh token in OCC storage
   and inherits the `issuerRotated` update hazards.
+- **Installation-owned Secrets for the OAuth client secret.** This keeps the
+  Refresh Driver contract smaller, but adds a Secret scope that only this feature
+  would use and splits refresh material between two owners. The Refresh Driver
+  already holds the per-source refresh material, so it also holds the client
+  secret.
 - **A Google-specific Gateway type.** Each new provider would need an OCE release.
 - **Shared Agents with a warning.** Anyone with access could read the mailbox.
 - **Wait for the Credential Proxy in PR #2484.** That RFC replaces the Credential
   Gateway but keeps `CredentialRefreshDriver`, so the browser methods remain valid.
   The endpoint `access` field, per-connection-template binary, and attachment
   egress would move to its proxy contract.
-
-## Unresolved questions
-
-- **Client secret custody.** This proposal gives the client secret to the
-  Credential Refresh Driver. Adding Installation-owned Secrets to the Secret Driver
-  is the alternative; it keeps the Refresh Driver contract smaller but adds a new
-  Secret scope. Driver contract reviewers decide.
 
 ## References
 
