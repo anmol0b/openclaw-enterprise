@@ -17,6 +17,7 @@ assert.equal(provenance.commit, process.env.OCC_TEST_OPENCLAW_COMMIT);
 // The peer rejects turn/start before accepting inference: no Codex process or external egress.
 const requests = [];
 const threadStarts = new Map();
+const unloadedThreads = new Set();
 let unsupportedMethod;
 const server = new WebSocketServer({ host: "127.0.0.1", port: 4500 });
 await new Promise((resolve, reject) => {
@@ -109,7 +110,49 @@ server.on("connection", (socket, request) => {
         reply(threadStartResult(threadId, message.params));
         break;
       }
-      case "thread/unsubscribe":
+      case "thread/read": {
+        const { threadId } = message.params;
+        const started = threadStarts.get(threadId);
+        assert.ok(started, "The fixture only reads its assigned native threads.");
+        const { thread } = threadStartResult(threadId, started.params);
+        reply({
+          thread: {
+            ...thread,
+            status: { type: unloadedThreads.has(threadId) ? "notLoaded" : "idle" },
+          },
+        });
+        break;
+      }
+      case "thread/unsubscribe": {
+        const { threadId } = message.params;
+        assert.ok(
+          threadStarts.has(threadId),
+          "The fixture only unloads its assigned native threads.",
+        );
+        unloadedThreads.add(threadId);
+        reply({});
+        socket.send(
+          JSON.stringify({
+            method: "thread/status/changed",
+            params: { threadId, status: { type: "notLoaded" } },
+          }),
+        );
+        break;
+      }
+      case "thread/resume": {
+        const { threadId } = message.params;
+        const started = threadStarts.get(threadId);
+        assert.ok(started, "The fixture only resumes its assigned native threads.");
+        unloadedThreads.delete(threadId);
+        // Fallback changes current settings, not the recorded primary request used by the oracle.
+        reply(threadStartResult(threadId, { ...started.params, ...message.params }));
+        break;
+      }
+      case "thread/inject_items":
+        assert.ok(
+          threadStarts.has(message.params?.threadId),
+          "The fixture only updates its assigned native threads.",
+        );
         reply({});
         break;
       case "turn/start":

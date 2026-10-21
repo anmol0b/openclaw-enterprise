@@ -20,6 +20,8 @@ The coordinating thread maintains the completion column and PR links. Each imple
 
 Dependent work may use explicit stacked PRs; OCE must not activate fields that its packaged OC does not enforce. Policy changes take effect through restart or deployment replacement after affected old work ends. Track source merge, runtime packaging and qualification separately. New scope decisions return to the author.
 
+At OCE `0a8b5850`, updated-pin qualification stopped before inference during OpenShell workspace initialization. The Gateway also reported missing native client credentials. The packaged Codex binary's identity was verified; app-server readiness and model turns were not reached. D adopts OCE #3041's client-store persistence. Setup diagnostics and live replacement remain verification work in D/E.
+
 ## Initial Gateway tool allowlist
 
 This is the proposed starting inventory for OCE-generated policy, not a claim that every path has completed runtime qualification. OCE publishes concrete tool identities and action sets; configuration from a loaded plugin cannot extend them automatically.

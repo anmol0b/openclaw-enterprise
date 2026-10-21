@@ -224,8 +224,9 @@ the Harness, which stays available for active work. Idle shutdown, or one before
 OpenClaw starts (wrappers run under `tini`), completes promptly. Forced
 termination can delay the successor until the persistent owner lease expires.
 
-Both Gateway modes persist SQLite, media, linked worktrees and common Git
-metadata on their private claim, preserving session paths across replacement.
+Both Gateway modes persist SQLite, client credentials, media, linked
+worktrees and common Git metadata on their private claim, preserving session paths
+across replacement.
 Embedded Gateways retain their default workspace; dedicated Harness claims
 retain node identity. Claims precede Pods for `WaitForFirstConsumer`;
 [Gateway storage](../reference/drivers/kubernetes-compute/storage-and-credentials.md#gateway-storage)
