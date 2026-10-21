@@ -83,6 +83,10 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 	if err != nil {
 		return err
 	}
+	connections, err := developmentConnections(r.env)
+	if err != nil {
+		return err
+	}
 	browserPort := 0
 	if sandboxDriver == "none" {
 		browserPort, err = positiveSetting(r, "OCC_DEVELOPMENT_BROWSER_PORT", 8443, 65535)
@@ -119,6 +123,7 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 		KeyPath:                     opts.KeyOutput,
 		KeyOwned:                    opts.KeyOutput == "",
 		SignIn:                      signIn,
+		Connections:                 connections,
 		directory:                   directory,
 	}
 	if err := validateClusterName(state.Cluster); err != nil {
@@ -247,6 +252,12 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 	}
 	r.env["KUBECONFIG"] = filepath.Join(directory, "kubeconfig")
 	timeout := time.Duration(timeoutSeconds) * time.Second
+	if connections != "" {
+		// Before the runtime image, which trusts this CA, and the gateway, which serves it.
+		if err := r.prepareDevelopmentConnectionPKI(ctx, state); err != nil {
+			return err
+		}
+	}
 
 	var runtimeImage string
 	var codexSeccompProfile string
@@ -360,6 +371,12 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 		return err
 	}
 	keyWritten = true
+	if connections != "" {
+		fmt.Fprintf(r.opts.Out, "Provisioning the OpenShell client Workspace %s...\n", developmentConnectionClientWorkspace)
+		if err := r.provisionDevelopmentClientWorkspace(ctx, state, assets, timeout); err != nil {
+			return err
+		}
+	}
 	_, namespaceID, err := r.waitForDevelopmentKubernetesNamespace(ctx, timeout)
 	if err != nil {
 		return err
@@ -398,6 +415,9 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 	}
 	if signIn == developmentSignInKeycloak {
 		fmt.Fprint(r.opts.Out, developmentKeycloakInstructions(state))
+	}
+	if connections != "" {
+		fmt.Fprint(r.opts.Out, developmentConnectionInstructions(state))
 	}
 	if routingPodCIDR == "" {
 		fmt.Fprintln(r.opts.Out, "Note: this profile installs no private gateway routing, so dedicated Agent deployments fail with DEPENDENCY_UNAVAILABLE. See docs/guides/deploy/openshell-credential-sources.md.")
@@ -675,6 +695,9 @@ func (r *runner) installKubernetesControlPlane(ctx context.Context, state *devel
 		"cluster":      map[string]any{"cidrs": []string{string(clusterIP) + "/32"}, "port": clusterPort},
 		"api":          map[string]any{"clients": []any{map[string]any{"namespace": namespace, "podLabels": map[string]string{"app.kubernetes.io/name": "occ-kubernetes-dev-client"}}}},
 		"resources":    resources,
+	}
+	if state.Connections != "" {
+		developmentConnectionChartValues(values)
 	}
 	if routing {
 		gatewayKey, err := randomDevelopmentSecret()

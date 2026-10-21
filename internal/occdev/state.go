@@ -44,6 +44,7 @@ type developmentState struct {
 	KeyPath                     string `json:"keyPath"`
 	KeyOwned                    bool   `json:"keyOwned"`
 	SignIn                      string `json:"signIn,omitempty"`
+	Connections                 string `json:"connections,omitempty"`
 	SandboxNetworkPolicies      []any  `json:"sandboxNetworkPolicies,omitempty"`
 	SandboxNetworkPolicyCeiling []any  `json:"sandboxNetworkPolicyCeiling,omitempty"`
 	directory                   string
