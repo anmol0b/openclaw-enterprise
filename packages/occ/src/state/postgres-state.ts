@@ -5291,7 +5291,13 @@ export class PostgresPlatformState implements PlatformStateStore {
         bindingIds.has(binding.id) ||
         (binding.subjectKind === "identity" && identity === undefined) ||
         (binding.subjectKind === "group" && group === undefined) ||
-        (binding.subjectKind !== "identity" && binding.subjectKind !== "group") ||
+        (binding.subjectKind !== "identity" &&
+          binding.subjectKind !== "group" &&
+          binding.subjectKind !== "namespace") ||
+        // A Namespace subject appears only on an Installation binding to one Installation resource.
+        (binding.subjectKind === "namespace" &&
+          (binding.namespaceId !== undefined ||
+            !INSTALLATION_RESOURCE_KINDS.some((kind) => kind === binding.resourceKind))) ||
         role === undefined ||
         (identity?.namespaceId !== undefined && identity.namespaceId !== binding.namespaceId) ||
         (binding.subjectKind === "group" && group?.namespaceId !== binding.namespaceId) ||

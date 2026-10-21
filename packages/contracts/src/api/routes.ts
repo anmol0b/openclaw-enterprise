@@ -18,7 +18,10 @@ import {
   ConnectionTemplateResponse,
   CreateConnectionTemplateBody,
   CreateInstallationAccessBindingBody,
+  InstallationAccessBindingListResponse,
   InstallationAccessBindingParams,
+  InstallationAccessBindingResponse,
+  InstallationRoleListResponse,
   RotateConnectionClientSecretBody,
   StartAgentConnectionBody,
   UpdateConnectionTemplateBody,
@@ -527,7 +530,7 @@ export const occApiRoutes = [
     tags: ["IAM"],
     schema: {
       querystring: EmptyQuery,
-      response: { 200: IAMRoleListResponse, ...readErrors },
+      response: { 200: InstallationRoleListResponse, ...readErrors },
     },
   },
   {
@@ -542,7 +545,7 @@ export const occApiRoutes = [
     tags: ["IAM"],
     schema: {
       querystring: EmptyQuery,
-      response: { 200: IAMAccessBindingListResponse, ...readErrors },
+      response: { 200: InstallationAccessBindingListResponse, ...readErrors },
     },
   },
   {
@@ -558,7 +561,7 @@ export const occApiRoutes = [
     schema: {
       querystring: EmptyQuery,
       body: CreateInstallationAccessBindingBody,
-      response: { 201: IAMAccessBindingResponse, ...createErrors },
+      response: { 201: InstallationAccessBindingResponse, ...createErrors },
     },
   },
   {

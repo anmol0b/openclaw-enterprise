@@ -99,6 +99,18 @@ export class DependencyUnavailableError extends AuthorizationDeniedError {
 }
 
 /**
+ * The source left every gateway, but its record stays until a late create from an aborted
+ * registration can no longer appear. Retrying the deletion later completes it.
+ */
+export class CredentialRegistrationFenceError extends DependencyUnavailableError {
+  constructor() {
+    super(
+      "The credential source registration may still be completing; retry the deletion shortly.",
+    );
+  }
+}
+
+/**
  * A Secret the selected Secret Driver cannot serve, typically one stored through a driver the
  * Installation no longer selects. Each subclass is raised only after the caller's grant and the
  * Secret lookup, so it reveals nothing a 403 or 404 hides, and carries a fixed message naming

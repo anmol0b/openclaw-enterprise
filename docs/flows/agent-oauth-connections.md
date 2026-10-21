@@ -29,8 +29,7 @@ removes it. Deployment and attachment continue in the
   registered client; selected OpenShell Credential Gateway (with `toolBinaries`)
   and Credential Refresh Driver (with `clientWorkspace`); Backend `operatorTls`; a
   configured public origin; the caller's human session with exact `agent:read`,
-  `agent:update`, Namespace `secret:create`, and `connection_template:use` for the
-  Agent's Namespace.
+  `agent:update`, and `connection_template:use` for the Agent's Namespace.
 
 ## Flow
 
@@ -68,15 +67,17 @@ graph TD
 The dispatcher refuses a service key with `403` and answers `503` when no
 callback URI is configured. The controller checks exact Agent `read` and
 `update`, then `use` on the template through `authorizationDecision` with the
-Agent's Namespace as `namespaceContext`, and Namespace `secret:create`. It
-requires a `ready` Namespace and active Agent. `assertPersonalAgentOwner` refuses
+Agent's Namespace as `namespaceContext`. These checks and the personal-Agent
+rules also authorize the source and Secret the connection creates, so the person
+needs no Namespace `credential_source` or `secret` grant (`CONNECTION_AUTHORIZED`).
+It requires a `ready` Namespace and active Agent. `assertPersonalAgentOwner` refuses
 a different existing owner, exact-Agent grants to other people, Group grants,
 and plugin approvers. OCC reads the Agent's Configuration and refuses enabled
 channels.
 
 ### 2. Register the pending source and start authorization
 
-`packages/occ/src/index.ts:createCredentialSource` with `deferRefresh: true`,
+`packages/occ/src/index.ts:createCredentialSource` with `CONNECTION_AUTHORIZED`,
 `apps/controller/src/drivers/credential-refresh/openshell.ts:startBrowserAuthorization`
 
 OCC registers an `oauth2-refresh-token` source whose config is the current

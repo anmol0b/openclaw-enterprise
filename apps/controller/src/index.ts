@@ -1853,7 +1853,9 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
       operation.operationId !== "listAgentRepositoryOptions" &&
       operation.operationId !== "getAgentDeploymentRuntimeLogs" &&
       operation.operationId !== "deleteServiceAccount" &&
-      operation.operationId !== "listAgentRevisions"
+      operation.operationId !== "listAgentRevisions" &&
+      // The provider's redirect carries state and code; the callback's schema bounds them.
+      operation !== connectionCallbackOperation
     ) {
       throw failure(
         400,

@@ -4,7 +4,6 @@ import type {
   ConnectionSession,
   ConnectionTemplate,
   ConnectionTemplateValues,
-  ConnectionTemplateVersion,
   CredentialClientRegistrationContext,
   InstallationResourceKind,
   SandboxPolicy,
@@ -173,6 +172,7 @@ import {
   AgentPrincipalAuthorizationError,
   AuthorizationDeniedError,
   BrowserAuthorizationError,
+  CredentialRegistrationFenceError,
   DEDICATED_OPENCLAW_SANDBOX_REQUIRED,
   DedicatedOpenClawSandboxError,
   DeletionRetryOwnedError,
@@ -940,6 +940,13 @@ type DriverFor<Capability extends DriverCapability> = DriverByCapability[Capabil
 const CREDENTIAL_GATEWAY_TIMEOUT_MS = 30_000;
 /** A browser connection must complete within this window. */
 const CONNECTION_SESSION_TTL_MS = 10 * 60 * 1000;
+/**
+ * Marks a source or Secret operation that a browser connection performs for its owner. The
+ * connection's own checks (exact Agent access, template `use`, and the personal-Agent rules)
+ * authorize it, because the template fixes the source's values and the Secret holds only the
+ * Refresh Driver's private state. Module-private, so no API caller can present it.
+ */
+const CONNECTION_AUTHORIZED: unique symbol = Symbol("connection-authorized");
 const MAX_AGENT_CREDENTIAL_SOURCES = 8;
 /** Overall deadline for one runtime status or log request, Driver calls included. */
 const RUNTIME_LOG_REQUEST_TIMEOUT_MS = 10_000;
@@ -1113,7 +1120,7 @@ function connectionDisplayName(value: string): string {
 
 /** The oauth2-refresh-token source configuration carries exactly the approved values. */
 function connectionSourceConfig(
-  version: Readonly<ConnectionTemplateVersion>,
+  version: Readonly<ConnectionTemplateValues>,
 ): Readonly<Record<string, string>> {
   return Object.freeze({
     host: version.endpoint.host,
@@ -4712,6 +4719,7 @@ export class OpenClawController {
   async createSecret(
     principalId: string,
     input: CreateSecretInput,
+    authorization?: typeof CONNECTION_AUTHORIZED,
   ): Promise<Readonly<SecretMetadata>> {
     this.validateSecretValue(input.value);
     if (!isName(input.name)) {
@@ -4719,11 +4727,13 @@ export class OpenClawController {
     }
     this.namespaceIdentity(input.namespaceId);
     return this.mutate(async (state) => {
-      await this.authorize(principalId, "create", {
-        kind: "secret",
-        id: input.namespaceId,
-        namespaceId: input.namespaceId,
-      });
+      if (authorization !== CONNECTION_AUTHORIZED) {
+        await this.authorize(principalId, "create", {
+          kind: "secret",
+          id: input.namespaceId,
+          namespaceId: input.namespaceId,
+        });
+      }
       const namespace = await this.lockNamespace(state, input.namespaceId);
       if (namespace.status !== "ready") {
         throw new NamespaceNotReadyError();
@@ -4866,7 +4876,7 @@ export class OpenClawController {
     input: CreateCredentialSourceInput,
     audit?: (source: Readonly<CredentialSourceMetadata>) => AuditEvent,
     // A browser connection registers the source before consent; its callback mints.
-    options: { readonly deferRefresh?: boolean } = {},
+    connection?: typeof CONNECTION_AUTHORIZED,
   ): Promise<Readonly<CredentialSourceMetadata & { readonly status?: CredentialSourceStatus }>> {
     this.assertCredentialSourceTransactionBoundary();
     if (!isName(input.name)) {
@@ -4877,11 +4887,13 @@ export class OpenClawController {
     this.namespaceIdentity(input.namespaceId);
     const { namespace, gateway, refresh, deferred, source, values } = await this.mutate(
       async (state) => {
-        await this.authorize(principalId, "create", {
-          kind: "credential_source",
-          id: input.namespaceId,
-          namespaceId: input.namespaceId,
-        });
+        if (connection !== CONNECTION_AUTHORIZED) {
+          await this.authorize(principalId, "create", {
+            kind: "credential_source",
+            id: input.namespaceId,
+            namespaceId: input.namespaceId,
+          });
+        }
         const locked = await this.lockNamespace(state, input.namespaceId);
         // An Installation property, so it is reported before any Namespace state.
         this.assertCredentialGatewaySelected();
@@ -4891,7 +4903,7 @@ export class OpenClawController {
         const selected = this.credentialGatewayDriver();
         const type = await this.credentialSourceType(selected, input.type);
         credentialSourceFieldsMatch("config", type.config, written);
-        if (options.deferRefresh === true) {
+        if (connection === CONNECTION_AUTHORIZED) {
           if (type.rotation !== "refresh" || Object.keys(secretRefs).length > 0) {
             throw new ScopeViolationError(
               "A deferred source is a refresh type without stored refresh material.",
@@ -4934,7 +4946,7 @@ export class OpenClawController {
           namespace: locked,
           gateway: selected,
           refresh: refreshDriver,
-          deferred: type.deviceAuthorization !== undefined || options.deferRefresh === true,
+          deferred: type.deviceAuthorization !== undefined || connection === CONNECTION_AUTHORIZED,
           source: registering,
           values: read,
         };
@@ -5388,15 +5400,19 @@ export class OpenClawController {
     namespaceId: string,
     credentialSourceId: string,
     audit?: (removedAccessBindings: readonly RemovedAccessBinding[]) => AuditEvent,
+    connection?: typeof CONNECTION_AUTHORIZED,
   ): Promise<void> {
     this.assertCredentialSourceTransactionBoundary();
     this.namespaceIdentity(namespaceId);
     const { namespace, source, gateway } = await this.mutate(async (state) => {
-      const locked = await this.lockNamespaceForPolicyDelete(state, principalId, {
-        kind: "credential_source",
-        id: credentialSourceId,
-        namespaceId,
-      });
+      const locked =
+        connection === CONNECTION_AUTHORIZED
+          ? await this.lockNamespace(state, namespaceId)
+          : await this.lockNamespaceForPolicyDelete(state, principalId, {
+              kind: "credential_source",
+              id: credentialSourceId,
+              namespaceId,
+            });
       // An Installation property, so it is reported before any source lookup.
       this.assertCredentialGatewaySelected();
       const found = await state.credentialSources.lockCredentialSource(
@@ -5440,9 +5456,7 @@ export class OpenClawController {
     }
     await this.credentialGatewayOperation(() => gateway.removeSource(context()));
     if (this.clock().getTime() < Date.parse(source.createdAt) + CREDENTIAL_REGISTRATION_FENCE_MS) {
-      throw new DependencyUnavailableError(
-        "The credential source registration may still be completing; retry the deletion shortly.",
-      );
+      throw new CredentialRegistrationFenceError();
     }
     // The success event commits with the final removal, so a completed deletion is always audited.
     await this.mutate(async (state) => {
@@ -6046,6 +6060,7 @@ export class OpenClawController {
     const templateId = this.nextIdentifier("connection_template");
     const createdAt = this.timestamp();
     const values = connectionTemplateValues(input);
+    this.assertConnectionSourceConfig(values);
     const registration = await this.connectionClientRegistration(
       refresh,
       values.issuer,
@@ -6092,6 +6107,9 @@ export class OpenClawController {
     const current = await this.getConnectionTemplate(principalId, templateId);
     const values = connectionTemplateValues({ ...current.current, ...input });
     const changed = connectionValuesChanged(current.current, values);
+    if (changed) {
+      this.assertConnectionSourceConfig(values);
+    }
     const refresh = this.connectionRefreshDriver();
     const registration = changed
       ? await this.connectionClientRegistration(
@@ -6149,6 +6167,18 @@ export class OpenClawController {
       }
       throw error;
     }
+  }
+
+  /**
+   * Refuses values the Credential Gateway would refuse at connect time, such as a token host
+   * its gateway cannot reach, so administrators see the error instead of the connecting person.
+   */
+  private assertConnectionSourceConfig(values: Readonly<ConnectionTemplateValues>): void {
+    this.assertCredentialGatewaySelected();
+    this.credentialGatewayDriver().validateSourceConfig({
+      type: "oauth2-refresh-token",
+      config: connectionSourceConfig(values),
+    });
   }
 
   /** Replaces the stored client secret; new connections use it, existing ones keep theirs. */
@@ -6422,7 +6452,6 @@ export class OpenClawController {
     await this.authorize(principalId, "read", agentRef);
     await this.authorize(principalId, "update", agentRef);
     await this.authorizeConnectionTemplateUse(principalId, input.connectionTemplateId, namespaceId);
-    await this.authorize(principalId, "create", { kind: "secret", id: namespaceId, namespaceId });
     const refresh = this.connectionRefreshDriver();
     const secrets = this.secretDriver();
     if (!secrets.withValue) {
@@ -6475,9 +6504,14 @@ export class OpenClawController {
         config: connectionSourceConfig(version),
       },
       undefined,
-      { deferRefresh: true },
+      CONNECTION_AUTHORIZED,
     );
-    const { context } = await this.authorizedCredentialSource(principalId, namespaceId, source.id);
+    const { context } = await this.authorizedCredentialSource(
+      principalId,
+      namespaceId,
+      source.id,
+      CONNECTION_AUTHORIZED,
+    );
     const started = await this.credentialGatewayOperation(() =>
       refresh.startBrowserAuthorization!(context, {
         clientRegistrationId: version.clientRegistrationId,
@@ -6492,11 +6526,15 @@ export class OpenClawController {
     );
     const createdAt = this.timestamp();
     const expiresAt = new Date(Date.parse(createdAt) + CONNECTION_SESSION_TTL_MS).toISOString();
-    const secret = await this.createSecret(principalId, {
-      namespaceId,
-      name: `Connection session ${crypto.randomUUID()}`,
-      value: started.privateState,
-    });
+    const secret = await this.createSecret(
+      principalId,
+      {
+        namespaceId,
+        name: `Connection session ${crypto.randomUUID()}`,
+        value: started.privateState,
+      },
+      CONNECTION_AUTHORIZED,
+    );
     await this.mutate(async (state) => {
       await state.agentConnections.createConnectionSession({
         stateHash: createHash("sha256").update(started.state).digest("hex"),
@@ -6554,11 +6592,12 @@ export class OpenClawController {
         session.connectionTemplateId,
         namespaceId,
       );
-      const privateState = await this.connectionSessionState(principalId, session);
+      const privateState = await this.connectionSessionState(session);
       const { context } = await this.authorizedCredentialSource(
         principalId,
         namespaceId,
         credentialSourceId,
+        CONNECTION_AUTHORIZED,
       );
       await this.credentialGatewayOperation(() =>
         refresh.completeBrowserAuthorization!(context, privateState, {
@@ -6569,9 +6608,13 @@ export class OpenClawController {
     } catch (error) {
       if (error instanceof BrowserAuthorizationError) {
         // A definite failure: nothing usable exists, so the pending source is removed.
-        await this.deleteCredentialSource(principalId, namespaceId, credentialSourceId).catch(
-          () => undefined,
-        );
+        await this.deleteCredentialSource(
+          principalId,
+          namespaceId,
+          credentialSourceId,
+          undefined,
+          CONNECTION_AUTHORIZED,
+        ).catch(() => undefined);
       }
       throw error;
     }
@@ -6774,11 +6817,21 @@ export class OpenClawController {
       }
     }
     try {
-      await this.deleteCredentialSource(principalId, namespaceId, credentialSourceId);
+      await this.deleteCredentialSource(
+        principalId,
+        namespaceId,
+        credentialSourceId,
+        undefined,
+        CONNECTION_AUTHORIZED,
+      );
       return { withdrawalRequested, deleted: true };
     } catch (error) {
-      // A revision, pending deployment, or withdrawal still holds the source; delete it later.
-      if (error instanceof ResourceConflictError) {
+      // A revision, pending deployment, or withdrawal still holds the source, or it is too new
+      // to delete yet; disconnecting again later deletes it.
+      if (
+        error instanceof ResourceConflictError ||
+        error instanceof CredentialRegistrationFenceError
+      ) {
         return { withdrawalRequested, deleted: false };
       }
       throw error;
@@ -6805,15 +6858,8 @@ export class OpenClawController {
     }
   }
 
-  private async connectionSessionState(
-    principalId: string,
-    session: Readonly<ConnectionSession>,
-  ): Promise<string> {
-    await this.authorize(principalId, "operate", {
-      kind: "secret",
-      id: session.secretId,
-      namespaceId: session.namespaceId,
-    });
+  /** The caller already consumed this session as its starting actor. */
+  private async connectionSessionState(session: Readonly<ConnectionSession>): Promise<string> {
     const secret = await this.read((state) =>
       state.secrets.findSecret(session.namespaceId, session.secretId),
     );
@@ -6863,12 +6909,15 @@ export class OpenClawController {
     principalId: string,
     namespaceId: string,
     sourceId: string,
+    connection?: typeof CONNECTION_AUTHORIZED,
   ) {
-    await this.authorize(principalId, "operate", {
-      kind: "credential_source",
-      namespaceId,
-      id: sourceId,
-    });
+    if (connection !== CONNECTION_AUTHORIZED) {
+      await this.authorize(principalId, "operate", {
+        kind: "credential_source",
+        namespaceId,
+        id: sourceId,
+      });
+    }
     const { namespace, source } = await this.read(async (state) => {
       const namespace = await this.exactNamespace(state, namespaceId);
       const source = await state.credentialSources.findCredentialSource(namespaceId, sourceId);

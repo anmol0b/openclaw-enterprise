@@ -11777,73 +11777,32 @@
                   "properties": {
                     "data": {
                       "items": {
-                        "anyOf": [
-                          {
-                            "additionalProperties": false,
-                            "properties": {
-                              "id": { "maxLength": 200, "minLength": 1, "type": "string" },
-                              "namespaceId": {
-                                "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                                "type": "string"
-                              },
-                              "roleId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                              "subjectId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                              "subjectKind": {
-                                "anyOf": [
-                                  { "const": "identity", "type": "string" },
-                                  { "const": "group", "type": "string" },
-                                  { "const": "namespace", "type": "string" }
-                                ]
-                              }
-                            },
-                            "required": ["id", "namespaceId", "subjectKind", "subjectId", "roleId"],
-                            "type": "object"
+                        "additionalProperties": false,
+                        "properties": {
+                          "id": { "maxLength": 200, "minLength": 1, "type": "string" },
+                          "resourceId": {
+                            "pattern": "^ctp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                            "type": "string"
                           },
-                          {
-                            "additionalProperties": false,
-                            "properties": {
-                              "id": { "maxLength": 200, "minLength": 1, "type": "string" },
-                              "namespaceId": {
-                                "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                                "type": "string"
-                              },
-                              "resourceId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                              "resourceKind": {
-                                "anyOf": [
-                                  { "const": "installation", "type": "string" },
-                                  { "const": "namespace", "type": "string" },
-                                  { "const": "configuration", "type": "string" },
-                                  { "const": "preset", "type": "string" },
-                                  { "const": "service_account", "type": "string" },
-                                  { "const": "secret", "type": "string" },
-                                  { "const": "agent", "type": "string" },
-                                  { "const": "agent_revision", "type": "string" },
-                                  { "const": "credential_source", "type": "string" },
-                                  { "const": "sandbox_policy", "type": "string" }
-                                ]
-                              },
-                              "roleId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                              "subjectId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                              "subjectKind": {
-                                "anyOf": [
-                                  { "const": "identity", "type": "string" },
-                                  { "const": "group", "type": "string" },
-                                  { "const": "namespace", "type": "string" }
-                                ]
-                              }
-                            },
-                            "required": [
-                              "id",
-                              "namespaceId",
-                              "subjectKind",
-                              "subjectId",
-                              "roleId",
-                              "resourceKind",
-                              "resourceId"
-                            ],
-                            "type": "object"
+                          "resourceKind": { "const": "connection_template", "type": "string" },
+                          "roleId": { "maxLength": 200, "minLength": 1, "type": "string" },
+                          "subjectId": { "maxLength": 200, "minLength": 1, "type": "string" },
+                          "subjectKind": {
+                            "anyOf": [
+                              { "const": "identity", "type": "string" },
+                              { "const": "namespace", "type": "string" }
+                            ]
                           }
-                        ]
+                        },
+                        "required": [
+                          "id",
+                          "subjectKind",
+                          "subjectId",
+                          "roleId",
+                          "resourceKind",
+                          "resourceId"
+                        ],
+                        "type": "object"
                       },
                       "type": "array"
                     },
@@ -11947,73 +11906,32 @@
                   "additionalProperties": false,
                   "properties": {
                     "data": {
-                      "anyOf": [
-                        {
-                          "additionalProperties": false,
-                          "properties": {
-                            "id": { "maxLength": 200, "minLength": 1, "type": "string" },
-                            "namespaceId": {
-                              "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                              "type": "string"
-                            },
-                            "roleId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                            "subjectId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                            "subjectKind": {
-                              "anyOf": [
-                                { "const": "identity", "type": "string" },
-                                { "const": "group", "type": "string" },
-                                { "const": "namespace", "type": "string" }
-                              ]
-                            }
-                          },
-                          "required": ["id", "namespaceId", "subjectKind", "subjectId", "roleId"],
-                          "type": "object"
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": { "maxLength": 200, "minLength": 1, "type": "string" },
+                        "resourceId": {
+                          "pattern": "^ctp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                          "type": "string"
                         },
-                        {
-                          "additionalProperties": false,
-                          "properties": {
-                            "id": { "maxLength": 200, "minLength": 1, "type": "string" },
-                            "namespaceId": {
-                              "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                              "type": "string"
-                            },
-                            "resourceId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                            "resourceKind": {
-                              "anyOf": [
-                                { "const": "installation", "type": "string" },
-                                { "const": "namespace", "type": "string" },
-                                { "const": "configuration", "type": "string" },
-                                { "const": "preset", "type": "string" },
-                                { "const": "service_account", "type": "string" },
-                                { "const": "secret", "type": "string" },
-                                { "const": "agent", "type": "string" },
-                                { "const": "agent_revision", "type": "string" },
-                                { "const": "credential_source", "type": "string" },
-                                { "const": "sandbox_policy", "type": "string" }
-                              ]
-                            },
-                            "roleId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                            "subjectId": { "maxLength": 200, "minLength": 1, "type": "string" },
-                            "subjectKind": {
-                              "anyOf": [
-                                { "const": "identity", "type": "string" },
-                                { "const": "group", "type": "string" },
-                                { "const": "namespace", "type": "string" }
-                              ]
-                            }
-                          },
-                          "required": [
-                            "id",
-                            "namespaceId",
-                            "subjectKind",
-                            "subjectId",
-                            "roleId",
-                            "resourceKind",
-                            "resourceId"
-                          ],
-                          "type": "object"
+                        "resourceKind": { "const": "connection_template", "type": "string" },
+                        "roleId": { "maxLength": 200, "minLength": 1, "type": "string" },
+                        "subjectId": { "maxLength": 200, "minLength": 1, "type": "string" },
+                        "subjectKind": {
+                          "anyOf": [
+                            { "const": "identity", "type": "string" },
+                            { "const": "namespace", "type": "string" }
+                          ]
                         }
-                      ]
+                      },
+                      "required": [
+                        "id",
+                        "subjectKind",
+                        "subjectId",
+                        "roleId",
+                        "resourceKind",
+                        "resourceId"
+                      ],
+                      "type": "object"
                     },
                     "meta": {
                       "additionalProperties": false,
@@ -12182,10 +12100,6 @@
                             "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
                             "type": "string"
                           },
-                          "namespaceId": {
-                            "pattern": "^ns_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-                            "type": "string"
-                          },
                           "permissions": {
                             "items": {
                               "additionalProperties": false,
@@ -12200,7 +12114,8 @@
                                     { "const": "operate", "type": "string" },
                                     { "const": "administer", "type": "string" },
                                     { "const": "read_logs", "type": "string" },
-                                    { "const": "manage_policy", "type": "string" }
+                                    { "const": "manage_policy", "type": "string" },
+                                    { "const": "use", "type": "string" }
                                   ]
                                 },
                                 "resourceKind": {
@@ -12214,19 +12129,19 @@
                                     { "const": "agent", "type": "string" },
                                     { "const": "agent_revision", "type": "string" },
                                     { "const": "credential_source", "type": "string" },
-                                    { "const": "sandbox_policy", "type": "string" }
+                                    { "const": "sandbox_policy", "type": "string" },
+                                    { "const": "connection_template", "type": "string" }
                                   ]
                                 }
                               },
                               "required": ["action", "resourceKind"],
                               "type": "object"
                             },
-                            "maxItems": 64,
                             "minItems": 1,
                             "type": "array"
                           }
                         },
-                        "required": ["id", "namespaceId", "permissions"],
+                        "required": ["id", "permissions"],
                         "type": "object"
                       },
                       "type": "array"

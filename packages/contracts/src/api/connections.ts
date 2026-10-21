@@ -1,5 +1,13 @@
 import { Type } from "typebox";
-import { AgentId, CredentialSourceId, NamespaceId, Meta } from "./common.ts";
+import {
+  AgentId,
+  CredentialSourceId,
+  NamespaceId,
+  Meta,
+  Name,
+  PermissionActionSchema,
+  ResourceKindSchema,
+} from "./common.ts";
 
 export const ConnectionTemplateId = Type.String({
   pattern: "^ctp_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -111,6 +119,52 @@ export const ConnectionTemplateListResponse = Type.Object(
 
 export const InstallationAccessBindingParams = Type.Object(
   { bindingId: Type.String({ minLength: 1, maxLength: 200 }) },
+  { additionalProperties: false },
+);
+
+/** Installation Roles may also grant `use` on Installation resources such as connection templates. */
+const InstallationPermissionSchema = Type.Object(
+  {
+    action: Type.Union([...PermissionActionSchema.anyOf, Type.Literal("use")]),
+    resourceKind: Type.Union([...ResourceKindSchema.anyOf, Type.Literal("connection_template")]),
+  },
+  { additionalProperties: false },
+);
+
+const InstallationRoleSchema = Type.Object(
+  {
+    id: Type.String({ minLength: 1, maxLength: 200 }),
+    name: Type.Optional(Name),
+    permissions: Type.Array(InstallationPermissionSchema, { minItems: 1 }),
+  },
+  { additionalProperties: false },
+);
+
+export const InstallationRoleListResponse = Type.Object(
+  { data: Type.Array(InstallationRoleSchema), meta: Meta },
+  { additionalProperties: false },
+);
+
+/** An Installation binding belongs to no Namespace; a Namespace subject names one instead. */
+const InstallationAccessBindingSchema = Type.Object(
+  {
+    id: Type.String({ minLength: 1, maxLength: 200 }),
+    subjectKind: Type.Union([Type.Literal("identity"), Type.Literal("namespace")]),
+    subjectId: Type.String({ minLength: 1, maxLength: 200 }),
+    roleId: Type.String({ minLength: 1, maxLength: 200 }),
+    resourceKind: Type.Literal("connection_template"),
+    resourceId: ConnectionTemplateId,
+  },
+  { additionalProperties: false },
+);
+
+export const InstallationAccessBindingResponse = Type.Object(
+  { data: InstallationAccessBindingSchema, meta: Meta },
+  { additionalProperties: false },
+);
+
+export const InstallationAccessBindingListResponse = Type.Object(
+  { data: Type.Array(InstallationAccessBindingSchema), meta: Meta },
   { additionalProperties: false },
 );
 

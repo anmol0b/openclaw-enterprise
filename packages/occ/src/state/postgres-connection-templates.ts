@@ -225,8 +225,8 @@ export function postgresConnectionTemplates(
         ]);
         return deleted.rowCount === 1;
       } catch (error) {
-        // A connection that still references a version restricts the delete.
-        if ((error as { code?: unknown }).code === "23503") {
+        // A connection that still references a version restricts the delete (restrict_violation).
+        if ((error as { code?: unknown }).code === "23001") {
           throw new ResourceStateConflictError(
             "The connection template still has connections; disconnect them first.",
           );

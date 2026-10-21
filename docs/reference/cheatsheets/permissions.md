@@ -111,8 +111,8 @@ needs its principal’s own grants; it does not inherit the issuer’s. See
   human Principal or a Namespace.
 - [Starting a connection](../api.md#post-namespacesnamespaceidagentsagentidconnections)
   requires a human session, exact `agent:read` and `agent:update`,
-  `connection_template:use` for the Agent's Namespace, and Namespace
-  `secret:create`. Completing it at the callback requires the same session and
+  and `connection_template:use` for the Agent's Namespace; those checks also
+  authorize the source and Secret it creates. Completing it at the callback requires the same session and
   rechecks `agent:update` and `use`. While an Agent holds a connection, only the
   connection owner can deploy it or open its native admin UI; see
   [personal Agents](../connection-templates.md#personal-agents).

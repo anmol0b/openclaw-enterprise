@@ -49,7 +49,11 @@ belong to the Agent's Namespace.
 PostgreSQL enforces value formats: `https` URLs, RFC 6749 scope tokens, a DNS
 endpoint host (not an IP address), and the variable rules of
 [tool sources](drivers/openshell-credential-gateway.md#source-type-catalog).
-Responses include `redirectUri`, the exact URI to register with the provider.
+The selected Credential Gateway also checks the endpoint and token URL when a
+template is created or changed, as it does for a source. The OpenShell gateway
+refuses an IP address or `localhost` token host, because it refreshes from its
+own network position (`400`). Responses include `redirectUri`, the exact URI to
+register with the provider.
 
 ### Versions and consent
 
@@ -100,8 +104,10 @@ lists the ones the caller may connect in a Namespace.
 1. The person signs in to OCC and
    [starts a connection](api.md#post-namespacesnamespaceidagentsagentidconnections)
    with a connection template ID. Only a human session can start one. OCC checks
-   exact `agent:read` and `agent:update`, `use`, and Namespace `secret:create`,
-   then the [personal-Agent rules](#personal-agents).
+   exact `agent:read` and `agent:update`, `use`, and the
+   [personal-Agent rules](#personal-agents). These checks authorize the source and
+   Secret the connection creates; no Namespace `credential_source` or `secret`
+   grant is needed.
 2. OCC registers a pending `oauth2-refresh-token` credential source with the
    approved values and no refresh material, and stores the Refresh Driver's
    private state in a Namespace Secret. It returns `authorizationUrl` (S256 PKCE),
@@ -131,9 +137,9 @@ Agent to use the connection.
 requires exact `agent:update`. OCC removes the source from the Agent, requests
 [withdrawal](credential-sources/withdrawal.md) when the active revision holds it
 (which also requires `agent:operate`), and deletes the source when nothing holds
-it. The response reports `withdrawalRequested` and `deleted`. When `deleted` is
-`false`, deploy a new version or wait for withdrawal, then
-[delete the source](api.md#delete-namespacesnamespaceidcredentialsourcescredentialsourceid).
+it. Like connecting, it needs no `credential_source:delete` grant. The response
+reports `withdrawalRequested` and `deleted`. When `deleted` is `false`, deploy a
+new version or wait for withdrawal, then disconnect again.
 
 ## Personal Agents
 
