@@ -136,9 +136,10 @@ administrators disconnect the affected sources. OCC refuses to delete a connecti
 template while any source references one of its versions.
 
 Rotating the client secret is not a consent change. The secret belongs to a client
-registration for one `issuer` and `clientId` pair. Rotation changes only sources
-that use that registration; the same client ID at another issuer stays independent
-([client registrations](contracts.md#client-registrations)).
+registration for one `issuer` and `clientId` pair, so the same client ID at another
+issuer stays independent. Rotation applies to new connections; existing
+connections keep the secret they were configured with until the provider disables
+it ([client registrations](contracts.md#client-registrations)).
 
 ### Personal Agents
 
