@@ -412,10 +412,31 @@ function relayNodeDiagnostic(value) {
   };
 }
 
+// The proof runs in a separate controller process. Both its test and the CI
+// reporter use this closed vocabulary; neither publishes arbitrary stage text.
+export function nativeFirstAgentProofDiagnostic(failureStage) {
+  const stages = [
+    "startup",
+    "connect",
+    "create",
+    "required-placement",
+    "session-identity",
+    "send",
+    "model-and-exec",
+    "current-placement",
+  ];
+  return stages.includes(failureStage)
+    ? { kind: "native-first-agent-proof", failureStage }
+    : undefined;
+}
+
 function failureDiagnostic(error) {
   const diagnostic = error?.openclawCiDiagnostic;
   if (!isRecord(diagnostic)) {
     return undefined;
+  }
+  if (diagnostic.kind === "native-first-agent-proof") {
+    return nativeFirstAgentProofDiagnostic(diagnostic.failureStage);
   }
   if (diagnostic.kind === "runtime-model-probe") {
     if (

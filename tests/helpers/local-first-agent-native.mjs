@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeFirstAgentProofDiagnostic } from "../../scripts/ci/reporter.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const proofPrefix = "OCE_NATIVE_FIRST_AGENT_PROOF ";
@@ -794,11 +795,20 @@ export async function assertNativeWorkerProofInController(
       }
     });
   });
-  assert.equal(
-    result.code,
-    0,
-    `Native first-Agent proof failed during ${result.proof?.stage ?? "controller startup"}; raw output withheld`,
-  );
+  if (result.code !== 0) {
+    // Only the proof's explicit failure record and exit 1 identify its stage.
+    // A controller exit without that evidence leaves the stage unknown.
+    const diagnostic =
+      result.code === 1 && result.proof?.verified === false
+        ? nativeFirstAgentProofDiagnostic(result.proof.stage)
+        : undefined;
+    const at = diagnostic
+      ? `during ${diagnostic.failureStage}`
+      : "without a recognized failure stage";
+    throw Object.assign(new Error(`Native first-Agent proof failed ${at}; raw output withheld`), {
+      openclawCiDiagnostic: diagnostic,
+    });
+  }
   assert.equal(result.proof?.verified, true);
   assert.ok(result.proof.profileId && result.proof.providerId && result.proof.environmentId);
   assert.ok(typeof result.proof.hostname === "string" && result.proof.hostname.length > 0);

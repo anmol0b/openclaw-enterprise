@@ -1464,6 +1464,18 @@ test("run redacts arbitrary stdout, stderr, assertion payloads, and stacks from 
           diagnostic: { kind: "runtime-image-stock-broker", stage: `${secret}-stage` },
         },
         {
+          name: "retains native first-Agent proof failure stage",
+          diagnostic: {
+            kind: "native-first-agent-proof",
+            failureStage: "required-placement",
+            output: `${secret}-output`,
+          },
+        },
+        {
+          name: "rejects unknown native first-Agent proof stage",
+          diagnostic: { kind: "native-first-agent-proof", failureStage: `${secret}-stage` },
+        },
+        {
           name: "retains safe monitoring readiness evidence",
           diagnostic: {
             kind: "metrics-monitoring",
@@ -1690,6 +1702,14 @@ test("run redacts arbitrary stdout, stderr, assertion payloads, and stacks from 
     (entry) => entry.name === "rejects unsafe runtime stock broker stage",
   );
   assert.equal(unsafeStockBroker.error.diagnostic, undefined);
+  const nativeProof = summary.files[0].tests.find(
+    (entry) => entry.name === "retains native first-Agent proof failure stage",
+  );
+  assert.equal(nativeProof.status, "failed");
+  assert.deepEqual(nativeProof.error.diagnostic, {
+    kind: "native-first-agent-proof",
+    failureStage: "required-placement",
+  });
   const monitoringFailure = summary.files[0].tests.find(
     (entry) => entry.name === "retains safe monitoring readiness evidence",
   );
@@ -1741,6 +1761,7 @@ test("run redacts arbitrary stdout, stderr, assertion payloads, and stacks from 
     assert.deepEqual(nodeFailure.error.diagnostic.relayNode, expected, name);
   }
   for (const name of [
+    "rejects unknown native first-Agent proof stage",
     "rejects unsafe repository platform setup stage",
     "rejects nonstring repository platform setup stage",
     "rejects unknown setup diagnostic kind",
