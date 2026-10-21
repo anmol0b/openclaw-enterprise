@@ -76,3 +76,30 @@ function sameParameters(
     leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key])
   );
 }
+
+/** One connected credential source: who consented, for which Agent, and what they approved. */
+export interface AgentConnection {
+  readonly namespaceId: string;
+  readonly credentialSourceId: string;
+  readonly agentId: string;
+  readonly ownerPrincipalId: string;
+  readonly connectionTemplateId: string;
+  readonly connectionTemplateVersion: number;
+  readonly createdAt: string;
+}
+
+/** A pending browser authorization, found by the SHA-256 of its `state` and consumed once. */
+export interface ConnectionSession {
+  readonly stateHash: string;
+  readonly namespaceId: string;
+  readonly agentId: string;
+  readonly credentialSourceId: string;
+  /** The Namespace Secret holding the Refresh Driver's private state. */
+  readonly secretId: string;
+  readonly actorId: string;
+  readonly connectionTemplateId: string;
+  readonly connectionTemplateVersion: number;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly consumedAt?: string;
+}

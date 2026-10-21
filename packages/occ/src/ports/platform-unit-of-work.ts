@@ -60,6 +60,15 @@ export function bindPlatformUnitOfWork(
       "updateConnectionTemplate",
       "deleteConnectionTemplate",
     ]),
+    agentConnections: bindRepository(repositories.agentConnections, lifetime, [
+      "findAgentConnection",
+      "listAgentConnections",
+      "findConnectionSession",
+      "createAgentConnection",
+      "deleteAgentConnection",
+      "createConnectionSession",
+      "consumeConnectionSession",
+    ]),
     secrets: bindRepository(repositories.secrets, lifetime, [
       "findSecret",
       "listSecrets",

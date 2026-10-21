@@ -36,6 +36,11 @@ export function createPlatformReadView(
       "findClientRegistration",
       "findClientRegistrationById",
     ]),
+    agentConnections: bindRepository(repositories.agentConnections, lifetime, [
+      "findAgentConnection",
+      "listAgentConnections",
+      "findConnectionSession",
+    ]),
     secrets: bindRepository(repositories.secrets, lifetime, [
       "findSecret",
       "listSecrets",

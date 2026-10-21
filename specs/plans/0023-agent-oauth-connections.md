@@ -93,9 +93,8 @@ are the acceptance criteria. Non-goals follow the RFC.
    and `GET /oauth/callback`. Check `agent:update` and template `use` with the
    Agent's Namespace as context. Store the session in a Namespace Secret with
    compare-and-swap. Bind the callback to the starting session, reject reuse and
-   sessions older than ten minutes, and keep codes out of logs and audit. Add the
-   Agent `connections` field, grant the Agent's service principal source `operate`,
-   and return `409` from deploy until each listed connection is `ready`.
+   sessions older than ten minutes, and keep codes out of logs and audit. Bind the
+   source to the Agent and grant the Agent's service principal source `operate`.
 6. **Personal-Agent enforcement.** Add a per-Agent retention predicate: a saved
    binding, a pending deployment, or an active or companion revision holding the
    source without a `revoked` withdrawal. While it holds, guard
@@ -123,7 +122,9 @@ are the acceptance criteria. Non-goals follow the RFC.
 
 ### PR 3: Preset and provider options
 
-1. Add Preset `agent.connections`, copied into the Agent at creation.
+1. Add the Agent `connections` field and Preset `agent.connections`, copied into
+   the Agent at creation, and return `409` from deploy until each listed connection
+   is `ready`.
 2. Add `accountIdentity: oidc` with discovery or `jwksUri`, metadata agreement
    checks, and ID token validation.
 3. Add the Gateway endpoint `access` field and the per-template binary in the

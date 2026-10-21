@@ -25,6 +25,8 @@ export {
 import type { WorkspaceSetup } from "./workspace-setup.ts";
 
 export type {
+  AgentConnection,
+  ConnectionSession,
   ConnectionClientRegistration,
   ConnectionEndpoint,
   ConnectionTemplate,
@@ -1613,6 +1615,32 @@ export interface CredentialRefreshDriver extends Driver {
     context: CredentialSourceContext,
     privateState: string,
   ): Promise<CredentialSourceDeviceAuthorizationResult>;
+  /** Stores the client secret for `issuer` and `clientId`; OCC keeps no copy. */
+  registerClient?(
+    context: CredentialClientRegistrationContext,
+    clientSecret: string,
+  ): Promise<void>;
+  /** Replaces the stored client secret for new connections; existing ones keep theirs. */
+  rotateClientSecret?(
+    context: CredentialClientRegistrationContext,
+    clientSecret: string,
+  ): Promise<void>;
+  /** Deletes the stored client secret; an absent secret counts as removed. */
+  removeClient?(context: CredentialClientRegistrationContext): Promise<void>;
+  /** Builds the consent URL for the source's pending browser authorization. */
+  startBrowserAuthorization?(
+    context: CredentialSourceContext,
+    request: CredentialBrowserAuthorizationRequest,
+  ): Promise<CredentialSourceBrowserAuthorization>;
+  /**
+   * Verifies `state`, exchanges the code once, configures Gateway refresh custody, and mints
+   * the first token. Resolves only when a usable token exists; never returns a token.
+   */
+  completeBrowserAuthorization?(
+    context: CredentialSourceContext,
+    privateState: string,
+    callback: CredentialBrowserAuthorizationCallback,
+  ): Promise<void>;
   /** Replaces the source's refresh material; replaying a successful `requestId` is a no-op. */
   configureRefresh(
     context: CredentialSourceContext,
@@ -1984,6 +2012,41 @@ export interface CredentialSourceDeviceAuthorization {
 }
 
 export type CredentialSourceDeviceAuthorizationResult = { readonly status: "pending" | "ready" };
+
+/** One OAuth client at one authorization server, whose secret the Refresh Driver keeps. */
+export interface CredentialClientRegistrationContext {
+  readonly registrationId: string;
+  readonly issuer: string;
+  readonly clientId: string;
+  readonly signal: AbortSignal;
+}
+
+/** The approved values of one connection template version that the browser flow uses. */
+export interface CredentialBrowserAuthorizationRequest {
+  readonly clientRegistrationId: string;
+  readonly issuer: string;
+  readonly clientId: string;
+  readonly authorizationUrl: string;
+  readonly tokenUrl: string;
+  readonly scopes: readonly string[];
+  readonly authorizationParameters: Readonly<Record<string, string>>;
+  /** The exact OCC callback URI registered with the provider. */
+  readonly redirectUri: string;
+}
+
+export interface CredentialSourceBrowserAuthorization {
+  /** The provider consent URL carrying the PKCE challenge and `state`. */
+  readonly authorizationUrl: string;
+  /** The random `state` in that URL; OCC keeps only its hash to find the callback's session. */
+  readonly state: string;
+  /** Opaque Refresh Driver state with the PKCE verifier; never an access or refresh token. */
+  readonly privateState: string;
+}
+
+export interface CredentialBrowserAuthorizationCallback {
+  readonly code: string;
+  readonly state: string;
+}
 
 /**
  * Options for Configuration rules that also run on Preset defaults. `unresolved` locates text its

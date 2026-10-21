@@ -8,6 +8,7 @@ import { RepositoryTransactionLifetime } from "../ports/transaction.ts";
 import { bindRepository } from "../ports/repository-factory.ts";
 import { bindPlatformUnitOfWork } from "../ports/platform-unit-of-work.ts";
 import { createPlatformReadView } from "../ports/platform-read-view.ts";
+import { postgresAgentConnections } from "./postgres-agent-connections.ts";
 import { postgresConnectionTemplates } from "./postgres-connection-templates.ts";
 import { postgresRepositorySessions } from "./postgres-repository-sessions.ts";
 import {
@@ -4226,6 +4227,7 @@ export class PostgresPlatformState implements PlatformStateStore {
       connectionTemplates: postgresConnectionTemplates(client, () =>
         this.requireInitialized(context),
       ),
+      agentConnections: postgresAgentConnections(client, () => this.requireInitialized(context)),
       secrets,
       credentialSources,
       serviceAccounts,

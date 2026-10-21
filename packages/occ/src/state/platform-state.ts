@@ -23,7 +23,9 @@ import type {
   AccessBinding,
   Agent,
   AgentRead,
+  AgentConnection,
   ConnectionClientRegistration,
+  ConnectionSession,
   ConnectionTemplate,
   ConnectionTemplateVersion,
   AgentRevisionMetadata,
@@ -374,6 +376,26 @@ export interface ConnectionTemplateRepository extends ConnectionTemplateReadRepo
   ): Promise<Readonly<ConnectionTemplate> | undefined>;
   /** Refuses with ResourceStateConflictError while a connection uses one of its versions. */
   deleteConnectionTemplate(templateId: string): Promise<boolean>;
+}
+
+export interface AgentConnectionReadRepository {
+  findAgentConnection(
+    namespaceId: string,
+    credentialSourceId: string,
+  ): Promise<Readonly<AgentConnection> | undefined>;
+  listAgentConnections(
+    namespaceId: string,
+    agentId: string,
+  ): Promise<readonly Readonly<AgentConnection>[]>;
+  findConnectionSession(stateHash: string): Promise<Readonly<ConnectionSession> | undefined>;
+}
+
+export interface AgentConnectionRepository extends AgentConnectionReadRepository {
+  createAgentConnection(connection: AgentConnection): Promise<Readonly<AgentConnection>>;
+  deleteAgentConnection(namespaceId: string, credentialSourceId: string): Promise<boolean>;
+  createConnectionSession(session: ConnectionSession): Promise<Readonly<ConnectionSession>>;
+  /** Marks the session consumed if it is unconsumed and unexpired at `at`; false otherwise. */
+  consumeConnectionSession(stateHash: string, at: string): Promise<boolean>;
 }
 
 /**
@@ -952,6 +974,7 @@ export interface PlatformReadView {
   readonly configurations: ConfigurationReadRepository;
   readonly presets: PresetReadRepository;
   readonly connectionTemplates: ConnectionTemplateReadRepository;
+  readonly agentConnections: AgentConnectionReadRepository;
   readonly secrets: SecretReadRepository;
   readonly credentialSources: CredentialSourceReadRepository;
   readonly serviceAccounts: ServiceAccountReadRepository;
@@ -971,6 +994,7 @@ export interface PlatformUnitOfWork extends PlatformReadView {
   readonly configurations: ConfigurationRepository;
   readonly presets: PresetRepository;
   readonly connectionTemplates: ConnectionTemplateRepository;
+  readonly agentConnections: AgentConnectionRepository;
   readonly secrets: SecretRepository;
   readonly credentialSources: CredentialSourceRepository;
   readonly serviceAccounts: ServiceAccountRepository;
@@ -1027,6 +1051,8 @@ interface PlatformSnapshot {
   /** Every version, keyed by template and version. */
   readonly connectionTemplateVersions: Map<string, Readonly<ConnectionTemplateVersion>>;
   readonly clientRegistrations: Map<string, Readonly<ConnectionClientRegistration>>;
+  readonly agentConnections: Map<string, Readonly<AgentConnection>>;
+  readonly connectionSessions: Map<string, Readonly<ConnectionSession>>;
   readonly secrets: Map<string, Readonly<Secret>>;
   readonly credentialSources: Map<string, Readonly<CredentialSource>>;
   readonly credentialWithdrawals: Map<string, Readonly<CredentialWithdrawal>>;
@@ -1095,6 +1121,8 @@ function cloneSnapshot(snapshot: PlatformSnapshot): PlatformSnapshot {
     connectionTemplates: new Map(snapshot.connectionTemplates),
     connectionTemplateVersions: new Map(snapshot.connectionTemplateVersions),
     clientRegistrations: new Map(snapshot.clientRegistrations),
+    agentConnections: new Map(snapshot.agentConnections),
+    connectionSessions: new Map(snapshot.connectionSessions),
     secrets: new Map(Array.from(snapshot.secrets, ([key, secret]) => [key, immutableCopy(secret)])),
     credentialWithdrawals: new Map(
       Array.from(snapshot.credentialWithdrawals, ([key, withdrawal]) => [
@@ -1640,6 +1668,61 @@ function repositories(
         }
       }
       deleteResourceAccessBindings("connection_template", templateId);
+      return true;
+    },
+  };
+
+  const agentConnections: AgentConnectionRepository = {
+    findAgentConnection: async (namespaceId, credentialSourceId) => {
+      const found = snapshot.agentConnections.get(agentKey(namespaceId, credentialSourceId));
+      return found === undefined ? undefined : immutableCopy(found);
+    },
+    listAgentConnections: async (namespaceId, agentId) =>
+      Object.freeze(
+        Array.from(snapshot.agentConnections.values())
+          .filter(
+            (connection) =>
+              connection.namespaceId === namespaceId && connection.agentId === agentId,
+          )
+          .sort((a, b) => a.credentialSourceId.localeCompare(b.credentialSourceId))
+          .map((connection) => immutableCopy(connection)),
+      ),
+    findConnectionSession: async (stateHash) => {
+      const found = snapshot.connectionSessions.get(stateHash);
+      return found === undefined ? undefined : immutableCopy(found);
+    },
+    createAgentConnection: async (connection) => {
+      assertInitialized(snapshot);
+      const key = agentKey(connection.namespaceId, connection.credentialSourceId);
+      if (snapshot.agentConnections.has(key)) {
+        throw new ResourceConflictError("The credential source is already connected.");
+      }
+      const saved = immutableCopy(connection);
+      snapshot.agentConnections.set(key, saved);
+      return immutableCopy(saved);
+    },
+    deleteAgentConnection: async (namespaceId, credentialSourceId) =>
+      snapshot.agentConnections.delete(agentKey(namespaceId, credentialSourceId)),
+    createConnectionSession: async (session) => {
+      assertInitialized(snapshot);
+      if (snapshot.connectionSessions.has(session.stateHash)) {
+        throw new ResourceConflictError("The connection session already exists.");
+      }
+      const saved = immutableCopy(session);
+      snapshot.connectionSessions.set(saved.stateHash, saved);
+      return immutableCopy(saved);
+    },
+    // Mirrors the database: a session is consumed at most once.
+    consumeConnectionSession: async (stateHash, at) => {
+      const current = snapshot.connectionSessions.get(stateHash);
+      if (
+        current === undefined ||
+        current.consumedAt !== undefined ||
+        Date.parse(current.expiresAt) <= Date.parse(at)
+      ) {
+        return false;
+      }
+      snapshot.connectionSessions.set(stateHash, immutableCopy({ ...current, consumedAt: at }));
       return true;
     },
   };
@@ -3280,6 +3363,7 @@ function repositories(
     configurations,
     presets,
     connectionTemplates,
+    agentConnections,
     secrets,
     credentialSources,
     serviceAccounts,
@@ -3568,6 +3652,8 @@ export class InMemoryPlatformState implements PlatformStateStore {
     connectionTemplates: new Map(),
     connectionTemplateVersions: new Map(),
     clientRegistrations: new Map(),
+    agentConnections: new Map(),
+    connectionSessions: new Map(),
     secrets: new Map(),
     credentialSources: new Map(),
     credentialWithdrawals: new Map(),
