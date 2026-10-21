@@ -46,6 +46,14 @@ Each connection template version and credential source records its
 `clientRegistrationId`. The Driver stores secrets durably for every API replica
 and across restarts. OCC stores no secret value.
 
+OpenShell keeps providers per Workspace, and each OCE Namespace has its own
+Workspace, so the OpenShell Credential Refresh Driver needs one Installation-level
+place for client secrets. Its configuration gains a required `clientWorkspace`
+when browser connections are enabled: an operator-provisioned OpenShell Workspace
+that holds one Driver-owned provider per client registration. The Driver reads a
+secret back over the operator-TLS connection, so operator TLS is a prerequisite.
+The Workspace grants no Agent access; no Sandbox attaches its providers.
+
 ### OIDC account identity
 
 For `accountIdentity: oidc`, the Refresh Driver establishes the trusted provider
