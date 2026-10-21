@@ -88,9 +88,9 @@ source commit. BuildKit rewrites image and filesystem timestamps to that epoch,
 so wall-clock time does not change the image manifests on a cold-cache rebuild.
 
 `deploy/runtime/Dockerfile:openclaw-source` verifies the pinned OpenClaw main source archive
-and applies four checksum-verified patches:
+and applies three checksum-verified patches:
 the stock Codex 0.163.0-alpha.2 dependency pin, before extracting frozen installation
-inputs, and the temporary read-only-paths, full-access-profile and `connect --ephemeral` expired-setup
+inputs, and the temporary read-only-paths and full-access-profile
 bridge patches. The bridge forwards the bound
 Agent's stock network settings without modifying Codex. Both installs use
 frozen lockfiles and upstream's selected-plugin manifests, retaining required
@@ -303,7 +303,7 @@ owns package-write access and coordination.
 
 - 2026-09-22 03:04: Use manual dispatch without an independent approval or linkage comment (codex/01a0c70f-8a8f-7c62-ac81-ee1a3e99f48b - 149ac0fe)
 
-- 2026-09-22 01:34: Record bounded QEMU smoke timeouts while retaining native deadlines and startup assertions (codex/01a0c179-19f7-7111-8bb4-fc7680da5545 - 473d9b45ee5aa8d8a081cca7664973fee5bd7e11)
+- 2026-09-22 01:34: Record QEMU smoke test deadlines while retaining native deadlines and startup assertions (codex/01a0c179-19f7-7111-8bb4-fc7680da5545 - 473d9b45ee5aa8d8a081cca7664973fee5bd7e11)
 
 - 2026-09-22 01:10: Bound disk use by pruning the job-owned build cache and removing each successfully checked image variant (codex/01a0c179-19f7-7111-8bb4-fc7680da5545 - 1e486bffadbe5f5f9f6437bfc8da2e4176ffefd6)
 

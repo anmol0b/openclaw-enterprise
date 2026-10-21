@@ -1,3 +1,14 @@
+import type {
+  SandboxPolicy,
+  SandboxFacet,
+  SandboxNetworkGrant,
+  SandboxPolicySnapshot,
+  SandboxPolicyRecommendations,
+} from "@openclaw-enterprise/contracts";
+import {
+  validateSandboxNetworkGrants,
+  sandboxNetworkGrantsWithinCeiling,
+} from "@openclaw-enterprise/contracts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -251,6 +262,7 @@ import {
   normalizeProvisioningHarnessAuth,
   normalizeProvisioningWorkspace,
   normalizeRequestSecretBindings,
+  PROVISIONING_DEPLOYMENT_PENDING,
   provisioningProgress,
   requireProvisioningRequestId,
   type ProvisionAgentInput,
@@ -280,6 +292,7 @@ export {
   restrictionsRemovedWithAgent,
 } from "./iam-policy-cleanup.ts";
 export type { RemovedAccessBinding } from "./iam-policy-cleanup.ts";
+export { operationRefusalHint } from "./state/controller-work.ts";
 export {
   ActivationFailedError,
   ComputePreparationFailedError,
@@ -335,8 +348,12 @@ export {
   RuntimeLogsError,
   RuntimeLogsForbiddenByClusterError,
   RuntimeLogsSandboxNotFoundError,
+  SANDBOX_DELETION_UNCONFIRMED,
+  SandboxGatewayUnauthorizedError,
+  SandboxGatewayUnavailableError,
   SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
+  SandboxWorkspaceSetupRefusedError,
   ScopeViolationError,
   SecretBindingDriverError,
   ServiceAccountCredentialSecretExistsError,
@@ -556,6 +573,7 @@ export interface RuntimeLogReadGrant {
 export type RuntimeLogReadAdmission = <T>(read: () => Promise<T>) => Promise<T>;
 
 export interface ControllerOptions {
+  readonly sandboxNetworkPolicyCeiling?: readonly SandboxNetworkGrant[];
   readonly authorize?: (
     request: AuthorizationRequest,
   ) => AuthorizationDecision | Promise<AuthorizationDecision>;
@@ -661,6 +679,19 @@ export interface CreateAgentInput {
   readonly pluginApprovers?: PluginApprovers;
   readonly repositoryBindings?: readonly RepositoryBindingRequest[];
   readonly repositoryAccess?: RepositoryAccess;
+}
+
+/** Create Agent's preflight input: an Agent create body with its Configuration inline, unsaved. */
+export interface ValidateAgentCreateInput {
+  readonly namespaceId: string;
+  readonly configuration: {
+    readonly kind: "agent";
+    readonly values: Readonly<OpenClawConfigurationDocument>;
+  };
+  readonly initialWorkspaceFiles?: InitialWorkspaceFiles;
+  readonly executionMode?: HarnessExecutionMode;
+  readonly plugins?: PluginDesiredState;
+  readonly pluginApprovers?: PluginApprovers;
 }
 
 export interface UpdateAgentInput {
@@ -1322,7 +1353,7 @@ function requireDedicatedNativeSupport(
 }
 
 /**
- * Whether Agent save and deploy admission accept OpenClaw in this execution mode on this
+ * Whether an OpenClaw Agent in this execution mode passes both save and deploy admission on this
  * Installation shape. It runs admission's own checks, so the Installation capability built from
  * it cannot disagree with them (#2670).
  */
@@ -1366,7 +1397,7 @@ function validRepositoryOption(value: unknown): value is RepositoryOption {
     !hasControlCharacter(displayName) &&
     (option?.description === undefined ||
       (isNonEmptyString(option.description) &&
-        option.description.length <= 512 &&
+        Array.from(option.description).length <= 512 &&
         !hasControlCharacter(option.description))) &&
     Array.isArray(allowedProfiles) &&
     allowedProfiles.length >= 1 &&
@@ -1446,6 +1477,7 @@ const NAMESPACE_POLICY_RESOURCE_KINDS: ReadonlySet<ResourceKind> = new Set<Resou
   "agent_revision",
   "configuration",
   "credential_source",
+  "sandbox_policy",
   "preset",
   "secret",
   "service_account",
@@ -1513,6 +1545,7 @@ function rejectCrossNamespaceSecretSources(
 export class OpenClawController {
   readonly installation: Readonly<Installation>;
 
+  private readonly sandboxNetworkPolicyCeiling: readonly SandboxNetworkGrant[];
   private readonly authorization?: ControllerOptions["authorize"];
   private readonly clock: () => Date;
   private readonly identifier?: ControllerOptions["createId"];
@@ -1552,6 +1585,8 @@ export class OpenClawController {
       name: installation.name,
       createdAt: installation.createdAt,
     });
+    validateSandboxNetworkGrants(options.sandboxNetworkPolicyCeiling ?? []);
+    this.sandboxNetworkPolicyCeiling = immutableCopy(options.sandboxNetworkPolicyCeiling ?? []);
     this.authorization = options.authorize;
     this.clock = options.now ?? (() => new Date());
     this.identifier = options.createId;
@@ -1668,19 +1703,22 @@ export class OpenClawController {
       id: this.installation.id,
     });
     // openclaw lists the execution modes admission accepts for OpenClaw; an empty list means
-    // none (#2670). nativeWorkers promises that dedicated native OpenClaw can be admitted, so it
-    // is reported only when that mode is listed (finding 1608).
+    // none (#2670), and sandboxDriverUnavailable says that is an outage, not the Installation's
+    // shape (finding 1624). nativeWorkers promises that dedicated native OpenClaw can be
+    // admitted, so it is reported only when that mode is listed (finding 1608).
     const {
       nativeWorkers: _unchecked,
       openclaw: _derived,
       ...declared
     } = this.installation.capabilities ?? {};
-    const openclawModes = this.openClawExecutionModes();
-    const nativeWorkers = openclawModes.includes("dedicated") ? this.nativeWorkers : undefined;
+    const openclaw = this.openClawExecutionModes();
+    const nativeWorkers = openclaw.executionModes.includes("dedicated")
+      ? this.nativeWorkers
+      : undefined;
     const capabilities = {
       ...declared,
       ...(nativeWorkers === undefined ? {} : { nativeWorkers: { support: nativeWorkers } }),
-      openclaw: { executionModes: openclawModes },
+      openclaw,
       ...(this.selections.has("credential_gateway")
         ? {
             credentialSources: {
@@ -1713,22 +1751,27 @@ export class OpenClawController {
   }
 
   /**
-   * The OpenClaw execution modes this Installation's Sandbox Driver and runtime admit at Agent
-   * save and deploy. A selected Sandbox Driver that is unavailable admits none until it returns.
+   * The OpenClaw execution modes this Installation's Sandbox Driver and runtime let an Agent
+   * deploy. A selected Sandbox Driver that is unavailable admits none until it returns.
    */
-  private openClawExecutionModes(): HarnessExecutionMode[] {
+  private openClawExecutionModes(): {
+    executionModes: HarnessExecutionMode[];
+    sandboxDriverUnavailable?: true;
+  } {
     let sandbox: SandboxDriver | undefined;
     try {
       sandbox = this.sandboxDriver();
     } catch (error) {
       if (error instanceof DependencyUnavailableError) {
-        return [];
+        return { executionModes: [], sandboxDriverUnavailable: true };
       }
       throw error;
     }
-    return HARNESS_EXECUTION_MODES.filter((mode) =>
-      admitsOpenClawExecutionMode(sandbox, mode, this.nativeWorkers),
-    );
+    return {
+      executionModes: HARNESS_EXECUTION_MODES.filter((mode) =>
+        admitsOpenClawExecutionMode(sandbox, mode, this.nativeWorkers),
+      ),
+    };
   }
 
   async getInstallationDeploymentInventory(
@@ -2535,7 +2578,12 @@ export class OpenClawController {
         await this.authorizeProvisioningRecord(state, principalId, replay);
         const work = await state.operations.findWork(replay.workId);
         const result = Object.freeze({
-          provisioning: provisioningProgress(replay, work, this.clock()),
+          provisioning: provisioningProgress(
+            replay,
+            work,
+            this.clock(),
+            await this.provisioningDeploymentProgress(state, principalId, replay, work),
+          ),
         });
         if (auditEvent) {
           await state.audit.append(auditEvent(result));
@@ -2666,8 +2714,59 @@ export class OpenClawController {
       if (work === undefined) {
         throw new DependencyUnavailableError("The provisioning work is unavailable.");
       }
-      return Object.freeze({ provisioning: provisioningProgress(record, work, this.clock()) });
+      return Object.freeze({
+        provisioning: provisioningProgress(
+          record,
+          work,
+          this.clock(),
+          await this.provisioningDeploymentProgress(state, principalId, record, work),
+        ),
+      });
     });
+  }
+
+  /**
+   * The initial deployment's progress for a job waiting on it after handoff (finding 1634).
+   * The provisioning read does not check `agent_revision:read`, which the deployment read
+   * needs, so a caller without it gets undefined and the job reports only its own deferral.
+   */
+  private async provisioningDeploymentProgress(
+    state: PlatformReadView,
+    principalId: string,
+    record: Readonly<AgentProvisioningRecord>,
+    work: { readonly state: string } | undefined,
+  ): Promise<DeploymentStatusResult["progress"] | undefined> {
+    const revisionId = record.revisionId;
+    if (
+      revisionId === undefined ||
+      record.agentId === undefined ||
+      (record.status !== "queued" && record.status !== "running") ||
+      work === undefined ||
+      work.state === "failed_permanent"
+    ) {
+      return undefined;
+    }
+    const key = `agent_revision:${revisionId}:reconcile`;
+    const deployment = await state.operations.findWork(key);
+    if (
+      deployment === undefined ||
+      deployment.namespaceId !== record.namespaceId ||
+      deployment.agentId !== record.agentId ||
+      deployment.revisionId !== revisionId ||
+      !(await this.canRead(principalId, {
+        kind: "agent_revision",
+        id: revisionId,
+        namespaceId: record.namespaceId,
+      }))
+    ) {
+      return undefined;
+    }
+    return deploymentProgressForWork(
+      deployment,
+      deployment.state === "queued" || deployment.state === "claimed"
+        ? await state.operations.findWorkAttempt(key)
+        : undefined,
+    );
   }
 
   async retryAgentProvisioning(
@@ -3761,7 +3860,7 @@ export class OpenClawController {
           : deploymentError;
       const pending = status !== "failed";
       const code = pending
-        ? "PROVISIONING_DEPLOYMENT_PENDING"
+        ? PROVISIONING_DEPLOYMENT_PENDING
         : (error?.code ?? "PROVISIONING_DEPLOYMENT_FAILED");
       const message = pending
         ? "Waiting for the initial deployment to complete."
@@ -6667,11 +6766,368 @@ export class OpenClawController {
     });
   }
 
-  /**
-   * `resolveHarness` (the deploy route's resolver) lets the save refuse a Harness/mode
-   * mismatch and the Compute Driver's checks of the Agent against its Configuration, as
-   * deployment would. Without it only the Sandbox execution-mode rule runs.
-   */
+  private requireNetworkPolicyFacet(facet: SandboxFacet): void {
+    if (facet !== "networking") {
+      throw new ResourceStateConflictError(
+        `Agent policy editing is unsupported for the ${facet} facet.`,
+      );
+    }
+  }
+
+  async getAgentSandboxPolicy(
+    principalId: string,
+    namespaceId: string,
+    agentId: string,
+    facet: SandboxFacet,
+  ) {
+    this.requireNetworkPolicyFacet(facet);
+    await this.authorize(principalId, "read", { kind: "agent", id: agentId, namespaceId });
+    await this.authorize(principalId, "read", {
+      kind: "sandbox_policy",
+      id: `sbp_${agentId.slice(4)}`,
+      namespaceId,
+    });
+    return this.read(async (state) => {
+      await this.exactNamespace(state, namespaceId);
+      const agent = await state.agents.findAgent(namespaceId, agentId);
+      const policy = await state.sandboxPolicies.find(namespaceId, agentId);
+      if (agent === undefined || policy === undefined) {
+        throw new ScopeViolationError("The Agent policy is unavailable in this Namespace.");
+      }
+      const revision =
+        agent.activeRevisionId === undefined
+          ? undefined
+          : await state.revisions.findRevision(namespaceId, agentId, agent.activeRevisionId);
+      const driver = this.sandboxDriver();
+      const defaults =
+        revision?.sandboxPolicy?.defaults ??
+        driver?.admitNetworkPolicy?.([], policy.version).defaults ??
+        null;
+      return {
+        policy,
+        editingEnabled: agent.sandboxPolicyEditing === true,
+        capability: this.sandboxDriver()?.networkPolicy ?? null,
+        ceiling: this.sandboxNetworkPolicyCeiling,
+        defaults,
+        ...(revision?.sandboxPolicy === undefined ? {} : { defaultsRevisionId: revision.id }),
+      };
+    });
+  }
+
+  // TODO: Replace this temporary admission switch with the platform Guardrails primitive.
+  async TEMPORARY_API_WILL_BREAK_IN_FUTURE_setAgentSandboxPolicyEditing(
+    principalId: string,
+    namespaceId: string,
+    agentId: string,
+    facet: SandboxFacet,
+    enabled: boolean,
+  ): Promise<Readonly<Agent>> {
+    this.requireNetworkPolicyFacet(facet);
+    await this.authorize(principalId, "administer", {
+      kind: "installation",
+      id: this.installation.id,
+    });
+    await this.authorize(principalId, "administer", { kind: "agent", id: agentId, namespaceId });
+    return this.mutate(async (state) => {
+      await this.lockNamespace(state, namespaceId);
+      const agent = await state.agents.lockAgent(namespaceId, agentId);
+      if (agent === undefined || agent.status !== "active") {
+        throw new ResourceStateConflictError("The Agent is unavailable for policy configuration.");
+      }
+      const updated = await state.agents.setSandboxPolicyEditing(namespaceId, agentId, enabled);
+      if (updated === undefined) {
+        throw new ResourceStateConflictError("The Agent changed.");
+      }
+      return updated;
+    });
+  }
+
+  private admitAgentNetworkPolicy(
+    additions: readonly SandboxNetworkGrant[],
+    version: number,
+    defaults?: SandboxPolicySnapshot["defaults"],
+  ): SandboxPolicySnapshot {
+    try {
+      validateSandboxNetworkGrants(additions);
+    } catch {
+      throw new ScopeViolationError("Invalid sandbox network grants.");
+    }
+    if (!sandboxNetworkGrantsWithinCeiling(additions, this.sandboxNetworkPolicyCeiling)) {
+      throw new ResourceStateConflictError(
+        "The requested network grant exceeds the Installation delegation ceiling.",
+      );
+    }
+    const driver = this.sandboxDriver();
+    if (driver?.networkPolicy === undefined || driver.admitNetworkPolicy === undefined) {
+      throw new ResourceStateConflictError(
+        "The selected Sandbox Driver does not support per-Agent network policy.",
+      );
+    }
+    if (
+      additions.some(
+        (grant) =>
+          (!driver.networkPolicy!.wildcards && grant.host.startsWith("*.")) ||
+          (!driver.networkPolicy!.portRanges && grant.ports.some(({ from, to }) => from !== to)),
+      )
+    ) {
+      throw new ResourceStateConflictError(
+        "The Sandbox Driver does not support the requested host or port ranges.",
+      );
+    }
+    try {
+      return driver.admitNetworkPolicy(additions, version, defaults);
+    } catch {
+      throw new ResourceStateConflictError(
+        "The Sandbox Driver cannot enforce the complete requested policy.",
+      );
+    }
+  }
+
+  async updateAgentSandboxPolicy(
+    principalId: string,
+    namespaceId: string,
+    agentId: string,
+    facet: SandboxFacet,
+    expectedVersion: number,
+    additions: readonly SandboxNetworkGrant[],
+  ): Promise<Readonly<SandboxPolicy>> {
+    this.requireNetworkPolicyFacet(facet);
+    await this.authorize(principalId, "manage_policy", { kind: "agent", id: agentId, namespaceId });
+    await this.authorize(principalId, "update", {
+      kind: "sandbox_policy",
+      id: `sbp_${agentId.slice(4)}`,
+      namespaceId,
+    });
+    return this.mutate(async (state) => {
+      await this.lockNamespace(state, namespaceId);
+      const agent = await state.agents.lockAgent(namespaceId, agentId);
+      const previous = await state.sandboxPolicies.find(namespaceId, agentId);
+      if (agent?.status !== "active" || agent.sandboxPolicyEditing !== true) {
+        throw new ResourceStateConflictError("Policy editing is disabled for this Agent.");
+      }
+      if (
+        previous === undefined ||
+        previous.version !== expectedVersion ||
+        previous.application?.state === "pending"
+      ) {
+        throw new ResourceStateConflictError(
+          "The policy changed or an application is still pending. Reload before editing.",
+        );
+      }
+      this.admitAgentNetworkPolicy(additions, expectedVersion + 1);
+      const updated = await state.sandboxPolicies.save(
+        {
+          id: previous.id,
+          namespaceId,
+          agentId,
+          version: expectedVersion + 1,
+          additions,
+          ...(previous.applied === undefined ? {} : { applied: previous.applied }),
+        },
+        expectedVersion,
+      );
+      if (updated === undefined) {
+        throw new ResourceStateConflictError("The policy changed.");
+      }
+      return updated;
+    });
+  }
+
+  async applyAgentSandboxPolicy(
+    principalId: string,
+    namespaceId: string,
+    agentId: string,
+    facet: SandboxFacet,
+    expectedVersion: number,
+    revisionId: string,
+  ): Promise<Readonly<SandboxPolicy>> {
+    this.requireNetworkPolicyFacet(facet);
+    await this.authorize(principalId, "manage_policy", { kind: "agent", id: agentId, namespaceId });
+    await this.authorize(principalId, "update", {
+      kind: "sandbox_policy",
+      id: `sbp_${agentId.slice(4)}`,
+      namespaceId,
+    });
+    return this.mutate(async (state) => {
+      const namespace = await this.lockNamespace(state, namespaceId);
+      const agent = await state.agents.lockAgent(namespaceId, agentId);
+      const policy = await state.sandboxPolicies.find(namespaceId, agentId);
+      if (
+        namespace.status !== "ready" ||
+        agent?.status !== "active" ||
+        agent.sandboxPolicyEditing !== true ||
+        agent.desiredRuntimeState !== "running" ||
+        agent.activeRevisionId !== revisionId ||
+        policy?.version !== expectedVersion
+      ) {
+        throw new ResourceStateConflictError(
+          "The Agent, revision, editing setting, or policy changed. Reload before applying.",
+        );
+      }
+      if (policy.application?.state === "pending") {
+        throw new ResourceStateConflictError("A policy application is already pending.");
+      }
+      const driver = this.sandboxDriver();
+      const revision = await state.revisions.findRevision(namespaceId, agentId, revisionId);
+      if (
+        driver === undefined ||
+        revision?.sandboxPolicy === undefined ||
+        revision.sandboxDriverId !== driver.id ||
+        driver.networkPolicy?.live !== true ||
+        driver.applyNetworkPolicy === undefined ||
+        driver.observeNetworkPolicy === undefined
+      ) {
+        throw new ResourceStateConflictError(
+          "Live policy application is unavailable for this revision. Deploy explicitly to apply the saved policy.",
+        );
+      }
+      const snapshot = this.admitAgentNetworkPolicy(
+        policy.additions,
+        policy.version,
+        revision.sandboxPolicy.defaults,
+      );
+      const id = crypto.randomUUID();
+      const updated = await state.sandboxPolicies.save(
+        {
+          ...policy,
+          application: {
+            id,
+            revisionId,
+            policyVersion: policy.version,
+            snapshot,
+            state: "pending",
+            requestedBy: principalId,
+            requestedAt: this.timestamp(),
+          },
+        },
+        policy.version,
+      );
+      if (updated === undefined) {
+        throw new ResourceStateConflictError("The policy changed.");
+      }
+      await this.record(state, {
+        kind: "agent",
+        action: "reconcile",
+        target: "sandbox_policy",
+        namespaceId,
+        resourceId: agentId,
+        actorId: principalId,
+        operationId: id,
+      });
+      return updated;
+    });
+  }
+
+  async readAgentSandboxRecommendations(
+    principalId: string,
+    namespaceId: string,
+    agentId: string,
+    facet: SandboxFacet,
+    revisionId: string,
+    admitRead: (
+      read: () => Promise<SandboxPolicyRecommendations>,
+    ) => Promise<SandboxPolicyRecommendations>,
+  ): Promise<SandboxPolicyRecommendations> {
+    this.requireNetworkPolicyFacet(facet);
+    await this.authorize(principalId, "read", { kind: "agent", id: agentId, namespaceId });
+    await this.authorize(principalId, "read", {
+      kind: "sandbox_policy",
+      id: `sbp_${agentId.slice(4)}`,
+      namespaceId,
+    });
+    const binding = await this.read(async (state) => {
+      const namespace = await this.exactNamespace(state, namespaceId);
+      const revision = await state.revisions.findRevision(namespaceId, agentId, revisionId);
+      if (revision === undefined) {
+        throw new ScopeViolationError("The revision is outside this Agent.");
+      }
+      return { namespace, revision };
+    });
+    const driver = this.sandboxDriver();
+    if (
+      driver?.id !== binding.revision.sandboxDriverId ||
+      driver?.readPolicyRecommendations === undefined
+    ) {
+      throw new ResourceStateConflictError(
+        "Policy recommendations are unavailable for this revision.",
+      );
+    }
+    const readRecommendations = driver.readPolicyRecommendations.bind(driver);
+    return admitRead(async () => {
+      let result: SandboxPolicyRecommendations;
+      try {
+        const compute = this.selectedDriver("compute");
+        if (
+          compute.id !== binding.revision.compute.id ||
+          compute.implementation !== binding.revision.compute.implementation ||
+          compute.resolveSandboxNamespace === undefined
+        ) {
+          throw new Error("Revision placement is unavailable.");
+        }
+        const namespace = await compute.resolveSandboxNamespace(binding.namespace);
+        result = await readRecommendations(
+          { namespace, revision: binding.revision, signal: AbortSignal.timeout(15_000) },
+          32,
+        );
+      } catch {
+        throw new DependencyUnavailableError("Sandbox policy recommendations are unavailable.");
+      }
+      // Reconstruct the public projection: provider fields and full candidate policies never escape.
+      if (
+        result === null ||
+        typeof result !== "object" ||
+        !Array.isArray(result.recommendations) ||
+        result.recommendations.length > 32 ||
+        typeof result.truncated !== "boolean"
+      ) {
+        throw new DependencyUnavailableError("Invalid Sandbox recommendation response.");
+      }
+      const recommendations = result.recommendations.map((entry) => {
+        try {
+          validateSandboxNetworkGrants([entry?.grant]);
+        } catch {
+          throw new DependencyUnavailableError("Invalid Sandbox recommendation.");
+        }
+        if (
+          !/^[a-zA-Z0-9-]{1,128}$/.test(entry.id) ||
+          !["pending", "approved", "rejected"].includes(entry.status) ||
+          (entry.observations !== undefined &&
+            (!Number.isSafeInteger(entry.observations) || entry.observations < 0))
+        ) {
+          throw new DependencyUnavailableError("Invalid Sandbox recommendation.");
+        }
+        return {
+          id: entry.id,
+          status: entry.status,
+          grant: {
+            id: entry.grant.id,
+            binary: entry.grant.binary,
+            host: entry.grant.host,
+            ports: entry.grant.ports.map(({ from, to }: { from: number; to: number }) => ({
+              from,
+              to,
+            })),
+          },
+          ...(entry.observations === undefined ? {} : { observations: entry.observations }),
+        };
+      });
+      if (
+        result.providerVersion !== undefined &&
+        (typeof result.providerVersion !== "string" ||
+          !/^[A-Za-z0-9_.:-]{1,128}$/.test(result.providerVersion))
+      ) {
+        throw new DependencyUnavailableError("Invalid Sandbox recommendation version.");
+      }
+      return immutableCopy({
+        recommendations,
+        truncated: result.truncated,
+        ...(result.providerVersion === undefined
+          ? {}
+          : { providerVersion: result.providerVersion }),
+      });
+    });
+  }
+
   async createAgent(
     principalId: string,
     input: CreateAgentInput,
@@ -6795,7 +7251,84 @@ export class OpenClawController {
     });
   }
 
+  /**
+   * Create Agent's preflight, for a Configuration the caller has not saved yet: createConfiguration's
+   * content rules, then createAgent's checks of plugin selections and initial workspace files
+   * against those values, with their messages, under createAgent's `agent:create` check. A
+   * refusal is reported before the caller saves its Secret or Configuration. It writes nothing.
+   * Checks that need saved resources (Secret bindings, Harness authentication and credential
+   * sources) or live repository policy stay with those writes.
+   * `resolveHarness` as in createAgent.
+   */
+  async validateAgentCreate(
+    principalId: string,
+    input: ValidateAgentCreateInput,
+    resolveHarness?: HarnessResolver,
+  ): Promise<void> {
+    let initialWorkspaceFiles: InitialWorkspaceFiles | undefined;
+    try {
+      initialWorkspaceFiles = normalizeInitialWorkspaceFiles(input.initialWorkspaceFiles);
+    } catch {
+      throw new ScopeViolationError("The initial workspace setup input is invalid.");
+    }
+    const executionMode = input.executionMode ?? "embedded";
+    if (!validExecutionMode(executionMode)) {
+      throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
+    }
+    const plugins = normalizeAgentPlugins(input.plugins);
+    const pluginApprovers = normalizeAgentPluginApprovers(input.pluginApprovers);
+    this.namespaceIdentity(input.namespaceId);
+    await this.authorize(principalId, "create", {
+      kind: "agent",
+      id: input.namespaceId,
+      namespaceId: input.namespaceId,
+    });
+    await this.read(async (state) => {
+      const namespace = await this.exactNamespace(state, input.namespaceId);
+      if (namespace.status !== "provisioning" && namespace.status !== "ready") {
+        throw new ResourceStateConflictError("The Namespace does not accept new Agents.");
+      }
+      if (input.configuration?.kind !== "agent") {
+        throw new ScopeViolationError("The Configuration kind must identify an Agent.");
+      }
+      const values = frozenValues(input.configuration.values);
+      // The form saves the Configuration first, so its content rules answer first, in
+      // createConfiguration's order.
+      await this.configurationDriver().validateSize?.(values);
+      this.validateConfigurationContent(values);
+      this.validatePluginPolicies(plugins, pluginApprovers);
+      // Shaped like the saved Configuration createAgent reads; only its values are checked.
+      const configuration: () => Promise<Readonly<Configuration>> = async () =>
+        Object.freeze({
+          id: "cfg_00000000-0000-4000-8000-000000000000",
+          namespaceId: namespace.id,
+          kind: "agent" as const,
+          generation: 1,
+          values,
+          createdAt: this.timestamp(),
+        });
+      await this.validateSavedPluginConfiguration(plugins, configuration);
+      await this.validateSavedAgentTopology(
+        state,
+        resolveHarness,
+        {
+          namespaceId: namespace.id,
+          executionMode,
+          harnessAuth: null,
+          repositoryBindings: undefined,
+          workspaceSetup: initialWorkspaceFiles !== undefined,
+        },
+        configuration,
+      );
+    });
+  }
+
   /** `resolveHarness` as in createAgent. */
+  /**
+   * `resolveHarness` (the deploy route's resolver) lets the save refuse a Harness/mode
+   * mismatch and the Compute Driver's checks of the Agent against its Configuration, as
+   * deployment would. Without it only the Sandbox execution-mode rule runs.
+   */
   async updateAgent(
     principalId: string,
     input: UpdateAgentInput,
@@ -7295,6 +7828,23 @@ export class OpenClawController {
       }
       // PostgreSQL restamps createdAt on its own clock; the response carries the stored value.
       // The repository credential deadline above stays on this controller's clock.
+      const policy = await state.sandboxPolicies.find(namespace.id, lockedAgent.id);
+      const sandboxPolicy =
+        (policy?.additions.length ?? 0) > 0
+          ? this.admitAgentNetworkPolicy(policy!.additions, policy!.version)
+          : sandbox?.admitNetworkPolicy?.([], policy?.version ?? 1);
+      if ((policy?.additions.length ?? 0) > 0 && sandboxPolicy === undefined) {
+        throw new ResourceStateConflictError(
+          "The selected Sandbox Driver cannot enforce this Agent's network policy.",
+        );
+      }
+      if (policy !== undefined && policy.additions.length > 0) {
+        await this.authorize(principalId, "read", {
+          kind: "sandbox_policy",
+          id: policy.id,
+          namespaceId: namespace.id,
+        });
+      }
       const revisionDraft: AgentRevision = {
         id: this.nextIdentifier("agent_revision"),
         namespaceId: namespace.id,
@@ -7308,6 +7858,7 @@ export class OpenClawController {
         harness: revisionHarness,
         compute: { id: compute.id, implementation: compute.implementation },
         ...(sandbox === undefined ? {} : { sandboxDriverId: sandbox.id }),
+        ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
         ...(secretDriver === undefined ? {} : { secretDriverId: secretDriver.id, secretBindings }),
         ...(pluginState === undefined ? {} : { plugins: pluginState }),
         ...(lockedAgent.pluginApprovers === undefined
@@ -10597,6 +11148,17 @@ export class OpenClawController {
         }
         return;
       }
+      if (resourceKind === "sandbox_policy") {
+        const agentId = `agt_${resourceId.slice(4)}`;
+        const policy = await state.sandboxPolicies.find(namespaceId, agentId);
+        if (policy?.id !== resourceId) {
+          throw new IAMPolicyValidationError(
+            "/resourceId",
+            "The SandboxPolicy does not belong to the Namespace.",
+          );
+        }
+        return;
+      }
       if (resourceKind === "agent_revision") {
         const agents = await state.agents.listAgents(namespaceId);
         for (const agent of agents) {
@@ -10858,7 +11420,7 @@ export class OpenClawController {
   // with deployment: an unapproved Harness runtime, and Harness authentication through a
   // ServiceAccount (issued credential) or a credential source (its state and type).
   private async validateSavedAgentTopology(
-    state: PlatformUnitOfWork,
+    state: PlatformReadView,
     resolveHarness: HarnessResolver | undefined,
     agent: {
       readonly namespaceId: string;
@@ -10920,7 +11482,7 @@ export class OpenClawController {
   // operator-managed runtime, or a Secret (its record names the Secret Driver). Undefined for
   // every other binding, and for a Secret that is gone, which deployment refuses.
   private async savedHarnessAuthSnapshot(
-    state: PlatformUnitOfWork,
+    state: PlatformReadView,
     namespaceId: string,
     binding: HarnessAuthBinding | null,
   ): Promise<HarnessAuthSnapshot | undefined> {
@@ -11262,6 +11824,7 @@ export class OpenClawController {
       agent: "agt",
       agent_revision: "rev",
       credential_source: "cs",
+      sandbox_policy: "sbp",
     };
     const result = this.identifier
       ? this.identifier(kind)

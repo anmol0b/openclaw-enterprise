@@ -11,6 +11,8 @@ import { promisify } from "node:util";
 import {
   createKubernetesInstallationConfiguration,
   createRealKubernetesFixture,
+  diagnosticDeadlineMs,
+  withinDiagnosticDeadline,
 } from "./kubernetes-real.mjs";
 
 const execute = promisify(execFile);
@@ -40,6 +42,164 @@ const requiredWorkspaceMounts = Object.freeze([
   },
   { subPath: "workspace", mountPath: "/sandbox/enterprise", readOnly: false },
 ]);
+
+// The OpenShell proof's installation cleanups, each its own registration on a bounded teardown
+// context (finding 1711), so a worker stop that never settles cannot keep the later ones from
+// running. Operations are closures, so resources the proof assigns later are read at cleanup
+// time. They run last-registered first: the worker stops before what it uses goes away.
+export const openShellInstallationCleanupOrder = Object.freeze([
+  "workerStop",
+  "portForwards",
+  "productionApp",
+  "observerPool",
+  "workloadNamespace",
+  "temporaryDirectory",
+]);
+
+export function registerOpenShellInstallationCleanups(context, operations) {
+  let stopped;
+  for (const name of [...openShellInstallationCleanupOrder].reverse()) {
+    const operation = operations[name];
+    assert.equal(typeof operation, "function", `OpenShell installation cleanup ${name}`);
+    // Named for the teardown log: every registration comes from this line. Registered after its
+    // test's teardown, each runs at once and throws to stop the setup; register them all first.
+    try {
+      context.after({ [name]: () => operation() }[name]);
+    } catch (error) {
+      stopped ??= error;
+    }
+  }
+  if (stopped !== undefined) {
+    throw stopped;
+  }
+}
+
+// One poll of the gateway-outage proof: the revision's work back in `queued` after a pass, then
+// the deployment's status. A pass that waited on the gateway (`last_attempt_code`
+// SANDBOX_GATEWAY_UNAVAILABLE) gives its attempt back (finding 2040); any other failed pass keeps
+// it, so the proof can still see, and then reject, one. The worker can claim the work again
+// between the two reads, and a live lease reads as `running`, so that pair is read again; any
+// other status ends the wait for the proof to assert on, so a revision that failed or activated
+// during the outage still fails it (finding 1846).
+export function outageAttemptRead({ readWork, readStatus }) {
+  return async () => {
+    const work = await readWork();
+    if (
+      work?.state !== "queued" ||
+      (work.attempt_count < 1 && work.last_attempt_code !== "SANDBOX_GATEWAY_UNAVAILABLE")
+    ) {
+      return undefined;
+    }
+    const status = await readStatus();
+    return status === "running" ? undefined : { work, status };
+  };
+}
+
+// Finding 2017: after the gateway outage the held deployment can end failed_permanent with
+// RUNTIME_LOGIN_FAILED. The proof reads why near the failure, before its refresh checks take
+// minutes and the failed revision's Pods go: `readWorker` gives the worker's events and persisted
+// state, and `describe(worker)` the revision's Pods with the Gateway, Harness and OpenShell
+// supervisor log tails. Each read stops at the diagnostic deadline, and one that fails or stalls
+// only says so: it never replaces the failure it explains. The text is written to stderr, added
+// to `failure`'s message when the wait itself failed, and returned for the assertion.
+export async function failedRecoveryDiagnostic(
+  { readWorker, describe, failure, write = (text) => process.stderr.write(text) },
+  { timeoutMs = diagnosticDeadlineMs } = {},
+) {
+  // A worker read that failed or stalled gives `describe` no worker (an undefined timedOut
+  // would fall back to the deadline's default text).
+  const read = await withinDiagnosticDeadline(
+    () =>
+      Promise.resolve()
+        .then(readWorker)
+        .catch(() => null),
+    { timeoutMs, timedOut: null },
+  );
+  const worker = typeof read === "object" && read !== null ? read : undefined;
+  const detail = await withinDiagnosticDeadline(
+    () =>
+      Promise.resolve()
+        .then(() => describe(worker))
+        .catch((error) => `\nRecovery diagnostic unavailable: ${error?.name ?? "Error"}`),
+    { timeoutMs, timedOut: `\nRecovery diagnostic timed out after ${timeoutMs / 1_000} s` },
+  );
+  write(`OpenShell integration: gateway outage recovery failed.${detail}\n`);
+  if (failure instanceof Error) {
+    failure.message = `${failure.message}${detail}`;
+  }
+  return detail;
+}
+
+// The real model's final answer when its provider has no capacity for the selected model; the
+// turn script prints it as its error, and kubectl's failure carries it on stderr (finding 1946).
+const modelAtCapacity = /^Error: Selected model is at capacity\./m;
+
+// The in-Pod client's positive receipt that a turn is safe to run again: our own turn's final
+// error was the at-capacity answer, before the turn began any action. The client exits with
+// this status and writes exactly this to stdout only then; stderr stays diagnostic, so nothing
+// in it (or a truncated copy of it) can authorize another turn.
+const modelAtCapacityExitCode = 75;
+const modelAtCapacityReceipt = "occ-codex-turn: retry-safe: model at capacity before any action";
+
+// "retry" with the client's exact receipt; "unsafe" when stderr shows the at-capacity answer
+// without it; undefined for any other failure.
+export function modelAtCapacityOutcome(error) {
+  if (error?.code === modelAtCapacityExitCode && error?.stdout === modelAtCapacityReceipt) {
+    return "retry";
+  }
+  return modelAtCapacity.test(String(error?.stderr ?? "")) ? "unsafe" : undefined;
+}
+
+// Runs a real-model Codex turn, and runs it again, a bounded number of times, when the model
+// answered only that it is at capacity before the turn began any action: an upstream
+// condition, not the product's. A turn that had begun a command keeps its unknown outcome and
+// is never run again. Either way an at-capacity failure says so on its first line, since the
+// kubectl failure itself starts with the command line; any other failure is thrown at once.
+export async function retryModelAtCapacity(
+  turn,
+  {
+    attempts = 3,
+    firstDelayMs = 15_000,
+    sleep = delay,
+    log = (message) => process.stderr.write(`${message}\n`),
+  } = {},
+) {
+  // Keeps kubectl's output and exit code for callers that read them.
+  const atCapacity = (line, error) =>
+    Object.assign(new Error(`${line}\n${error.message}`, { cause: error }), {
+      stdout: error.stdout,
+      stderr: error.stderr,
+      code: error.code,
+    });
+  let delayMs = firstDelayMs;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await turn();
+    } catch (error) {
+      const outcome = modelAtCapacityOutcome(error);
+      if (outcome === undefined) {
+        throw error;
+      }
+      if (outcome === "unsafe") {
+        throw atCapacity(
+          `The real model was at capacity ("Selected model is at capacity"), but the turn's client gave no receipt that it is safe to run again (it may have begun an action), so it is not run again (attempt ${attempt}/${attempts}).`,
+          error,
+        );
+      }
+      if (attempt >= attempts) {
+        throw atCapacity(
+          `The real model was at capacity on all ${attempts} turn attempts ("Selected model is at capacity").`,
+          error,
+        );
+      }
+      log(
+        `The real model was at capacity before the turn began any action; retrying the turn in ${delayMs} ms (attempt ${attempt + 1}/${attempts})`,
+      );
+      await sleep(delayMs);
+      delayMs *= 2;
+    }
+  }
+}
 
 export function openshellHash(value, length = 12) {
   return sha256Hex(value, length);
@@ -211,6 +371,14 @@ export function createOpenShellInstallationConfiguration({
     id: "credential-gateway-openshell-kubernetes",
     configuration: { binaries: [...openshellCodexBinaries] },
   };
+  configuration.sandboxNetworkPolicyCeiling = [
+    {
+      id: "python-demo",
+      binary: "/usr/bin/python3.11",
+      host: "example.org",
+      ports: [{ from: 443, to: 443 }],
+    },
+  ];
   configuration.drivers.sandbox = {
     id: "sandbox-openshell-kubernetes",
     configuration: {
@@ -464,6 +632,11 @@ export function createOpenShellKubernetesFixture({
   kubernetesContext,
   gatewayImage,
   codexImage,
+  // How long a Codex turn observes a command still running when the turn completes. A suite
+  // whose probe commands bound themselves (curl --max-time) passes that bound plus a margin.
+  codexCommandGraceMs = 5_000,
+  // Options for retryModelAtCapacity: a test's fake model reply passes a short delay.
+  modelAtCapacityRetry = {},
   databaseUrl,
   openShellGatewayImage,
   openShellSandboxImage,
@@ -481,6 +654,12 @@ export function createOpenShellKubernetesFixture({
     codexImage,
     databaseUrl,
   });
+  assert.ok(
+    Number.isSafeInteger(codexCommandGraceMs) &&
+      codexCommandGraceMs > 0 &&
+      codexCommandGraceMs <= 60_000,
+    "codexCommandGraceMs must be a positive number of milliseconds, at most 60 s.",
+  );
 
   async function kubectl(...args) {
     return base.kubectl(...args);
@@ -1128,16 +1307,25 @@ export function createOpenShellKubernetesFixture({
           ? "process.env.APP_SERVER_TOKEN"
           : `require("node:fs").readFileSync(${JSON.stringify(appServerTokenPath)}, "utf8")`
       };
-      const timeout = setTimeout(() => fail(new Error("Codex harness turn timed out")), 300000);
+      // While a command's terminal is awaited, running out of time leaves its outcome unknown.
+      const timeout = setTimeout(() => commandDeadline ? unknownCommandOutcome() : fail(new Error("Codex harness turn timed out")), 300000);
       const pending = new Map();
       const items = [];
       const pendingCommands = new Map();
-      let threadId, turnId, commandDeadline;
+      let threadId, turnId, commandDeadline, turnCompletedAt;
+      // A final error that ended the turn while a command ran: reported once that command's
+      // terminal is observed, or with the outcome unknown when the grace expires first.
+      let finalError;
+      // Start time and output volume of each command, never its output.
+      const commandTimes = new Map();
       let nextId = 1;
       let assistant = "";
       let finished = false;
       let failedCommands = 0;
       let approvalRequests = 0;
+      // Whether the turn began anything that can act: a command, file change, tool call or
+      // approval. Only a turn that failed before any of these is safe to run again.
+      let actionSeen = false;
       const sandboxSignals = new Set();
 
       function rememberFailureSignals(message) {
@@ -1170,21 +1358,64 @@ export function createOpenShellKubernetesFixture({
         }
       }
 
-      function fail(error) {
+      // Timing of commands still running, so an unknown outcome says how long it waited.
+      function pendingCommandTimes() {
+        const now = performance.now();
+        return [...pendingCommands.keys()].map((id) => {
+          const { startedAt, deltas = 0, bytes = 0 } = commandTimes.get(id) ?? {};
+          return {
+            startedBeforeTurnEndMs: startedAt !== undefined && turnCompletedAt !== undefined
+              ? Math.floor(turnCompletedAt - startedAt) : null,
+            runningMs: startedAt === undefined ? null : Math.floor(now - startedAt),
+            outputDeltas: deltas,
+            outputBytes: bytes,
+          };
+        });
+      }
+
+      // Diagnostics only: the caller never decides from stderr whether to run the turn again.
+      function writeFailure(error, retrySafe) {
         clearTimeout(timeout);
         process.stderr.write(error?.stack || String(error));
         process.stderr.write("\nNative execution summary: " + JSON.stringify({
           failedCommands, approvalRequests, sandboxSignals: [...sandboxSignals],
+          commandGraceMs: ${codexCommandGraceMs},
+          sinceTurnEndMs: turnCompletedAt === undefined ? null : Math.floor(performance.now() - turnCompletedAt),
+          retrySafe,
+          pendingCommands: pendingCommandTimes(),
         }));
+      }
+
+      function fail(error) {
+        writeFailure(error, false);
         process.exit(1);
       }
 
+      // The only way the caller may run this turn again: a dedicated exit status and an exact
+      // stdout receipt, for our own turn's final at-capacity error before any action.
+      function failRetrySafe(error) {
+        finished = true;
+        writeFailure(error, true);
+        process.stdout.write(${JSON.stringify(modelAtCapacityReceipt)}, () => process.exit(${modelAtCapacityExitCode}));
+      }
+
       function unknownCommandOutcome() {
-        fail(new Error("Codex command outcome is unknown; not sending another turn"));
+        const unknown = "Codex command outcome is unknown; not sending another turn";
+        fail(new Error(finalError === undefined ? unknown : finalError.message + "\n" + unknown));
+      }
+
+      function waitForCommandDeadline() {
+        // A timer can wake early. Keep the deadline anchored to the end of the turn.
+        const remaining = turnCompletedAt + ${codexCommandGraceMs} - performance.now();
+        if (remaining <= 0) return unknownCommandOutcome();
+        commandDeadline = setTimeout(waitForCommandDeadline, Math.ceil(remaining));
       }
 
       function finish() {
         clearTimeout(commandDeadline);
+        // The turn failed while a command ran; that command's terminal is now observed (and
+        // counted in the summary), and the turn still fails.
+        if (finalError !== undefined) return fail(finalError);
         finished = true;
         clearTimeout(timeout);
         // Exit once the result is flushed. Through the OpenShell service route the WebSocket
@@ -1252,6 +1483,11 @@ export function createOpenShellKubernetesFixture({
         if (${JSON.stringify(readThreadId)} !== undefined && message.id === undefined) return;
         const { method, params } = message;
         const item = params?.item;
+        // Any server request (an approval of any API version) counts as an action too.
+        if ((item?.type !== undefined && !["userMessage", "agentMessage", "reasoning"].includes(item.type)) ||
+            (message.id !== undefined && method !== undefined) || String(method).endsWith("/outputDelta")) {
+          actionSeen = true;
+        }
         const decline = message.id !== undefined && (
           method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval"
         );
@@ -1264,6 +1500,12 @@ export function createOpenShellKubernetesFixture({
         if (!commandDeadline && commandEvent && !command) return unknownCommandOutcome();
         const starting = method === "item/started" && command;
         const ending = method === "item/completed" && command;
+        if (method === "item/commandExecution/outputDelta" && params?.turnId === turnId &&
+            commandTimes.has(params.itemId)) {
+          const time = commandTimes.get(params.itemId);
+          time.deltas += 1;
+          time.bytes += typeof params.delta === "string" ? params.delta.length : 0;
+        }
         if (commandDeadline) {
           if (starting) return unknownCommandOutcome();
           if (ending) {
@@ -1277,7 +1519,10 @@ export function createOpenShellKubernetesFixture({
         }
         rememberFailureSignals(message);
         items.push(message);
-        if (starting) pendingCommands.set(item.id, item.command);
+        if (starting) {
+          pendingCommands.set(item.id, item.command);
+          commandTimes.set(item.id, { startedAt: performance.now(), deltas: 0, bytes: 0 });
+        }
         if (ending) {
           pendingCommands.delete(item.id);
           if (commandDeadline && !pendingCommands.size) finish();
@@ -1308,14 +1553,32 @@ export function createOpenShellKubernetesFixture({
             fail(new Error("Codex harness turn did not complete successfully"));
             return;
           }
-          // A command can outlive its turn. Briefly observe only its original socket;
-          // the overall turn deadline still applies. Never extend either deadline on activity.
-          if (pendingCommands.size) commandDeadline = setTimeout(unknownCommandOutcome, 5_000);
+          // A command can outlive its turn: Codex returns a long command to the model, which
+          // may reply before it ends. Observe only its original socket until its completion
+          // event or the fixture's bound; the overall turn deadline still applies. Never extend
+          // either deadline on activity.
+          turnCompletedAt = performance.now();
+          if (pendingCommands.size) waitForCommandDeadline();
           else finish();
         } else if (message.method === "error" && message.params?.willRetry !== true) {
           // Codex reports retried model reconnects as errors; only a final error ends the turn,
           // and turn/completed still requires a completed status.
-          fail(new Error(message.params?.error?.message || "Codex harness turn failed"));
+          const error = new Error(message.params?.error?.message || "Codex harness turn failed");
+          if (pendingCommands.size) {
+            // A command already started: observe its original socket for its terminal, within
+            // the same bound as after turn/completed, so the failure keeps that evidence.
+            finalError = error;
+            turnCompletedAt = performance.now();
+            waitForCommandDeadline();
+            return;
+          }
+          // Only our own turn's final at-capacity error, before any action, is safe to run again.
+          const ours = typeof threadId === "string" && typeof turnId === "string" &&
+            params?.threadId === threadId && params?.turnId === turnId && params?.willRetry === false;
+          if (ours && !actionSeen && /^Selected model is at capacity\./.test(error.message)) {
+            return failRetrySafe(error);
+          }
+          fail(error);
         }
       });
       socket.addEventListener("error", () => {
@@ -1331,16 +1594,20 @@ export function createOpenShellKubernetesFixture({
     `;
     const containerArguments = container === undefined ? [] : ["--container", container];
     return JSON.parse(
-      await kubectl(
-        "exec",
-        pod,
-        "--namespace",
-        namespace,
-        ...containerArguments,
-        "--",
-        "node",
-        "-e",
-        script,
+      await retryModelAtCapacity(
+        () =>
+          kubectl(
+            "exec",
+            pod,
+            "--namespace",
+            namespace,
+            ...containerArguments,
+            "--",
+            "node",
+            "-e",
+            script,
+          ),
+        modelAtCapacityRetry,
       ),
     );
   }

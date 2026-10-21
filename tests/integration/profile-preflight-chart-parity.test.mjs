@@ -12,6 +12,10 @@ import { createKubernetesComputeDriver } from "../../apps/controller/src/drivers
 import { conformanceKubernetesOptions } from "../helpers/kubernetes-compute.mjs";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
 import { immutableImageAccepted, imageReferenceCases } from "../fixtures/image-reference-cases.mjs";
+import {
+  RenderRefusal,
+  renderInstallationProfile,
+} from "../../scripts/render-installation-profile.mjs";
 
 // Each case runs through the profile preflight and through `helm template`, so the
 // renderer cannot accept a value the chart then refuses (or refuse one it accepts).
@@ -102,9 +106,10 @@ const namespaceRefusal = (field) =>
     `${escape(field)} must be a Kubernetes namespace name \\(a DNS label of at most 63 characters\\)`,
   );
 
-// Each case spawns its renderer and helm children in turn. A test runs its cases in at most
-// one worker per CPU (and at least two), and the tests run one after another, so this file
-// runs at most that many children at once (the CI lane may run other files beside it).
+// Each case renders its profile in-process, then spawns its helm child. A test runs its
+// cases in at most one worker per CPU (and at least two), and the tests run one after
+// another, so this file runs at most that many helm children at once (the CI lane may run
+// other files beside it).
 const slots = Math.max(2, availableParallelism());
 async function each(cases, check) {
   let next = 0;
@@ -126,9 +131,16 @@ async function each(cases, check) {
   }
 }
 
+// Runs one `helm template`. Each run exits within a fraction of a second, so Go's garbage
+// collector only adds CPU: GOGC=off cuts about a quarter of helm's CPU time for under 10 MB
+// more peak memory per child. GOMEMLIMIT still collects if a child nears 512 MiB.
 function run(command, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: repository, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, {
+      cwd: repository,
+      env: { ...process.env, GOGC: "off", GOMEMLIMIT: "512MiB" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
@@ -140,19 +152,28 @@ function run(command, args) {
   });
 }
 
+// Renders in-process through the function the CLI calls. `renderer.output` is what the CLI
+// prints: the preflight summary on stdout, or its stderr line for a refusal without one.
+// profile-renderer.test.mjs covers the CLI process itself (argv, exit status, stdout).
 async function renderProfile(profileInput, profile = "openclaw") {
   const directory = mkdtempSync(join(tmpdir(), "oce-profile-parity-"));
   try {
     writeFileSync(join(directory, "input.json"), JSON.stringify(profileInput));
-    const renderer = await run(process.execPath, [
-      "scripts/render-installation-profile.mjs",
-      "--profile",
-      profile,
-      "--input",
-      join(directory, "input.json"),
-      "--out-dir",
-      directory,
-    ]);
+    let renderer;
+    try {
+      const preflight = await renderInstallationProfile({
+        profile,
+        input: join(directory, "input.json"),
+        outDir: directory,
+      });
+      renderer = { ok: preflight.ok, output: `${JSON.stringify(preflight, null, 2)}\n` };
+    } catch (error) {
+      // Only a refusal is a verdict; a renderer crash fails the case.
+      if (!(error instanceof RenderRefusal)) {
+        throw error;
+      }
+      renderer = { ok: false, output: `render-installation-profile: ${error.message}\n` };
+    }
     return { directory, renderer };
   } catch (error) {
     rmSync(directory, { recursive: true, force: true });
@@ -1310,9 +1331,18 @@ test(
       for (const mountPath of [
         undefined,
         "/etc/company/postgres-ca",
+        "etc/company/postgres-ca",
+        "/etc/openclaw/./installation",
+        "/etc/openclaw/database-ca/../installation",
+        "/etc/openclaw/installation/",
+        "etc/openclaw/installation",
         "/etc/openclaw/execution", // Profiles do not enable executionCluster mounts.
         "/etc/openclaw/installation",
         "/run/openclaw-worker",
+        "/var/run/openclaw-worker", // The controller image links /var/run to /run.
+        "/var/run/../var/lib/openclaw/bootstrap", // Dot segments apply after the link.
+        "/var/lock/../openclaw-worker", // The image links /var/lock to /run/lock, so this is /run.
+        "/run/lock/../openclaw-worker",
         "/var/lib/openclaw/bootstrap",
         "/etc/openclaw/gateway-api-key",
         "/etc/openclaw/gateway-ca",
@@ -1330,7 +1360,11 @@ test(
           values: { database: { caSecretName: "occ-db-ca", caMountPath: mountPath } },
           accepted:
             mountPath === undefined ||
-            ["/etc/company/postgres-ca", "/etc/openclaw/execution"].includes(mountPath),
+            [
+              "/etc/company/postgres-ca",
+              "etc/company/postgres-ca",
+              "/etc/openclaw/execution",
+            ].includes(mountPath),
           chartError,
         });
       }
@@ -1340,7 +1374,9 @@ test(
         "/etc/openclaw/repository-registry",
         "/etc/openclaw/repository-ca",
         "/var/run/secrets/kubernetes.io/serviceaccount",
+        "/run/secrets/kubernetes.io/serviceaccount",
         "/run/openclaw/repository-control",
+        "/var/run/openclaw/repository-control",
         "/etc/openclaw/repository-inputs", // Broker-only mounts cannot collide with its absent CA.
       ]) {
         for (const enabled of [false, true]) {

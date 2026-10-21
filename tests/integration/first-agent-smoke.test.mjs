@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 
 import { GATEWAY_STOP_TIMEOUT_MS } from "../../apps/controller/src/drivers/compute/kubernetes/runtime-entrypoints.ts";
@@ -6,7 +9,9 @@ import {
   STOP_PHASE_TIMEOUT_MS,
   agentStopDiagnostic,
   observeAgentStop,
+  smokeSlotNames,
   waitFor,
+  watchCluster,
 } from "../../scripts/ci/first-agent-smoke.mjs";
 
 const revision = "rev_00000000-0000-4000-8000-000000000001";
@@ -233,4 +238,81 @@ test("diagnostics project only fixed lifecycle fields", async () => {
     activeRevisionId: "invalid",
     status: "unknown",
   });
+});
+
+// Run the real watcher with real timers and no cluster. A `k3d` stand-in on PATH
+// records each lookup and fails, as it does once `occ dev up` deletes its cluster.
+async function withRecordedK3d(operation) {
+  const directory = await mkdtemp(join(tmpdir(), "first-agent-smoke-k3d-"));
+  const calls = join(directory, "calls");
+  await writeFile(join(directory, "k3d"), `#!/bin/sh\necho "$@" >> '${calls}'\nexit 1\n`, {
+    mode: 0o755,
+  });
+  const path = process.env.PATH;
+  process.env.PATH = `${directory}${delimiter}${path}`;
+  try {
+    const started = Date.now();
+    await operation();
+    return {
+      seconds: (Date.now() - started) / 1000,
+      calls: await readFile(calls, "utf8").catch(() => ""),
+    };
+  } finally {
+    process.env.PATH = path;
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("a successful setup stops an idle watcher at once without another capture", async () => {
+  const { seconds, calls } = await withRecordedK3d(() => watchCluster()());
+  // The watcher idles for 30 seconds between captures; stopping must not wait for one.
+  assert.ok(seconds < 5, `stop took ${seconds}s`);
+  assert.equal(calls, "");
+});
+
+test("a failed setup stops the watcher at once with one final capture", async () => {
+  const { seconds, calls } = await withRecordedK3d(() => watchCluster()({ finalCapture: true }));
+  // The final snapshot keeps diagnostics for the failure without the idle wait.
+  assert.ok(seconds < 5, `stop took ${seconds}s`);
+  const { cluster } = smokeSlotNames(process.env.OCC_FIRST_AGENT_SMOKE_SLOT);
+  assert.equal(calls, `kubeconfig get ${cluster}\n`);
+});
+
+test("smoke slots keep CI's names at slot 0 and give other slots distinct host resources", () => {
+  const ci = {
+    cluster: "occ-dev-first-agent-smoke",
+    registryContainer: "oce-first-agent-smoke-registry",
+    registry: "127.0.0.1:5000",
+    model: "oce-first-agent-smoke-model",
+    subnet: "11.111.0.0/29",
+    modelAddress: "11.111.0.2",
+    nodeModelAddress: "11.111.0.3",
+  };
+  for (const unset of [undefined, "", "0"]) {
+    assert.deepEqual(smokeSlotNames(unset), ci);
+  }
+  assert.deepEqual(smokeSlotNames("2"), {
+    cluster: "occ-dev-smoke-s2",
+    registryContainer: "oce-smoke-s2-registry",
+    registry: "127.0.0.1:15002",
+    model: "oce-smoke-s2-model",
+    subnet: "11.111.0.16/29",
+    modelAddress: "11.111.0.18",
+    nodeModelAddress: "11.111.0.19",
+  });
+  assert.equal(smokeSlotNames("31").subnet, "11.111.0.248/29");
+  const slots = Array.from({ length: 32 }, (_, slot) => smokeSlotNames(String(slot)));
+  for (const field of Object.keys(ci)) {
+    assert.equal(new Set(slots.map((names) => names[field])).size, 32, field);
+  }
+});
+
+test("a malformed or out-of-range smoke slot fails with the setting's name", () => {
+  for (const value of ["-1", "32", "100", "01", "1.5", " 1", "1 ", "0x1", "one"]) {
+    assert.throws(
+      () => smokeSlotNames(value),
+      /^Error: OCC_FIRST_AGENT_SMOKE_SLOT must be an integer from 0 to 31, got /,
+      value,
+    );
+  }
 });

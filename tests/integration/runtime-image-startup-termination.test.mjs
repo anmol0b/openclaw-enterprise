@@ -3,18 +3,8 @@
 // probes. Both files start the wrapper through the same scenario helper.
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  failureInputLimit,
-  failureSecrets,
-  redactOutputLines,
-} from "../../scripts/ci/failure-redaction.mjs";
 import { imageSmokeTimeoutMultiplier } from "../helpers/image-smoke-timeout.mjs";
-import {
-  imageTestOptions,
-  runDocker,
-  failureTail,
-  failureOutputLimit,
-} from "../helpers/runtime-image-startup.mjs";
+import { imageTestOptions, runDocker, failureTail } from "../helpers/runtime-image-startup.mjs";
 import {
   runStartupProbeScenario,
   observedValue,
@@ -35,18 +25,18 @@ import {
 const promptTerminationMs = 15_000;
 
 // Sends SIGTERM as the kubelet does and measures how long the container takes
-// to stop. Container exit ends its PID namespace, so no child outlives it.
-async function assertPromptTermination(t, { containerName, collect, wrapper }, description, phase) {
+// to stop (the scenario follows its exit with `docker wait`). Container exit
+// ends its PID namespace, so no child outlives it.
+async function assertPromptTermination(t, { containerName, collect, exited }, description, phase) {
   const budgetMs = promptTerminationMs * imageSmokeTimeoutMultiplier;
   const signalledAt = Date.now();
   await runDocker(["kill", "--signal", "TERM", containerName]);
-  const deadline = signalledAt + budgetMs;
-  let state = await collect();
-  while (state.running && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    state = await collect();
-  }
-  const elapsedMs = Date.now() - signalledAt;
+  const exitedAt = await exited(signalledAt + budgetMs);
+  // An exit not seen by the deadline counts as the budget, not the inspect after it.
+  const elapsedMs = exitedAt === undefined ? budgetMs : exitedAt - signalledAt;
+  const state = await collect();
+  // An exit found later than the budget, or not at all by the deadline, is not prompt.
+  const stopped = exitedAt !== undefined && !state.running && elapsedMs <= budgetMs;
   t.diagnostic(
     `${description}: ${state.running ? "still running" : `exit ${state.exitCode}`} ` +
       `${elapsedMs} ms after SIGTERM`,
@@ -57,44 +47,15 @@ async function assertPromptTermination(t, { containerName, collect, wrapper }, d
     `openclaw-ci-measurement ${JSON.stringify({
       kind: "runtime-sigterm",
       case: phase,
-      stopped: !state.running,
+      stopped,
       elapsedMs,
       budgetMs,
     })}`,
   );
-  if (state.running) {
-    const wrapperEnv = Object.fromEntries(
-      wrapper.environment.map((entry) => {
-        const separator = entry.indexOf("=");
-        return [entry.slice(0, separator), entry.slice(separator + 1)];
-      }),
-    );
-    const secrets = failureSecrets([process.env, wrapperEnv]);
-    // Retain every captured line in the job log before the bounded assertion.
-    // Docker capture limits and the redactor's per-line bound still apply.
-    for (const [stream, output] of [
-      ["stdout", state.stdout],
-      ["stderr", state.stderr],
-    ]) {
-      const lines = redactOutputLines(
-        output.split("\n"),
-        secrets,
-        process.cwd(),
-        failureInputLimit,
-      );
-      t.diagnostic(
-        `${phase}: captured ${stream} from ${containerName}; ` +
-          `SIGTERM at ${new Date(signalledAt).toISOString()}; redacted, per-line bounded\n` +
-          lines.join("\n"),
-      );
-    }
-    // Keep both streams: stderr warnings must not crowd stdout shutdown spans out.
-    // Reserve space for stream labels and omission markers in the existing budget.
-    const streamTailLimit = failureOutputLimit / 2 - 128;
+  if (!stopped) {
     assert.fail(
-      `${description}: SIGTERM did not stop the wrapper in ${elapsedMs} ms.\n` +
-        `stdout:\n${failureTail(state.stdout, streamTailLimit)}\n` +
-        `stderr:\n${failureTail(state.stderr, streamTailLimit)}`,
+      `${description}: SIGTERM did not stop the wrapper in ${budgetMs} ms` +
+        `${elapsedMs > budgetMs ? ` (it exited after ${elapsedMs} ms)` : ""}.\n${failureTail(state.output)}`,
     );
   }
   // A terminated wrapper exits cleanly in every phase, as it does once running.

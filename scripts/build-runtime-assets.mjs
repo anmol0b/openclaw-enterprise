@@ -24,6 +24,7 @@ const runtimePaths = [
   "pnpm-lock.yaml",
   "pnpm-workspace.yaml",
   "patches",
+  "scripts",
   "node-version.mjs",
   "node-sqlite.mjs",
   "node-runtime-update.mjs",
@@ -192,6 +193,8 @@ if (command === "inputs") {
   // Keep their build dependencies here; the production install stays selected.
   for (const dir of [
     "ui",
+    "examples/ai-chat",
+    "tools/solid-lint",
     ...(await readdir(join(root, "packages"))).map((name) => `packages/${name}`),
     ...(await readdir(join(root, "extensions"))).map((name) => `extensions/${name}`),
   ]) {
@@ -298,15 +301,13 @@ if (command === "inputs") {
       {
         source: "https://github.com/openclaw/openclaw",
         commit: process.env.GIT_COMMIT,
-        sourceArchiveSha256: "83a1691f9bf223807ce62109ce96cdc563856dbf8980fae800cf16061807627f",
+        sourceArchiveSha256: "2e8ef25b1ab2b0589142390e34d3f163b651074dedae264fd8620fad9947db9e",
         openclawBridgePatchSha256:
-          "1d8b670e7029872262375a21da7222768c2fe2390ff7a159ed1616ee9c9de1ca",
-        openclawConnectPatchSha256:
-          "c3cdd724b4084cdbc1acdc2b62c7ad0ec36f400e56b21d1db9790bb1e4adb8b5",
+          "2e529593cb72c69be86cf7bb927aa555de50bc7ef923e80b37ba67df9bc1a624",
         codexDependencyPinPatchSha256:
-          "b125312f310d1dac3b3cf98c029dfaaadbf996229fd26660f73f1d51eb00dec3",
+          "686dcb3fcdd384150845f7af5b5f3bf46b2dc6ee24ab8f5b629b10566e18afd4",
         openclawRequiredWorkerAuthorityRegressionPatchSha256:
-          "6da1bf12358f39d7c65bd345453a41495e50b1ab46c4958d41378da105ca6e0d",
+          "ba95cbc56d3f9c75de6768760411f15a2c20dac2f59d406e321596a863c90511",
         artifactKind: "assembled-runtime-root",
         runtimeContentsSha256: hash(contents),
         lockfileSha256: hash(await readFile(join(root, "pnpm-lock.yaml"))),

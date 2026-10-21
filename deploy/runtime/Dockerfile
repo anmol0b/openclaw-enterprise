@@ -1,4 +1,4 @@
-ARG OPENCLAW_COMMIT=c2976c807b70f3d47db84493f1d00e68eb44e914
+ARG OPENCLAW_COMMIT=6796ef305fc2d4d4a765c6d54274ec352cf0a65e
 ARG NODE_BASE_IMAGE=docker.io/library/node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
 ARG NODE_RUNTIME_BASE_IMAGE=docker.io/library/node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
@@ -87,7 +87,7 @@ FROM node-build-base AS openclaw-source
 # Keep the source identity separate from its unreleased package version.
 ARG OPENCLAW_COMMIT
 ENV GIT_COMMIT=${OPENCLAW_COMMIT}
-ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-16T19:33:30Z
+ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-21T20:01:51Z
 ENV OPENCLAW_PREFER_PNPM=1
 WORKDIR /source
 RUN --mount=type=secret,id=build-ca,required=false \
@@ -95,25 +95,20 @@ RUN --mount=type=secret,id=build-ca,required=false \
     if [ -f /run/secrets/build-ca ]; then export CURL_CA_BUNDLE=/run/secrets/build-ca; fi; \
     curl --fail --location --silent --show-error \
       "https://codeload.github.com/openclaw/openclaw/tar.gz/${GIT_COMMIT}" -o /tmp/openclaw-source.tar.gz; \
-    echo '83a1691f9bf223807ce62109ce96cdc563856dbf8980fae800cf16061807627f  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
+    echo '2e8ef25b1ab2b0589142390e34d3f163b651074dedae264fd8620fad9947db9e  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
     tar -xzf /tmp/openclaw-source.tar.gz --strip-components=1; \
     rm /tmp/openclaw-source.tar.gz
 # TODO: Remove this bridge patch when OpenClaw supports networkProxy.readOnlyPaths.
 COPY deploy/runtime/openclaw-codex-read-only-paths.patch /tmp/openclaw-codex-read-only-paths.patch
-RUN echo '1d8b670e7029872262375a21da7222768c2fe2390ff7a159ed1616ee9c9de1ca  /tmp/openclaw-codex-read-only-paths.patch' | sha256sum --check --strict \
+RUN echo '2e529593cb72c69be86cf7bb927aa555de50bc7ef923e80b37ba67df9bc1a624  /tmp/openclaw-codex-read-only-paths.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-codex-read-only-paths.patch
-# TODO: Remove this bridge patch when OpenClaw `connect --ephemeral` accepts an expired
-# replayed setup code for a node whose saved device token can reconnect.
-COPY deploy/runtime/openclaw-connect-ephemeral-expired-setup.patch /tmp/openclaw-connect-ephemeral-expired-setup.patch
-RUN echo 'c3cdd724b4084cdbc1acdc2b62c7ad0ec36f400e56b21d1db9790bb1e4adb8b5  /tmp/openclaw-connect-ephemeral-expired-setup.patch' | sha256sum --check --strict \
-    && git apply /tmp/openclaw-connect-ephemeral-expired-setup.patch
 # TODO: Remove this bridge patch when OpenClaw selects the native full-access profile.
 COPY deploy/runtime/openclaw-codex-full-access-profile.patch /tmp/openclaw-codex-full-access-profile.patch
 RUN echo 'ce301e59ba9266f7897c472cd54d51f487a4f9ed75034824f48c6839b35e922f  /tmp/openclaw-codex-full-access-profile.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-codex-full-access-profile.patch
 # TODO: Remove this dependency pin when the selected OpenClaw source supports plugin defaults.
 COPY deploy/runtime/stock-codex-0.163.0-alpha.2-dependency-pin.patch /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch
-RUN echo 'b125312f310d1dac3b3cf98c029dfaaadbf996229fd26660f73f1d51eb00dec3  /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch' | sha256sum --check --strict \
+RUN echo '686dcb3fcdd384150845f7af5b5f3bf46b2dc6ee24ab8f5b629b10566e18afd4  /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch' | sha256sum --check --strict \
     && git apply --unidiff-zero /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch
 COPY scripts/build-runtime-assets.mjs /tmp/build-runtime-assets.mjs
 RUN node /tmp/build-runtime-assets.mjs inputs /source /inputs
@@ -139,7 +134,7 @@ RUN --mount=type=secret,id=build-ca,required=false \
 FROM node-build-base AS openclaw-dependency-inputs
 ARG OPENCLAW_COMMIT
 ENV GIT_COMMIT=${OPENCLAW_COMMIT}
-ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-16T19:33:30Z
+ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-21T20:01:51Z
 ENV OPENCLAW_PREFER_PNPM=1
 WORKDIR /source
 COPY --from=openclaw-source /inputs/ ./
@@ -166,7 +161,7 @@ COPY --from=openclaw-source /source/ ./
 # Exercise the original caller through the public RPC before and after the
 # placement acknowledgment, including revocation, against this exact source.
 COPY deploy/runtime/openclaw-required-worker-authority-regression.patch /tmp/openclaw-required-worker-authority-regression.patch
-RUN echo '6da1bf12358f39d7c65bd345453a41495e50b1ab46c4958d41378da105ca6e0d  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
+RUN echo 'ba95cbc56d3f9c75de6768760411f15a2c20dac2f59d406e321596a863c90511  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-required-worker-authority-regression.patch
 RUN --network=none OPENCLAW_VITEST_RUNTIME=node OPENCLAW_VITEST_MAX_WORKERS=1 pnpm_config_verify_deps_before_run=false \
     node --import ./scripts/tsx.mjs scripts/test-projects.mts src/gateway/server.required-placement-scopes.test.ts
@@ -242,7 +237,10 @@ NODE
 COPY scripts/build-runtime-assets.mjs /tmp/build-runtime-assets.mjs
 RUN --mount=type=bind,from=openclaw-source,source=/source/scripts,target=/verification/scripts \
     --mount=type=bind,from=openclaw-build,source=/source/node_modules,target=/verification/node_modules \
-    node /tmp/build-runtime-assets.mjs package /source /out \
+    node scripts/docker/copy-bootstrap-scripts.mjs /tmp/openclaw-runtime-bootstrap \
+    && rm -rf scripts \
+    && mv /tmp/openclaw-runtime-bootstrap/scripts scripts \
+    && node /tmp/build-runtime-assets.mjs package /source /out \
     && node /verification/scripts/check-package-dist-imports.mjs /source
 
 FROM node-runtime-base AS runtime

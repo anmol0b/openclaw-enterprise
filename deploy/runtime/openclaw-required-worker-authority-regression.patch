@@ -1,62 +1,67 @@
 diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/server.required-placement-scopes.test.ts
 --- a/src/gateway/server.required-placement-scopes.test.ts
 +++ b/src/gateway/server.required-placement-scopes.test.ts
-@@ -115,223 +115,282 @@
+@@ -6,6 +6,7 @@
+ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+ import { writeConfigFile } from "../config/config.js";
+ import type { GatewayAuthConfig } from "../config/types.gateway.js";
++import type { OpenClawConfig } from "../config/types.js";
+ import { createDeferredCore, type Deferred } from "../shared/deferred.js";
+ import * as sessionChangeEvent from "./server-methods/session-change-event.js";
+ import * as gateway from "./server.auth.test-helpers.js";
+@@ -25,6 +26,7 @@
+ async function configureWriters(
+   identityScopes: NonNullable<GatewayAuthConfig["identityScopes"]>,
+   required = true,
++  roles?: NonNullable<OpenClawConfig["gateway"]>["roles"],
+ ) {
+   const dedicated = { provider: "device", settings: { device: "paired", inference: "worker" } };
+   const auth: GatewayAuthConfig = {
+@@ -40,7 +42,12 @@
+   gateway.testState.gatewayAuth = auth;
+   gateway.testState.gatewayControlUi = { allowedOrigins: [origin] };
+   await writeConfigFile({
+-    gateway: { auth, trustedProxies: ["127.0.0.1"], controlUi: { allowedOrigins: [origin] } },
++    gateway: {
++      auth,
++      trustedProxies: ["127.0.0.1"],
++      controlUi: { allowedOrigins: [origin] },
++      ...(roles ? { roles } : {}),
++    },
+     ...(required
+       ? { cloudWorkers: { requiredProfile: "dedicated", profiles: { dedicated } } }
+       : {}),
+@@ -116,146 +123,199 @@
    },
  );
  
 -test("required placement survives disconnect but stops setup when committed caller authority ends", async () => {
--  const origin = "https://control.example.invalid";
 -  const admin = "admin@example.invalid";
 -  const writers = {
 -    disconnect: "disconnect@example.invalid",
 -    scope: "scope@example.invalid",
 -    profile: "profile@example.invalid",
 -  };
--  const auth: GatewayAuthConfig = {
--    mode: "trusted-proxy",
--    identityScopes: {
--      [admin]: ["operator.admin"],
--      ...Object.fromEntries(
--        Object.values(writers).map((email) => [email, ["operator.sessions.write"]]),
--      ),
--    },
--    trustedProxy: {
--      userHeader: "x-forwarded-user",
--      requiredHeaders: ["x-forwarded-proto"],
--      allowLoopback: true,
--      allowUsers: [admin, ...Object.values(writers)],
--    },
--  };
--  testState.gatewayAuth = auth;
--  testState.gatewayControlUi = { allowedOrigins: [origin] };
--  await writeConfigFile({
--    gateway: { auth, trustedProxies: ["127.0.0.1"], controlUi: { allowedOrigins: [origin] } },
--    cloudWorkers: {
--      requiredProfile: "dedicated",
--      profiles: {
--        dedicated: { provider: "device", settings: { device: "paired", inference: "worker" } },
--      },
--    },
+-  await configureWriters({
+-    [admin]: ["operator.admin"],
+-    ...Object.fromEntries(Object.values(writers).map((email) => [email, writerScopes])),
 -  });
--  vi.stubEnv("OPENCLAW_TEST_MINIMAL_GATEWAY", "0");
 -
--  // Observe the production service's provider-side setup entry points without replacing them.
+-  // Observe real provider setup, never replace it.
 -  const setupCalls: string[] = [];
 -  const dispatchErrors: string[] = [];
 -  let dispatchSettled: Promise<unknown> | undefined;
--  const createDispatch = placementDispatch.createWorkerPlacementDispatchService;
--  vi.spyOn(placementDispatch, "createWorkerPlacementDispatchService").mockImplementation(
--    (options) => {
--      const service = createDispatch({
--        ...options,
--        runLocalBarrier: async (params) => {
--          const placement = await options.runLocalBarrier(params);
+-  let hold: { committed: Deferred; resume: Promise<void>; afterAck: boolean } | undefined;
+-  async function pauseRequested<T extends { state: string }>(placement: T, afterAck: boolean) {
+-    const current = hold;
+-    if (current?.afterAck === afterAck && placement.state === "requested") {
+-      hold = undefined;
+-      current.committed.resolve();
+-      await current.resume;
 +test.each(["before acknowledgment", "after acknowledgment"] as const)(
 +  "required placement survives disconnect %s but stops setup when committed caller authority ends",
 +  async (timing) => {
 +    const afterAcknowledgment = timing === "after acknowledgment";
-+    const origin = "https://control.example.invalid";
 +    const admin = "admin@example.invalid";
 +    const writers = {
 +      disconnect: "disconnect@example.invalid",
@@ -64,127 +69,72 @@ diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/
 +      role: "role@example.invalid",
 +      profile: "profile@example.invalid",
 +    };
-+    const auth: GatewayAuthConfig = {
-+      mode: "trusted-proxy",
-+      identityScopes: {
++    await configureWriters(
++      {
 +        [admin]: ["operator.admin"],
-+        ...Object.fromEntries(
-+          Object.values(writers).map((email) => [email, ["operator.sessions.write"]]),
-+        ),
++        ...Object.fromEntries(Object.values(writers).map((email) => [email, writerScopes])),
 +      },
-+      trustedProxy: {
-+        userHeader: "x-forwarded-user",
-+        requiredHeaders: ["x-forwarded-proto"],
-+        allowLoopback: true,
-+        allowUsers: [admin, ...Object.values(writers)],
-+      },
-+    };
-+    testState.gatewayAuth = auth;
-+    testState.gatewayControlUi = { allowedOrigins: [origin] };
-+    await writeConfigFile({
-+      gateway: {
-+        auth,
-+        trustedProxies: ["127.0.0.1"],
-+        controlUi: { allowedOrigins: [origin] },
-+        roles: {
-+          default: "owner",
-+          definitions: {
-+            owner: {
-+              agents: ["main"],
-+              scopes: ["operator.admin"],
-+              sessions: { others: "write" },
-+            },
-+            denied: { agents: [], scopes: [], sessions: { others: "none" } },
-+          },
++      true,
++      {
++        default: "owner",
++        definitions: {
++          owner: { agents: ["main"], scopes: ["operator.admin"], sessions: { others: "write" } },
++          denied: { agents: [], scopes: [], sessions: { others: "none" } },
 +        },
 +      },
-+      cloudWorkers: {
-+        requiredProfile: "dedicated",
-+        profiles: {
-+          dedicated: { provider: "device", settings: { device: "paired", inference: "worker" } },
-+        },
-+      },
-+    });
-+    vi.stubEnv("OPENCLAW_TEST_MINIMAL_GATEWAY", "0");
++    );
 +
-+    // Observe the production service's provider-side setup entry points without replacing them.
++    // Observe real provider setup, never replace it.
 +    const setupCalls: string[] = [];
 +    const dispatchErrors: string[] = [];
 +    let dispatchSettled: Promise<unknown> | undefined;
++    let hold: { committed: Deferred; resume: Promise<void>; afterAck: boolean } | undefined;
++    async function pauseRequested<T extends { state: string }>(placement: T, afterAck: boolean) {
++      const current = hold;
++      if (current?.afterAck === afterAck && placement.state === "requested") {
++        hold = undefined;
++        current.committed.resolve();
++        await current.resume;
++      }
++      return placement;
+     }
+-    return placement;
+-  }
+-  const createDispatch = placementDispatch.createWorkerPlacementDispatchService;
+-  vi.spyOn(placementDispatch, "createWorkerPlacementDispatchService").mockImplementation(
+-    (options) => {
+-      const { prepareProjectIntent, createWithRequest } = options.environments;
+-      vi.spyOn(options.environments, "prepareProjectIntent").mockImplementation((...args) => {
+-        setupCalls.push("prepareProjectIntent");
+-        return prepareProjectIntent(...args);
 +    const createDispatch = placementDispatch.createWorkerPlacementDispatchService;
 +    vi.spyOn(placementDispatch, "createWorkerPlacementDispatchService").mockImplementation(
 +      (options) => {
++        const { prepareProjectIntent, createWithRequest } = options.environments;
++        vi.spyOn(options.environments, "prepareProjectIntent").mockImplementation((...args) => {
++          setupCalls.push("prepareProjectIntent");
++          return prepareProjectIntent(...args);
++        });
++        vi.spyOn(options.environments, "createWithRequest").mockImplementation((...args) => {
++          setupCalls.push("createWithRequest");
++          return createWithRequest(...args);
++        });
++        const startDispatch = options.placements.startDispatch.bind(options.placements);
++        vi.spyOn(options.placements, "startDispatch").mockImplementation(async (...args) =>
++          pauseRequested(await startDispatch(...args), false),
++        );
 +        const service = createDispatch({
 +          ...options,
-+          runLocalBarrier: async (params) => {
-+            const placement = await options.runLocalBarrier(params);
-+            const current = hold;
-+            if (current?.afterAcknowledgment && placement.state === "requested") {
-+              hold = undefined;
-+              current.committed.resolve();
-+              await current.resume;
-+            }
-+            return placement;
-+          },
++          runLocalBarrier: async (params) =>
++            pauseRequested(await options.runLocalBarrier(params), true),
 +        });
 +        const dispatch = service.dispatch;
 +        service.dispatch = (...args) => {
 +          const operation = dispatch(...args);
-+          dispatchSettled = operation.catch((error: unknown) => {
-+            dispatchErrors.push(String(error));
-+          });
++          dispatchSettled = operation.catch((error: unknown) => dispatchErrors.push(String(error)));
 +          return operation;
 +        };
 +        return service;
-+      },
-+    );
-+    const createService = workerEnvironmentService.createWorkerEnvironmentService;
-+    vi.spyOn(workerEnvironmentService, "createWorkerEnvironmentService").mockImplementation(
-+      (options) => {
-+        const service = createService(options);
-+        const { prepareProjectIntent, createWithRequest } = service;
-+        service.prepareProjectIntent = (...args) => {
-+          setupCalls.push("prepareProjectIntent");
-+          return prepareProjectIntent(...args);
-+        };
-+        service.createWithRequest = (...args) => {
-+          setupCalls.push("createWithRequest");
-+          return createWithRequest(...args);
-+        };
-+        return service;
-+      },
-+    );
-+    // Hold dispatch after its durable requested commit. The requested acknowledgment is reported
-+    // on resume, leaving the post-acknowledgment recheck as the only fence before setup I/O.
-+    let hold:
-+      | { committed: Deferred; resume: Promise<void>; afterAcknowledgment: boolean }
-+      | undefined;
-+    const createLifecycle = placementLifecycleStore.createPlacementLifecycleWorkerOps;
-+    vi.spyOn(placementLifecycleStore, "createPlacementLifecycleWorkerOps").mockImplementation(
-+      (options) => {
-+        const lifecycle = createLifecycle(options);
-+        const startDispatch = lifecycle.startDispatch.bind(lifecycle);
-+        lifecycle.startDispatch = async (...args) => {
-+          const placement = await startDispatch(...args);
-           const current = hold;
--          if (current?.afterAcknowledgment && placement.state === "requested") {
-+          if (current && !current.afterAcknowledgment && placement.state === "requested") {
-             hold = undefined;
-             current.committed.resolve();
-             await current.resume;
-           }
-           return placement;
--        },
--      });
--      const dispatch = service.dispatch;
--      service.dispatch = (...args) => {
--        const operation = dispatch(...args);
--        dispatchSettled = operation.catch((error: unknown) => {
--          dispatchErrors.push(String(error));
--        });
--        return operation;
-+        };
-+        return lifecycle;
 +      },
 +    );
 +    // The requested acknowledgment and the failed dispatch's final transition each publish once.
@@ -197,71 +147,39 @@ diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/
 +      emitSessionsChanged(...args);
 +    });
 +
-+    await withGatewayServer(async ({ port }) => {
-+      const connect = async (email: string, scopes: string[]) => {
-+        const ws = await openWs(port, {
-+          origin,
-+          "x-forwarded-user": email,
-+          "x-forwarded-for": "203.0.113.50",
-+          "x-forwarded-proto": "https",
-+        });
-+        const connected = await connectReq(ws, {
-+          prePairDevice: true,
-+          client: CONTROL_UI_CLIENT,
-+          browserOrigin: origin,
-+          skipDefaultAuth: true,
-+          scopes,
-+          deviceIdentityPath: path.join(temps.make("required-placement-"), "device.sqlite"),
-+        });
-+        expect(connected.ok, JSON.stringify(connected.error)).toBe(true);
-+        return ws;
-       };
--      return service;
--    },
--  );
--  const createService = workerEnvironmentService.createWorkerEnvironmentService;
--  vi.spyOn(workerEnvironmentService, "createWorkerEnvironmentService").mockImplementation(
--    (options) => {
--      const service = createService(options);
--      const { prepareProjectIntent, createWithRequest } = service;
--      service.prepareProjectIntent = (...args) => {
--        setupCalls.push("prepareProjectIntent");
--        return prepareProjectIntent(...args);
-+      const adminWs = await connect(admin, ["operator.admin"]);
++    await gateway.withGatewayServer(async ({ port }) => {
++      using adminConnection = await connectWriter(port, admin, ["operator.admin"]);
++      const adminWs = adminConnection.ws;
 +      const commitConfigPatch = async (patch: Record<string, unknown>) => {
-+        const current = await rpcReq<{ hash: string }>(adminWs, "config.get", {});
++        const current = await gateway.rpcReq<{ hash: string }>(adminWs, "config.get", {});
 +        expect(current.ok, JSON.stringify(current.error)).toBe(true);
-+        const patched = await rpcReq(adminWs, "config.patch", {
++        const patched = await gateway.rpcReq(adminWs, "config.patch", {
 +          baseHash: current.payload?.hash,
 +          ...patch,
 +        });
 +        expect(patched.ok, JSON.stringify(patched.error)).toBe(true);
-       };
--      service.createWithRequest = (...args) => {
--        setupCalls.push("createWithRequest");
--        return createWithRequest(...args);
++      };
 +      const createThenEndAuthority = async (
 +        email: string,
 +        endAuthority: (ws: WebSocket) => Promise<void>,
 +        expectedSetupCalls: string[] = [],
++        afterAck = afterAcknowledgment,
 +      ) => {
 +        setupCalls.length = 0;
 +        dispatchErrors.length = 0;
-+        const ws = await connect(email, ["operator.sessions.write"]);
++        const { ws } = await connectWriter(port, email);
 +        const committed = createDeferredCore();
 +        const resume = createDeferredCore();
-+        hold = { committed, resume: resume.promise, afterAcknowledgment };
++        hold = { committed, resume: resume.promise, afterAck };
 +        settled = { remaining: 2, done: createDeferredCore() };
 +        const sessionKey = `agent:main:required-source-${timing.replaceAll(" ", "-")}-${email.split("@")[0]}`;
-+        // Cold full-Gateway preparation can exceed the default 10s before reaching our barrier.
-+        const created = rpcReq(ws, "sessions.create", { key: sessionKey }, 30_000);
++        const created = gateway.rpcReq(ws, "sessions.create", { key: sessionKey }, 30_000);
 +        void created.catch(() => {});
 +        try {
-+          if (afterAcknowledgment) {
-+            const acknowledged = await created;
-+            expect(acknowledged.ok, JSON.stringify(acknowledged.error)).toBe(true);
++          if (afterAck) {
++            expect(await created).toMatchObject({ ok: true });
 +            await committed.promise;
-+            const published = await rpcReq<{ sessions: Array<{ key: string }> }>(
++            const published = await gateway.rpcReq<{ sessions: Array<{ key: string }> }>(
 +              adminWs,
 +              "sessions.list",
 +              {},
@@ -291,31 +209,72 @@ diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/
 +          );
 +        }
 +        return { ws, created };
-       };
--      return service;
--    },
--  );
--  // Hold dispatch after its durable requested commit. The requested acknowledgment is reported
--  // on resume, leaving the post-acknowledgment recheck as the only fence before setup I/O.
--  let hold:
--    | { committed: Deferred; resume: Promise<void>; afterAcknowledgment: boolean }
--    | undefined;
--  const createLifecycle = placementLifecycleStore.createPlacementLifecycleWorkerOps;
--  vi.spyOn(placementLifecycleStore, "createPlacementLifecycleWorkerOps").mockImplementation(
--    (options) => {
--      const lifecycle = createLifecycle(options);
--      const startDispatch = lifecycle.startDispatch.bind(lifecycle);
--      lifecycle.startDispatch = async (...args) => {
--        const placement = await startDispatch(...args);
--        const current = hold;
--        if (current && !current.afterAcknowledgment && placement.state === "requested") {
--          hold = undefined;
--          current.committed.resolve();
--          await current.resume;
--        }
--        return placement;
++      };
++      // Detached setup keeps accepted custody after RPC acknowledgment and disconnect.
++      const disconnected = await createThenEndAuthority(
++        writers.disconnect,
++        async (ws) => {
++          const closed = once(ws, "close");
++          ws.close();
++          await closed;
++        },
++        ["prepareProjectIntent", "createWithRequest"],
++      );
++      if (afterAcknowledgment) {
++        expect((await disconnected.created).ok).toBe(true);
++      } else {
++        await expect(disconnected.created).rejects.toThrow(/closed/);
++      }
++
++      const revoked = await createThenEndAuthority(writers.scope, async () => {
++        await commitConfigPatch({
++          raw: JSON.stringify({ gateway: { auth: { identityScopes: { [writers.scope]: null } } } }),
++          replacePaths: [`gateway.auth.identityScopes.${writers.scope}`],
++        });
+       });
+-      vi.spyOn(options.environments, "createWithRequest").mockImplementation((...args) => {
+-        setupCalls.push("createWithRequest");
+-        return createWithRequest(...args);
++      if (!afterAcknowledgment) {
++        await expect(revoked.created).rejects.toThrow(/gateway policy changed/);
++      }
++
++      // Restoring the role cannot restore authority accepted before its revocation.
++      const reassigned = await createThenEndAuthority(writers.role, async (ws) => {
++        const self = await gateway.rpcReq<{ profile: { id: string } }>(ws, "users.self", {});
++        expect(self.ok, JSON.stringify(self.error)).toBe(true);
++        for (const role of ["denied", null]) {
++          const changed = await gateway.rpcReq(adminWs, "users.setRole", {
++            profileId: self.payload?.profile.id,
++            role,
++          });
++          expect(changed.ok, JSON.stringify(changed.error)).toBe(true);
++        }
+       });
+-      const startDispatch = options.placements.startDispatch.bind(options.placements);
+-      vi.spyOn(options.placements, "startDispatch").mockImplementation(async (...args) =>
+-        pauseRequested(await startDispatch(...args), false),
+-      );
+-      const service = createDispatch({
+-        ...options,
+-        runLocalBarrier: async (params) =>
+-          pauseRequested(await options.runLocalBarrier(params), true),
++      if (!afterAcknowledgment) {
++        await expect(reassigned.created).rejects.toThrow(/closed|policy changed|role changed/);
++      }
++
++      const unprofiled = await createThenEndAuthority(writers.profile, async () => {
++        await commitConfigPatch({
++          raw: JSON.stringify({ cloudWorkers: { requiredProfile: null } }),
++        });
+       });
+-      const dispatch = service.dispatch;
+-      service.dispatch = (...args) => {
+-        const operation = dispatch(...args);
+-        dispatchSettled = operation.catch((error: unknown) => dispatchErrors.push(String(error)));
+-        return operation;
 -      };
--      return lifecycle;
+-      return service;
 -    },
 -  );
 -  // The requested acknowledgment and the failed dispatch's final transition each publish once.
@@ -328,30 +287,13 @@ diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/
 -    emitSessionsChanged(...args);
 -  });
 -
--  await withGatewayServer(async ({ port }) => {
--    const connect = async (email: string, scopes: string[]) => {
--      const ws = await openWs(port, {
--        origin,
--        "x-forwarded-user": email,
--        "x-forwarded-for": "203.0.113.50",
--        "x-forwarded-proto": "https",
--      });
--      const connected = await connectReq(ws, {
--        prePairDevice: true,
--        client: CONTROL_UI_CLIENT,
--        browserOrigin: origin,
--        skipDefaultAuth: true,
--        scopes,
--        deviceIdentityPath: path.join(temps.make("required-placement-"), "device.sqlite"),
--      });
--      expect(connected.ok, JSON.stringify(connected.error)).toBe(true);
--      return ws;
--    };
--    const adminWs = await connect(admin, ["operator.admin"]);
+-  await gateway.withGatewayServer(async ({ port }) => {
+-    using adminConnection = await connectWriter(port, admin, ["operator.admin"]);
+-    const adminWs = adminConnection.ws;
 -    const commitConfigPatch = async (patch: Record<string, unknown>) => {
--      const current = await rpcReq<{ hash: string }>(adminWs, "config.get", {});
+-      const current = await gateway.rpcReq<{ hash: string }>(adminWs, "config.get", {});
 -      expect(current.ok, JSON.stringify(current.error)).toBe(true);
--      const patched = await rpcReq(adminWs, "config.patch", {
+-      const patched = await gateway.rpcReq(adminWs, "config.patch", {
 -        baseHash: current.payload?.hash,
 -        ...patch,
 -      });
@@ -361,131 +303,69 @@ diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/
 -      email: string,
 -      endAuthority: (ws: WebSocket) => Promise<void>,
 -      expectedSetupCalls: string[] = [],
--      afterAcknowledgment = false,
+-      afterAck = false,
 -    ) => {
 -      setupCalls.length = 0;
--      const ws = await connect(email, ["operator.sessions.write"]);
+-      const { ws } = await connectWriter(port, email);
 -      const committed = createDeferredCore();
 -      const resume = createDeferredCore();
--      hold = { committed, resume: resume.promise, afterAcknowledgment };
+-      hold = { committed, resume: resume.promise, afterAck };
 -      settled = { remaining: 2, done: createDeferredCore() };
--      const created = rpcReq(ws, "sessions.create", {});
+-      const created = gateway.rpcReq(ws, "sessions.create", {});
 -      void created.catch(() => {});
-       try {
-+        // Ordinary mutations retain accepted authority across reconnects. Intent preparation
-+        // succeeds, then the actual provider rejects this unpaired node instead of losing custody.
-+        const disconnected = await createThenEndAuthority(
-+          writers.disconnect,
-+          async (ws) => {
-+            const closed = createDeferredCore();
-+            ws.once("close", () => closed.resolve());
-+            ws.close();
-+            await closed.promise;
-+          },
-+          ["prepareProjectIntent", "createWithRequest"],
-+        );
-         if (afterAcknowledgment) {
--          const acknowledged = await created;
--          expect(acknowledged.ok, JSON.stringify(acknowledged.error)).toBe(true);
+-      try {
+-        if (afterAck) {
+-          expect(await created).toMatchObject({ ok: true });
 -          await committed.promise;
-+          expect((await disconnected.created).ok).toBe(true);
-         } else {
+-        } else {
 -          await Promise.race([
 -            committed.promise,
 -            created.then(() => {
 -              throw new Error("sessions.create settled before its requested placement committed");
-+          await expect(disconnected.created).rejects.toThrow(/closed/);
-+        }
-+
-+        // A committed config patch removes the caller's operator scope.
-+        const revoked = await createThenEndAuthority(writers.scope, async () => {
-+          await commitConfigPatch({
-+            raw: JSON.stringify({
-+              gateway: { auth: { identityScopes: { [writers.scope]: null } } },
-             }),
+-            }),
 -          ]);
 -        }
 -        await endAuthority(ws);
-+            replacePaths: [`gateway.auth.identityScopes.${writers.scope}`],
-+          });
-+        });
-+        if (!afterAcknowledgment) {
-+          await expect(revoked.created).rejects.toThrow(/gateway policy changed/);
-+        }
-+
-+        // Restoring a profile assignment cannot revive its original accepted authority.
-+        const reassigned = await createThenEndAuthority(writers.role, async (ws) => {
-+          const self = await rpcReq<{ profile: { id: string } }>(ws, "users.self", {});
-+          expect(self.ok, JSON.stringify(self.error)).toBe(true);
-+          for (const role of ["denied", null]) {
-+            const changed = await rpcReq(adminWs, "users.setRole", {
-+              profileId: self.payload?.profile.id,
-+              role,
-+            });
-+            expect(changed.ok, JSON.stringify(changed.error)).toBe(true);
-+          }
-+        });
-+        if (!afterAcknowledgment) {
-+          await expect(reassigned.created).rejects.toThrow(/closed|policy changed|role changed/);
-+        }
-+
-+        // A committed config patch removes the required profile while the caller stays connected.
-+        const unprofiled = await createThenEndAuthority(writers.profile, async () => {
-+          await commitConfigPatch({
-+            raw: JSON.stringify({ cloudWorkers: { requiredProfile: null } }),
-+          });
-+        });
-+        await unprofiled.created;
-+        expect(unprofiled.ws.readyState).toBe(WebSocket.OPEN);
-+        unprofiled.ws.close();
-       } finally {
+-      } finally {
 -        resume.resolve();
-+        adminWs.close();
-       }
+-      }
 -      await settled.done.promise;
 -      await dispatchSettled;
 -      expect(setupCalls, dispatchErrors.join("; ")).toEqual(expectedSetupCalls);
 -      return { ws, created };
 -    };
--    try {
--      // Let the RPC acknowledge and release its own custody before disconnecting.
--      // Detached setup still owns the accepted source until its operation settles.
--      const disconnected = await createThenEndAuthority(
--        writers.disconnect,
--        async (ws) => {
--          const closed = createDeferredCore();
--          ws.once("close", () => closed.resolve());
--          ws.close();
--          await closed.promise;
--        },
--        ["prepareProjectIntent", "createWithRequest"],
--        true,
--      );
--      expect((await disconnected.created).ok).toBe(true);
+-    // Detached setup keeps accepted custody after RPC acknowledgment and disconnect.
+-    await createThenEndAuthority(
+-      writers.disconnect,
+-      async (ws) => {
+-        const closed = once(ws, "close");
+-        ws.close();
+-        await closed;
+-      },
+-      ["prepareProjectIntent", "createWithRequest"],
+-      true,
+-    );
 -
--      // A committed config patch removes the caller's operator scope.
--      const revoked = await createThenEndAuthority(writers.scope, async () => {
--        await commitConfigPatch({
--          raw: JSON.stringify({ gateway: { auth: { identityScopes: { [writers.scope]: null } } } }),
--          replacePaths: [`gateway.auth.identityScopes.${writers.scope}`],
--        });
+-    const revoked = await createThenEndAuthority(writers.scope, async () => {
+-      await commitConfigPatch({
+-        raw: JSON.stringify({ gateway: { auth: { identityScopes: { [writers.scope]: null } } } }),
+-        replacePaths: [`gateway.auth.identityScopes.${writers.scope}`],
 -      });
--      await expect(revoked.created).rejects.toThrow(/gateway policy changed/);
++      await unprofiled.created;
++      expect(unprofiled.ws.readyState).toBe(WebSocket.OPEN);
++      unprofiled.ws.close();
+     });
+-    await expect(revoked.created).rejects.toThrow(/gateway policy changed/);
 -
--      // A committed config patch removes the required profile while the caller stays connected.
--      const unprofiled = await createThenEndAuthority(writers.profile, async () => {
--        await commitConfigPatch({
--          raw: JSON.stringify({ cloudWorkers: { requiredProfile: null } }),
--        });
+-    const unprofiled = await createThenEndAuthority(writers.profile, async () => {
+-      await commitConfigPatch({
+-        raw: JSON.stringify({ cloudWorkers: { requiredProfile: null } }),
 -      });
--      await unprofiled.created;
--      expect(unprofiled.ws.readyState).toBe(WebSocket.OPEN);
--      unprofiled.ws.close();
--    } finally {
--      adminWs.close();
--    }
+-    });
+-    await unprofiled.created;
+-    expect(unprofiled.ws.readyState).toBe(WebSocket.OPEN);
+-    unprofiled.ws.close();
 -  });
 -});
-+    });
 +  },
 +);

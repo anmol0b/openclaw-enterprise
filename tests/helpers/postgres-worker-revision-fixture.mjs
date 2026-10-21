@@ -71,6 +71,8 @@ const disposeLimitsMs = {
 // wait for exits on its own first. The file must run under `node --test`, whose parent process
 // counts the file's results (node:test sets a failing exit code only once the event loop drains).
 const abandonedExitGraceMs = 2_000;
+// Set by `createWorkerRevisionFixtures`; the fixture's own exit tests pass a shorter grace.
+let exitGraceMs = abandonedExitGraceMs;
 let abandonedSteps = 0;
 let exitTimer;
 let exitHookAdded = false;
@@ -78,7 +80,7 @@ let exitHookAdded = false;
 function exitIfAbandoned() {
   if (abandonedSteps > 0) {
     // process.exit() keeps the exit code; the test runner reads results from its reports.
-    exitTimer ??= setTimeout(() => process.exit(), abandonedExitGraceMs).unref();
+    exitTimer ??= setTimeout(() => process.exit(), exitGraceMs).unref();
   }
 }
 
@@ -135,11 +137,16 @@ export async function disposeStep(step, limitMs, work) {
 }
 
 // Importing this helper registers no tests or hooks.
-// `exitBackstopMs` replaces the abandoned-step backstop for the fixture's own exit tests.
+// `exitGraceMs` and `exitBackstopMs` replace the abandoned-step grace and backstop for the
+// fixture's own exit tests.
 export function createWorkerRevisionFixtures(
   testFile,
-  { exitBackstopMs: backstopMs = abandonedExitBackstopMs } = {},
+  {
+    exitGraceMs: graceMs = abandonedExitGraceMs,
+    exitBackstopMs: backstopMs = abandonedExitBackstopMs,
+  } = {},
 ) {
+  exitGraceMs = graceMs;
   // The owning file registers this as a root after hook: `after(cleanup)`.
   function cleanup(context) {
     exitBackstopMs ??= backstopMs;
@@ -470,6 +477,7 @@ export function createWorkerRevisionFixtures(
       number,
       {
         harness,
+        sandboxDriverId,
         repositoryCredentials,
         actorId = actor.id,
         plugins,
@@ -535,6 +543,7 @@ export function createWorkerRevisionFixtures(
         configurationGeneration: 1,
         harness: approvedHarness,
         compute: { id: compute.id, implementation: compute.implementation },
+        ...(sandboxDriverId === undefined ? {} : { sandboxDriverId }),
         ...(plugins === undefined ? {} : { plugins }),
         harnessAuth,
         ...(credentialSources.length === 0 ? {} : { credentialSources }),
@@ -697,20 +706,64 @@ export function createWorkerRevisionFixtures(
       );
     }
 
-    async function copyActorGrants(actorId) {
+    // Provisions actorId with the fixture actor's direct bindings. withoutActions binds each
+    // scope to a copy of its role minus those actions instead, so the identity is provisioned
+    // and keeps its other grants but lacks exactly those permissions. An action is dropped for
+    // every resource kind (["delete"] also drops delete secret). The copied roles keep the
+    // source role's scope, usually Installation-wide, so Namespace teardown never removes them;
+    // like the copied identity they live until the per-file database is dropped.
+    async function copyActorGrants(actorId, { withoutActions = [] } = {}) {
       await observerPool.query(
         `INSERT INTO occ.iam_identities (id, kind, issuer, subject)
          SELECT $1, kind, issuer, $1 FROM occ.iam_identities WHERE id = $2`,
         [actorId, actor.id],
       );
-      await observerPool.query(
-        `INSERT INTO occ.iam_access_bindings
-           (id, namespace_id, identity_subject_id, role_id, resource_kind, resource_id)
-         SELECT 'binding-' || gen_random_uuid(), namespace_id, $1, role_id,
-                resource_kind, resource_id
-         FROM occ.iam_access_bindings WHERE identity_subject_id = $2`,
-        [actorId, actor.id],
+      if (withoutActions.length === 0) {
+        await observerPool.query(
+          `INSERT INTO occ.iam_access_bindings
+             (id, namespace_id, identity_subject_id, role_id, resource_kind, resource_id)
+           SELECT 'binding-' || gen_random_uuid(), namespace_id, $1, role_id,
+                  resource_kind, resource_id
+           FROM occ.iam_access_bindings WHERE identity_subject_id = $2`,
+          [actorId, actor.id],
+        );
+        return;
+      }
+      const { rows: bindings } = await observerPool.query(
+        `SELECT b.namespace_id, b.resource_kind, b.resource_id,
+                r.namespace_id AS role_namespace_id, r.permissions
+         FROM occ.iam_access_bindings AS b JOIN occ.iam_roles AS r ON r.id = b.role_id
+         WHERE b.identity_subject_id = $1`,
+        [actor.id],
       );
+      assert.ok(bindings.length > 0, "the fixture actor must hold direct bindings to copy");
+      for (const binding of bindings) {
+        const permissions = binding.permissions.filter(
+          (permission) => !withoutActions.includes(permission.action),
+        );
+        if (permissions.length === 0) {
+          continue;
+        }
+        const roleId = `role-${randomUUID()}`;
+        await observerPool.query(
+          `INSERT INTO occ.iam_roles (id, namespace_id, name, permissions)
+           VALUES ($1, $2, NULL, $3::jsonb)`,
+          [roleId, binding.role_namespace_id, JSON.stringify(permissions)],
+        );
+        await observerPool.query(
+          `INSERT INTO occ.iam_access_bindings
+             (id, namespace_id, identity_subject_id, role_id, resource_kind, resource_id)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            `binding-${randomUUID()}`,
+            binding.namespace_id,
+            actorId,
+            roleId,
+            binding.resource_kind,
+            binding.resource_id,
+          ],
+        );
+      }
     }
 
     // Advance only this revision's queued observation, preserving its claim and actor.
