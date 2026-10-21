@@ -428,6 +428,15 @@ test(
     const stolen = await carol.request("GET", callbackPath);
     assert.equal(stolen.statusCode, 303);
     assert.match(stolen.headers.location, /connection=failed&reason=unknown_session/);
+    const refusedAudit = await pool.query(
+      `SELECT actor_id, details FROM occ.audit_events
+       WHERE action = 'openclaw.agents.connections.complete' AND outcome = 'failure'`,
+    );
+    assert.deepEqual(
+      refusedAudit.rows.map((row) => [row.actor_id, row.details?.reasonCode]),
+      [[carol.principalId, "unknown_session"]],
+      "the refused callback is audited with its reason and the person who sent it",
+    );
 
     const completed = await bob.request("GET", callbackPath);
     assert.equal(completed.statusCode, 303, completed.body);

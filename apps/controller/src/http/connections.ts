@@ -255,9 +255,13 @@ export interface ConnectionCallbackDependencies {
     request: FastifyRequest,
     context: RequestContext,
     target: ResourceRef,
-    outcome: "success" | "failure",
-    reasonCode?: string,
   ) => AuditEvent;
+  /** Audits a refused or failed callback with its safe reason code, never the query. */
+  readonly auditFailure: (
+    request: FastifyRequest,
+    context: RequestContext,
+    reasonCode: string,
+  ) => Promise<void>;
 }
 
 /**
@@ -289,7 +293,7 @@ export function createConnectionCallback(dependencies: ConnectionCallbackDepende
         namespaceId: connection.namespaceId,
       };
       await controller.transact((unit) =>
-        unit.audit.append(dependencies.auditEvent(request, context, target, "success")),
+        unit.audit.append(dependencies.auditEvent(request, context, target)),
       );
       reply.redirect(
         `/console/agents/${encodeURIComponent(connection.agentId)}?namespace=${encodeURIComponent(
@@ -303,6 +307,7 @@ export function createConnectionCallback(dependencies: ConnectionCallbackDepende
         /^[a-z][a-z0-9_]{0,63}$/.test((error as { code: string }).code)
           ? (error as { code: string }).code
           : "unavailable";
+      await dependencies.auditFailure(request, context, reason);
       fail(reason);
     }
   };

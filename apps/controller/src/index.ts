@@ -4162,6 +4162,8 @@ export function createFastifyApp(options: ControllerAppOptions): FastifyInstance
         isSession: (request) => admissions.get(request)?.method === "session",
         auditEvent: (request, context, target) =>
           event(connectionCallbackOperation, request, target, "mutation", context),
+        auditFailure: (request, context, reasonCode) =>
+          rejectedMutation(connectionCallbackOperation, request, context, reasonCode),
       }),
     );
     routes.route({
