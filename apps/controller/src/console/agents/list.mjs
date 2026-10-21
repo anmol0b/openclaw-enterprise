@@ -1,4 +1,4 @@
-import { element, button } from "../dom.mjs";
+import { element } from "../dom.mjs";
 
 export const displayDate = (value) => new Date(value).toLocaleString();
 export const shortId = (value) => `${value.slice(0, 12)}…${value.slice(-6)}`;
@@ -30,6 +30,10 @@ const NOT_READY_REASONS = {
     "This Namespace is being deleted, so it cannot hold new Agents. Choose another Namespace.",
 };
 
+// How often an open Create Agent form, or the Agents list, rereads a provisioning Namespace while
+// its note is shown: the runtime status poll's cadence (findings 2012, 2058).
+export const NAMESPACE_RECHECK_MS = 10_000;
+
 // What the selected Namespace's status means where Agent creation starts (finding 1895): null
 // when it is ready or its status is unknown, otherwise the status and its consequence, and
 // whether the API refuses every new Agent there (`blocked`). A provisioning Namespace still
@@ -53,6 +57,14 @@ export function namespaceCreation(namespace) {
     note: `${label} ${NOT_READY_REASONS[status] ?? NAMESPACE_NOT_READY_MESSAGE}`,
   };
 }
+
+// A complete Namespace list read without the selected Namespace: it was deleted, or the reader
+// lost access. Waiting changes nothing, so the reader chooses another one.
+export const NAMESPACE_MISSING = Object.freeze({
+  blocked: true,
+  missing: true,
+  note: "This Namespace is missing or you no longer have access. Choose another Namespace.",
+});
 
 // The API's catch-all answers: a caller's own denial and an untyped conflict. They name nothing
 // the caller can act on, so views keep their own guidance instead of showing them.
@@ -82,27 +94,26 @@ export function deploymentOutcome(status) {
   return neutralDeploymentOutcome(status) ?? status.status;
 }
 
+// One word per recorded outcome wherever the console shows one: the Agents list, the Agent's
+// overview and its deployment records (finding 2093).
+const DEPLOYMENT_OUTCOME_LABELS = {
+  queued: "Queued",
+  running: "In progress",
+  succeeded: "Completed",
+  failed: "Failed",
+  superseded: "Superseded",
+  stopped: "Stopped",
+};
+
+// The label for a recorded outcome (deploymentOutcome's value).
+export function outcomeLabel(outcome) {
+  return DEPLOYMENT_OUTCOME_LABELS[outcome] ?? outcome;
+}
+
 export const NEUTRAL_DEPLOYMENT_NOTES = {
   superseded: "Superseded by a newer version",
   stopped: "Stopped before it finished",
 };
-
-// Revisions list newest first, one page at a time (finding 1323). A page can be empty when
-// its revisions are not readable to the viewer, so follow the cursor to the newest readable one.
-async function latestReadableRevision(context, path, options) {
-  let cursor = null;
-  do {
-    const page = await context.request(
-      cursor ? `${path}?cursor=${encodeURIComponent(cursor)}` : path,
-      { ...options, includeMeta: true },
-    );
-    if (page.data.length > 0) {
-      return page.data[0];
-    }
-    cursor = page.meta?.nextCursor ?? null;
-  } while (cursor);
-  return null;
-}
 
 export function message(error, mutation = false) {
   if (error.code === "SAVED_CONFIGURATION_UNREADABLE") {
@@ -248,16 +259,6 @@ export function assertReadableConfiguration(resource) {
   }
 }
 
-// A row's deployment while it is read. The text follows the 250 ms rule, so a read that lands
-// sooner, as most do on a return to a retained list, never paints it (finding 1656). Text that a
-// focusable holder wraps stays readable to a screen reader meanwhile.
-const readingDeployment = (className = "delayed-status") =>
-  element("span", { className }, "Reading deployment…");
-// With a dozen rows, reads that landed just after the 250 ms rule's delay (console.css
-// .delayed-status and .delayed-text) replaced the text a frame or a few after it showed (16-133
-// ms, finding 1683), so once shown it stays at least READING_SHOWN_MS.
-const READING_SHOWN_MS = 150;
-
 // A run of more characters than any ordinary word cannot wrap, so it would set the table's width
 // (finding 1955). Only a name with one breaks anywhere (console.css); others wrap as before. The
 // rule follows the break points Chromium was measured to use (finding 1982), not all of UAX #14.
@@ -318,311 +319,3 @@ export const UNBROKEN_RUN = new RegExp(
 
 /** Whether a name holds a run the browser cannot wrap, so it must be marked to break anywhere. */
 export const hasUnbrokenRun = (name) => UNBROKEN_RUN.test(name);
-
-function agentNameLink(item, context) {
-  const node = link(item.name, `agents/${item.id}`, context);
-  if (hasUnbrokenRun(item.name)) {
-    node.classList.add("agent-name-unbroken");
-  }
-  return node;
-}
-
-export function renderAgentList(context) {
-  const { view, items } = context;
-  const search = element("input", {
-    type: "search",
-    "aria-label": "Search Agents",
-    placeholder: "Search Agents by name or ID",
-  });
-  search.value = context.drafts.get("agent-search") ?? "";
-  context.drafts.track("agent-search", () => search.value || undefined);
-  context.drafts.unsavedWhen("agent-search", () => false);
-  const rows = element("div");
-  const deployments = new Map();
-  // The page renders with the caller's permission answer, so Create Agent is never painted
-  // enabled and then refused, and the note never pushes the table down (finding 1517). Gating
-  // only: the API still authorizes creation, so an unknown answer keeps the control.
-  const createDenied = context.permissions?.agents?.create === false;
-  // A Namespace that is not ready names its status here, so the first sign is never a refused
-  // Secret or submit, and one that takes no new Agent never invites creating one (finding 1895).
-  const notReady = namespaceCreation(context.namespace);
-  const create = button("Create Agent", () => context.navigate("agents/new"), {
-    tone: "primary",
-  });
-  create.disabled = createDenied || notReady?.blocked === true;
-  // A provisioning Namespace still takes drafts, so Create Agent stays enabled, and says why
-  // nothing deploys yet (finding 1990).
-  if (notReady) {
-    create.setAttribute("aria-describedby", "namespace-not-ready");
-  }
-  view.replaceChildren(
-    element("div", { className: "agent-toolbar" }, search, create),
-    ...(notReady
-      ? [
-          // A warning status block (dom.mjs statusBlock's markup), a polite status on load.
-          element(
-            "p",
-            {
-              className: "status",
-              "data-tone": "warning",
-              role: "status",
-              id: "namespace-not-ready",
-            },
-            notReady.note,
-          ),
-        ]
-      : []),
-    ...(createDenied
-      ? [
-          element(
-            "p",
-            { className: "muted", role: "status" },
-            "Your access does not include creating Agents in this Namespace.",
-          ),
-        ]
-      : []),
-    rows,
-  );
-  // Each row's latest deployment, read after the list paints. A return to a retained list
-  // revalidates only the list's own reads, so these never hold its reveal (finding 1644); the
-  // retained rows read them again in place instead. So one still running doesn't keep the list
-  // from being retained either (finding 1663): leaving aborts it, and the list rereads it.
-  const cells = new Map(); // The shown rows' deployment cells, each with its Agent.
-  const rowRead = { revalidate: false, rereadOnResume: true };
-  function readDeployment(item) {
-    const agentPath = `${namespacePath(context.namespaceId)}/agents/${encodeURIComponent(item.id)}`;
-    return latestReadableRevision(context, `${agentPath}/revisions`, rowRead).then(
-      async (latest) => {
-        if (!latest) {
-          return null;
-        }
-        const status = await context.request(
-          `${agentPath}/deployments/${encodeURIComponent(latest.id)}`,
-          rowRead,
-        );
-        return { revision: latest, status };
-      },
-    );
-  }
-  // Fills a row's deployment cell. Focus in the cell moves to its new link, or to the row's Agent
-  // link when it has none.
-  function fillDeployment(deployment, ...content) {
-    const focused = deployment.contains(deployment.ownerDocument.activeElement);
-    deployment.replaceChildren(...content);
-    if (focused) {
-      (deployment.querySelector("a") ?? deployment.closest("tr")?.querySelector("a"))?.focus({
-        preventScroll: true,
-      });
-    }
-  }
-  function showDeployment(item, deployment) {
-    if (!deployments.has(item.id)) {
-      deployments.set(item.id, readDeployment(item));
-    }
-    // The cell's "Reading deployment…" (or its focusable holder) and when its text shows: the
-    // frame its delay animation ends in, not render time plus the delay. The animation starts
-    // with the frame that first styles the text, which can be a frame or two either side of the
-    // render, so that estimate let a read landing between the two fill the cell one frame after
-    // the text painted (finding 1716).
-    const reading = deployment.firstElementChild;
-    let shownAt;
-    reading.addEventListener("animationend", () => {
-      shownAt = performance.now();
-    });
-    // A read that lands before the text shows, or after it has shown long enough, fills the cell
-    // now; otherwise once it has. A later resume or render replaces the text, and its own read
-    // fills the cell instead.
-    const fill = (...content) => {
-      const wait = shownAt === undefined ? 0 : shownAt + READING_SHOWN_MS - performance.now();
-      if (wait <= 0) {
-        fillDeployment(deployment, ...content);
-        return;
-      }
-      setTimeout(() => {
-        if (context.isCurrent() && reading.isConnected) {
-          fillDeployment(deployment, ...content);
-        }
-      }, wait);
-    };
-    void deployments
-      .get(item.id)
-      .then((result) => {
-        if (!context.isCurrent()) {
-          return;
-        }
-        if (result === null) {
-          fill("No visible deployments");
-          return;
-        }
-        const neutral = neutralDeploymentOutcome(result.status);
-        const failure =
-          !neutral && result.status.status === "failed"
-            ? (result.status.error?.message ?? "Deployment failed.")
-            : null;
-        // A long failure fits one line; its title and the Agent page give the whole text.
-        fill(
-          link(
-            `v${result.revision.revision} · ${deploymentOutcome(result.status)}`,
-            `agents/${item.id}?revision=${result.revision.id}`,
-            context,
-          ),
-          element(
-            "span",
-            {
-              className: "resource-id agent-deployment-note",
-              ...(failure ? { title: failure } : {}),
-            },
-            failure ??
-              (neutral ? `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.` : "Serving health unverified"),
-          ),
-        );
-      })
-      .catch((error) => {
-        // A read the list's reset aborted fails here; it never paints the list it left.
-        if (!context.isCurrent()) {
-          return;
-        }
-        fill(error.status === 403 ? "Deployment access denied" : "Deployment unavailable");
-      });
-  }
-  function render() {
-    cells.clear();
-    const query = search.value.trim().toLowerCase();
-    const matches = items
-      .filter((item) => `${item.name} ${item.id}`.toLowerCase().includes(query))
-      .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-    if (!matches.length) {
-      rows.replaceChildren(
-        element(
-          "section",
-          { className: "state-panel" },
-          element("h2", {}, query ? "No matching Agents" : "No Agents yet"),
-          element(
-            "p",
-            {},
-            query
-              ? "Try another name or ID."
-              : createDenied
-                ? // Under the note above: say what the reader can expect, not invite creating
-                  // (finding 1521).
-                  "Agents in this Namespace that are shared with you appear here."
-                : notReady?.blocked
-                  ? context.namespace.status === "provisioning"
-                    ? "You can create Agents here once this Namespace is ready."
-                    : "Agents cannot be created in this Namespace."
-                  : notReady
-                    ? "You can save an Agent draft here now. It can be deployed once this Namespace is ready."
-                    : "Create an Agent in this Namespace using an editable Configuration template.",
-          ),
-        ),
-      );
-      return;
-    }
-    const table = element("table", { className: "agent-table", "aria-label": "Agents" });
-    table.append(
-      element(
-        "thead",
-        {},
-        element(
-          "tr",
-          {},
-          ...["Agent", "Execution mode", "Current version", "Latest deployment", "Created"].map(
-            (label) => element("th", { scope: "col" }, label),
-          ),
-        ),
-      ),
-    );
-    const body = element("tbody");
-    for (const item of matches) {
-      const revision = item.activeRevisionId
-        ? link(
-            shortId(item.activeRevisionId),
-            `agents/${item.id}?revision=${item.activeRevisionId}`,
-            context,
-          )
-        : null;
-      revision?.classList.add("agent-revision-link");
-      // The cell keeps its column's width once its read lands, and its outcome link and one
-      // note line fit the two lines the Agent cell already gives the row (finding 1488).
-      const deployment = element(
-        "td",
-        { className: "agent-deployment", "data-label": "Latest deployment" },
-        readingDeployment(),
-      );
-      cells.set(deployment, item);
-      showDeployment(item, deployment);
-      body.append(
-        element(
-          "tr",
-          {},
-          element(
-            "td",
-            {},
-            agentNameLink(item, context),
-            element("span", { className: "resource-id" }, item.id),
-            item.status === "deleting"
-              ? element("span", { className: "badge", "data-tone": "warning" }, "Deleting")
-              : null,
-            item.configurationReadError
-              ? element(
-                  "span",
-                  { className: "badge", "data-tone": "danger" },
-                  "Saved configuration unreadable",
-                )
-              : null,
-          ),
-          // On a phone each cell shows its column's name (console.css, `data-label`).
-          element(
-            "td",
-            { "data-label": "Execution mode" },
-            item.executionMode === "dedicated" ? "Dedicated" : "Embedded",
-          ),
-          element("td", { "data-label": "Current version" }, revision ?? "No current version"),
-          deployment,
-          element("td", { "data-label": "Created" }, displayDate(item.createdAt)),
-        ),
-      );
-    }
-    table.append(body);
-    // On a phone the rows stack (console.css), and a table part whose CSS display changes can
-    // lose its table role in some browsers. Explicit roles keep the table for screen readers.
-    table.setAttribute("role", "table");
-    for (const [parts, role] of [
-      ["thead, tbody", "rowgroup"],
-      ["tr", "row"],
-      ["th", "columnheader"],
-      ["td", "cell"],
-    ]) {
-      for (const part of table.querySelectorAll(parts)) {
-        part.setAttribute("role", role);
-      }
-    }
-    rows.replaceChildren(element("div", { className: "table-scroll" }, table));
-  }
-  // A retained list is mounted without rereading its rows' deployments, so what they showed is
-  // not presented as current: each row reads its deployment again from "Reading deployment…",
-  // blank for its first 250 ms. Back from a deployment can focus the pending cell. Keep its
-  // address only to match that return: until the read settles, the previous revision must not
-  // be an active link.
-  context.onResume?.(() => {
-    deployments.clear();
-    for (const [deployment, item] of cells) {
-      // A cell still reading from an earlier resume keeps the address it was given.
-      const shown =
-        deployment.querySelector("a")?.href ??
-        deployment.querySelector("[data-return-focus-href]")?.dataset.returnFocusHref;
-      deployment.replaceChildren(
-        shown
-          ? element(
-              "span",
-              { tabindex: "-1", "data-return-focus-href": shown },
-              readingDeployment("delayed-text"),
-            )
-          : readingDeployment(),
-      );
-      showDeployment(item, deployment);
-    }
-  });
-  search.addEventListener("input", render);
-  render();
-}
