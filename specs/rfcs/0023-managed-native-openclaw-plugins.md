@@ -11,7 +11,7 @@ author: stevenlee-oai
 
 ## Summary
 
-OpenClaw Enterprise (OCE) should let an administrator select a reviewed Agent integration, bind an authorized connection, and deploy both through the Agent revision lifecycle. The first milestone (P0) is Google access through a reviewed skill and the pinned gog CLI. The model can use gog or write reusable API scripts; OpenShell enforces the same admitted operations and credential boundary for both. Platform integrations remain OCE-managed.
+OpenClaw Enterprise (OCE) should let an administrator select a reviewed Agent integration, bind an authorized connection, and deploy both through the Agent revision lifecycle. The first milestone (P0) pairs a reviewed skill with pinned [gog](https://github.com/openclaw/gogcli), OpenClaw's command-line client for Google Workspace APIs. The model can use gog or write reusable API scripts; OpenShell enforces the same admitted operations and credential boundary. Platform integrations remain OCE-managed.
 
 ## Plugins and capabilities
 
