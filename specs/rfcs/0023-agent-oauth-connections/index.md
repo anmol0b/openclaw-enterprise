@@ -191,7 +191,8 @@ These changes require review of this RFC before implementation. The
 [companion](contracts.md) defines their inputs, results, and failure behavior.
 
 1. **`CredentialRefreshDriver`** gains browser authorization, client registration,
-   and OIDC provider verification. It keeps OAuth client secrets.
+   and OIDC provider verification. It keeps OAuth client secrets; the OpenShell
+   implementation adds a `clientWorkspace` setting for them.
 2. **`CredentialGatewayDriver`** accepts an `access` field on tool-source
    endpoints, so `read-only` permits only `GET`, `HEAD`, and `OPTIONS`.
 3. **The OpenShell tool profile** releases the credential only to the connection
