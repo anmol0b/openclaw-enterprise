@@ -85,10 +85,12 @@ which hands the grant to OpenShell without persisting the refresh token.
 A connection template is an Installation-scoped resource with IAM kind
 `connection_template` and actions `create`, `read`, `update`, `delete`, and `use`.
 Installation administrators manage the catalog through the API, CLI, and console.
-They grant `use` on an exact connection template to the people or Namespaces that
-may connect it. A user needs `use` to see a connection template under **Connect**
-and to start a connection from it. Credential sources created from it stay in the
-Agent's Namespace.
+They grant `use` on an exact connection template to a person, or to a Namespace so
+that anyone connecting an Agent in that Namespace may use it. IAM gains
+Installation-level access bindings for this ([IAM changes](contracts.md#iam-driver)).
+A user needs `use` to see a connection template under **Connect** and to start a
+connection from it. Credential sources created from it stay in the Agent's
+Namespace.
 
 | Field                               | Why it is needed                                                                                                                                |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -194,8 +196,10 @@ These changes require review of this RFC before implementation. The
    endpoints, so `read-only` permits only `GET`, `HEAD`, and `OPTIONS`.
 3. **The OpenShell tool profile** releases the credential only to the connection
    template's `binary`.
-4. **Attachment opens the endpoint** for that binary, as the model source's
-   provider profile already does, without a per-Agent addition or ceiling change.
+4. **Attachment opens the endpoint** for that binary. The current provider profile
+   already does this; the contract makes it required behavior.
+5. **`IAMDriver`** gains Installation-level access bindings, a `namespace` subject
+   kind, and an optional Namespace context on authorization requests.
 
 Connections create sources of the existing `oauth2-refresh-token` type. The type
 keeps its Secret-backed registration path for manual use.

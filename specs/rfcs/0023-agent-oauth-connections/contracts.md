@@ -67,6 +67,36 @@ against keys from that JWKS URL only: signature, `iss` equal to the recorded
 `issuer`, `aud` containing the client ID, expiry, and nonce. It refetches the key
 set once for an unknown key ID, then rejects. It returns only a verified `email`.
 
+## IAM Driver
+
+IAM matches a Namespace-scoped binding only to resources in that Namespace, and has
+no API for Installation-level bindings. Granting `use` on an Installation-wide
+connection template needs these additions:
+
+- **Installation access bindings.** Optional `listInstallationAccessBindings`,
+  `createInstallationAccessBinding`, and `deleteInstallationAccessBinding`, with
+  `listInstallationRoles`. They accept only Installation-scoped resource kinds, which
+  this RFC limits to `connection_template`, and require Installation `administer`
+  inside the caller's policy-and-audit transaction, as Namespace policy writes do.
+- **Built-in role.** Bootstrap seeds an Installation role, "Connection template
+  user", with `use` on `connection_template`. A migration adds it to existing
+  Installations. No role-creation API is added.
+- **`namespace` subject kind.** `AccessBindingSubjectKind` adds `namespace`, valid
+  only on Installation access bindings. Its `subjectId` is a Namespace ID.
+- **Namespace context.** `AuthorizationRequest` gains optional `namespaceContext`.
+  A `namespace` binding matches only when the request's `namespaceContext` equals its
+  subject. OCC sets it to the Agent's Namespace when it checks `use` at connect time,
+  after the caller passes `agent:update` there. Requests without a context never
+  match `namespace` bindings.
+- **Identity bindings** for a person use `subjectKind: identity` and match without a
+  context. Namespace-bound identities, such as service principals, still cannot use
+  Installation resources.
+- **Deletion.** Deleting a connection template removes its bindings; deleting a
+  Namespace removes `namespace` bindings that name it.
+
+A Driver without these methods cannot grant `use` to anyone except Installation
+administrators, who hold every action through the built-in administrator role.
+
 ## Credential Gateway Driver
 
 - Tool-source endpoints accept `access`. OpenShell maps `read-only` to its enforced
@@ -111,6 +141,10 @@ must verify, and External Testing applications issue seven-day refresh tokens.
 - **Client registrations.** Two connection templates with the same `clientId` in
   two Keycloak realms keep independent secrets: rotating one leaves the other's
   sources refreshing.
+- **IAM.** A person with an identity binding and a person connecting an Agent in a
+  Namespace with a `namespace` binding can connect; the same person connecting an
+  Agent in another Namespace, a service key, and a caller without a binding are
+  refused. Only Installation administrators can create or delete the bindings.
 - **OIDC.** Reject a version whose metadata issuer or endpoints differ, and an ID
   token with a wrong issuer, an untrusted signing key, a wrong audience, or a wrong
   nonce. Show the verified address on success.
