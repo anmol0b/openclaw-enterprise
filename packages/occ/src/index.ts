@@ -11825,6 +11825,7 @@ export class OpenClawController {
       agent_revision: "rev",
       credential_source: "cs",
       sandbox_policy: "sbp",
+      connection_template: "ctp",
     };
     const result = this.identifier
       ? this.identifier(kind)

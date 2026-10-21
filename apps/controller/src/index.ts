@@ -1027,6 +1027,7 @@ function permissionDescription(
     agent_revision: "Agent revision",
     credential_source: "CredentialSource",
     sandbox_policy: "SandboxPolicy",
+    connection_template: "ConnectionTemplate",
   };
 
   const description = permissions
