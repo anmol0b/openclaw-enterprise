@@ -2072,9 +2072,9 @@ function probeOpenClawAuthenticationFailure() {
 // The full probe needs 10-20 s of local work before its model request. A
 // rejected credential is found first with one empty request to the default
 // endpoint, sent with the credential exactly as OpenClaw sends it: the provider
-// normally authenticates before validating. Stop early for a recognized credential
-// rejection or a policy-marked 401. An unclassified 401 to this model-less request
-// is inconclusive; only a successful model turn can make the runtime ready.
+// normally authenticates before validating. A 401 rejects a direct credential.
+// With a provider-managed credential, an unclassified 401 to this model-less request
+// is inconclusive; a recognized credential rejection or policy-marked 401 still stops startup.
 // Skip preflight for custom headers or request options (except allowPrivateNetwork),
 // a model that overrides the provider endpoint or API, or an Anthropic setup token.
 // Use the configured API path: a key may be scoped to one endpoint, and OpenAI
@@ -2158,7 +2158,8 @@ function runOpenClawAuthenticationProbe(fs, capMs) {
     const rejected = credentialRejectedUpfront(provider, configuration.models?.providers?.[provider], process.env[credentialEnvironment], stage);
     if (rejected) {
       const { providerCode, providerErrorCode, responseHeaderMarker } = rejected;
-      if (providerCode || (providerErrorCode && providerErrorCode !== "other") ||
+      if (process.env.OCE_OPENCLAW_CREDENTIAL_SOURCE !== "1" ||
+        providerCode || (providerErrorCode && providerErrorCode !== "other") ||
         responseHeaderMarker === "openshell-policy" || responseHeaderMarker === "mixed") {
         return { code: "AUTHENTICATION_FAILED", ...rejected };
       }
