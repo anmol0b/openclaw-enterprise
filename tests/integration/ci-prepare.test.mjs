@@ -2341,11 +2341,16 @@ if (args[0] === "pull") {
     const other = "tests/integration/local-first-agent-openshell-real.test.mjs";
     const cases = [
       { harness: "codex", credentials: ["CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"] },
-      { harness: "codex", credentials: ["CODEX_ACCESS_TOKEN"], missing: "OPENAI_API_KEY" },
+      { harness: "codex", credentials: ["CODEX_ACCESS_TOKEN"] },
       { harness: "codex", credentials: ["OPENAI_API_KEY"], missing: "CODEX_ACCESS_TOKEN" },
       { harness: "openclaw", credentials: ["OPENAI_API_KEY"], missing: "CODEX_ACCESS_TOKEN" },
       { harness: "openclaw", credentials: ["OPENAI_API_KEY"], file: owner },
-      { harness: "openclaw", credentials: ["CODEX_ACCESS_TOKEN"], missing: "OPENAI_API_KEY" },
+      {
+        harness: "openclaw",
+        credentials: ["CODEX_ACCESS_TOKEN"],
+        file: owner,
+        missing: "OPENAI_API_KEY",
+      },
       { harness: "codex", endpoint: true, credentials: ["OPENAI_API_KEY"], file: owner },
       {
         harness: "codex",
