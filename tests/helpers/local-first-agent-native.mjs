@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const proofPrefix = "OCE_NATIVE_FIRST_AGENT_PROOF ";
@@ -102,9 +103,13 @@ const failureCategory = (code) => (runtimeFailureCodes.has(code) ? code : "unrec
 const progressCode = (code) => (deploymentProgressCodes.has(code) ? code : "unknown");
 
 // The latest model check in the exact revision's agent log page, as fixed values only.
-function observedModelProbe(logs, revisionId) {
-  if (logs?.revisionId !== revisionId || logs.source !== "agent" || !Array.isArray(logs.records)) {
-    return "unavailable";
+async function observeModelProbe(observation, logs, revision, readProbePod, signal) {
+  if (
+    logs?.revisionId !== revision.revisionId ||
+    logs.source !== "agent" ||
+    !Array.isArray(logs.records)
+  ) {
+    return;
   }
   const probes = logs.records.filter(
     (record) =>
@@ -112,8 +117,9 @@ function observedModelProbe(logs, revisionId) {
       record.kind === "wrapper" &&
       record.message === "openclaw.model_probe",
   );
-  const fields = probes.at(-1)?.fields ?? {};
-  return {
+  const probe = probes.at(-1);
+  const fields = probe?.fields ?? {};
+  observation.modelProbe = {
     probes: probes.length,
     code: absentOr(fields.code, (code) => (modelProbeCodes.has(code) ? code : "other")),
     providerStatus: absentOr(fields.providerStatus, (status) =>
@@ -127,15 +133,47 @@ function observedModelProbe(logs, revisionId) {
     providerErrorCode: markerOrAbsent(fields.providerErrorCode, providerErrorCodes),
     providerErrorType: markerOrAbsent(fields.providerErrorType, providerErrorTypes),
   };
+  if (!readProbePod) return;
+
+  // The log reader reports stream_replaced if the Pod or container changed during its read.
+  // Compare that stream to one later Pod status; never infer the image from the requested tag.
+  observation.probePodImage = "unavailable";
+  const stream = probe?.stream;
+  if (
+    stream?.source !== "agent" ||
+    stream.container !== "agent" ||
+    !stream.pod ||
+    !isDeepStrictEqual(stream, logs.stream) ||
+    !uuidV4.test(stream.podUid) ||
+    !Number.isSafeInteger(stream.restartCount) ||
+    stream.restartCount < 0 ||
+    logs.records.some((record) => record?.type === "gap" && record.reason === "stream_replaced")
+  ) {
+    return;
+  }
+  // The caller's existing diagnostic catch preserves the probe if this read fails.
+  const row = (await readProbePod(revision, signal)).trim();
+  const [pod, podUid, restartCount, imageId, extra] = row.split(/\s+/);
+  if (
+    pod !== stream.pod ||
+    podUid !== stream.podUid ||
+    restartCount !== String(stream.restartCount) ||
+    extra !== undefined
+  ) {
+    return;
+  }
+  const digest = /^(?:[^\s@]+@|[a-z-]+:\/\/)?(sha256:[0-9a-f]{64})$/.exec(imageId)?.[1];
+  if (digest) observation.probePodImage = { digest, podUid };
 }
 
 // Codes from the provisioning record, its exact deployment and, for a held model-check
-// failure, that check's log event. Every value comes from a fixed vocabulary.
+// failure, that check's log event and the image observed for its exact container instance.
 async function observeNativeFailure({
   request,
   namespaceId,
   provisioningPath,
   provisioned,
+  readProbePod,
   signal,
 }) {
   const observation = {
@@ -158,7 +196,14 @@ async function observeNativeFailure({
       revisionId: provisioned.revisionId,
       deploymentPath,
     };
-    await observeDeployment(observation, deployment, revision, request, diagnosticSignal);
+    await observeDeployment(
+      observation,
+      deployment,
+      revision,
+      request,
+      diagnosticSignal,
+      readProbePod,
+    );
   } catch {
     // Diagnostic failures cannot replace the terminal failure or reveal peer errors.
   }
@@ -167,7 +212,7 @@ async function observeNativeFailure({
 
 // The exact revision's status and codes and, for a held model-check failure, that check's
 // log event. Sets `deployment` (and `modelProbe`) on the observation as it learns them.
-async function observeDeployment(observation, deployment, revision, request, signal) {
+async function observeDeployment(observation, deployment, revision, request, signal, readProbePod) {
   if (
     deployment?.namespaceId !== revision.namespaceId ||
     deployment.agentId !== revision.agentId ||
@@ -189,16 +234,17 @@ async function observeDeployment(observation, deployment, revision, request, sig
       undefined,
       signal,
     );
-    observation.modelProbe = observedModelProbe(logs, revision.revisionId);
+    await observeModelProbe(observation, logs, revision, readProbePod, signal);
   }
 }
 
 // CI keeps only the start of this message. Lead with the probe; its 401 response
 // does not tell us whether credentials were attached when the request was made.
-function failNativeWork(expectation, code, { modelProbe, ...work }) {
+function failNativeWork(expectation, code, { modelProbe, probePodImage, ...work }) {
   const observation = {
     modelProbe,
     credentialAttachment: modelProbe?.providerStatus === 401 ? "not observed" : undefined,
+    probePodImage,
     ...work,
   };
   assert.fail(`${expectation}: ${failureCategory(code)} ${JSON.stringify(observation)}`);
