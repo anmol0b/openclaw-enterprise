@@ -2078,11 +2078,27 @@ test("console clears private content after session expiry, access revocation, an
 
   await page.reload();
   await page.getByText("Revoked agent").waitFor();
-  // Better Auth's memory adapter stores session expiry as Date values.
-  for (const session of fixture.memoryDatabase.session) {
-    session.expiresAt = new Date(Date.now() - 1000);
-  }
+  // Expire at the reloaded page's session check. A row read still in flight on the old page
+  // could otherwise get a 401, show the expiry notice, and leave reload opening /console/login.
+  const sessionPath = "**/api/auth/session";
+  await page.route(
+    sessionPath,
+    async (route) => {
+      for (const session of fixture.memoryDatabase.session) {
+        session.expiresAt = new Date(Date.now() - 1000);
+      }
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  const sessionCheck = page.waitForResponse(sessionPath);
   await page.reload();
+  const expired = await sessionCheck;
+  assert.equal(expired.status(), 200);
+  assert.ok(
+    (await expired.json()).data === null,
+    "the reloaded page must observe an expired session",
+  );
   await page.getByText("Your session has expired").waitFor();
   await page.getByRole("button", { name: "Sign in" }).waitFor();
   await expectNoText(page, /Revoked agent/);
