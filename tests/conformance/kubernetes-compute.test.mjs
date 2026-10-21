@@ -8852,15 +8852,17 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
 
   // Execute the production launcher with the admitted worker identity and the
   // candidate image's source identity; native image tests qualify its binary.
-  const { files, calls } = await runOpenClawRuntimeHelper(undefined, [], {
+  const runtimeOptions = {
     baseConfig: configuration,
+    files: [["/etc/openclaw-managed/openclaw.json", JSON.stringify(configuration)]],
     env: {
       OPENCLAW_GATEWAY_PORT: "8080",
       OPENCLAW_NATIVE_WORKER_PROFILE: "dedicated-native",
       OPENCLAW_STATE_DIR: "/home/node/.openclaw",
       OPENCLAW_WORKSPACE_NODE_ID: deviceId,
     },
-  });
+  };
+  const { files, calls, sandbox } = await runOpenClawRuntimeHelper(undefined, [], runtimeOptions);
   assert.equal(
     calls.some(({ args }) => args?.[1] === "gateway"),
     true,
@@ -8871,6 +8873,33 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
     provider: "device",
     settings: { device: deviceId, inference: "worker" },
   });
+  // Restart against the writable configuration: reuse only the exact admitted worker profile.
+  const restartOptions = { ...runtimeOptions, env: { ...sandbox.process.env }, files };
+  const restarted = await runOpenClawRuntimeHelper(undefined, [], restartOptions);
+  assert.equal(
+    restarted.calls.some(({ args }) => args?.[1] === "gateway"),
+    true,
+  );
+
+  effectiveConfiguration.cloudWorkers.profiles["dedicated-native"].settings.device = "b".repeat(64);
+  const conflictingFiles = new Map(restarted.files);
+  conflictingFiles.set(
+    "/home/node/.openclaw/openclaw.json",
+    JSON.stringify(effectiveConfiguration),
+  );
+  const conflictingCalls = [];
+  await assert.rejects(
+    runOpenClawRuntimeHelper(undefined, [], {
+      ...restartOptions,
+      files: conflictingFiles,
+      calls: conflictingCalls,
+    }),
+    /worker profile conflicts with admitted configuration/u,
+  );
+  assert.equal(
+    conflictingCalls.some(({ args }) => args?.[1] === "gateway"),
+    false,
+  );
 });
 
 test("account-token authentication grants only the exact Codex revision outbound HTTPS", () => {
@@ -13530,6 +13559,12 @@ test("Gateway and Harness storage are separate and preserve ephemeral Codex cred
           name: privateVolume.name,
           mountPath: "/home/node/.openclaw/state",
           subPath: "state",
+          readOnly: false,
+        },
+        {
+          name: privateVolume.name,
+          mountPath: "/home/node/.openclaw/client",
+          subPath: "client",
           readOnly: false,
         },
         {
