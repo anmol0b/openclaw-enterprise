@@ -982,6 +982,8 @@ function run(args, env, readinessUrl) {
         "none",
         "--volume",
         `${configurationPath}:/etc/openclaw/openclaw.json:ro`,
+        "--volume",
+        `${configurationPath}:/etc/openclaw-managed/openclaw.json:ro`,
         "--entrypoint",
         "node",
         image,
