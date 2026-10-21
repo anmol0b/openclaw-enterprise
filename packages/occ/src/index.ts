@@ -11857,7 +11857,12 @@ export class OpenClawController {
     try {
       return await operation();
     } catch (error) {
-      if (error instanceof ScopeViolationError || error instanceof ResourceConflictError) {
+      // A definite browser authorization failure keeps its safe code and recovery action.
+      if (
+        error instanceof ScopeViolationError ||
+        error instanceof ResourceConflictError ||
+        error instanceof BrowserAuthorizationError
+      ) {
         throw error;
       }
       throw new DependencyUnavailableError(

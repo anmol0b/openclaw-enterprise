@@ -360,27 +360,23 @@ test(
       });
       assert.equal(bound.statusCode, 201, bound.body);
     }
-    const agentRole = await pool.query(
-      `INSERT INTO occ.iam_roles (id, namespace_id, name, permissions)
-       VALUES ($1, $2, 'Agent owner', $3::jsonb) RETURNING id`,
-      [
-        `role_${randomUUID()}`,
-        namespace.id,
-        JSON.stringify(
-          ["read", "update", "deploy", "operate", "administer"].map((action) => ({
-            action,
-            resourceKind: "agent",
-          })),
-        ),
-      ],
-    );
-    // Namespace Role writes accept only Namespace read, so the Agent grant is seeded directly.
-    await pool.query(
-      `INSERT INTO occ.iam_access_bindings
-       (id, namespace_id, identity_subject_id, role_id, resource_kind, resource_id)
-       VALUES ($1, $2, $3, $4, 'agent', $5)`,
-      [`binding_${randomUUID()}`, namespace.id, bob.principalId, agentRole.rows[0].id, agent.id],
-    );
+    // Bob's exact-Agent grant comes through the same Namespace policy API the console uses.
+    const agentRole = await inject("POST", `/namespaces/${namespace.id}/iam/roles`, {
+      name: "Agent owner",
+      permissions: ["read", "update", "deploy", "operate", "administer"].map((action) => ({
+        action,
+        resourceKind: "agent",
+      })),
+    });
+    assert.equal(agentRole.statusCode, 201, agentRole.body);
+    const agentGrant = await inject("POST", `/namespaces/${namespace.id}/iam/access-bindings`, {
+      subjectKind: "identity",
+      subjectId: bob.principalId,
+      roleId: agentRole.json().data.id,
+      resourceKind: "agent",
+      resourceId: agent.id,
+    });
+    assert.equal(agentGrant.statusCode, 201, agentGrant.body);
     const listed = await bob.request("GET", `/namespaces/${namespace.id}/connection-templates`);
     assert.equal(listed.statusCode, 200, listed.body);
     assert.deepEqual(
