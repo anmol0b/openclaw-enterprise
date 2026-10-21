@@ -23,12 +23,15 @@ import { requiresPostgres } from "../helpers/postgres-database.mjs";
 
 const issuer = process.env.OCC_TEST_KEYCLOAK_ISSUER;
 const secretsFile = process.env.OCC_TEST_KEYCLOAK_SECRETS_FILE;
+// The OpenShell gateway refuses `localhost` token hosts, so the token endpoint uses another
+// name for the same Keycloak, as Google's token host differs from its issuer.
+const tokenOrigin = process.env.OCC_TEST_KEYCLOAK_TOKEN_ORIGIN;
 const requiresKeycloak = {
   skip:
     requiresPostgres.skip ||
-    (issuer && secretsFile
+    (issuer && secretsFile && tokenOrigin
       ? false
-      : "Prepare the keycloak-oidc lane for OCC_TEST_KEYCLOAK_ISSUER and OCC_TEST_KEYCLOAK_SECRETS_FILE (docs/testing/ci.md)."),
+      : "Prepare the keycloak-oidc lane for OCC_TEST_KEYCLOAK_ISSUER, OCC_TEST_KEYCLOAK_SECRETS_FILE and OCC_TEST_KEYCLOAK_TOKEN_ORIGIN (docs/testing/ci.md)."),
 };
 
 const publicOrigin = "https://occ-connections.test";
@@ -178,7 +181,11 @@ test(
   async (t) => {
     const secrets = JSON.parse(await readFile(secretsFile, "utf8"));
     let provision;
+    // Source deletion waits out the Credential Gateway's registration fence (70 seconds), so
+    // the test moves OCC's clock forward instead of sleeping.
+    let skewMs = 0;
     const fixture = await createPostgresAgentApp(t, {
+      controllerOptions: { now: () => new Date(Date.now() + skewMs) },
       label: `connections-${randomUUID().slice(0, 8)}`,
       authSecret: "openclaw-connections-test-auth-secret-minimum-32-bytes",
       appOptions: {
@@ -207,6 +214,13 @@ test(
     const { namespace, agent } = await fixture.deployAgent("connections");
     const other = await fixture.deployAgent("connections other");
 
+    // Only the Kubernetes Compute Driver places Credential Gateway sources; like it, this
+    // placement names the Namespace's Sandbox view with a short Kubernetes namespace label,
+    // which OpenShell operator mode uses as the Workspace name.
+    fixture.computeDriver.resolveSandboxNamespace = async (namespace) => ({
+      ...namespace,
+      name: `oce-${namespace.id.slice(3, 11)}`,
+    });
     const openShell = recordingOpenShell();
     const backend = createOpenShellBackend(
       {
@@ -301,13 +315,21 @@ test(
       displayName: `Keycloak ${realm}`,
       issuer: `${new URL(issuer).origin}/realms/${realm}`,
       authorizationUrl: `${new URL(issuer).origin}/realms/${realm}/protocol/openid-connect/auth`,
-      tokenUrl: `${new URL(issuer).origin}/realms/${realm}/protocol/openid-connect/token`,
+      tokenUrl: `${tokenOrigin}/realms/${realm}/protocol/openid-connect/token`,
       clientId,
       clientSecret,
       scopes: ["openid"],
       endpoint: { host: "api.connections.test", port: 443, path: "/**" },
       envVar: "CONNECTION_TOKEN",
     });
+    // The OpenShell gateway, not OCC, refreshes at the token URL, and a `localhost` name would
+    // reach the gateway itself. The administrator sees that refusal before anyone connects.
+    const unreachable = await inject("POST", "/connection-templates", {
+      ...templateBody("oce", clientSecretA),
+      tokenUrl: `${new URL(issuer).origin}/realms/oce/protocol/openid-connect/token`,
+    });
+    assert.equal(unreachable.statusCode, 400, unreachable.body);
+    assert.match(unreachable.json().error.message, /token_url host/);
     const createdA = await inject(
       "POST",
       "/connection-templates",
@@ -422,15 +444,15 @@ test(
 
     // Another person's session cannot complete Bob's connection, and it is not consumed.
     const stolen = await carol.request("GET", callbackPath);
-    assert.equal(stolen.statusCode, 303);
+    assert.equal(stolen.statusCode, 303, stolen.body);
     assert.match(stolen.headers.location, /connection=failed&reason=unknown_session/);
     const refusedAudit = await pool.query(
       `SELECT actor_id, details FROM occ.audit_events
        WHERE action = 'openclaw.agents.connections.complete' AND outcome = 'failure'`,
     );
     assert.deepEqual(
-      refusedAudit.rows.map((row) => [row.actor_id, row.details?.reasonCode]),
-      [[carol.principalId, "unknown_session"]],
+      refusedAudit.rows.map((row) => [row.actor_id, row.details?.__occAuditMetadata?.reasonCode]),
+      [[carol.principalId, "UNKNOWN_SESSION"]],
       "the refused callback is audited with its reason and the person who sent it",
     );
 
@@ -542,20 +564,28 @@ test(
     const deleteUsed = await inject("DELETE", `/connection-templates/${templateA.id}`);
     assert.equal(deleteUsed.statusCode, 409, deleteUsed.body);
 
-    // Disconnect removes the binding and deletes the source, which lifts the restriction.
-    const disconnected = await bob.request(
-      "DELETE",
-      `/namespaces/${namespace.id}/agents/${agent.id}/connections/${credentialSourceId}`,
-    );
+    // Disconnect removes the source from the Agent and the gateway. A source this new keeps its
+    // record (a late gateway create could still appear), so the Agent stays personal.
+    const disconnectPath = `/namespaces/${namespace.id}/agents/${agent.id}/connections/${credentialSourceId}`;
+    const shareCarol = () =>
+      inject("POST", `/namespaces/${namespace.id}/iam/access-bindings`, {
+        subjectKind: "identity",
+        subjectId: carol.principalId,
+        roleId: agentRole.json().data.id,
+        resourceKind: "agent",
+        resourceId: agent.id,
+      });
+    const early = await bob.request("DELETE", disconnectPath);
+    assert.equal(early.statusCode, 200, early.body);
+    assert.deepEqual(early.json().data, { withdrawalRequested: false, deleted: false });
+    assert.equal((await shareCarol()).statusCode, 409, "still personal until the source is gone");
+
+    // Disconnecting again after the fence deletes the source, which lifts the restriction.
+    skewMs = 71_000;
+    const disconnected = await bob.request("DELETE", disconnectPath);
     assert.equal(disconnected.statusCode, 200, disconnected.body);
     assert.deepEqual(disconnected.json().data, { withdrawalRequested: false, deleted: true });
-    const shareAfter = await inject("POST", `/namespaces/${namespace.id}/iam/access-bindings`, {
-      subjectKind: "identity",
-      subjectId: carol.principalId,
-      roleId: role.json().data.id,
-      resourceKind: "namespace",
-      resourceId: namespace.id,
-    });
+    const shareAfter = await shareCarol();
     assert.equal(shareAfter.statusCode, 201, shareAfter.body);
 
     // No authorization code, refresh token, or client secret reaches the audit log.
