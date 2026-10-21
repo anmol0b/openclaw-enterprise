@@ -275,7 +275,7 @@ func (client *Client) apiError(status int, header http.Header, body []byte) erro
 		result.Code = envelope.Error.Code
 		result.Message = envelope.Error.Message
 	}
-	if seconds, err := strconv.Atoi(header.Get("retry-after")); err == nil && seconds > 0 && seconds <= 3600 {
+	if seconds, err := strconv.ParseUint(header.Get("retry-after"), 10, 64); err == nil && seconds > 0 && seconds <= 3600 {
 		result.RetryAfter = time.Duration(seconds) * time.Second
 	} else if until, err := http.ParseTime(header.Get("retry-after")); err == nil {
 		if remaining := time.Until(until); remaining > 0 && remaining <= time.Hour {
@@ -291,7 +291,7 @@ func (client *Client) apiError(status int, header http.Header, body []byte) erro
 			target.Fragment = ""
 			target.RawFragment = ""
 			result.Location = target.String()
-			if target.Scheme != client.baseURL.Scheme || target.Host != client.baseURL.Host {
+			if target.Scheme != client.baseURL.Scheme || !strings.EqualFold(target.Host, client.baseURL.Host) {
 				result.redirectOrigin = target.Scheme + "://" + target.Host
 			}
 		}

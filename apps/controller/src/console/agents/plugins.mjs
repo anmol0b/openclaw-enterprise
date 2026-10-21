@@ -1,4 +1,11 @@
-import { button, element, focusSaveOutcome } from "../dom.mjs";
+import {
+  button,
+  element,
+  focusSaveOutcome,
+  revealStatus,
+  statusBlock,
+  validateFields,
+} from "../dom.mjs";
 import { createPluginDiscovery } from "./plugin-discovery.mjs";
 import { createSlackApproverField } from "./slack-approvers.mjs";
 import {
@@ -157,7 +164,7 @@ export function renderAgentPlugins(
   });
   // Refusals read as errors, as on Configuration saves, not in the muted status (finding 1864).
   // Declared before the approver field, whose edits clear it.
-  const saveError = element("p", { className: "error", role: "alert" });
+  const saveError = statusBlock("danger", null, null);
   const defaultApprovers = createSlackApproverField({
     context,
     label: "Default plugin approvers",
@@ -205,14 +212,18 @@ export function renderAgentPlugins(
     ),
     ...(agent.harnessAuth?.method === "credential_source"
       ? [
-          element(
-            "p",
-            { className: "notice" },
+          statusBlock(
+            "info",
+            null,
             "Plugin browsing uses this Agent's saved credential source.",
+            [],
+            { role: null },
           ),
         ]
       : []),
-    ...(apiKeyAuth ? [element("p", { className: "notice" }, API_KEY_PLUGIN_MESSAGE)] : []),
+    ...(apiKeyAuth
+      ? [statusBlock("warning", null, API_KEY_PLUGIN_MESSAGE, [], { role: null })]
+      : []),
     discovery.fields.section,
     capabilitiesStatus,
     updateNote,
@@ -285,9 +296,10 @@ export function renderAgentPlugins(
       }
     } catch {
       input.setCustomValidity("Enter a valid Plugin selections JSON object.");
-      input.closest("details").open = true;
-      input.reportValidity();
-      feedback.textContent = "Enter a valid Plugin selections JSON object.";
+      // The error goes under the field, opening its section, without the browser's bubble; the
+      // status line does not repeat it.
+      validateFields([input]);
+      feedback.textContent = "";
       return;
     }
     pending = true;
@@ -356,15 +368,17 @@ export function renderAgentPlugins(
                 : error.status === 501
                   ? "This Installation has no compatible Plugin Driver for these selections. Ask an operator to select or configure one, then retry."
                   : message(error, mutationStarted);
-      // Save disables while it runs, which dropped focus to the page.
-      focusSaveOutcome(section, [], saveError);
+      // Save disables while it runs, which dropped focus to the page. Focus the reader moved
+      // anywhere else while the save ran, in this section too, stays there (finding 1978).
+      revealStatus(saveError, save);
     } finally {
       if (context.isCurrent() && !saved) {
         pending = false;
         updateState();
-        if (outcomeUnknown) {
-          // updateState shows the outcome and its Reload, which takes focus.
-          focusSaveOutcome(section, [reload], feedback);
+        if (outcomeUnknown || reloadRequired) {
+          // updateState shows the outcome and its Reload, which takes focus unless the reader
+          // moved it off Save (findings 1978, 1998).
+          focusSaveOutcome(save, [reload], feedback);
         }
       }
     }

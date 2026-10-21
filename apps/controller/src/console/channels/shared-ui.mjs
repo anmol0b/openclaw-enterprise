@@ -1,4 +1,12 @@
-import { element, button, dismissOnBackdrop, focusSaveOutcome } from "../dom.mjs";
+import {
+  element,
+  button,
+  dismissOnBackdrop,
+  field as formField,
+  focusSaveOutcome,
+  statusBlock,
+  validateOnSubmit,
+} from "../dom.mjs";
 import { renderSecretReference } from "../agents/secret-picker.mjs";
 import { carryList, carryValue } from "../carry.mjs";
 
@@ -13,13 +21,7 @@ export const refsEqual = (left, right) =>
   left.id === right.id;
 
 export function field(label, control, hint) {
-  return element(
-    "div",
-    { className: "channel-field" },
-    element("label", { for: control.id }, label),
-    control,
-    hint ? element("p", { className: "hint", id: `${control.id}-hint` }, hint) : null,
-  );
+  return formField({ label, control, help: hint, className: "channel-field" });
 }
 
 export function checkbox(id, label, checked, disabled = false) {
@@ -214,10 +216,10 @@ function renderCard(section, state, provider) {
       ),
     );
   } else if (blockReason) {
-    card.append(element("p", { className: "error" }, blockReason));
+    card.append(element("p", { className: "status", "data-tone": "danger" }, blockReason));
   } else if (!support.supported) {
     card.append(
-      element("p", { className: "error" }, support.reason),
+      element("p", { className: "status", "data-tone": "danger" }, support.reason),
       nativeDocument(`${provider.name} native configuration`, support.config),
     );
   }
@@ -342,9 +344,9 @@ async function save(state, values, dialog, targetError, secretBindingUpdate, pro
       dialog?.remove();
     }
     (sectionError ? state.error : errorNode).replaceChildren(
-      element(
-        "p",
-        { className: "error", role: "alert" },
+      statusBlock(
+        "danger",
+        null,
         errorText(error) +
           (state.reloadRequired ? carriedNotice(state.carriedDraft, provider) : ""),
       ),
@@ -511,6 +513,7 @@ function openDrawer(section, state, provider, retained) {
     config.enabled !== false,
   );
   const body = element("form", { method: "dialog", className: "channel-drawer-form" });
+  validateOnSubmit(body);
   const carriedNote = carried
     ? element("p", { className: "hint", role: "status", id: `${provider.id}-carried-edits` })
     : null;
@@ -547,11 +550,11 @@ function openDrawer(section, state, provider, retained) {
       ),
       button("Close", discard),
     ),
-    element(
-      "p",
-      { className: "notice", role: "status" },
+    statusBlock(
+      "info",
+      null,
       state.copy.drawerNotice ??
-        "New version. Changes affect future deployments using this Configuration. Configure model credentials in the Credentials tab before first deploy.",
+        "New version. Changes affect future deployments using this Configuration. Configure model credentials in the Credentials tab before deploying.",
     ),
     ...(carriedNote ? [carriedNote] : []),
     enabled,
@@ -662,9 +665,9 @@ function openDrawer(section, state, provider, retained) {
   if (stale || unresolved) {
     submit.disabled = true;
     feedback.append(
-      element(
-        "p",
-        { className: "error", role: "alert" },
+      statusBlock(
+        "danger",
+        null,
         unresolved
           ? "Outcome unknown. Cancel this editor and reload the page to inspect saved settings before saving again."
           : "The saved Configuration changed while you were editing. Cancel this editor to use current settings.",
@@ -685,19 +688,13 @@ function openDrawer(section, state, provider, retained) {
       body.querySelector(`#${provider.id}-enabled`).checked
     ) {
       feedback.replaceChildren(
-        element(
-          "p",
-          { className: "error", role: "alert" },
-          "Channels require Dedicated execution.",
-        ),
+        statusBlock("danger", null, "Channels require Dedicated execution."),
       );
       return;
     }
     const validationError = provider.validate?.(body);
     if (validationError) {
-      feedback.replaceChildren(
-        element("p", { className: "error", role: "alert" }, validationError),
-      );
+      feedback.replaceChildren(statusBlock("danger", null, validationError));
       return;
     }
     const nextValues = provider.updatedValues(state.values, body);

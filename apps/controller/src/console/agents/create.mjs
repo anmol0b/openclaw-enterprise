@@ -1,5 +1,15 @@
 import defaultCodexPreset from "../default-codex-preset.mjs";
-import { button, element, fieldError, jsonObjectProblem, setText } from "../dom.mjs";
+import {
+  button,
+  element,
+  field as formField,
+  fieldError,
+  jsonObjectProblem,
+  setStatusTone,
+  setText,
+  statusBlock,
+  validateFields,
+} from "../dom.mjs";
 import { WORKSPACE_DEFAULTS, WORKSPACE_DEFAULTS_ID } from "../workspace-defaults.mjs";
 import { configuredHarnessId, harnessAuthDescription } from "./harness-auth.mjs";
 import { createDeviceLogin } from "./device-login.mjs";
@@ -14,6 +24,8 @@ import {
   GENERIC_CONFLICT,
   link,
   message,
+  NAMESPACE_MISSING,
+  NAMESPACE_RECHECK_MS,
   namespaceCreation,
   namespacePath,
   preAdmissionRefusal,
@@ -26,6 +38,23 @@ const AGENT_NAME_CONFLICT =
   "An Agent with this name already exists in this Namespace. Choose a different name.";
 // The API's Agent name limit, in characters (code points).
 const AGENT_NAME_MAX_CHARACTERS = 200;
+// The open Create Agent form rechecks its Namespace when the window regains focus. The page's own
+// recheck skips any open form, because a reload would discard it (finding 2012).
+let recheckOpenForm = null;
+let refocusListening = false;
+function onRefocus(recheck) {
+  recheckOpenForm = recheck;
+  if (refocusListening) {
+    return;
+  }
+  refocusListening = true;
+  window.addEventListener("focus", () => recheckOpenForm?.());
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      recheckOpenForm?.();
+    }
+  });
+}
 
 // TODO: This starter list is intentionally hardcoded for the initial Console release.
 // Revisit catalog refresh and credential-aware discovery after the basic creation flow ships.
@@ -60,14 +89,11 @@ const MODEL_CHOICES = {
 };
 
 function field(label, input, hint, error = null) {
-  return element(
-    "div",
-    { className: "form-field" },
-    element("label", { for: input.id }, label),
-    input,
-    error,
-    hint ? element("p", { className: "hint", id: `${input.id}-hint` }, hint) : null,
-  );
+  const node = formField({ label, control: input, help: hint, className: "form-field" });
+  if (error) {
+    input.after(error);
+  }
+  return node;
 }
 
 function configurationTemplate(harnessId, nativeProvider, providerModel) {
@@ -366,7 +392,7 @@ export function renderCreateAgent(context, draft) {
   // The permission answer refuses up front what the API would refuse at submit (finding 1521),
   // and so does a Namespace that takes no new Agent (finding 1895). Gating only: an unknown
   // answer keeps the start page, and the API still decides.
-  const notReady = namespaceCreation(context.namespace);
+  const notReady = createNamespaceState(context);
   const unavailable =
     context.permissions?.agents?.create === false
       ? "Your access does not include creating Agents in this Namespace. Ask an administrator for access, or choose another Namespace."
@@ -375,12 +401,13 @@ export function renderCreateAgent(context, draft) {
         : null;
   if (unavailable) {
     context.view.replaceChildren(
-      link("← Agents", "agents", context),
       element(
         "section",
         { className: "state-panel" },
         element("h2", {}, "Creating Agents is not available"),
-        element("p", { role: "status" }, unavailable),
+        unavailable === notReady?.note
+          ? namespaceNote(notReady)
+          : element("p", { role: "status" }, unavailable),
       ),
     );
     // Start over re-enters here from the form; keep focus on the page, not the document.
@@ -399,10 +426,9 @@ export function renderCreateAgent(context, draft) {
   };
   const presets = createPresetFields(context, startForm);
   context.view.replaceChildren(
-    link("← Agents", "agents", context),
     // A provisioning Namespace accepts drafts; its status shows before any start (finding 1895).
     // replaceChildren would print a null child as the text "null".
-    ...(notReady ? [element("p", { className: "muted", role: "status" }, notReady.note)] : []),
+    ...(notReady ? [namespaceNote(notReady)] : []),
     element(
       "section",
       { className: "launch-intro agent-card" },
@@ -418,6 +444,7 @@ export function renderCreateAgent(context, draft) {
         presets.startDefault,
         button("Start without Preset", () => startForm({}, {})),
       ),
+      presets.defaultHint,
     ),
     element(
       "section",
@@ -433,8 +460,50 @@ export function renderCreateAgent(context, draft) {
   );
 }
 
+// A member's Agent reaches its Secrets through an Installation administrator's grant (UX plan A2).
+const MEMBER_CREDENTIAL_ACCESS =
+  "An Installation administrator then gives the new Agent access to its Secrets.";
+const MEMBER_GRANT_REFUSED =
+  "The Agent was created as a draft. Giving it access to its saved model and channel Secrets needs Installation administration access: open the saved Agent and ask an Installation administrator to grant it.";
+const INSTALLATION_REFUSAL =
+  "Creating an Agent needs Installation access that your account does not have. Ask an Installation administrator to create this Agent.";
+// The Installation read was refused and the Namespace's permission answer is unknown (its read
+// failed), so whether this account may create Agents here is not known (finding 2110).
+const PERMISSIONS_UNREAD =
+  "Your permissions in this Namespace could not be checked, and Installation-wide capabilities are not readable with your access. Retry the permission check before creating an Agent.";
+// A refused Configuration create names the grants it needs, as a refused save does
+// (SAVE_REFUSALS): one fixed text for every 403 (finding 2111).
+const CONFIGURATION_CREATE_REFUSAL =
+  "You do not have permission to create this Agent's Configuration. Ask an administrator for Configuration create access in this Namespace, plus Secret operate on each Secret it binds.";
+
+// What Create Agent knows of its Namespace: missing from a list the form read (kept for Start
+// over, which renders from the same context), otherwise its status.
+function createNamespaceState(context) {
+  return context.namespaceMissing ? NAMESPACE_MISSING : namespaceCreation(context.namespace);
+}
+
+// A Namespace that is not ready keeps its note on the start page and the form, so the first
+// sign is never a refused Secret or submit (findings 1895, 1990).
+function namespaceNote(notReady) {
+  return statusBlock("warning", null, notReady.note, [], { role: "status" });
+}
+
+// Takes the not-ready note's place on an open form once its Namespace is ready (finding 2024).
+function namespaceReadyNote() {
+  return statusBlock(
+    "success",
+    null,
+    "Namespace status: Ready. Agents created here can be deployed now.",
+    [],
+    { role: "status" },
+  );
+}
+
 function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   const { view, request, namespaceId } = context;
+  // A recheck replaces it once the Namespace becomes ready (finding 2012).
+  let notReady = createNamespaceState(context);
+  let notReadyNote = notReady ? namespaceNote(notReady) : null;
   const agent = rendered.agent ?? {};
   const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
   const workspaceFileNames = Object.keys(WORKSPACE_DEFAULTS);
@@ -549,6 +618,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     id: "agent-name",
     name: "name",
     required: "",
+    "data-trim": "",
     autocomplete: "off",
   });
   const checkNameLength = () =>
@@ -570,27 +640,27 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     element("option", { value: "openclaw" }, "OpenClaw"),
   );
   const harnessHint = element("p", { id: "agent-harness-hint", className: "hint" });
-  const nativeHarnessWarning = element(
-    "p",
-    { className: "notice", role: "status", hidden: true },
+  const nativeHarnessWarning = statusBlock(
+    "warning",
+    null,
     "Experimental: Dedicated OpenClaw requires a runtime build with native worker-inference support. Released OpenClaw images may not include it yet.",
+    [],
+    { role: "status", hidden: true },
   );
   // The Installation reports native worker support only when it can admit dedicated OpenClaw:
   // the runtime supports native workers and a Sandbox Driver can provision them (finding 1608).
   // Its absence does not say whether Embedded remains: any selected Sandbox Driver refuses
   // Embedded execution, so the copy names Codex and the condition (finding 1612).
-  const nativeWorkersUnavailable = element(
-    "p",
-    { className: "error", role: "alert", hidden: true },
+  const nativeWorkersUnavailable = statusBlock(
+    "danger",
+    null,
     "Dedicated OpenClaw is unavailable: this installation has no Sandbox Driver that can provision it, or its OpenClaw runtime lacks native worker support. Choose the Codex harness, or Embedded execution if the installation selects no Sandbox Driver. Otherwise an administrator must select a Sandbox Driver that can provision dedicated OpenClaw, or a runtime with native worker support.",
+    [],
+    { hidden: true },
   );
   // The Installation lists the OpenClaw execution modes admission accepts (#2670). When the
   // selected mode is not one of them, say so here and keep Create disabled, before any write.
-  const openclawModeUnavailable = element("p", {
-    className: "error",
-    role: "alert",
-    hidden: true,
-  });
+  const openclawModeUnavailable = statusBlock("danger", null, null, [], { hidden: true });
   const selectedModeUnavailable = () =>
     !nativeWorkersUnavailable.hidden || !openclawModeUnavailable.hidden;
   // Invalid JSON is reported under the field, never by the browser's bubble (finding 1903).
@@ -1196,6 +1266,20 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   let capabilityDiscoveryDone = false;
   let capabilityDiscoveryFailed = false;
   let capabilityDiscoveryDenied = false;
+  // The Installation read is refused, but the Namespace's permission answer grants Agent create
+  // (UX plan A2, finding 1901). The form proceeds without the Installation's capabilities, so it
+  // refuses no option the API might accept: the preflight and Agent create still decide, before
+  // and when anything is saved. capabilityDiscoveryDone stays false, so no hint claims an outcome.
+  let capabilitiesUnreadable = false;
+  const capabilitiesSettled = () => capabilityDiscoveryDone || capabilitiesUnreadable;
+  // The Namespace's permission answer this form decides with. A retry rereads it when the
+  // console's read failed (finding 2110); the API still decides every write.
+  let namespacePermissions = context.permissions;
+  let permissionsUnknown = false;
+  let permissionsReading = false;
+  // Granting the saved Agent its credential access is Installation administration, which the API
+  // refused this account: a retry cannot succeed, so the form offers none (finding 2109).
+  let credentialGrantRefused = false;
   const provisionableExecutionModes = new Set();
   let nativeWorkersAvailable = false;
   // The OpenClaw execution modes the Installation admits, or undefined from a server that does
@@ -1228,9 +1312,33 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   let provisioningAttempt = null;
   const capabilityStatus = element(
     "p",
-    { className: "hint", role: "status" },
+    { id: "create-agent-capability-status", className: "hint", role: "status" },
     "Checking installation capabilities…",
   );
+  // Above the form, not mid-form: why a member's form offers what it does (UX plan A2).
+  // Granting an Agent access to its Secrets is Installation administration, so the member learns
+  // before Create that an administrator finishes that step.
+  const namespaceName = context.namespace?.name ?? "this Namespace";
+  const accessStatus = statusBlock(
+    "info",
+    "Your access",
+    `${
+      typeof presetOptions.presetName === "string"
+        ? `You can create Agents in ${namespaceName}. Installation-wide capabilities are not readable with your access, so the options below come from this Namespace's Presets.`
+        : `You can create Agents in ${namespaceName}. Installation-wide capabilities are not readable with your access, so Create Agent checks the Configuration with the server before saving it.`
+    } ${MEMBER_CREDENTIAL_ACCESS}`,
+    [],
+    { id: "create-agent-access", hidden: true },
+  );
+  // The Preset this form started from (flows.md C8).
+  const presetBadge =
+    typeof presetOptions.presetName === "string"
+      ? element(
+          "p",
+          { className: "create-agent-origin" },
+          element("span", { className: "badge" }, `From Preset · ${presetOptions.presetName}`),
+        )
+      : null;
   let pending = false;
   // Create's own request. `pending` also covers the recovery controls' requests, which must not
   // mark Create busy (finding 1961).
@@ -1243,6 +1351,9 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   let stagedChannelSecrets = draft.stagedChannelSecrets ?? [];
   const feedback = element("p", { className: "error", role: "alert" });
   const savedStatus = element("p", { className: "hint", role: "status" });
+  // Create's refusals show in the danger status block (UX plan C1). The line above keeps its
+  // markup so open changes to the lines around it still merge.
+  setStatusTone(feedback, "danger");
   const submit = element(
     "button",
     { type: "submit", form: formId, className: "button button--primary" },
@@ -1313,38 +1424,43 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       }
     }
   });
-  const removeCredentialRegistration = button("Remove failed credential registration", async () => {
-    if (!failedCredentialSource || pending) {
-      return;
-    }
-    pending = true;
-    updateControls();
-    try {
-      await request(
-        `${namespacePath(namespaceId)}/credential-sources/${encodeURIComponent(failedCredentialSource.id)}`,
-        { method: "DELETE", expectedStatus: 204 },
-      );
-      if (!context.isCurrent()) {
+  const removeCredentialRegistration = button(
+    "Remove failed credential registration",
+    async () => {
+      if (!failedCredentialSource || pending) {
         return;
       }
-      failedCredentialSource = null;
-      credentialRegistration = null;
-      outcomeUnknown = false;
-      feedback.textContent =
-        "Failed credential registration removed. Select Create Agent to retry with the saved model Secret.";
-    } catch (error) {
-      if (context.isCurrent()) {
-        feedback.textContent = `${message(error)} Retry removal when the Credential Gateway is available; the model Secret remains saved.`;
+      pending = true;
+      updateControls();
+      try {
+        await request(
+          `${namespacePath(namespaceId)}/credential-sources/${encodeURIComponent(failedCredentialSource.id)}`,
+          { method: "DELETE", expectedStatus: 204 },
+        );
+        if (!context.isCurrent()) {
+          return;
+        }
+        failedCredentialSource = null;
+        credentialRegistration = null;
+        outcomeUnknown = false;
+        feedback.textContent =
+          "Failed credential registration removed. Select Create Agent to retry with the saved model Secret.";
+      } catch (error) {
+        if (context.isCurrent()) {
+          feedback.textContent = `${message(error)} Retry removal when the Credential Gateway is available; the model Secret remains saved.`;
+        }
+      } finally {
+        if (context.isCurrent()) {
+          pending = false;
+          updateControls();
+        }
       }
-    } finally {
-      if (context.isCurrent()) {
-        pending = false;
-        updateControls();
-      }
-    }
-  });
+    },
+    { tone: "danger" },
+  );
   const retryCapabilityDiscovery = button("Retry capability check", () => {
-    void loadInstallationCapabilities();
+    // A refused Installation read stays refused: reread only the permission answer.
+    void (capabilityDiscoveryDenied ? rereadPermissions() : loadInstallationCapabilities());
   });
   const recoveryMessage = element("p", { className: "muted" });
   const requireRepositoryReload = () => {
@@ -1438,6 +1554,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
   const form = element(
     "form",
     { id: formId, className: "agent-form agent-card", novalidate: "" },
+    ...(presetBadge ? [presetBadge] : []),
     field("Agent name", name, "Unique within this Namespace."),
     authSection,
     capabilityStatus,
@@ -1482,16 +1599,6 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       reset,
       workspaceSection,
     ),
-  );
-  form.addEventListener(
-    "invalid",
-    (event) => {
-      const details = event.target.closest("details");
-      if (details) {
-        details.open = true;
-      }
-    },
-    true,
   );
   form.addEventListener("input", (event) => {
     edited = true;
@@ -1610,7 +1717,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         details.open = true;
       }
       input.setCustomValidity("Enter a valid JSON object.");
-      input.reportValidity();
+      validateFields([input]);
     }
     return undefined;
   }
@@ -1669,10 +1776,12 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
           "section",
           { className: "channels-section" },
           element("div", { className: "channel-heading" }, element("h2", {}, "Channels")),
-          element(
-            "p",
-            { className: "error" },
+          statusBlock(
+            "danger",
+            null,
             "Enter a valid Configuration JSON object before configuring channels.",
+            [],
+            { role: null },
           ),
         ),
       );
@@ -1686,6 +1795,7 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         drafts: context.drafts,
         baseline: JSON.stringify([values, configurationSecretBindings]),
         operatorId: context.operatorId,
+        installationAdmin: context.installationAdmin,
         namespaceId,
         request,
         agentName: () => name.value,
@@ -1703,7 +1813,10 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
           "Channel settings and selected bindings are not persisted until you create the Agent. Secrets created from the modal are stored immediately in the Namespace.",
         saveLabel: "Apply channel settings",
         readOnlyDescription:
-          "This saved initial Configuration is fixed for this create form. Retrying Agent creation will reuse these channel settings.",
+          "This saved initial Configuration is fixed for this create form." +
+          (credentialGrantRefused
+            ? ""
+            : " Retrying Agent creation will reuse these channel settings."),
         readOnlyCardMessage: "This saved initial Configuration cannot be edited from this form.",
       },
       onSave: async (updatedValues, options = {}) => {
@@ -1730,10 +1843,12 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     });
     const modeWarning =
       mode.value === "embedded" && hasEnabledChannel(values)
-        ? element(
-            "p",
-            { className: "error" },
+        ? statusBlock(
+            "danger",
+            null,
             "Channels require Dedicated execution. Select Dedicated under Runtime details or disable configured channels before creating the Agent.",
+            [],
+            { role: null },
           )
         : null;
     channelEditor.replaceChildren(...[channels, modeWarning].filter(Boolean));
@@ -1755,6 +1870,101 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         type.secrets[0].required,
     );
     return candidates.length === 1 ? candidates[0] : null;
+  }
+  // Every step of a provisioning plan needs a ready Namespace, so the API would refuse it; a
+  // draft plan still saves (finding 2007, #2867).
+  const provisioningWaitsForNamespace = () => Boolean(notReady) && shouldProvision();
+  // A Namespace that takes no new Agent, draft or not: an adopted one still provisioning, which
+  // becomes ready by waiting, or one that turned failed or deleting, or went missing, while the
+  // form was open, which never does (finding 2022). A refocus still rechecks it.
+  const namespaceRefusesAgents = () => Boolean(notReady?.blocked);
+  const namespaceEnded = () =>
+    Boolean(notReady?.missing) ||
+    (namespaceRefusesAgents() && ["failed", "deleting"].includes(context.namespace?.status));
+  // The Namespace can become ready while the form is open. Reread only its status, on refocus
+  // and while Create Agent waits for it, and update just the note and the gate: the draft,
+  // focus and field values stay (finding 2012). A failed read keeps the 10 s wait going
+  // (finding 2021); a form that Start over replaced stops for good.
+  let namespaceTimer = null;
+  let namespaceReading = false;
+  const namespaceGateShown = () =>
+    !savedAgent &&
+    !provisioningAttempt &&
+    !namespaceEnded() &&
+    (provisioningWaitsForNamespace() || namespaceRefusesAgents());
+  const recheckNamespace = async () => {
+    clearTimeout(namespaceTimer);
+    namespaceTimer = null;
+    if (!context.isCurrent() || !form.isConnected) {
+      if (recheckOpenForm === recheckNamespace) {
+        recheckOpenForm = null;
+      }
+      return;
+    }
+    if (!notReady || namespaceReading || document.hidden) {
+      return;
+    }
+    namespaceReading = true;
+    let namespace;
+    let read = false;
+    try {
+      const namespaces = await request("/namespaces", { revalidate: false, rereadOnResume: true });
+      namespace = namespaces.find((item) => item.id === namespaceId);
+      read = true;
+    } catch {
+      // A failed read changes nothing on screen; the next check comes at the usual cadence.
+    } finally {
+      namespaceReading = false;
+    }
+    if (!context.isCurrent() || !form.isConnected) {
+      return;
+    }
+    if (!read) {
+      waitForNamespace();
+      return;
+    }
+    // Start over renders from this context again. A complete list without the Namespace is an
+    // answer too: it stops the wait instead of leaving the last status shown.
+    if (namespace) {
+      context.namespace = namespace;
+    }
+    context.namespaceMissing = !namespace;
+    const next = createNamespaceState(context);
+    if (next?.note !== notReady?.note) {
+      notReady = next;
+      // Swap the note in place and keep its height, so the field being edited below it does not
+      // jump mid-edit (finding 2024). A ready Namespace says so where the warning was.
+      const replacement = next ? namespaceNote(next) : namespaceReadyNote();
+      if (notReadyNote) {
+        replacement.style.minHeight = `${notReadyNote.getBoundingClientRect().height}px`;
+        // A new width reflows the form anyway; the reserved space would then only stay empty.
+        window.addEventListener("resize", () => replacement.style.removeProperty("min-height"), {
+          once: true,
+        });
+        notReadyNote.replaceWith(replacement);
+      }
+      notReadyNote = replacement;
+      updateControls();
+    }
+    waitForNamespace();
+  };
+  const waitForNamespace = () => {
+    if (namespaceTimer === null && !namespaceReading && namespaceGateShown()) {
+      namespaceTimer = setTimeout(() => {
+        namespaceTimer = null;
+        if (namespaceGateShown()) {
+          void recheckNamespace();
+        }
+      }, NAMESPACE_RECHECK_MS);
+    }
+  };
+  if (notReady) {
+    onRefocus(recheckNamespace);
+    // A retained form comes back with its timer stopped: recheck as on a refocus.
+    context.onResume?.(() => {
+      onRefocus(recheckNamespace);
+      void recheckNamespace();
+    });
   }
   const credentialSourceRefused = () =>
     credentialSourceTypes !== undefined &&
@@ -1858,14 +2068,25 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
               ? "Codex uses Dedicated execution. This installation selects a Sandbox Driver, so OpenClaw uses Dedicated execution too. Slack requires Dedicated execution."
               : "Codex uses Dedicated execution. OpenClaw uses Dedicated execution with a Sandbox Driver that provisions it, and Embedded execution without a Sandbox Driver. Slack requires Dedicated execution.";
     }
-    if (capabilityDiscoveryDone) {
+    if (capabilitiesSettled()) {
       let nextStatus = "";
-      if (!modeUnavailable) {
+      if (!savedAgent && namespaceRefusesAgents()) {
+        nextStatus = notReady.missing
+          ? "Create Agent is unavailable until you choose another Namespace."
+          : namespaceEnded()
+            ? "This Namespace cannot hold new Agents, so Create Agent is unavailable."
+            : "Create Agent is unavailable until this Namespace is ready.";
+      } else if (!modeUnavailable) {
         nextStatus = shouldProvision()
-          ? "Dedicated Agents are provisioned and deployed when created."
-          : mode.value === "embedded"
-            ? "Embedded Agents are saved as drafts. Deploy them from the Agent page after creation."
-            : "This installation creates draft Agents for later deployment.";
+          ? notReady
+            ? "Dedicated Agents are provisioned and deployed when created, so this Namespace must be ready first. Create Agent is unavailable until then."
+            : "Dedicated Agents are provisioned and deployed when created."
+          : capabilitiesUnreadable
+            ? // Without the Installation's capabilities, deploying may need an administrator.
+              "Agents you create here are saved as drafts for later deployment."
+            : mode.value === "embedded"
+              ? "Embedded Agents are saved as drafts. Deploy them from the Agent page after creation."
+              : "This installation creates draft Agents for later deployment.";
       }
       if (capabilityStatus.textContent !== nextStatus) {
         capabilityStatus.textContent = nextStatus;
@@ -2028,20 +2249,39 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
           repositories.blocksCreate())) ||
       pending ||
       outcomeUnknown ||
-      !capabilityDiscoveryDone ||
+      !capabilitiesSettled() ||
+      permissionsReading ||
+      credentialGrantRefused ||
       selectedModeUnavailable() ||
       credentialSourceRefused() ||
+      (!savedAgent && (provisioningWaitsForNamespace() || namespaceRefusesAgents())) ||
       Boolean(provisioningAttempt);
+    // Create Agent names why it waits: the status line above says so (finding 2007).
+    if (
+      !savedAgent &&
+      capabilitiesSettled() &&
+      (namespaceRefusesAgents() || (!selectedModeUnavailable() && provisioningWaitsForNamespace()))
+    ) {
+      submit.setAttribute("aria-describedby", capabilityStatus.id);
+    } else {
+      submit.removeAttribute("aria-describedby");
+    }
     checkCredentialRegistration.hidden = !credentialRegistration;
     checkCredentialRegistration.disabled = pending;
     removeCredentialRegistration.hidden = !failedCredentialSource;
     removeCredentialRegistration.disabled = pending;
     retryProvisioning.hidden = !provisioningAttempt;
     retryProvisioning.disabled = pending || !provisioningAttempt;
-    retryCapabilityDiscovery.hidden = !capabilityDiscoveryFailed || capabilityDiscoveryDenied;
-    retryCapabilityDiscovery.disabled = pending;
+    retryCapabilityDiscovery.hidden =
+      !capabilityDiscoveryFailed || (capabilityDiscoveryDenied && !permissionsUnknown);
+    retryCapabilityDiscovery.disabled = pending || permissionsReading;
+    retryCapabilityDiscovery.textContent = capabilityDiscoveryDenied
+      ? "Retry permission check"
+      : "Retry capability check";
+    submit.hidden = credentialGrantRefused;
     submit.textContent = savedAgent ? "Retry credential access" : "Create Agent";
     submit.setAttribute("aria-busy", createPending ? "true" : "false");
+    waitForNamespace();
   };
   // Every way Create's request ends clears its busy state, a navigation away included: the view
   // it leaves may still show as an inert preview.
@@ -2076,7 +2316,8 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
           savedCredentialSource ? `Credential Source saved: ${savedCredentialSource.id}.` : "",
           savedConfiguration ? `Configuration saved: ${savedConfiguration.id}.` : "",
           savedAgent ? `Agent saved: ${savedAgent.id}.` : "",
-          "Retries reuse these resources. Saved provider and Configuration settings are fixed.",
+          credentialGrantRefused ? "" : "Retries reuse these resources.",
+          "Saved provider and Configuration settings are fixed.",
         ]
           .filter(Boolean)
           .join(" "),
@@ -2094,6 +2335,9 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
     capabilityDiscoveryDone = false;
     capabilityDiscoveryFailed = false;
     capabilityDiscoveryDenied = false;
+    capabilitiesUnreadable = false;
+    permissionsUnknown = false;
+    accessStatus.hidden = true;
     updateControls();
     try {
       const installation = await request("/installation");
@@ -2142,16 +2386,64 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         return;
       }
       capabilityDiscoveryFailed = true;
-      // A denial is permanent for this account: creating Agents needs Installation access,
-      // which only Installation administrators hold, so retrying cannot help.
+      // A denial is permanent for this account, so retrying the read cannot help.
       capabilityDiscoveryDenied = error.status === 403;
-      capabilityStatus.textContent = capabilityDiscoveryDenied
-        ? "Creating an Agent needs Installation access that your account does not have. Ask an Installation administrator to create this Agent."
-        : `Installation capabilities unavailable. ${message(error)} Retry before creating an Agent.`;
+      if (capabilityDiscoveryDenied) {
+        settleRefusedCapabilities();
+        return;
+      }
+      capabilityStatus.textContent = `Installation capabilities unavailable. ${message(error)} Retry before creating an Agent.`;
     } finally {
       if (context.isCurrent()) {
         updateControls();
       }
+    }
+  }
+  // After a refused Installation read, the permission answer decides. A member the Namespace lets
+  // create Agents goes on without the Installation's capabilities (UX plan A2); only an explicit
+  // grant does. A known denial keeps the refusal; an unknown answer says the check failed and
+  // offers a retry of it (finding 2110).
+  function settleRefusedCapabilities() {
+    const create = namespacePermissions?.agents?.create;
+    permissionsUnknown = typeof create !== "boolean";
+    if (create === true) {
+      capabilitiesUnreadable = true;
+      accessStatus.hidden = false;
+      return;
+    }
+    capabilityStatus.textContent = permissionsUnknown ? PERMISSIONS_UNREAD : INSTALLATION_REFUSAL;
+  }
+  async function rereadPermissions() {
+    permissionsReading = true;
+    capabilityStatus.textContent = "Checking your permissions in this Namespace…";
+    updateControls();
+    try {
+      namespacePermissions = await request(`${namespacePath(namespaceId)}/permissions`);
+      // Start over renders from this context: it keeps the answer instead of asking again.
+      context.permissions = namespacePermissions;
+    } catch (error) {
+      if (context.isCurrent() && error.status === 401) {
+        context.onExpired();
+        return;
+      }
+    } finally {
+      permissionsReading = false;
+    }
+    if (!context.isCurrent()) {
+      return;
+    }
+    settleRefusedCapabilities();
+    updateControls();
+    // The retry hides once answered: its outcome takes focus rather than the page.
+    const active = document.activeElement;
+    if (
+      retryCapabilityDiscovery.hidden &&
+      (!active || active === document.body || active === retryCapabilityDiscovery)
+    ) {
+      const outcome = accessStatus.hidden ? capabilityStatus : accessStatus;
+      outcome.tabIndex = -1;
+      outcome.focus({ preventScroll: true });
+      outcome.scrollIntoView({ block: "nearest" });
     }
   }
   void loadInstallationCapabilities();
@@ -2308,11 +2600,14 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       pending ||
       outcomeUnknown ||
       provisioningAttempt ||
+      credentialGrantRefused ||
       (!savedAgent && repositoryRetryLocked()) ||
-      !capabilityDiscoveryDone ||
+      !capabilitiesSettled() ||
       selectedModeUnavailable() ||
       credentialSourceRefused() ||
-      !form.reportValidity()
+      (!savedAgent && (provisioningWaitsForNamespace() || namespaceRefusesAgents())) ||
+      // The console's own errors under each field, not the browser's bubble (UX plan C3).
+      !validateFields([...form.elements])
     ) {
       return;
     }
@@ -2540,6 +2835,11 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
             values,
             ...(Object.keys(bindings).length ? { secretBindings: bindings } : {}),
           },
+        }).catch((error) => {
+          if (error?.status === 403) {
+            error.refusal = CONFIGURATION_CREATE_REFUSAL;
+          }
+          throw error;
         });
         if (!context.isCurrent()) {
           return;
@@ -2566,6 +2866,23 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
         modelCredentialSecret ??
         presetExistingSecret ??
         (hasBoundModelCredential && binding.source.kind === "secret" ? binding.source : undefined);
+      // The grants are Installation administration (the IAM routes), which this session's
+      // /observability read already found refused to this account. Reading IAM now is certain to
+      // be refused and audited as a denial, so name who finishes the step instead (finding 2109).
+      if (
+        context.installationAdmin === false &&
+        (body.harnessAuth?.method === "credential_source" ||
+          modelSecret?.kind === "secret" ||
+          modelSecret?.ref?.kind === "secret" ||
+          Object.values(savedConfiguration.secretBindings ?? {}).some(
+            (binding) => binding?.source?.kind === "secret",
+          ))
+      ) {
+        credentialGrantRefused = true;
+        feedback.textContent = MEMBER_GRANT_REFUSED;
+        focusFeedbackLine(feedback);
+        return;
+      }
       if (body.harnessAuth?.method === "credential_source") {
         await ensureCredentialOperateBinding(context, savedAgent, {
           kind: "credential_source",
@@ -2627,28 +2944,40 @@ function renderAgentForm(context, rendered, presetOptions = {}, draft = {}) {
       const guidance = refusedPlugin
         ? ` This form cannot edit saved Configuration ${savedConfiguration.id}. Deselect plugin ${refusedPlugin} under Plugins and select Create Agent again; to use the plugin, fix the setting on the new Agent's Configuration tab, then select the plugin on its Plugins tab.`
         : "";
+      // A member's grant of the new Agent's credential access is refused as Installation
+      // administration: name who finishes it (UX plan A2), and offer no retry of it (finding 2109).
+      const memberGrantRefused =
+        savedAgent && !credentialRegistration && capabilitiesUnreadable && error.status === 403;
+      credentialGrantRefused ||= memberGrantRefused;
       feedback.textContent =
-        detail + guidance + (error.requestId ? ` Request ID: ${error.requestId}` : "");
+        (memberGrantRefused ? MEMBER_GRANT_REFUSED : detail) +
+        guidance +
+        (error.requestId ? ` Request ID: ${error.requestId}` : "");
       focusFeedbackLine(feedback);
       keepDraftAfterRefusal();
     } finally {
       endCreate();
       if (context.isCurrent()) {
         pending = false;
+        if (credentialGrantRefused) {
+          showSavedStatus();
+          renderChannelEditor();
+        }
         updateControls();
       }
     }
   });
   view.replaceChildren(
-    link("← Agents", "agents", context),
+    ...(notReadyNote ? [notReadyNote] : []),
     element(
       "p",
       { className: "muted" },
       "Choose a model and repository access. Add Slack when you want this Agent to work with your team.",
     ),
+    accessStatus,
     form,
     channelEditor,
-    // The outcome leads; the saved-resources line explains what a retry reuses (finding 1862).
+    // The outcome leads; the saved-resources line identifies what was kept (finding 1862).
     feedback,
     savedStatus,
     recovery,

@@ -431,6 +431,8 @@ for (const stream of ["stdout", "stderr"]) {
 // These are real command trees behind the supported container-binary override. The
 // wrapper and descendant do no container work; the descendant inherits both output
 // pipes and ignores TERM. Its finite lifetime also bounds a failed regression run.
+// Cleanup must leave the escaped descendant running, so the test releases it once it
+// has been observed alive instead of waiting out that lifetime in teardown.
 for (const scenario of [
   "exit-before-timeout",
   "exit-on-term",
@@ -446,6 +448,7 @@ for (const scenario of [
     async (t) => {
       const { root, descendantPidPath, waitForTermination } = await commandTreeFixture(t);
       const heartbeat = join(root, "heartbeat");
+      const release = join(root, "release");
       const descendantPath = join(root, "descendant.cjs");
       await writeFile(
         descendantPath,
@@ -458,7 +461,10 @@ for (const scenario of [
         }
       });
       let ticks = 0;
-      const timer = setInterval(() => fs.writeFileSync(${JSON.stringify(heartbeat)}, String(++ticks)), 50);
+      const timer = setInterval(() => {
+        if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+        fs.writeFileSync(${JSON.stringify(heartbeat)}, String(++ticks));
+      }, 50);
       fs.writeFileSync(${JSON.stringify(heartbeat)}, "0");
       process.send("ready");
       process.disconnect();
@@ -564,6 +570,10 @@ for (const scenario of [
           encoding: "utf8",
           timeout: 5000,
         });
+        // Released only after the observation, so a cleanup that waited for the
+        // descendant's pipes still waits out its four-second lifetime and fails the
+        // elapsed-time assertion above.
+        await writeFile(release, "");
         assert.equal(observation.error, undefined, "could not observe escaped descendant");
         assert.equal(observation.status, 0, "escaped descendant stopped during cleanup");
         assert.doesNotMatch(observation.stdout, /^Z/, "escaped descendant stopped during cleanup");
@@ -752,7 +762,8 @@ for (const scenario of [
         const body =
           scenario === "fixture-exit"
             ? `import { createWorkerRevisionFixtures, disposeStep } from ${fixtureImport};
-           const { cleanup } = createWorkerRevisionFixtures(import.meta.url);
+           // A shorter exit grace than the fixture's 2 s: this file has one test to report.
+           const { cleanup } = createWorkerRevisionFixtures(import.meta.url, { exitGraceMs: 500 });
            after(cleanup);
            test("abandons cleanup", async () => {
              await assert.rejects(disposeStep("cleanup command", 500, () => cleanupState(${JSON.stringify(statePath)})), /did not finish within 500 ms/);

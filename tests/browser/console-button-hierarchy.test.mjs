@@ -2,18 +2,24 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 
+import { CodexPluginDriver } from "../../apps/controller/src/drivers/plugin/index.ts";
+import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { createRuntimeLogComputeDriver } from "../helpers/runtime-logs.mjs";
 import {
+  assertControlEdge,
+  consoleViewports,
   detailUrl,
   fileBrowser,
   holdRequests,
   login,
   nativeValues,
   newPage,
-  persistedDeploymentError,
+  routeFailedDeployment,
+  settledView,
 } from "./console-agents-browser-helpers.mjs";
 import {
   createModelCredentialSecret,
+  createRepositoryLaunchFixture,
   enterManualModel,
   openAdvancedSettings,
   routeInstallationWithoutProvisioning,
@@ -21,13 +27,13 @@ import {
 } from "./console-agents-test-support.mjs";
 import { createReadyConsoleNamespace } from "./console-ready-namespace.mjs";
 
-// The console's button hierarchy (UX plan C2): each view shows at most one primary action, a
-// secondary button's edge is visible against its surface, and a button waiting on its own request
-// says it is busy instead of looking permanently disabled (finding 1927).
+// The console's control patterns. Button hierarchy (UX plan C2): each view shows at most one
+// primary action, a secondary button's edge is visible against its surface, and a button waiting
+// on its own request says it is busy instead of looking permanently disabled (finding 1927).
+// Status badges and cards (UX plan C4): a word or two of human copy in `.badge`, with a tone.
 
 // One Chromium for the file; each test still gets its own context.
 const browser = fileBrowser();
-const settledView = '.content [aria-live="polite"][aria-busy="false"]:not([inert])';
 
 // The visible controls painted as a primary action: filled with the accent, or with the strong
 // text colour the Agent page's older black primary used. Counted by paint, not class, so an
@@ -56,47 +62,32 @@ const filledActions = (page) =>
       .map((node) => node.textContent.trim().replace(/\s+/g, " "));
   });
 
-// An Agent whose v1 serves while its v2 redeploy failed with DEPENDENCY_UNAVAILABLE.
-async function failedRedeploy(t, fixture, namespace, page) {
+// An Agent whose v1 serves while its v2 redeploy failed; each page routes that deployment's read
+// to a DEPENDENCY_UNAVAILABLE failure.
+async function failedRedeploy(fixture, namespace) {
   const agent = await fixture.createAgent(namespace.id, "Failed Agent", nativeValues("failed"));
   const active = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
   const failed = await fixture.deployAgent(namespace.id, agent.id);
-  await page.route(
-    `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}/deployments/${failed.id}`,
-    (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          data: {
-            deploymentId: failed.id,
-            namespaceId: namespace.id,
-            agentId: agent.id,
-            status: "failed",
-            error: persistedDeploymentError("DEPENDENCY_UNAVAILABLE"),
-            warnings: [],
-            progress: null,
-          },
-          meta: { requestId: "req_test_button_hierarchy" },
-        }),
-      }),
-  );
-  return { agent, active };
+  const route = (page) =>
+    routeFailedDeployment(page, fixture, {
+      namespaceId: namespace.id,
+      agentId: agent.id,
+      deploymentId: failed.id,
+    });
+  return { agent, active, route };
 }
 
-for (const viewport of [
-  { width: 1440, height: 900 },
-  { width: 390, height: 844 },
-]) {
-  const size = `${viewport.width}x${viewport.height}`;
-  test(`Agents, Agent detail, Create Agent and Logs each show at most one primary action at ${size}`, async (t) => {
-    const { fixture, namespace } = await createReadyConsoleNamespace(t, `Primary ${size}`, {
-      computeDriver: createRuntimeLogComputeDriver(),
-      agentRuntimeLogs: { enabled: true, cursorSecret: `console-logs-${randomUUID()}` },
-    });
-    const draft = await fixture.createAgent(namespace.id, "Draft Agent", nativeValues("draft"));
+test("Agents, Agent detail, Create Agent and Logs each show at most one primary action at 1440 and 390", async (t) => {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Primary actions", {
+    computeDriver: createRuntimeLogComputeDriver(),
+    agentRuntimeLogs: { enabled: true, cursorSecret: `console-logs-${randomUUID()}` },
+  });
+  const draft = await fixture.createAgent(namespace.id, "Draft Agent", nativeValues("draft"));
+  const { agent: failed, active, route } = await failedRedeploy(fixture, namespace);
+  for (const viewport of consoleViewports) {
+    const size = `${viewport.width}x${viewport.height}`;
     const { page } = await newPage(t, fixture, { browser, context: { viewport } });
-    const { agent: failed, active } = await failedRedeploy(t, fixture, namespace, page);
+    await route(page);
     await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
 
     const views = [
@@ -164,7 +155,18 @@ for (const viewport of [
       await page.locator(settledView).waitFor();
       // Park the pointer so no hover repaints a control.
       await page.mouse.move(0, 0);
-      assert.deepEqual(await filledActions(page), [view.primary], view.name);
+      assert.deepEqual(await filledActions(page), [view.primary], `${view.name} at ${size}`);
+      if (view.primary === "Deploy again") {
+        // Its secondary action is a white button on the card's warning tint, so its edge marks
+        // it (finding 1958).
+        await assertControlEdge(
+          page
+            .getByRole("region", { name: "Deployment needs attention" })
+            .getByRole("link", { name: "Open v2 Logs" }),
+          `Open v2 Logs, ${view.name} at ${size}`,
+          { opaqueFill: true },
+        );
+      }
     }
     // The recovery's secondary link is a button of the same size as its primary, not bare text.
     const recovery = page.getByRole("region", { name: "Deployment needs attention" });
@@ -173,50 +175,15 @@ for (const viewport of [
         recovery.getByRole("link", { name }).boundingBox(),
       ),
     );
-    assert.equal(secondaryBox.height, primaryBox.height);
+    assert.equal(secondaryBox.height, primaryBox.height, size);
     assert.equal(
       await recovery
         .getByRole("link", { name: "Open v2 Logs" })
         .evaluate((link) => globalThis.getComputedStyle(link).textDecorationLine),
       "none",
     );
-  });
-}
-
-// WCAG 2 contrast between two sRGB colours given as [r, g, b] in 0-255.
-function contrast(a, b) {
-  const luminance = (rgb) => {
-    const [r, g, bl] = rgb.map((value) => {
-      const channel = value / 255;
-      return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-    });
-    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
-  };
-  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (light + 0.05) / (dark + 0.05);
-}
-
-// A secondary button's own edge, its fill and the first opaque background behind it.
-const edgeColours = (locator) =>
-  locator.evaluate((node) => {
-    const rgba = (value) => {
-      const [r, g, b, a = 1] = value.match(/[\d.]+/g).map(Number);
-      return { rgb: [r, g, b], a };
-    };
-    let parent = node.parentElement;
-    let behind = rgba(globalThis.getComputedStyle(parent).backgroundColor);
-    while (behind.a < 1 && parent.parentElement) {
-      parent = parent.parentElement;
-      behind = rgba(globalThis.getComputedStyle(parent).backgroundColor);
-    }
-    const style = globalThis.getComputedStyle(node);
-    return {
-      edge: rgba(style.borderTopColor),
-      fill: rgba(style.backgroundColor),
-      behind: behind.a < 1 ? { rgb: [255, 255, 255], a: 1 } : behind,
-      width: style.borderTopWidth,
-    };
-  });
+  }
+});
 
 // A secondary button is a white control on a white or near-white card, so its edge is what marks
 // it as a control (WCAG 1.4.11). The old 1.27:1 line edge left a grey slab with no edge.
@@ -244,19 +211,7 @@ test("Secondary buttons have an edge of at least 3:1 against their fill and the 
     await control.waitFor();
     await page.locator(settledView).waitFor();
     await page.mouse.move(0, 0);
-    const { edge, fill, behind, width } = await edgeColours(control);
-    assert.equal(width, "1px", name);
-    assert.equal(edge.a, 1, name);
-    for (const [against, colour] of [
-      ["fill", fill],
-      ["surface", behind],
-    ]) {
-      const ratio = contrast(edge.rgb, colour.rgb);
-      assert.ok(
-        ratio >= 3,
-        `${name}: edge ${edge.rgb} is ${ratio.toFixed(2)}:1 against its ${against}`,
-      );
-    }
+    await assertControlEdge(control, name);
   }
 });
 
@@ -318,12 +273,26 @@ test("Stop, Delete and Save Configuration show busy, not only disabled, while th
   const save = page.getByRole("button", { name: "Save Configuration" });
   // Idle: available, and not busy.
   assert.equal(await save.getAttribute("aria-busy"), "false");
-  const patch = await holdRequests(
-    t,
-    page,
-    `${fixture.origin}/namespaces/${namespace.id}/configurations/${editable.configurationId}`,
-    { method: "PATCH", once: true },
-  );
+  const configurationUrl = `${fixture.origin}/namespaces/${namespace.id}/configurations/${editable.configurationId}`;
+  // A refused save is busy while it runs and not after, so Save again is not left with a busy
+  // state and the progress cursor (finding 1972).
+  const refused = await holdRequests(t, page, configurationUrl, {
+    method: "PATCH",
+    once: true,
+    fulfill: refusal(400, "VALIDATION_FAILED", "Refused for the busy test."),
+  });
+  await save.click();
+  await refused.requested;
+  assert.equal(await save.getAttribute("aria-busy"), "true");
+  refused.release();
+  await page.getByText("Refused for the busy test.", { exact: true }).waitFor();
+  assert.deepEqual(await busyState(save), {
+    busy: "false",
+    cursor: "pointer",
+    disabled: false,
+    text: "Save Configuration",
+  });
+  const patch = await holdRequests(t, page, configurationUrl, { method: "PATCH", once: true });
   await save.click();
   await patch.requested;
   assert.deepEqual(await busyState(save), {
@@ -334,6 +303,89 @@ test("Stop, Delete and Save Configuration show busy, not only disabled, while th
   });
   patch.release();
   await page.getByText("Configuration saved.", { exact: true }).waitFor();
+});
+
+// Save repository access is busy while its request runs and not after it (finding 1972: removing
+// its aria-busy wiring left every test green).
+test("Save repository access shows busy while its request runs", async (t) => {
+  const { fixture, namespace } = await createRepositoryLaunchFixture(t, (namespaceId) => [
+    {
+      repositoryRef: "application",
+      repositoryId: "789",
+      repository: "example/application",
+      namespaces: [{ namespaceId, profiles: ["git-read", "git-full"] }],
+    },
+  ]);
+  const configured = await fixture.createAgent(namespace.id, "Configured", nativeValues("repo"));
+  const created = await fixture.request("POST", `/namespaces/${namespace.id}/agents`, {
+    body: {
+      name: "Repository busy",
+      configurationId: configured.configurationId,
+      repositoryBindings: [{ repositoryRef: "application", profile: "git-read" }],
+    },
+  });
+  assert.equal(created.status, 201);
+  const { page } = await newPage(t, fixture, { browser });
+  await login(
+    page,
+    fixture,
+    detailUrl(fixture, namespace.id, created.data.id, "draft", "repositories"),
+  );
+  await page.getByText("Read-only · Custom", { exact: true }).waitFor();
+  const save = page.getByRole("button", { name: "Save repository access" });
+  assert.equal(await save.getAttribute("aria-busy"), "false");
+  await page.getByRole("button", { name: "Access for example/application" }).click();
+  await page.locator("#repository-override-application-git-full").check();
+  await page.getByText("Contributor · Custom", { exact: true }).waitFor();
+  const patch = await holdRequests(
+    t,
+    page,
+    `${fixture.origin}/namespaces/${namespace.id}/agents/${created.data.id}`,
+    { method: "PATCH", once: true },
+  );
+  await save.click();
+  await patch.requested;
+  assert.deepEqual(await busyState(save), {
+    busy: "true",
+    cursor: "progress",
+    disabled: true,
+    text: "Save repository access",
+  });
+  patch.release();
+  // The saved tab rebuilds in place; its Save is not busy.
+  await page.getByText("Repository access saved.", { exact: true }).waitFor();
+  assert.equal(await save.getAttribute("aria-busy"), "false");
+});
+
+test("a permanently disabled button says not allowed, not busy", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const driver = new CodexPluginDriver({ catalogSource: "openai-curated" });
+  fixture.controller.registerDriver(driver);
+  fixture.controller.selectDriver("plugin", driver.id);
+  const namespace = await fixture.createNamespace("Disabled cursor", { ready: true });
+  const agent = await fixture.createAgent(
+    namespace.id,
+    "API-key plugin Agent",
+    nativeValues("api-key-cursor", { harnessId: "codex" }),
+    { executionMode: "dedicated" },
+  );
+  assert.equal(agent.harnessAuth.method, "api_key");
+  const { page } = await newPage(t, fixture, { browser });
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "plugins"));
+  await page.getByRole("button", { name: "Configure plugins", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Configure plugins", exact: true });
+  await dialog.getByText("Plugin browsing is unavailable with API-key authentication.").waitFor();
+  // An API key can never browse the catalog, so Load plugins stays disabled: nothing is pending.
+  const load = dialog.getByRole("button", { name: "Load plugins" });
+  assert.equal(await load.isDisabled(), true);
+  assert.deepEqual(
+    await load.evaluate((node) => {
+      const style = globalThis.getComputedStyle(node);
+      return [style.cursor, style.opacity];
+    }),
+    ["not-allowed", "0.6"],
+  );
 });
 
 const refusal = (status, code, message) => ({
@@ -529,4 +581,274 @@ test("Create Agent is busy only for its own request, not a recovery control's", 
     .filter({ hasText: "Credential Source registration could not be confirmed." })
     .waitFor();
   assert.deepEqual(await busyAfter(create), { busy: "false", disabled: false });
+});
+
+// A badge's words, tone and paint, and the gap to the element before it. `painted` is true when
+// its text has its tone's colour (muted when neutral).
+const badgeState = (locator) =>
+  locator.evaluate((node) => {
+    const style = globalThis.getComputedStyle(node);
+    const probe = globalThis.document.createElement("span");
+    probe.style.color = `var(--color-${node.dataset.tone ?? "text-muted"})`;
+    globalThis.document.body.append(probe);
+    const toneColor = globalThis.getComputedStyle(probe).color;
+    probe.remove();
+    const before = node.previousElementSibling?.getBoundingClientRect();
+    return {
+      badge: node.classList.contains("badge"),
+      text: node.textContent,
+      tone: node.dataset.tone ?? null,
+      gap: before ? Math.round(node.getBoundingClientRect().left - before.right) : null,
+      sameLine: before
+        ? Math.abs(node.getBoundingClientRect().top - before.top) < before.height
+        : null,
+      painted: style.color === toneColor && style.backgroundColor !== "rgba(0, 0, 0, 0)",
+    };
+  });
+
+// Status badges share one pattern. The version list's "Current version" label read as
+// "Currentversion" (audit 2.2), and the Credentials tab's Slack token states had their own chrome.
+test("The current version, Slack token bindings and Namespace rows use the badge and card patterns", async (t) => {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Badges and cards");
+  const versioned = await fixture.createAgent(namespace.id, "Badge Agent", nativeValues("badge"));
+  await fixture.seedActiveAgentRevision(namespace.id, versioned.id);
+  const bot = await fixture.createSecret(namespace.id, "Badge bot token", "xoxb-badge");
+  const slack = await fixture.createAgent(
+    namespace.id,
+    "Credential badges",
+    nativeValues("channels", {
+      harnessId: "codex",
+      channels: {
+        slack: {
+          enabled: true,
+          mode: "socket",
+          appToken: { source: "env", provider: "default", id: "SLACK_APP_TOKEN" },
+          botToken: { source: "env", provider: "default", id: "SLACK_BOT_TOKEN" },
+          channels: {},
+        },
+      },
+    }),
+    {
+      executionMode: "dedicated",
+      secretBindings: { SLACK_BOT_TOKEN: { source: bot.ref, delivery: { type: "env" } } },
+    },
+  );
+
+  // The current version shows a Current badge after a visible space. Info, not success: Current
+  // means only that OCC selected the version, which may be stopped or failed (finding 1969).
+  for (const viewport of consoleViewports) {
+    const { page } = await newPage(t, fixture, { browser, context: { viewport } });
+    await login(page, fixture, detailUrl(fixture, namespace.id, versioned.id));
+    const version = page.getByRole("button", {
+      name: "View version v1, current version",
+      exact: true,
+    });
+    await version.waitFor();
+    const state = await badgeState(version.locator(".badge"));
+    assert.deepEqual(
+      { ...state, gap: state.gap >= 4 },
+      { badge: true, text: "Current", tone: "info", gap: true, sameLine: true, painted: true },
+      `badge at ${viewport.width}: ${JSON.stringify(state)}`,
+    );
+    // Rendered text: the badge follows the version number after a space.
+    assert.match(await version.innerText(), /^v1 Current\n/);
+  }
+
+  // Each Slack token binding reads Bound or Missing in the shared badge, with a tone.
+  const { page } = await newPage(t, fixture, { browser });
+  await login(page, fixture, detailUrl(fixture, namespace.id, slack.id, "draft", "credentials"));
+  const list = page.locator(".credential-status-list").filter({ hasText: "Slack bot token" });
+  await list.waitFor();
+  const status = (label) =>
+    list.locator("dt", { hasText: label }).locator("xpath=following-sibling::dd[1]/span");
+  for (const [label, text, tone] of [
+    ["Slack app token", "Missing", "danger"],
+    ["Slack bot token", "Bound", "success"],
+  ]) {
+    const state = await badgeState(status(label));
+    assert.deepEqual(
+      { badge: state.badge, text: state.text, tone: state.tone, painted: state.painted },
+      { badge: true, text, tone, painted: true },
+      label,
+    );
+  }
+
+  // Namespace rows sit in one table card (UX spec 3.12): the card's surface, edge and radius
+  // belong to the table, and each row is divided from the next by a hairline.
+  await page.goto(new URL(`/console/namespaces?namespace=${namespace.id}`, fixture.origin).href);
+  const row = page
+    .getByRole("list", { name: "Namespaces", exact: true })
+    .getByRole("listitem")
+    .filter({ hasText: namespace.id });
+  await row.waitFor();
+  assert.deepEqual(
+    await row.evaluate((node) => {
+      const table = globalThis.getComputedStyle(node.closest(".namespace-table"));
+      return {
+        card: node.classList.contains("card"),
+        surface: table.backgroundColor,
+        radius: table.borderTopLeftRadius,
+        edge: table.borderTopWidth,
+      };
+    }),
+    { card: false, surface: "rgb(255, 255, 255)", radius: "14px", edge: "1px" },
+  );
+  const { badge, text, tone, painted } = await badgeState(row.locator(".badge"));
+  assert.deepEqual(
+    { badge, text, tone, painted },
+    { badge: true, text: "Ready", tone: "success", painted: true },
+    "Namespace row",
+  );
+});
+
+// The Agents list's Deleting and Saved configuration unreadable badges and the detail header's
+// Deleting badge keep their tones; no test checked them (finding 1973).
+test("Deleting and unreadable configuration badges take their tones on the list and the detail page", async (t) => {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Badge tones");
+  const deleting = await fixture.createAgent(namespace.id, "Deleting Agent", nativeValues("del"));
+  const unreadable = await fixture.createAgent(
+    namespace.id,
+    "Unreadable Agent",
+    nativeValues("un"),
+  );
+  const deletingPath = `/namespaces/${namespace.id}/agents/${deleting.id}`;
+  assert.equal((await fixture.request("DELETE", deletingPath)).status, 202);
+  const { page } = await newPage(t, fixture, { browser });
+  // The list reports a saved configuration it cannot decode in the API's degraded shape: Agent
+  // metadata without the six saved-settings fields (AgentReadSchema), plus configurationReadError.
+  // PostgreSQL tests own the decode failure itself.
+  const savedSettings = [
+    "plugins",
+    "pluginApprovers",
+    "repositoryBindings",
+    "repositoryAccess",
+    "harnessAuth",
+    "credentialSources",
+  ];
+  await page.route(`${fixture.origin}/namespaces/${namespace.id}/agents`, async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const payload = await response.json();
+    payload.data = payload.data.map((item) =>
+      item.id === unreadable.id
+        ? {
+            ...Object.fromEntries(
+              Object.entries(item).filter(([field]) => !savedSettings.includes(field)),
+            ),
+            configurationReadError: { code: "SAVED_CONFIGURATION_UNREADABLE", field: "plugins" },
+          }
+        : item,
+    );
+    await route.fulfill({ response, json: payload });
+  });
+  await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
+  const table = page.locator(settledView).getByRole("table", { name: "Agents" });
+  const rowBadge = (name) =>
+    table
+      .getByRole("row")
+      .filter({ has: page.getByRole("link", { name, exact: true }) })
+      .locator(".badge");
+  for (const [name, text, tone] of [
+    ["Deleting Agent", "Deleting", "warning"],
+    ["Unreadable Agent", "Saved configuration unreadable", "danger"],
+  ]) {
+    await rowBadge(name).waitFor();
+    const { badge, text: shown, tone: shownTone, painted } = await badgeState(rowBadge(name));
+    assert.deepEqual(
+      { badge, text: shown, tone: shownTone, painted },
+      { badge: true, text, tone, painted: true },
+      name,
+    );
+  }
+
+  await page.goto(detailUrl(fixture, namespace.id, deleting.id).href);
+  await page.locator(settledView).waitFor();
+  // The badge sits in the page header's actions, where Create new version would be.
+  const header = page
+    .locator(".content .page-header .page-actions")
+    .locator(".badge")
+    .filter({ hasText: /^Deleting$/ });
+  await header.waitFor();
+  const { badge, text, tone, painted } = await badgeState(header);
+  assert.deepEqual(
+    { badge, text, tone, painted },
+    { badge: true, text: "Deleting", tone: "warning", painted: true },
+    "detail header",
+  );
+});
+
+// Links are ink with an underline and the accent is for actions (UX plan C8, spec 3.3): an inline
+// link or a disclosure that opens more detail must not paint itself in the accent, and a table's
+// name links underline only on hover.
+test("Links and disclosures use the link colour with an underline, not the accent", async (t) => {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Link tone");
+  const agent = await fixture.createAgent(namespace.id, "Link Agent", nativeValues("link"));
+  const { page } = await newPage(t, fixture, { browser });
+  await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
+  // Each node's paint against the resolved link and accent colours.
+  const tones = (locator) =>
+    locator.evaluateAll((nodes) => {
+      const resolve = (value) => {
+        const probe = globalThis.document.createElement("span");
+        probe.style.color = value;
+        globalThis.document.body.append(probe);
+        const color = globalThis.getComputedStyle(probe).color;
+        probe.remove();
+        return color;
+      };
+      const [link, accent] = [resolve("var(--color-link)"), resolve("var(--color-accent)")];
+      return nodes
+        .filter((node) => node.getClientRects().length > 0)
+        .map((node) => {
+          const style = globalThis.getComputedStyle(node);
+          return {
+            text: node.textContent.trim(),
+            ink: style.color === link,
+            accent: style.color === accent,
+            line: style.textDecorationLine,
+            lineShows: style.textDecorationColor !== "rgba(0, 0, 0, 0)",
+            weight: style.fontWeight,
+          };
+        });
+    });
+  const tone = async (locator) => {
+    const [{ text: _text, ...paint }] = await tones(locator);
+    return paint;
+  };
+
+  // The Agents table's name link: ink, medium, its underline hidden until the pointer is on it.
+  const name = page.getByRole("link", { name: "Link Agent", exact: true });
+  await name.waitFor();
+  await page.mouse.move(0, 0);
+  assert.deepEqual(await tone(name), {
+    ink: true,
+    accent: false,
+    line: "underline",
+    lineShows: false,
+    weight: "500",
+  });
+  await name.hover();
+  assert.equal((await tone(name)).lineShows, true, "name link underlines on hover");
+
+  // On the Agent page, every plain link and disclosure in the content stays out of the accent,
+  // and the native Configuration disclosure reads as an underlined ink link.
+  await page.goto(detailUrl(fixture, namespace.id, agent.id).href);
+  const native = page.getByText("View native Configuration", { exact: true });
+  await native.waitFor();
+  await page.locator(settledView).waitFor();
+  await page.mouse.move(0, 0);
+  assert.deepEqual(await tone(native), {
+    ink: true,
+    accent: false,
+    line: "underline",
+    lineShows: true,
+    weight: "500",
+  });
+  const painted = (await tones(page.locator(".content").locator("a, summary")))
+    .filter((paint) => paint.accent)
+    .map((paint) => paint.text);
+  assert.deepEqual(painted, [], "links painted in the accent");
 });

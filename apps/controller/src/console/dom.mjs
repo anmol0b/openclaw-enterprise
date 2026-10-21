@@ -40,11 +40,15 @@ export function replaceChildrenIfChanged(parent, children) {
 }
 
 // A live region or alert announces reliably when it is inserted, not when an existing node takes
-// its role, so a node whose role (or the kind of a role node) changes is replaced instead.
+// its role, so a node whose role (or the kind of a role node, a status block's tone included)
+// changes is replaced instead.
 function sameRole(shown, child) {
   const role = child.getAttribute("role");
   return (
-    shown.getAttribute("role") === role && (role === null || shown.className === child.className)
+    shown.getAttribute("role") === role &&
+    (role === null ||
+      (shown.className === child.className &&
+        shown.getAttribute("data-tone") === child.getAttribute("data-tone")))
   );
 }
 
@@ -421,36 +425,307 @@ function visibleLength(line) {
   return pieces.filter((piece) => !INVISIBLE.test(piece)).length;
 }
 
-// A persistent error under a form control, linked to it with aria-describedby and aria-invalid,
-// in place of the browser's transient validation bubble (finding 1903).
-export function fieldError(input) {
-  const id = `${input.id}-error`;
-  const node = element("p", { className: "error field-error", id, hidden: true });
-  const others = () =>
-    (input.getAttribute("aria-describedby") ?? "")
-      .split(" ")
-      .filter((value) => value && value !== id);
-  return {
-    node,
-    show(text) {
-      node.textContent = text;
-      node.hidden = false;
-      input.setAttribute("aria-invalid", "true");
-      input.setAttribute("aria-describedby", [id, ...others()].join(" "));
-    },
-    clear() {
-      if (node.hidden) {
-        return;
-      }
+let fieldIds = 0;
+const controlId = (control) => (control.id ||= `field-${++fieldIds}`);
+
+function describe(control, id, first = false) {
+  const others = (control.getAttribute("aria-describedby") ?? "")
+    .split(/\s+/)
+    .filter((value) => value && value !== id);
+  control.setAttribute("aria-describedby", (first ? [id, ...others] : [...others, id]).join(" "));
+}
+
+function undescribe(control, id) {
+  const others = (control.getAttribute("aria-describedby") ?? "")
+    .split(/\s+/)
+    .filter((value) => value && value !== id);
+  if (others.length) {
+    control.setAttribute("aria-describedby", others.join(" "));
+  } else {
+    control.removeAttribute("aria-describedby");
+  }
+}
+
+/**
+ * A form field (UX plan C3, console.css "Form field"): a label, the control, then its help. The
+ * control is described by the help, and by its error while one shows (setFieldError), which sits
+ * between the two, under the control. `help` is text or nodes; `className` adds a component's own
+ * class (".form-field" and ".channel-field" are the older names).
+ */
+export function field({ label, control, help, error, className }) {
+  const id = controlId(control);
+  const helpNode =
+    help === undefined || help === null || help === ""
+      ? null
+      : element("p", { id: `${id}-hint`, className: "hint field-help" }, ...[help].flat());
+  const node = element(
+    "div",
+    { className: ["field", className].filter(Boolean).join(" ") },
+    element("label", { for: id }, label),
+    control,
+    helpNode,
+  );
+  if (helpNode) {
+    describe(control, helpNode.id);
+  }
+  if (error) {
+    setFieldError(control, error);
+  }
+  return node;
+}
+
+const fieldErrors = new WeakMap();
+
+// Where a control's error goes: under the control (or the wrapper holding it) in its field, or
+// after the label a checkbox sits in.
+function placeFieldError(control, node) {
+  const container = control.closest(".field, .form-field, .channel-field");
+  if (container) {
+    let child = control;
+    while (child.parentElement !== container) {
+      child = child.parentElement;
+    }
+    child.after(node);
+  } else {
+    (control.closest("label") ?? control).after(node);
+  }
+}
+
+/**
+ * Shows `text` as `control`'s error, linked with aria-describedby and aria-invalid, in place of
+ * the browser's transient validation bubble (finding 1903); empty text clears it.
+ */
+export function setFieldError(control, text) {
+  let node = fieldErrors.get(control);
+  if (!text) {
+    if (node && !node.hidden) {
       node.textContent = "";
       node.hidden = true;
-      input.removeAttribute("aria-invalid");
-      const describedBy = others().join(" ");
-      if (describedBy) {
-        input.setAttribute("aria-describedby", describedBy);
-      } else {
-        input.removeAttribute("aria-describedby");
+      control.removeAttribute("aria-invalid");
+      undescribe(control, node.id);
+    }
+    return;
+  }
+  if (!node) {
+    node = element("p", { className: "field-error", id: `${controlId(control)}-error` });
+    fieldErrors.set(control, node);
+  }
+  if (!node.parentNode) {
+    placeFieldError(control, node);
+  }
+  node.textContent = text;
+  node.hidden = false;
+  control.setAttribute("aria-invalid", "true");
+  describe(control, node.id, true);
+}
+
+/** A persistent error under `input` whose node the caller places (finding 1903). */
+export function fieldError(input) {
+  const node = element("p", { className: "field-error", id: `${controlId(input)}-error` });
+  node.hidden = true;
+  fieldErrors.set(input, node);
+  return {
+    node,
+    show: (text) => setFieldError(input, text),
+    clear: () => setFieldError(input, ""),
+  };
+}
+
+function fieldName(control) {
+  const labelledBy = (control.getAttribute("aria-labelledby") ?? "")
+    .split(/\s+/)
+    .map((id) => (id ? document.getElementById(id)?.textContent : ""))
+    .join(" ");
+  const label =
+    control.labels?.[0]?.textContent || labelledBy || control.getAttribute("aria-label") || "";
+  return label.trim().replace(/\s+/g, " ") || "This field";
+}
+
+const TEXT_TYPES = new Set(["text", "search", "email", "url", "tel"]);
+
+// The console's own sentence for a control the browser's checks refuse, or "" when it passes.
+// A required control marked data-trim (a name or an identifier, which the API trims) also
+// refuses text that is only spaces, which checkValidity() accepts: gate a form on
+// validateFields, not on both. Other text, such as a Preset string, keeps its spaces.
+function fieldProblem(control) {
+  const blank =
+    control.required &&
+    control.hasAttribute("data-trim") &&
+    (control.tagName === "TEXTAREA" || TEXT_TYPES.has(control.type)) &&
+    !control.value.trim();
+  const { validity } = control;
+  if (validity.customError) {
+    return control.validationMessage;
+  }
+  if (validity.valueMissing || blank) {
+    return control.type === "checkbox"
+      ? "Check this box to continue."
+      : `${fieldName(control)} is required.`;
+  }
+  return validity.valid ? "" : `Enter a valid value for ${fieldName(control)}.`;
+}
+
+// Controls whose error a check showed. After any edit, one that now passes, or is no longer
+// checked (disabled, or no longer required after another field changed), loses its error. One
+// document listener runs after the form's own input handlers, which may reset custom validity or
+// toggle `required`.
+const checkedControls = new Set();
+let clearsOnEdit = false;
+function clearFixedErrors() {
+  for (const control of checkedControls) {
+    if (!control.isConnected) {
+      checkedControls.delete(control);
+    } else if (!control.willValidate || !fieldProblem(control)) {
+      checkedControls.delete(control);
+      setFieldError(control, "");
+    }
+  }
+}
+
+/**
+ * Checks `controls` as the browser would on submit, without its bubble: each one that fails
+ * shows the console's error under it (opening a collapsed section around it), and focus moves to
+ * the first. Errors an earlier check showed clear once their control passes. Returns whether
+ * every control passed. Use with `novalidate` on the form.
+ */
+export function validateFields(controls) {
+  if (!clearsOnEdit) {
+    clearsOnEdit = true;
+    document.addEventListener("input", clearFixedErrors);
+    document.addEventListener("change", clearFixedErrors);
+  }
+  let first;
+  for (const control of controls) {
+    if (!control?.willValidate) {
+      continue;
+    }
+    const problem = fieldProblem(control);
+    if (problem) {
+      setFieldError(control, problem);
+      checkedControls.add(control);
+      first ??= control;
+      const details = control.closest("details");
+      if (details) {
+        details.open = true;
+      }
+    } else if (checkedControls.delete(control)) {
+      setFieldError(control, "");
+    }
+  }
+  first?.focus();
+  return !first;
+}
+
+/**
+ * Turns off `form`'s browser validation and checks it with validateFields before any other
+ * submit handler runs; a form that fails does not submit.
+ */
+export function validateOnSubmit(form) {
+  form.noValidate = true;
+  form.addEventListener(
+    "submit",
+    (event) => {
+      if (!validateFields([...form.elements])) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
       }
     },
+    { capture: true },
+  );
+}
+
+const STATUS_ALERT_TONES = new Set(["danger", "warning"]);
+
+/**
+ * A status block (UX plan C1, console.css "Status block"): an error, warning or notice. `tone` is
+ * "info", "success", "warning" or "danger". `label` is an optional short heading (text, or a
+ * heading node to keep the outline), `body` text or nodes, and `actions` optional buttons or
+ * links shown beneath. Danger and warning blocks are alerts, info and success ones statuses;
+ * `attributes.role` overrides that (null for no role), and `attributes.className` adds a
+ * component's own class. With no label or actions it is one `p` whose text is the body, so a
+ * caller can still set its textContent.
+ */
+export function statusBlock(
+  tone,
+  label,
+  body,
+  actions = [],
+  { className, role, ...attributes } = {},
+) {
+  const shownRole = role === undefined ? (STATUS_ALERT_TONES.has(tone) ? "alert" : "status") : role;
+  const shared = {
+    className: ["status", className].filter(Boolean).join(" "),
+    "data-tone": tone,
+    ...(shownRole ? { role: shownRole } : {}),
+    ...attributes,
   };
+  const bodyNodes = (Array.isArray(body) ? body : [body]).filter(
+    (child) => child !== null && child !== undefined,
+  );
+  if (!label && !actions.length) {
+    return element("p", shared, ...bodyNodes);
+  }
+  if (label && typeof label !== "string") {
+    label.classList.add("status-label");
+  }
+  return element(
+    "div",
+    shared,
+    label
+      ? typeof label === "string"
+        ? element("p", { className: "status-label" }, label)
+        : label
+      : null,
+    ...bodyNodes.map((child) =>
+      typeof child === "string" ? element("p", { className: "status-body" }, child) : child,
+    ),
+    actions.length ? element("div", { className: "status-actions" }, ...actions) : null,
+  );
+}
+
+/**
+ * Gives a feedback line that switches between a quiet hint and a refusal its look: a status
+ * block in `tone`, or `fallback` (the hint class) when `tone` is null. It replaces the whole
+ * class list, so use it only on a line with no component class of its own. A line that
+ * announces (role status or alert) becomes an alert in the danger and warning tones and a status
+ * otherwise, as `statusBlock` does; set the tone before writing the text, so the text arrives in
+ * an alert (finding 2005).
+ */
+export function setStatusTone(node, tone, fallback = "hint") {
+  const role = node.getAttribute("role");
+  if (role === "status" || role === "alert") {
+    const shownRole = STATUS_ALERT_TONES.has(tone) ? "alert" : "status";
+    if (role !== shownRole) {
+      node.setAttribute("role", shownRole);
+    }
+  }
+  const className = tone ? "status" : fallback;
+  if (node.className !== className) {
+    node.className = className;
+  }
+  if (tone) {
+    if (node.dataset.tone !== tone) {
+      node.dataset.tone = tone;
+    }
+  } else if (node.hasAttribute("data-tone")) {
+    node.removeAttribute("data-tone");
+  }
+}
+
+/**
+ * A refusal after a request: the block takes focus and scrolls into view, so it is not read as
+ * progress below the fold (findings 1862, 1864). Focus the reader moved elsewhere stays there.
+ */
+export function revealStatus(node, root = document.body) {
+  const active = document.activeElement;
+  if (
+    !node?.isConnected ||
+    !node.textContent ||
+    (active && active !== document.body && !root.contains(active))
+  ) {
+    return;
+  }
+  node.tabIndex = -1;
+  node.focus({ preventScroll: true });
+  node.scrollIntoView({ block: "nearest" });
 }

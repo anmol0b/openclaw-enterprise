@@ -30,6 +30,7 @@ import {
   settlePageRequests,
   repositoryCheckbox,
   waitForInputValue,
+  statusTone,
 } from "./console-agents-browser-helpers.mjs";
 import {
   STARTER_CONTROL_UI,
@@ -47,6 +48,16 @@ import {
   createRepositoryLaunchFixture,
   waitForCreateFormReads,
 } from "./console-agents-test-support.mjs";
+
+// A failure's card leads the Agent page and folds Deployment details (finding 2094); a reader
+// opens them for the record's evidence.
+async function openFoldedDetails(page) {
+  await page.getByRole("region", { name: "Deployment needs attention" }).waitFor();
+  const details = page.locator(".deployment-status > details");
+  if (!(await details.evaluate((node) => node.open))) {
+    await details.locator("summary").click();
+  }
+}
 
 const defaultCodexPreset = JSON.parse(
   await readFile(new URL("../../deploy/presets/default-codex.json", import.meta.url), "utf8"),
@@ -323,7 +334,7 @@ test("Agent creation stores its API key separately, grants exact access, and sav
     );
   });
   await page.getByRole("button", { name: "Create new version" }).waitFor();
-  await page.getByRole("heading", { name: "Create new version" }).waitFor();
+  await page.getByRole("heading", { name: "Prepare this version" }).waitFor();
   await page.getByText("No version is currently selected for service.").waitFor();
   // A never-deployed Agent has no Stop card and reports no stop request (finding 1899). The
   // card is hidden while versions load too, so wait for the empty version list first.
@@ -682,6 +693,12 @@ test("Agent creation distinguishes unavailable repository choices from denied Ag
   await login(deniedPage, deniedFixture, `/console/agents/new?namespace=${deniedNamespace.id}`);
   await deniedPage.getByRole("button", { name: "Start with default Preset" }).click();
   await deniedPage.getByText(/Repository choices are denied/).waitFor();
+  // A refusal is a danger alert, not a quiet hint (finding 2006).
+  assert.deepEqual(await statusTone(deniedPage.getByText(/Repository choices are denied/)), {
+    className: "status",
+    tone: "danger",
+    role: "alert",
+  });
   // The disabled state must reflect both reads' outcome, not a read still pending.
   await waitForCreateFormReads(deniedPage);
   assert.equal(await deniedPage.getByRole("button", { name: "Create Agent" }).isDisabled(), true);
@@ -984,7 +1001,12 @@ test("Agent creation recovers from stale authoritative admission without replaci
   await page.getByRole("button", { name: "Reload repository choices" }).click();
   await page
     .getByRole("alert")
-    .filter({ hasText: /Repository choices could not be reloaded/ })
+    .filter({ hasText: /^Repository choices could not be reloaded\. Configuration / })
+    .waitFor();
+  // The repository picker's own line is a danger block, so an alert too (finding 2005).
+  await page
+    .getByRole("alert")
+    .filter({ hasText: /^Repository choices could not be reloaded\. Service unavailable\./ })
     .waitFor();
   await page.unroute(repositoryOptionsPath, failRepositoryReload);
   assert.equal(
@@ -1015,7 +1037,7 @@ test("Agent creation recovers from stale authoritative admission without replaci
   await page.getByRole("button", { name: "Reload repository choices" }).click();
   await page
     .getByRole("alert")
-    .filter({ hasText: /Repository choices could not be reloaded/ })
+    .filter({ hasText: /^Repository choices could not be reloaded\. Configuration / })
     .waitFor();
   assert.equal(await page.getByRole("button", { name: "Create Agent" }).isDisabled(), true);
   await page.locator("#create-agent-form").evaluate((form) => form.requestSubmit());
@@ -1036,10 +1058,13 @@ test("Agent creation recovers from stale authoritative admission without replaci
   await page.getByRole("button", { name: "Reload repository choices" }).click();
   await page
     .getByRole("alert")
-    .filter({ hasText: /Namespace no longer accepts new Agents/ })
+    .filter({
+      hasText:
+        /^Repository choices could not be reloaded because this Namespace no longer accepts new Agents\. /,
+    })
     .waitFor();
   await page
-    .getByRole("status")
+    .getByRole("alert")
     .getByText("This Namespace no longer accepts new Agents.", { exact: true })
     .waitFor();
   await page.unroute(repositoryOptionsPath, conflictRepositoryReload);
@@ -1494,11 +1519,12 @@ test("Dedicated Agent creation opens deployment details after provisioning with 
   });
   // Creation must hand off to the detail page while deployment is still queued.
   const deploymentPanel = page.locator(".deployment-status");
-  await deploymentPanel.getByText("Recorded status: queued", { exact: true }).waitFor();
+  await deploymentPanel.getByText("Recorded status: Queued", { exact: true }).waitFor();
   assert.equal(await page.getByRole("heading", { name: "Create Agent", exact: true }).count(), 0);
   deploymentStatus = "failed";
   await deploymentPanel.getByRole("button", { name: "Refresh deployment", exact: true }).click();
-  await deploymentPanel.getByText("Recorded status: failed", { exact: true }).waitFor();
+  await openFoldedDetails(page);
+  await deploymentPanel.getByText("Recorded status: Failed", { exact: true }).waitFor();
   await deploymentPanel
     .getByText("DEPENDENCY_UNAVAILABLE: Deployment reconciliation failed.", { exact: true })
     .waitFor();
@@ -2027,6 +2053,14 @@ test("Agent creation explains a denied capability check instead of offering a re
   await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Capability denial", { ready: true });
   const { page } = await newPage(t, fixture);
+  // Without a permission answer that grants Agent create, a denied Installation read keeps the
+  // refusal; a member the Namespace lets create goes on (console-create-agent-member.test.mjs).
+  let permissions = null;
+  await page.route(`**/namespaces/${namespace.id}/permissions`, (route) =>
+    permissions
+      ? route.fulfill({ json: { data: permissions } })
+      : route.fulfill({ status: 503, contentType: "application/json", body: "{}" }),
+  );
   let status = 403;
   await page.route(`${fixture.origin}/installation`, async (route) => {
     await route.fulfill({
@@ -2047,13 +2081,18 @@ test("Agent creation explains a denied capability check instead of offering a re
 
   await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
   await page.getByRole("button", { name: "Start without Preset" }).click();
+  // A failed permission read is not a denial: the form says so and offers that check again
+  // (finding 2110); a known denial then keeps the refusal, with no retry.
+  await page.getByText(/^Your permissions in this Namespace could not be checked/).waitFor();
+  permissions = { agents: { create: false } };
+  await page.getByRole("button", { name: "Retry permission check" }).click();
   await page
     .getByText(
       "Creating an Agent needs Installation access that your account does not have. Ask an Installation administrator to create this Agent.",
     )
     .waitFor();
+  assert.equal(await page.getByRole("button", { name: "Retry permission check" }).count(), 0);
   const retry = page.getByRole("button", { name: "Retry capability check" });
-  assert.equal(await retry.isHidden(), true);
   assert.equal(
     await page.getByRole("button", { name: "Create Agent", exact: true }).isDisabled(),
     true,
@@ -2064,6 +2103,7 @@ test("Agent creation explains a denied capability check instead of offering a re
 
   // A transient failure still offers the retry.
   status = 503;
+  permissions = null;
   await page.goto(`${fixture.origin}/console/agents/new?namespace=${namespace.id}`);
   await page.getByRole("button", { name: "Start without Preset" }).click();
   await page.getByText(/^Installation capabilities unavailable\. /).waitFor();

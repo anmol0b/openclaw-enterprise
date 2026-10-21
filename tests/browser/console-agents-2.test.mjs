@@ -447,13 +447,24 @@ test("Dedicated Agent creation shows the API's named reason when a provisioning 
   assert.equal(jobs, 2);
 });
 
-// The stopped guidance is not an error, so it does not take the error colour.
+// The stopped guidance is not an error, so neither its text nor its block's stripe takes the
+// error colour.
 async function assertNotErrorColour(locator) {
-  const [colour, errorColour] = await locator.evaluate((node) => {
+  const [colour, stripe, errorColour] = await locator.evaluate((node) => {
     const view = node.ownerDocument.defaultView;
-    return [view.getComputedStyle(node).color, view.getComputedStyle(node.closest(".error")).color];
+    const probe = node.ownerDocument.createElement("span");
+    probe.style.color = "var(--color-danger)";
+    node.ownerDocument.body.append(probe);
+    const danger = view.getComputedStyle(probe).color;
+    probe.remove();
+    return [
+      view.getComputedStyle(node).color,
+      view.getComputedStyle(node.closest(".status")).borderLeftColor,
+      danger,
+    ];
   });
   assert.notEqual(colour, errorColour);
+  assert.notEqual(stripe, errorColour);
 }
 
 // An owner's Stop during the first deployment fails provisioning with REVISION_STOPPED. A Stop
@@ -2113,6 +2124,15 @@ test("Agent creation retries a denied credential grant without duplicating its s
   const fixture = await createConsoleAppFixture(t);
   const installation = await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Credential grant retry", { ready: true });
+  const { page } = await newPage(t, fixture);
+  // Exercise the supported draft path; dedicated provisioning has separate workflow coverage.
+  await routeInstallationWithoutProvisioning(page, fixture);
+  const requests = apiRequests(page, fixture.origin);
+  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+  await page.getByRole("button", { name: "Start with default Preset" }).click();
+  // Native IAM denies the administrator's grant authority after the session found it allowed. A
+  // session that already knows it is refused sends no grant at all
+  // (console-create-agent-member.test.mjs, finding 2109).
   fixture.policy.restrictions.push({
     id: "deny-credential-grant",
     resourceKind: "installation",
@@ -2120,12 +2140,6 @@ test("Agent creation retries a denied credential grant without duplicating its s
     action: "administer",
     effect: "deny",
   });
-  const { page } = await newPage(t, fixture);
-  // Exercise the supported draft path; dedicated provisioning has separate workflow coverage.
-  await routeInstallationWithoutProvisioning(page, fixture);
-  const requests = apiRequests(page, fixture.origin);
-  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
-  await page.getByRole("button", { name: "Start with default Preset" }).click();
   await page.getByLabel("Agent name").fill("Grant retry Agent");
   await enterManualModel(page, "grant-retry-key", "gpt-4.1");
   const created = page.waitForResponse(
@@ -2319,7 +2333,7 @@ test("the Agents list does not move when failed deployments land", async (t) => 
     for (const { name, error } of records) {
       const row = page.getByRole("row").filter({ hasText: name });
       await row
-        .getByRole("link", { name: error ? "v1 · failed" : "v1 · succeeded", exact: true })
+        .getByRole("link", { name: error ? "v1 · Failed" : "v1 · Completed", exact: true })
         .waitFor();
     }
     await page.evaluate(() => globalThis.document.fonts.ready);

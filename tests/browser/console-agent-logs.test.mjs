@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { createConsoleAppFixture } from "../helpers/console-app.mjs";
+import { openShellLogDecision } from "../../apps/controller/src/drivers/sandbox/openshell-log-decisions.ts";
+import { createConsoleAppFixture, fileConsoleApp } from "../helpers/console-app.mjs";
 import { grantRole } from "../helpers/iam-grants.mjs";
 import { createRuntimeLogComputeDriver } from "../helpers/runtime-logs.mjs";
 import {
@@ -22,14 +23,40 @@ import {
 
 // The console runs against the production controller app, IAM, cursor signing and
 // sanitizer. The Compute Driver serves in-memory Pod state in place of a cluster.
+// The tests share one app (fileConsoleApp) and its Compute Driver: each test gets its own
+// Namespace, Agent and revision, and starts and ends with the Driver's Pod state, calls and
+// properties as they were when it was made. The Driver's methods hold its `state` and `calls`, so
+// tests change those in place and never replace them.
+const computeDriver = createRuntimeLogComputeDriver();
+const initialDriver = { ...computeDriver, state: structuredClone(computeDriver.state) };
+const logsApp = fileConsoleApp({
+  computeDriver,
+  agentRuntimeLogs: { enabled: true, cursorSecret: `console-logs-${randomUUID()}` },
+});
+let logsNamespaces = 0;
+
+function resetComputeDriver() {
+  for (const key of Object.keys(computeDriver)) {
+    if (!Object.hasOwn(initialDriver, key)) {
+      delete computeDriver[key];
+    }
+  }
+  Object.assign(computeDriver, initialDriver, { state: computeDriver.state });
+  for (const key of Object.keys(computeDriver.state)) {
+    delete computeDriver.state[key];
+  }
+  Object.assign(computeDriver.state, structuredClone(initialDriver.state));
+  computeDriver.calls.length = 0;
+}
+
 async function logsFixture(t) {
-  const computeDriver = createRuntimeLogComputeDriver();
-  const fixture = await createConsoleAppFixture(t, {
-    computeDriver,
-    agentRuntimeLogs: { enabled: true, cursorSecret: `console-logs-${randomUUID()}` },
+  const fixture = await logsApp(t);
+  resetComputeDriver();
+  t.after(resetComputeDriver);
+  logsNamespaces += 1;
+  const namespace = await fixture.createNamespace(`Runtime logs ${logsNamespaces}`, {
+    ready: true,
   });
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Runtime logs", { ready: true });
   const agent = await fixture.createAgent(namespace.id, "Logs Agent", nativeValues("v1"));
   const active = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
   return { fixture, computeDriver, namespace, agent, revisionId: active.revision.id };
@@ -159,6 +186,7 @@ for (const viewport of [
     const { fixture, computeDriver, namespace, agent, revisionId } = await logsFixture(t);
     computeDriver.state.lines = [line(1, "tab click output")];
     const { page } = await newPage(t, fixture, { context: { viewport } });
+    await trackSettledFetches(page);
     await login(
       page,
       fixture,
@@ -166,6 +194,9 @@ for (const viewport of [
     );
     await page.getByRole("heading", { name: "Configuration snapshot", exact: true }).waitFor();
     await page.locator('.content [aria-live="polite"][aria-busy="false"]').waitFor();
+    // The overview shows after at most 2 s even if its deployment read is still out; when that
+    // read lands it grows the status above the strip. Measure the strip once the reads are in.
+    await waitForIdleFetches(page);
     const logsTab = page.getByRole("tab", { name: "Logs", exact: true });
     // The strip sits in the middle of the viewport, as after reading the overview.
     await page.evaluate(() => {
@@ -1582,7 +1613,8 @@ test("the Sandbox source shows redacted policy decisions without a Pod picker", 
       return {
         sandbox: `sb-${context.revision.id.slice(4, 12)}`,
         observedAt: "2026-09-30T12:00:05.000Z",
-        lines: sandboxState.lines,
+        // Native OCSF decoding belongs to the Driver; OCC sanitizes the shared records.
+        lines: sandboxState.lines.map(openShellLogDecision),
         bufferTotal: sandboxState.lines.length,
       };
     },
@@ -1810,11 +1842,11 @@ test("a status denial for one operator does not carry over to the next sign-in o
   await page.getByText(/Runtime status requires Agent operate/).waitFor();
 
   // Sign out and in as the administrator without reloading the page.
-  await page.getByRole("button", { name: "OpenClaw Enterprise", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Logout" }).click();
-  await page.getByLabel("Username").fill(fixture.credentials.email);
+  await page.locator(".account-toggle").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByLabel("Email", { exact: true }).fill(fixture.credentials.email);
   await page.getByLabel("Password").fill(fixture.credentials.password);
-  await page.getByRole("button", { name: "Login", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\/console\/agents/);
   const statusReads = () =>
     requests.filter(({ path }) => path.endsWith(`/deployments/${revisionId}/runtime`)).length;
@@ -2341,7 +2373,7 @@ for (const delayed of ["follow", "download"]) {
     logs.computeDriver.state.lines.push(line(2, "authorized before revocation"));
 
     const follow = page.getByRole("button", { name: "Follow", exact: true });
-    const download = page.getByRole("button", { name: "Download" });
+    const download = page.getByRole("button", { name: "Download", exact: true });
     const startFollow = async () => {
       await follow.click();
       await page.clock.runFor(2_000);
@@ -2725,11 +2757,11 @@ test("a restored operate grant shows status on Back, and a new sign-in asks for 
 
   // Sign out and in again as the same member, without reloading the tab.
   changeGrant(role, "read_logs", true);
-  await page.getByRole("button", { name: "OpenClaw Enterprise", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Logout" }).click();
-  await page.getByLabel("Username").fill(account.credentials.email);
+  await page.locator(".account-toggle").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByLabel("Email", { exact: true }).fill(account.credentials.email);
   await page.getByLabel("Password").fill(account.credentials.password);
-  await page.getByRole("button", { name: "Login", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\/console\/agents/);
   const url = detailUrl(logs.fixture, logs.namespace.id, logs.agent.id, logs.revisionId, "logs");
   await page.evaluate((target) => {
@@ -2837,11 +2869,11 @@ test("a status refusal taken while operate is allowed is asked again after a new
   assert.equal(permissionReads(), permissionsBefore + 1);
 
   await page.unroute(`${logs.fixture.origin}${statusPath}`);
-  await page.getByRole("button", { name: "OpenClaw Enterprise", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Logout" }).click();
-  await page.getByLabel("Username").fill(account.credentials.email);
+  await page.locator(".account-toggle").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByLabel("Email", { exact: true }).fill(account.credentials.email);
   await page.getByLabel("Password").fill(account.credentials.password);
-  await page.getByRole("button", { name: "Login", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\/console\/agents/);
   const url = detailUrl(logs.fixture, logs.namespace.id, logs.agent.id, logs.revisionId, "logs");
   await page.evaluate((target) => {

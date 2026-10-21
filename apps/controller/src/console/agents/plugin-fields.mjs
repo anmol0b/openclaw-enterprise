@@ -128,7 +128,7 @@ export function createPluginFields({
   });
   const searchLabel = element("label", { for: search.id }, "Search plugins");
   const status = element("p", { className: "hint", role: "status" });
-  const feedback = element("p", { className: "error", role: "status" });
+  const feedback = element("p", { className: "status", "data-tone": "danger", role: "alert" });
   const policyStatus = element("p", { className: "hint", role: "status" });
   const summary = element("p", { className: "hint" });
   const list = element("div", { className: "plugin-list" });
@@ -852,7 +852,15 @@ export function createPluginFields({
           details.append(element("p", { className: "hint" }, "No tools listed for this plugin."));
         }
         if (entry.toolError) {
-          details.append(element("p", { className: "error", role: "status" }, entry.toolError));
+          details.append(
+            element(
+              "p",
+              // A status, not an alert: the pane is rebuilt on every redraw (search typing, say),
+              // and an alert would be announced again each time.
+              { className: "status", "data-tone": "danger", role: "status" },
+              entry.toolError,
+            ),
+          );
         }
         const toolRows = [];
         const filterTools = () => {

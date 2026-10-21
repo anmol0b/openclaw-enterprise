@@ -52,7 +52,7 @@ func validDevelopmentCodexSeccompResult(mode, profileName string) bool {
 	}
 }
 
-func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result error) {
+func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolicies []any, ceiling []any) (result error) {
 	r := newRunner(opts)
 	if len(opts.ComposeArgs) != 0 {
 		return fmt.Errorf("the Kubernetes-only profile does not accept Compose options")
@@ -105,19 +105,21 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 		return err
 	}
 	state := &developmentState{
-		Version:           3,
-		Repository:        opts.Repository,
-		ComputeDriver:     "kubernetes",
-		SandboxDriver:     sandboxDriver,
-		DeploymentMode:    "k3d",
-		PlatformNamespace: r.setting("OCC_DEVELOPMENT_KUBERNETES_NAMESPACE", "oce-system"),
-		APIPort:           apiPort,
-		BrowserPort:       browserPort,
-		Cluster:           r.setting("OCC_DEVELOPMENT_KUBERNETES_CLUSTER", "occ-dev-"+strings.ToLower(rand.Text()[:10])),
-		KeyPath:           opts.KeyOutput,
-		KeyOwned:          opts.KeyOutput == "",
-		SignIn:            signIn,
-		directory:         directory,
+		SandboxNetworkPolicies:      networkPolicies,
+		SandboxNetworkPolicyCeiling: ceiling,
+		Version:                     3,
+		Repository:                  opts.Repository,
+		ComputeDriver:               "kubernetes",
+		SandboxDriver:               sandboxDriver,
+		DeploymentMode:              "k3d",
+		PlatformNamespace:           r.setting("OCC_DEVELOPMENT_KUBERNETES_NAMESPACE", "oce-system"),
+		APIPort:                     apiPort,
+		BrowserPort:                 browserPort,
+		Cluster:                     r.setting("OCC_DEVELOPMENT_KUBERNETES_CLUSTER", "occ-dev-"+strings.ToLower(rand.Text()[:10])),
+		KeyPath:                     opts.KeyOutput,
+		KeyOwned:                    opts.KeyOutput == "",
+		SignIn:                      signIn,
+		directory:                   directory,
 	}
 	if err := validateClusterName(state.Cluster); err != nil {
 		return err
@@ -612,7 +614,7 @@ func (r *runner) installKubernetesControlPlane(ctx context.Context, state *devel
 					"securityContext": map[string]any{"allowPrivilegeEscalation": false, "capabilities": map[string]any{"drop": []string{"ALL"}}},
 					"env":             []any{map[string]string{"name": "POSTGRES_DB", "value": "openclaw_enterprise"}, map[string]any{"name": "POSTGRES_PASSWORD", "valueFrom": map[string]any{"secretKeyRef": map[string]string{"name": "postgres-bootstrap", "key": "password"}}}},
 					"volumeMounts":    []any{map[string]any{"name": "data", "mountPath": "/var/lib/postgresql"}, map[string]any{"name": "init", "mountPath": "/docker-entrypoint-initdb.d", "readOnly": true}},
-					"readinessProbe":  map[string]any{"exec": map[string]any{"command": []string{"pg_isready", "-U", "postgres", "-d", "openclaw_enterprise"}}, "initialDelaySeconds": 2, "periodSeconds": 2},
+					"readinessProbe":  map[string]any{"exec": map[string]any{"command": []string{"pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "openclaw_enterprise"}}, "initialDelaySeconds": 2, "periodSeconds": 2},
 				}},
 				"volumes": []any{map[string]any{"name": "data", "persistentVolumeClaim": map[string]string{"claimName": "postgres-data"}}, map[string]any{"name": "init", "secret": map[string]any{"secretName": "postgres-bootstrap", "items": []any{map[string]string{"key": "init.sql", "path": "init.sql"}}}}},
 			}},

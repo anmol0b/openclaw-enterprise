@@ -1,3 +1,4 @@
+import { reconcileSandboxPolicy, failAbandonedSandboxPolicies } from "./worker/sandbox-policy.ts";
 import { isSecretHarnessAuth, isServiceAccountHarnessAuth } from "@openclaw-enterprise/contracts";
 import { isPositiveSafeInteger } from "@openclaw-enterprise/utils";
 import { randomUUID } from "node:crypto";
@@ -52,6 +53,7 @@ import {
   CredentialSourceRevisionError,
   CredentialWithdrawalRefusedError,
   SandboxGatewayUnauthorizedError,
+  SandboxGatewayUnavailableError,
   SANDBOX_DELETION_UNCONFIRMED,
   operationRefusalHint,
   SandboxRevisionUnsupportedError,
@@ -290,6 +292,46 @@ function revisionFailureLogFields(error: unknown): {
   return record === undefined
     ? { cause: errorClass }
     : { cause: errorClass, ...causeStatusLogFields(record) };
+}
+
+/**
+ * The dependency a revision pass waits for when its failure clears by itself: within the
+ * convergence deadline, without spending the attempt budget (D28). A Sandbox gateway that did not
+ * answer at all (down or restarting) is one (findings 1658, 2040), at every step of the pass that
+ * calls it: the candidate's preparation and an exclusive predecessor's stop, which the next pass
+ * repeats. Other work (an Agent stop or deletion, a credential withdrawal, a Namespace) keeps its
+ * attempt budget: it has no convergence deadline to bound the wait.
+ */
+function revisionDependencyFailure(error: unknown): TransientDependencyError | undefined {
+  if (error instanceof TransientDependencyError) {
+    return error;
+  }
+  return error instanceof SandboxGatewayUnavailableError
+    ? new TransientDependencyError(
+        "sandbox_gateway",
+        "unavailable",
+        "The Sandbox gateway did not answer.",
+        { cause: error },
+      )
+    : undefined;
+}
+
+/** Why a claim-owned effect lost its claim; the `CLAIM_LOST` log line names it as `cause`. */
+type ClaimLossCause =
+  | "CLAIM_RENEWAL_REFUSED"
+  | "CLAIM_RENEWAL_LATE"
+  | "CLAIM_RENEWAL_FAILED"
+  | "CLAIM_LEASE_LAPSED"
+  | "WORKER_STOPPING";
+
+/** A claim lost around an external effect. Keeps the base error's name for its callers. */
+class ClaimLeaseLostError extends WorkClaimLostError {
+  readonly lossCause: ClaimLossCause;
+
+  constructor(lossCause: ClaimLossCause) {
+    super();
+    this.lossCause = lossCause;
+  }
 }
 
 /**
@@ -961,6 +1003,7 @@ export class ControllerWorker {
    */
   private refusalWait: { readonly idempotencyKey: string; readonly refusal: string } | undefined;
   private readonly state: PostgresPlatformState;
+  private readonly policyCeiling: readonly import("@openclaw-enterprise/contracts").SandboxNetworkGrant[];
   private readonly queue: PostgresWorkQueue;
   private readonly compute: ComputeDriver;
   private readonly configuration: ConfigurationDriver | undefined;
@@ -1048,6 +1091,7 @@ export class ControllerWorker {
       "Worker convergence timeout",
     );
     const drivers = options.drivers;
+    this.policyCeiling = drivers?.installation.sandboxNetworkPolicyCeiling ?? [];
     this.configuredServiceAccountDriverId = drivers?.installation.drivers.service_account?.id;
     this.nativeWorkerSupport = drivers?.installation.runtime?.nativeWorkerSupport;
     if (this.mode === "production" && drivers === undefined) {
@@ -1181,6 +1225,7 @@ export class ControllerWorker {
     this.attachLifecycleDrivers(this.iam);
     const provisioning = new OpenClawController(installation, {
       state: this.state,
+      sandboxNetworkPolicyCeiling: this.policyCeiling,
       backends: this.backends,
       recordOperations: true,
       ...(this.configuredServiceAccountDriverId === undefined
@@ -1246,7 +1291,11 @@ export class ControllerWorker {
       this.progress();
       let claimed: ClaimedWork | undefined;
       try {
-        const recovery = await this.queue.recoverStale();
+        const recovery = await this.state.transactWithQueue(async (unit, queue) => {
+          const recovered = await queue.recoverStale();
+          await failAbandonedSandboxPolicies(unit, this.installation!.id, recovered.failed);
+          return recovered;
+        }, this.queueOptions);
         await this.scheduleRecoveredCredentialWithdrawals(recovery.failed);
         // A sweep step asks the Sandbox gateway, up to its deadline: it runs on passes that
         // follow an empty claim, so queued work is not delayed by a gateway that does not
@@ -1282,6 +1331,8 @@ export class ControllerWorker {
             let kind: WorkKind = "namespace_ensure";
             if (claim.kind === "provisioning") {
               kind = "agent_provisioning";
+            } else if (claim.agentTarget === "sandbox_policy") {
+              kind = "agent_sandbox_policy";
             } else if (claim.agentTarget === "deleted") {
               kind = "agent_delete";
             } else if (claim.agentTarget === "stopped") {
@@ -1316,6 +1367,12 @@ export class ControllerWorker {
           this.emit({
             event: "worker.error",
             code: error instanceof WorkClaimLostError ? "CLAIM_LOST" : "WORKER_UNAVAILABLE",
+            ...(error instanceof ClaimLeaseLostError
+              ? {
+                  ...(claimed === undefined ? {} : workLogFields(claimed)),
+                  cause: error.lossCause,
+                }
+              : {}),
           });
         }
       }
@@ -1972,6 +2029,25 @@ export class ControllerWorker {
   private async process(claim: ClaimedWork): Promise<void> {
     if (claim.kind === "provisioning") {
       await this.processAgentProvisioning(claim);
+      return;
+    }
+    if (claim.agentTarget === "sandbox_policy") {
+      this.passOutcome = await reconcileSandboxPolicy(
+        {
+          state: this.state,
+          queueOptions: this.queueOptions,
+          driver: this.sandbox,
+          compute: this.compute,
+          iam: this.iam,
+          installationId: this.installation!.id,
+          ceiling: this.policyCeiling,
+          signal: this.abort.signal,
+          maxAttempts: this.maxAttempts,
+          deadlineMs: this.convergenceTimeoutMs,
+          leaseDurationMs: this.leaseDurationMs,
+        },
+        claim,
+      );
       return;
     }
     if (isRepositoryCleanupWork(claim)) {
@@ -4041,6 +4117,7 @@ export class ControllerWorker {
       if (error instanceof RefusedCandidateStopError) {
         ({ result, logFields: failureLogFields } = error.pending());
       } else {
+        const dependencyFailure = revisionDependencyFailure(error);
         if (error instanceof ComputePreparationFailedError) {
           result = {
             outcome: "permanent",
@@ -4063,15 +4140,15 @@ export class ControllerWorker {
           // A predecessor's or a stopped Agent's revision stop yielded to other Work; the next
           // pass repeats it.
           result = { outcome: "pending", code: stopYieldedCode(error)! };
-        } else if (error instanceof TransientDependencyError) {
+        } else if (dependencyFailure !== undefined) {
           // A dependency that recovers by itself must not spend the attempt budget:
-          // five quick retries end long before a Gateway route or an API server
-          // that is converging under load comes back (D28).
-          result = { outcome: "pending", code: error.code, dependencyFailure: error };
+          // five quick retries end long before a Gateway route, an API server
+          // that is converging under load, or a restarting Sandbox gateway comes back (D28).
+          result = { outcome: "pending", code: dependencyFailure.code, dependencyFailure };
         } else {
           result = { outcome: "retry", code: "DEPENDENCY_UNAVAILABLE" };
         }
-        failureLogFields = revisionFailureLogFields(error);
+        failureLogFields = revisionFailureLogFields(dependencyFailure ?? error);
       }
     }
     try {
@@ -4537,51 +4614,73 @@ export class ControllerWorker {
     effect: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     if (this.stopping || this.abort.signal.aborted) {
-      throw new WorkClaimLostError();
+      throw new ClaimLeaseLostError("WORKER_STOPPING");
     }
     // Consecutive short effects can each finish before their timer fires while
     // the whole sequence outlives the lease. Renew before every external effect.
     const firstRenewal = performance.now();
     if (!(await this.renewClaim(claim))) {
-      throw new WorkClaimLostError();
+      throw new ClaimLeaseLostError("CLAIM_RENEWAL_REFUSED");
     }
-    this.progress();
-    let lost = false;
-    let pending = Promise.resolve();
+    let lost: ClaimLossCause | undefined;
     const operation = new AbortController();
-    const abandon = () => {
-      lost = true;
-      operation.abort(new WorkClaimLostError());
+    const abandon = (cause: ClaimLossCause) => {
+      lost ??= cause;
+      operation.abort(new ClaimLeaseLostError(cause));
     };
+    const stopping = () => abandon("WORKER_STOPPING");
     // A renewal that is never answered (a silent connection) waits for the
     // database timeout, long after the lease. Another worker may own the claim
     // by then, so stop when the last confirmed lease runs out. Measured from
     // when the renewal was sent, this is never later than the stored expiry.
+    // The renewal stores clock_timestamp() + lease at an unknown moment between
+    // send and answer, so one answered after the lease proves nothing about now:
+    // lease recovery may already have given the work to another worker. A late
+    // renewal therefore loses the claim at once (finding 2137).
     let lapse: ReturnType<typeof setTimeout> | undefined;
-    const confirmLease = (renewedAt: number) => {
+    const confirmLease = (renewedAt: number): boolean => {
       clearTimeout(lapse);
-      lapse = setTimeout(abandon, renewedAt + this.leaseDurationMs - performance.now());
+      const now = performance.now();
+      const remainingMs = renewedAt + this.leaseDurationMs - now;
+      if (remainingMs <= 0) {
+        this.emit({
+          event: "worker.claim-renewal-warning",
+          ...workLogFields(claim),
+          code: "CLAIM_RENEWAL_LATE",
+          durationMs: now - renewedAt,
+        });
+        return false;
+      }
+      lapse = setTimeout(() => abandon("CLAIM_LEASE_LAPSED"), remainingMs);
       lapse.unref();
+      return true;
     };
-    confirmLease(firstRenewal);
-    this.abort.signal.addEventListener("abort", abandon, { once: true });
+    if (!confirmLease(firstRenewal)) {
+      throw new ClaimLeaseLostError("CLAIM_RENEWAL_LATE");
+    }
+    this.progress();
+    let pending = Promise.resolve();
+    this.abort.signal.addEventListener("abort", stopping, { once: true });
     if (this.abort.signal.aborted) {
-      abandon();
+      stopping();
     }
     const heartbeat = setInterval(
       () => {
         pending = pending.then(async () => {
           const renewedAt = performance.now();
           if (!(await this.renewClaim(claim))) {
-            abandon();
-          } else if (!lost) {
-            confirmLease(renewedAt);
+            abandon("CLAIM_RENEWAL_REFUSED");
+          } else if (lost === undefined) {
+            if (!confirmLease(renewedAt)) {
+              abandon("CLAIM_RENEWAL_LATE");
+              return;
+            }
             this.progress();
             void this.health(false);
           }
         });
         pending.catch(() => {
-          abandon();
+          abandon("CLAIM_RENEWAL_FAILED");
         });
       },
       Math.max(1, Math.floor(this.leaseDurationMs / 3)),
@@ -4606,11 +4705,11 @@ export class ControllerWorker {
       );
     } finally {
       clearInterval(heartbeat);
-      this.abort.signal.removeEventListener("abort", abandon);
+      this.abort.signal.removeEventListener("abort", stopping);
       await pending.catch(() => {});
       clearTimeout(lapse);
-      if (lost) {
-        throw new WorkClaimLostError();
+      if (lost !== undefined) {
+        throw new ClaimLeaseLostError(lost);
       }
     }
   }

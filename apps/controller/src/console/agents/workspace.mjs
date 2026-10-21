@@ -1,4 +1,4 @@
-import { element, button } from "../dom.mjs";
+import { element, button, setFieldError, statusBlock, validateFields } from "../dom.mjs";
 
 const filenames = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md"];
 
@@ -44,10 +44,12 @@ export function renderWorkspaceFiles(context, agent, path) {
     element("h2", {}, "Workspace files"),
   );
   section.append(
-    element(
-      "p",
-      { className: "notice" },
+    statusBlock(
+      "info",
+      null,
       "These files belong to the Agent's live workspace. Saving replaces one file immediately and does not change Configuration or Agent versions. Concurrent writes use the last saved contents.",
+      [],
+      { role: null },
     ),
   );
   if (!agent.activeRevisionId) {
@@ -73,7 +75,7 @@ export function renderWorkspaceFiles(context, agent, path) {
       "aria-describedby": `workspace-${name}-hint`,
     });
     const status = element("p", { className: "hint", role: "status" }, `Loading ${name}…`);
-    const error = element("p", { className: "error", role: "alert" });
+    const error = statusBlock("danger", null, null);
     let pending = false;
     let loaded = false;
     let baseline;
@@ -101,7 +103,7 @@ export function renderWorkspaceFiles(context, agent, path) {
     const reload = button(`Reload ${name}`, () => void load(true));
     const form = element(
       "form",
-      { className: "agent-card agent-form" },
+      { className: "agent-card agent-form", novalidate: "" },
       element(
         "div",
         { className: "form-field" },
@@ -144,7 +146,9 @@ export function renderWorkspaceFiles(context, agent, path) {
         editor.value = file.content;
         // Compare edits in the textarea's LF representation; reading never rewrites the file.
         baseline = editor.value;
+        // A file read without an input event drops the last check's error with its validity.
         editor.setCustomValidity("");
+        setFieldError(editor, "");
         loaded = true;
         outcomeUnknown = false;
         status.textContent = `${name} loaded.`;
@@ -173,6 +177,7 @@ export function renderWorkspaceFiles(context, agent, path) {
           baseline = !discard && retained ? retained.baseline : undefined;
           initialized = true;
           editor.setCustomValidity("");
+          setFieldError(editor, "");
           loaded = true;
           if (missingReadback) {
             outcomeUnknown = false;
@@ -218,7 +223,8 @@ export function renderWorkspaceFiles(context, agent, path) {
         editor.setCustomValidity(
           "Use valid Unicode without NUL characters, within 16 KiB of UTF-8 content.",
         );
-        editor.reportValidity();
+        // The error goes under the file, without the browser's bubble (UX plan C3).
+        validateFields([editor]);
         return;
       }
       operations += 1;
