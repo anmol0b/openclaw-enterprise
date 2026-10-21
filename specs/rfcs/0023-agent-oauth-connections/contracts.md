@@ -36,9 +36,14 @@ Driver keys each secret by the trusted `issuer` and `clientId` pair:
   `clientRegistrationId` bound to that pair. Connection templates with the same
   pair share one registration. The same `clientId` at a different `issuer` gets
   a separate registration.
-- `rotateClientSecret(clientRegistrationId, clientSecret)` replaces the secret
-  and updates the refresh material of only the sources that carry that
-  registration. It reports per-source failure in refresh status.
+- `rotateClientSecret(clientRegistrationId, clientSecret)` replaces the stored
+  secret. New connections that carry the registration use it for the code exchange
+  and refresh. Existing connections keep the secret they were configured with:
+  OpenShell replaces refresh material only as a whole, never returns a stored
+  refresh token, and starts a new authorization epoch that revokes running
+  Sandboxes' placeholders. When the provider disables the old secret, those
+  connections report `reauthorize`. Operators overlap secrets where the provider
+  allows it; Google keeps two client secrets active during rotation.
 - `removeClient(clientRegistrationId)` deletes the secret. OCC calls it only when
   no connection template version or source carries the registration.
 
@@ -131,7 +136,7 @@ administrators, who hold every action through the built-in administrator role.
 | ID token from a wrong issuer, untrusted key, or wrong nonce | Source deleted; `fix_configuration`              | Administrator checks the provider; reconnect   |
 | Connection template edited after consent                    | Source unchanged; **Reconnect to apply changes** | Owner reconnects; administrator can disconnect |
 | Withdrawal pending or failed after disconnect               | Personal restriction stays in force              | Retry withdrawal, or stop or delete the Agent  |
-| Client secret rotation fails for some sources               | Those sources report refresh failure             | Rotate again with a working secret             |
+| Provider disables a rotated-out client secret               | Older connections report `reauthorize`           | Owners **Reconnect**                           |
 
 OpenShell refreshes access tokens. The operator guide documents provider rules,
 such as Google's: `gmail.readonly` is a restricted scope that public applications
@@ -160,7 +165,9 @@ must verify, and External Testing applications issue seven-day refresh tokens.
   Keycloak and prove: a tool reaches its endpoint with no added network policy; a
   write fails under `read-only`; another tool binary cannot send the placeholder;
   rotate, revoke, and reconnect work; an edited `tokenUrl` or endpoint leaves an
-  existing source unchanged; client secret rotation keeps sources refreshing.
+  existing source unchanged; after client secret rotation, existing sources keep
+  refreshing until the old secret is disabled, then report `reauthorize`, and new
+  connections use the new secret.
 - **Live Google proof.** Run manually with an authorized account: `gog` reads Gmail
   through a dedicated Codex Agent, and a write method is denied. This proof is
   outside CI.
