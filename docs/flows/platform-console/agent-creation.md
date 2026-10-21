@@ -91,6 +91,8 @@ Ordinary drafts first check values and plugins with
 `POST /namespaces/:namespaceId/agents/validate`, then post
 `{kind: "agent", values, secretBindings}` to `.../configurations` and submit its ID,
 plugins, `initialWorkspaceFiles`, and `workspaceDefaultsId` to `.../agents`.
+If the Console times out waiting for validation, it stops before the save step,
+keeps the form entries, and lets the caller select **Create Agent** to try again.
 Success opens `revision=draft`.
 OCC stages all four workspace textareas, including unchanged/empty values, outside
 Agent/Configuration for [workspace setup](../workspace-files.md).

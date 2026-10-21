@@ -156,7 +156,9 @@ select **Retry credential access** or ask an administrator to check its grants.
 A member without Installation administration gets no retry: open the saved Agent and
 ask an Installation administrator to grant it. If your permissions could not be checked,
 select **Retry permission check**.
-Uncertain responses block another attempt: check displayed IDs and the Agents list;
+If the configuration check times out, your entries stay in the form. Select
+**Create Agent** again to repeat the check and continue.
+An uncertain save blocks another attempt: check displayed IDs and the Agents list;
 give the request ID to your operator if the outcome remains unknown.
 
 After a lost admission response, **Retry provisioning request** resubmits the same
