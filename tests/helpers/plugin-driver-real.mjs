@@ -1135,18 +1135,36 @@ export async function readCodexPolicyRolloutHead(path) {
 }
 
 export function findCodexPolicyChild(parent, childMarker) {
-  const spawns = parent.turns
-    .filter((turn) => turn.status === "completed" && turn.error === null)
+  const completedTurns = parent.turns.filter(
+    (turn) => turn.status === "completed" && turn.error === null,
+  );
+  const collabSpawns = completedTurns
     .flatMap((turn) => turn.items)
-    .filter(
-      (item) =>
-        item.type === "collabAgentToolCall" &&
-        item.tool === "spawnAgent" &&
-        item.status === "completed" &&
-        item.senderThreadId === parent.id &&
-        item.prompt?.includes(childMarker),
-    );
-  assert.equal(spawns.length, 1, "one completed native spawn must match the child task");
+    .filter((item) => item.type === "collabAgentToolCall" && item.tool === "spawnAgent");
+  const completedSpawns = collabSpawns.filter((item) => item.status === "completed");
+  const senderBoundSpawns = completedSpawns.filter((item) => item.senderThreadId === parent.id);
+  const spawns = senderBoundSpawns.filter((item) => item.prompt?.includes(childMarker));
+  assert.equal(
+    spawns.length,
+    1,
+    `one completed native spawn must match the child task: ${JSON.stringify({
+      counts: {
+        turns: parent.turns.length,
+        completedErrorNullTurns: completedTurns.length,
+        collabSpawns: collabSpawns.length,
+        completedSpawns: completedSpawns.length,
+        senderBoundSpawns: senderBoundSpawns.length,
+        markerBoundSpawns: spawns.length,
+      },
+      recentTurns: parent.turns.slice(-10).map((turn) => ({
+        status: ["completed", "inProgress", "failed", "interrupted"].includes(turn.status)
+          ? turn.status
+          : "unknown",
+        hasError: turn.error !== null && turn.error !== undefined,
+        errorIsNull: turn.error === null,
+      })),
+    })}`,
+  );
   assert.equal(spawns[0].receiverThreadIds.length, 1, "the spawn must identify exactly one child");
   return spawns[0].receiverThreadIds[0];
 }

@@ -200,6 +200,20 @@ test("QA selection keeps prerequisite credentials and reports omitted coverage",
   const openclaw = selectQaMatrix({ OCC_TEST_QA_PRESET: "OpenClaw" });
   assert.deepEqual(openclaw.cells[0].scenarios, ["model-ui", "git-full"]);
   assert.ok(!openclaw.requiredEnv.some((name) => /CODEX|SLACK|CALENDAR/.test(name)));
+  const sandbox = selectQaMatrix({
+    OCC_TEST_QA_SCENARIOS: "sandbox-policy",
+    OCC_TEST_QA_PRESET: "Codex",
+    OCC_TEST_QA_INSTALLATION: "kubernetes",
+  });
+  assert.equal(sandbox.sandboxPolicy, true);
+  assert.deepEqual(sandbox.requiredEnv, [
+    "OCC_TEST_QA_CODEX_TOKEN_FILE",
+    "OCC_TEST_QA_SANDBOX_ENV",
+  ]);
+  assert.ok(
+    sandbox.cells.every((cell) => cell.scenarios.length === 0),
+    "OpenShell uses its prepared enforcement lane, not Sandbox-free installations",
+  );
   const full = selectQaMatrix({});
   assert.equal(full.scope, "full");
   assert.ok(full.repository);
@@ -2565,6 +2579,70 @@ test("Gateway policy evidence identifies a fresh native Codex child and its own 
   assert.deepEqual(result.childGatewayTools, []);
   assert.deepEqual(result.parentGatewayTools, [{ namespace: "openclaw", name: "agents_list" }]);
   assert.equal(JSON.stringify(result).includes("private description"), false);
+
+  await t.test("reports bounded spawn predicates without private native content", () => {
+    const value = fixture();
+    const spawn = value.parent.turns[0].items[0];
+    // Separate each rejected predicate so a real zero-match result identifies its cause.
+    value.parent.turns = [
+      ...Array.from({ length: 10 }, () => ({ status: "inProgress", error: null, items: [] })),
+      {
+        status: "completed",
+        error: null,
+        items: [
+          { ...spawn, status: "inProgress" },
+          { ...spawn, senderThreadId: "private-thread" },
+          { ...spawn, prompt: "private-prompt private-secret" },
+          {
+            type: "commandExecution",
+            command: "private-command",
+            aggregatedOutput: "private-result",
+          },
+        ],
+      },
+      { status: "completed", items: [spawn] },
+      { status: "inProgress", error: null, items: [spawn] },
+      { status: "failed", error: { message: "private-error" }, items: [spawn] },
+      { status: "private-status", error: "private-error", items: [] },
+    ];
+    assert.throws(
+      () => assertCodexPolicyChild(value),
+      (error) => {
+        assert.ok(error instanceof assert.AssertionError);
+        const prefix = "one completed native spawn must match the child task: ";
+        assert.ok(error.message.startsWith(prefix));
+        const diagnostic = JSON.parse(error.message.split("\n")[0].slice(prefix.length));
+        assert.deepEqual(diagnostic.counts, {
+          turns: 15,
+          completedErrorNullTurns: 1,
+          collabSpawns: 3,
+          completedSpawns: 2,
+          senderBoundSpawns: 1,
+          markerBoundSpawns: 0,
+        });
+        assert.equal(diagnostic.recentTurns.length, 10);
+        assert.deepEqual(diagnostic.recentTurns.slice(-5), [
+          { status: "completed", hasError: false, errorIsNull: true },
+          { status: "completed", hasError: false, errorIsNull: false },
+          { status: "inProgress", hasError: false, errorIsNull: true },
+          { status: "failed", hasError: true, errorIsNull: false },
+          { status: "unknown", hasError: true, errorIsNull: false },
+        ]);
+        for (const privateText of [
+          "private-thread",
+          "private-prompt",
+          "private-secret",
+          "private-command",
+          "private-result",
+          "private-error",
+          "private-status",
+        ]) {
+          assert.equal(error.message.includes(privateText), false);
+        }
+        return true;
+      },
+    );
+  });
 
   for (const [label, mutate] of [
     [
