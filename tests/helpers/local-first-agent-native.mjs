@@ -133,7 +133,9 @@ async function observeModelProbe(observation, logs, revision, readProbePod, sign
     providerErrorCode: markerOrAbsent(fields.providerErrorCode, providerErrorCodes),
     providerErrorType: markerOrAbsent(fields.providerErrorType, providerErrorTypes),
   };
-  if (!readProbePod) return;
+  if (!readProbePod) {
+    return;
+  }
 
   // The log reader reports stream_replaced if the Pod or container changed during its read.
   // Compare that stream to one later Pod status; never infer the image from the requested tag.
@@ -163,7 +165,9 @@ async function observeModelProbe(observation, logs, revision, readProbePod, sign
     return;
   }
   const digest = /^(?:[^\s@]+@|[a-z-]+:\/\/)?(sha256:[0-9a-f]{64})$/.exec(imageId)?.[1];
-  if (digest) observation.probePodImage = { digest, podUid };
+  if (digest) {
+    observation.probePodImage = { digest, podUid };
+  }
 }
 
 // Codes from the provisioning record, its exact deployment and, for a held model-check

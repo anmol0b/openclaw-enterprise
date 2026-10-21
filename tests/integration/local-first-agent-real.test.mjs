@@ -583,7 +583,9 @@ test("native terminal failures report only fixed failure codes", async (t) => {
         [deployment, page(lines)],
         [deploymentPath, logPath],
         async () => {
-          if (result === undefined) throw new Error("private-sentinel");
+          if (result === undefined) {
+            throw new Error("private-sentinel");
+          }
           return result;
         },
       );
