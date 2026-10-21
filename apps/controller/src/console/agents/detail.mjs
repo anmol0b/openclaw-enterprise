@@ -3992,7 +3992,6 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           repositoryBindings?.some((binding) => repositoryProfile(binding.profile)?.writes)
             ? element("p", { className: "hint repository-write-access" }, repositoryWriteAccessHelp)
             : null,
-          data.managedMode?.control,
           draft
             ? renderDraftConfigurationEditor(context, data)
             : element(
@@ -4005,6 +4004,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
                 ),
                 nativeDocument(values, "View admitted native configuration"),
               ),
+          data.managedMode?.control,
         ),
       );
     }
