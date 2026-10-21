@@ -1136,7 +1136,7 @@ test("unusable base policy cannot select documentation", async (t) => {
 
 test("documentation workflow selects documentation checks and omits product tests", () => {
   const docs = job("static-checks");
-  assert.doesNotMatch(docs, /^    (?:needs|if):/m);
+  assert.doesNotMatch(docs, /^ {4}(?:needs|if):/m);
   for (const command of [
     "check:workspace",
     "lint",
@@ -2328,7 +2328,7 @@ test("workflow runs selected lanes in tests mode and gates them by the verified 
   );
   // Static checks (lint, format, OpenAPI, docs) run in every mode; the smoke
   // and the advisory job stay off in tests mode.
-  assert.doesNotMatch(job("static-checks"), /^    (?:needs|if):/m);
+  assert.doesNotMatch(job("static-checks"), /^ {4}(?:needs|if):/m);
   for (const name of ["first-agent-smoke", "affected-packages"]) {
     assert.doesNotMatch(job(name), /'tests'/, name);
   }
