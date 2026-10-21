@@ -104,8 +104,10 @@ are the acceptance criteria. Non-goals follow the RFC.
    redeploy path. Require the owner principal for deploy and use; keep stop,
    delete, withdraw, and source deletion available to administrators.
 7. **CLI.** Add `occ connection-template` (create, get, list, update, delete,
-   rotate-secret, bind, unbind) and `occ agent connection` (connect, get, list,
-   disconnect). Connect prints the authorization URL for a browser.
+   rotate-client-secret, bind, bindings, unbind) and `occ agent connection` (list,
+   disconnect). Connecting needs the person's signed-in console session, which the
+   CLI's service keys never provide, so it is a console action (PR 2) or the HTTP API
+   with a session.
 8. **Documentation.** Write the connection template reference and the connection
    lifecycle flow doc. Update the Driver references, cheat sheets, generated API
    reference, and the local OpenShell guide with a Keycloak example.
