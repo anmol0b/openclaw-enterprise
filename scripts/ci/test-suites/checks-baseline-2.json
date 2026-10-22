@@ -136,7 +136,7 @@
     {
       "path": "tests/integration/first-agent-smoke.test.mjs",
       "expectedTests": [
-        "chat proof accepts the deterministic assistant answer for either Harness",
+        "chat proof accepts the deterministic assistant answer",
         "chat proof rejects a prompt echo, missing role, and other non-assistant replies",
         "chat proof still requires HTTP success and the current nonce as text",
         "stop observation accepts a fast shutdown and checks Pods afterward",

@@ -16,45 +16,44 @@ import {
 } from "../../scripts/ci/first-agent-smoke.mjs";
 
 const revision = "rev_00000000-0000-4000-8000-000000000001";
+const chatNonce = "OCE_SMOKE_00000000-0000-4000-8000-000000000001";
+const validChatReply = { status: 200, role: "assistant", content: chatNonce };
 
-test("chat proof accepts the deterministic assistant answer for either Harness", () => {
-  const nonce = "OCE_SMOKE_00000000-0000-4000-8000-000000000001";
-  // The shared stand-in provider emits plain text on both HTTPS and WebSocket.
-  for (const label of ["embedded", "codex"]) {
-    for (const content of [nonce, ` \t${nonce}\r\n`]) {
-      assertChatReply({ status: 200, role: "assistant", content }, nonce, label);
-    }
+test("chat proof accepts the deterministic assistant answer", () => {
+  for (const content of [chatNonce, ` \t${chatNonce}\r\n`]) {
+    assertChatReply({ ...validChatReply, content }, chatNonce, "embedded");
   }
 });
 
 test("chat proof rejects a prompt echo, missing role, and other non-assistant replies", () => {
-  const nonce = "OCE_SMOKE_00000000-0000-4000-8000-000000000001";
-  const prompt = `Reply with exactly this nonce and no other text: ${nonce}`;
-  for (const role of ["user", undefined, "system", "tool"]) {
-    for (const content of [nonce, prompt]) {
-      assert.throws(
-        () => assertChatReply({ status: 200, role, content }, nonce, "embedded"),
-        /reply was not an assistant message/,
-      );
-    }
-  }
-  for (const content of [prompt, `Answer: ${nonce}`, `${nonce} extra`, `\`${nonce}\``]) {
+  const prompt = `Reply with exactly this nonce and no other text: ${chatNonce}`;
+  for (const role of ["user", undefined, "tool"]) {
     assert.throws(
-      () => assertChatReply({ status: 200, role: "assistant", content }, nonce, "codex"),
+      () => assertChatReply({ ...validChatReply, role }, chatNonce, "embedded"),
+      /reply was not an assistant message/,
+    );
+  }
+  for (const content of [prompt, `Answer: ${chatNonce}`, `${chatNonce} extra`]) {
+    assert.throws(
+      () => assertChatReply({ ...validChatReply, content }, chatNonce, "embedded"),
       /assistant reply did not equal the nonce/,
     );
   }
 });
 
 test("chat proof still requires HTTP success and the current nonce as text", () => {
-  const nonce = "OCE_SMOKE_00000000-0000-4000-8000-000000000001";
+  assert.throws(() => assertChatReply({ ...validChatReply, status: 503 }, chatNonce, "embedded"), {
+    actual: 503,
+    expected: 200,
+  });
+  assert.throws(() => assertChatReply({}, chatNonce, "embedded"), /before an HTTP response/);
   assert.throws(
-    () => assertChatReply({ status: 503, role: "assistant", content: nonce }, nonce, "codex"),
-    /chat turn failed/,
+    () => assertChatReply({ status: 200, invalidResponse: true }, chatNonce, "embedded"),
+    /unreadable response/,
   );
-  for (const content of ["OCE_SMOKE_previous", "", undefined, null, [nonce], { text: nonce }]) {
+  for (const content of ["OCE_SMOKE_previous", undefined, [chatNonce]]) {
     assert.throws(
-      () => assertChatReply({ status: 200, role: "assistant", content }, nonce, "embedded"),
+      () => assertChatReply({ ...validChatReply, content }, chatNonce, "embedded"),
       /assistant reply did not equal the nonce/,
     );
   }

@@ -837,28 +837,25 @@ async function gatewayTurn({ prompt }) {
       }),
       signal: AbortSignal.timeout(170_000),
     });
-    const text = await response.text();
-    let message;
-    try {
-      message = JSON.parse(text).choices?.[0]?.message;
-    } catch {
-      message = undefined;
-    }
+    const payload = await response.json().catch(() => undefined);
+    const message = response.status === 200 ? payload?.choices?.[0]?.message : undefined;
     process.stdout.write(
       JSON.stringify({
         status: response.status,
-        role: message?.role,
+        role: message?.role === "assistant" ? "assistant" : undefined,
         content: typeof message?.content === "string" ? message.content : undefined,
-        body: response.status === 200 ? undefined : text.slice(0, 2_000),
+        invalidResponse: payload === undefined,
       }),
     );
-  } catch (error) {
-    process.stdout.write(JSON.stringify({ error: String(error?.message ?? error) }));
+  } catch {
+    process.stdout.write("{}");
   }
 }
 
 export function assertChatReply(result, nonce, label) {
+  assert.ok(result.status !== undefined, `${label}: chat request failed before an HTTP response`);
   assert.equal(result.status, 200, `${label}: chat turn failed`);
+  assert.ok(!result.invalidResponse, `${label}: chat turn returned an unreadable response`);
   assert.ok(result.role === "assistant", `${label}: reply was not an assistant message`);
   // This smoke uses a deterministic provider that returns the nonce verbatim.
   // Whitespace is harmless; an echoed prompt is not a completed answer.
