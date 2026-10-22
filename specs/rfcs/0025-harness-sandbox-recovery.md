@@ -6,7 +6,7 @@ author: freeqaz
 
 # Proposal: Recover a lost Harness Sandbox by resuming it
 
-- **ID:** RFC-0024
+- **ID:** RFC-0025
 - **Created:** 2026-10-22
 - **Last updated:** 2026-10-22
 - **RFC PR:** [#3233](https://github.com/openclaw/openclaw-enterprise/pull/3233)
