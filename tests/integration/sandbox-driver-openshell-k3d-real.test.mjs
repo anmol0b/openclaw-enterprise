@@ -2926,13 +2926,25 @@ async function prepareProductionInstallation(
       assert.equal(mount?.subPath, subPath);
       assert.notEqual(mount.readOnly, true);
     }
-    for (const name of ["APP_SERVER_TOKEN", "APP_TOKEN_SHA", "OPENCLAW_NODE_SETUP_CODE"]) {
+    for (const name of ["APP_SERVER_TOKEN", "OPENCLAW_NODE_SETUP_CODE"]) {
       assert.equal(
         environment.some((entry) => entry.name === name),
         false,
         `native enrollment must use the provider's setup-envelope file without ${name}`,
       );
     }
+    // Enrollment still uses the provider's setup file. This separate verifier
+    // authenticates held startup failures without delivering the transport token.
+    assert.deepEqual(
+      environment.filter(({ name }) => name === "APP_TOKEN_SHA"),
+      [
+        {
+          name: "APP_TOKEN_SHA",
+          value: createHash("sha256").update(transport.appServerToken).digest("hex"),
+        },
+      ],
+      "the native failure endpoint must receive exactly its literal transport verifier",
+    );
     await kubectl(
       "exec",
       harnessPod.metadata.name,
