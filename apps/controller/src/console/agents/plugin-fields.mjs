@@ -1,4 +1,4 @@
-import { element, button, dismissOnBackdrop } from "../dom.mjs";
+import { element, button, dismissOnBackdrop, setText } from "../dom.mjs";
 
 const approvalOptions = [
   ["provider_default", "Provider default"],
@@ -128,12 +128,12 @@ export function createPluginFields({
   });
   const searchLabel = element("label", { for: search.id }, "Search plugins");
   const status = element("p", { className: "hint", role: "status" });
-  const feedback = element("p", { className: "error", role: "status" });
+  const feedback = element("p", { className: "status", "data-tone": "danger", role: "alert" });
   const policyStatus = element("p", { className: "hint", role: "status" });
   const summary = element("p", { className: "hint" });
   const list = element("div", { className: "plugin-list" });
   const detail = element("div", { className: "plugin-detail" });
-  const loadPlugins = button("Load plugins", () => loadPage("refresh"));
+  const loadPlugins = button("Load plugins", () => loadPage("refresh"), { size: "sm" });
   loadPlugins.hidden = !onLoadPlugins;
   const previous = button("Previous page", () => loadPage("previous"));
   const next = button("Next page", () => loadPage("next"));
@@ -155,7 +155,7 @@ export function createPluginFields({
   );
   const workspace = element("div", { className: "plugin-workspace" }, browser, detail);
   const dialog = element("dialog", {
-    className: "plugin-dialog",
+    className: "dialog dialog--wide plugin-dialog",
     "aria-labelledby": "plugin-dialog-title",
   });
   dismissOnBackdrop(dialog);
@@ -430,6 +430,104 @@ export function createPluginFields({
     }
   }
 
+  function renderPluginList(values, entries, catalogLoading) {
+    list.setAttribute("aria-busy", String(catalogLoading));
+    const query = configuredOnly || !onLoadPlugins ? search.value.trim().toLowerCase() : "";
+    const candidates = configuredOnly
+      ? Object.keys(values ?? {}).map((id) => entries.get(id))
+      : (catalog?.entries ?? []);
+    const visible = candidates
+      .filter((entry) =>
+        [entry.name, entry.id, entry.description ?? ""].some((text) =>
+          text.toLowerCase().includes(query),
+        ),
+      )
+      .sort(
+        (a, b) =>
+          Number(a.available === false) - Number(b.available === false) ||
+          a.name.localeCompare(b.name),
+      );
+    const rows = visible.map((entry, index) => {
+      const selected = values?.[entry.id];
+      const item = button(pluginIdentity(entry), () => showPlugin(entry), {
+        className: "plugin-list-item",
+        "aria-label": entry.name,
+        "aria-current": String(tabState().activeId === entry.id),
+      });
+      item.append(
+        element(
+          "span",
+          { className: "badge" },
+          entry.available === false
+            ? "Unavailable"
+            : selected
+              ? selected.enabled
+                ? "Enabled"
+                : "Disabled"
+              : "Not selected",
+        ),
+      );
+      const reasonId = `${input.id}-plugin-unavailable-${index}`;
+      if (entry.available === false) {
+        item.setAttribute("aria-describedby", reasonId);
+      }
+      return element(
+        "div",
+        { className: "plugin-list-row", "data-plugin-id": entry.id },
+        item,
+        entry.available === false
+          ? element(
+              "button",
+              {
+                type: "button",
+                className: "plugin-unavailable-trigger",
+                "aria-label": `Why ${entry.name} is unavailable`,
+                popovertarget: reasonId,
+              },
+              element("span", { "aria-hidden": "true" }, "i"),
+            )
+          : null,
+        entry.available === false
+          ? element(
+              "div",
+              { id: reasonId, className: "plugin-unavailable-popover", popover: "auto" },
+              unavailableMessage(entry),
+            )
+          : null,
+      );
+    });
+    const focused = document.activeElement;
+    const focusedRow = focused?.closest(".plugin-list-row");
+    const focusedSelector = [".plugin-list-item", ".plugin-unavailable-trigger"].find((selector) =>
+      focused?.matches(selector),
+    );
+    const focusedId = focusedRow?.parentElement === list ? focusedRow.dataset.pluginId : null;
+    list.replaceChildren(...rows);
+    if (focusedId !== null && focusedSelector) {
+      rows
+        .find((row) => row.dataset.pluginId === focusedId)
+        ?.querySelector(focusedSelector)
+        ?.focus({ preventScroll: true });
+    }
+    if (!visible.length && !catalogLoading) {
+      list.append(
+        element(
+          "p",
+          { className: "muted" },
+          query
+            ? "No matching plugins on this page."
+            : configuredOnly
+              ? "No plugins configured. Choose Available plugins to add one."
+              : catalog?.status === "ready"
+                ? "No plugins were returned."
+                : !catalog?.canLoad
+                  ? "To add a plugin by ID, choose Done and edit Plugin selections JSON."
+                  : "Load plugins to browse available choices.",
+        ),
+      );
+    }
+  }
+
   function render() {
     rememberExpandedTools();
     const focused = document.activeElement?.getAttribute("aria-label");
@@ -442,19 +540,26 @@ export function createPluginFields({
     const focusedHeading = document.activeElement?.matches(".plugin-detail h3");
     const values = selections();
     const catalogLoading = !configuredOnly && catalog?.status === "loading";
-    policyStatus.textContent = capabilities
-      ? ""
-      : "This installation does not support plugin policy editing. You can browse plugins; existing settings are preserved.";
+    // Live regions are written only when their text changes, so a redraw (tool details arriving)
+    // does not make screen readers announce the same words again (finding 1890).
+    setText(
+      policyStatus,
+      capabilities
+        ? ""
+        : "This installation does not support plugin policy editing. You can browse plugins; existing settings are preserved.",
+    );
     const defaultReviewers = reviewerOptions.filter(([mode]) =>
       capabilities?.toolDefaults.reviewer?.includes(mode),
     );
     const toolReviewers = reviewerOptions.filter(([mode]) =>
       capabilities?.tools.reviewer?.includes(mode),
     );
-    feedback.textContent =
+    setText(
+      feedback,
       values === null
         ? "Fix Plugin selections JSON to use the controls. Check plugin enablement and tool policies. Your JSON has been kept."
-        : "";
+        : "",
+    );
     if (values === null) {
       json.open = true;
     }
@@ -481,18 +586,16 @@ export function createPluginFields({
     renderedTab = tabState();
     renderedPlugin = renderedTab.activeId;
     const open = renderedTab.expanded;
-    status.textContent =
+    let statusText =
       catalog?.message ??
       "Enter a service account token with the Codex harness to discover plugins. Existing selections remain in JSON.";
     status.classList.toggle("plugin-loading", catalogLoading);
     if (catalogLoading) {
-      status.textContent = tabs[0].query.trim()
-        ? "Searching plugins…"
-        : "Loading available plugins…";
+      statusText = tabs[0].query.trim() ? "Searching plugins…" : "Loading available plugins…";
     } else if (catalog?.status === "error") {
-      status.textContent = catalog.message;
+      statusText = catalog.message;
     } else if (catalog?.status === "ready") {
-      status.textContent = `Page ${catalog.pageNumber ?? 1} · ${catalog.entries.length} plugins`;
+      statusText = `Page ${catalog.pageNumber ?? 1} · ${catalog.entries.length} plugins`;
     }
     loadPlugins.textContent = catalog?.status === "loading" ? "Loading plugins…" : "Load plugins";
     loadPlugins.disabled = disabled || !catalog?.canLoad || catalog?.status === "loading";
@@ -516,76 +619,11 @@ export function createPluginFields({
     searchLabel.textContent = configuredOnly ? "Filter configured plugins" : "Search plugins";
     search.placeholder = searchLabel.textContent;
     if (configuredOnly) {
-      status.textContent = `${count} configured plugin${count === 1 ? "" : "s"}`;
+      statusText = `${count} configured plugin${count === 1 ? "" : "s"}`;
     }
-    list.setAttribute("aria-busy", String(catalogLoading));
+    setText(status, statusText);
     workspace.dataset.showDetails = String(tabState().activeId !== null);
-    const query = configuredOnly || !onLoadPlugins ? search.value.trim().toLowerCase() : "";
-    const candidates = configuredOnly
-      ? Object.keys(values ?? {}).map((id) => entries.get(id))
-      : (catalog?.entries ?? []);
-    const visible = candidates
-      .filter((entry) =>
-        [entry.name, entry.id, entry.description ?? ""].some((text) =>
-          text.toLowerCase().includes(query),
-        ),
-      )
-      .sort(
-        (a, b) =>
-          Number(a.available === false) - Number(b.available === false) ||
-          a.name.localeCompare(b.name),
-      );
-    list.replaceChildren(
-      ...visible.map((entry, index) => {
-        const selected = values?.[entry.id];
-        const item = button(pluginIdentity(entry), () => showPlugin(entry), {
-          className: "plugin-list-item",
-          "aria-label": entry.name,
-          "aria-current": String(tabState().activeId === entry.id),
-        });
-        item.append(
-          element(
-            "span",
-            { className: "badge" },
-            entry.available === false
-              ? "Unavailable"
-              : selected
-                ? selected.enabled
-                  ? "Enabled"
-                  : "Disabled"
-                : "Not selected",
-          ),
-        );
-        const reasonId = `${input.id}-plugin-unavailable-${index}`;
-        if (entry.available === false) {
-          item.setAttribute("aria-describedby", reasonId);
-        }
-        return element(
-          "div",
-          { className: "plugin-list-row" },
-          item,
-          entry.available === false
-            ? element(
-                "button",
-                {
-                  type: "button",
-                  className: "plugin-unavailable-trigger",
-                  "aria-label": `Why ${entry.name} is unavailable`,
-                  popovertarget: reasonId,
-                },
-                element("span", { "aria-hidden": "true" }, "i"),
-              )
-            : null,
-          entry.available === false
-            ? element(
-                "div",
-                { id: reasonId, className: "plugin-unavailable-popover", popover: "auto" },
-                unavailableMessage(entry),
-              )
-            : null,
-        );
-      }),
-    );
+    renderPluginList(values, entries, catalogLoading);
     detail.replaceChildren(
       ...[entries.get(tabState().activeId)].filter(Boolean).map((entry) => {
         const selected = values?.[entry.id];
@@ -814,7 +852,15 @@ export function createPluginFields({
           details.append(element("p", { className: "hint" }, "No tools listed for this plugin."));
         }
         if (entry.toolError) {
-          details.append(element("p", { className: "error", role: "status" }, entry.toolError));
+          details.append(
+            element(
+              "p",
+              // A status, not an alert: the pane is rebuilt on every redraw (search typing, say),
+              // and an alert would be announced again each time.
+              { className: "status", "data-tone": "danger", role: "status" },
+              entry.toolError,
+            ),
+          );
         }
         const toolRows = [];
         const filterTools = () => {
@@ -936,7 +982,11 @@ export function createPluginFields({
               element(
                 "span",
                 { className: "plugin-tool-actions" },
-                element("span", { className: "plugin-tool-policy-action" }, "Tool policy"),
+                element(
+                  "span",
+                  { className: "button button--sm plugin-tool-policy-action" },
+                  "Tool policy",
+                ),
                 enabledOverride,
               ),
             ),
@@ -969,23 +1019,6 @@ export function createPluginFields({
         return details;
       }),
     );
-    if (!visible.length && !catalogLoading) {
-      list.append(
-        element(
-          "p",
-          { className: "muted" },
-          query
-            ? "No matching plugins on this page."
-            : configuredOnly
-              ? "No plugins configured. Choose Available plugins to add one."
-              : catalog?.status === "ready"
-                ? "No plugins were returned."
-                : !catalog?.canLoad
-                  ? "To add a plugin by ID, choose Done and edit Plugin selections JSON."
-                  : "Load plugins to browse available choices.",
-        ),
-      );
-    }
     if (!tabState().activeId) {
       detail.append(
         element(

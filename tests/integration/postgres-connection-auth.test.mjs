@@ -10,6 +10,8 @@ import { promisify } from "node:util";
 import { startupDependencyFailure } from "../../apps/controller/src/startup-failure.ts";
 import { createPostgresPool } from "../../packages/occ/src/state/postgres-pool.ts";
 import { PostgresPlatformState } from "../../packages/occ/src/state/postgres-state.ts";
+import { listen } from "../helpers/listen.mjs";
+import { waitUntil } from "../helpers/wait-for.mjs";
 
 const requireOcc = createRequire(new URL("../../packages/occ/package.json", import.meta.url));
 const { Client } = requireOcc("pg");
@@ -204,11 +206,9 @@ test(
       const { rows } = await killer.query("SELECT pg_terminate_backend($1) AS ok", [pid]);
       assert.equal(rows[0].ok, true);
       // pg-pool discards the broken idle client after emitting its error.
-      const deadline = Date.now() + 5000;
-      while (pool.idleCount !== 0) {
-        assert.ok(Date.now() < deadline, "the terminated idle client was not discarded");
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitUntil("the terminated idle client to be discarded", () => pool.idleCount === 0, {
+        timeoutMs: 5000,
+      });
       const next = await pool.query("SELECT pg_backend_pid() AS pid");
       assert.notEqual(next.rows[0].pid, pid);
     } finally {
@@ -472,28 +472,13 @@ async function databaseCertificates(directory) {
 
 async function tlsServer(context, host, identity) {
   const state = { accepted: 0 };
-  const sockets = new Set();
   const server = createTlsServer(identity, (socket) => {
     state.accepted++;
     socket.once("data", () => socket.destroy());
   });
-  server.on("connection", (socket) => {
-    sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
-  });
   server.on("tlsClientError", () => {});
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, host, resolve);
-  });
-  context.after(async () => {
-    for (const socket of sockets) {
-      socket.destroy();
-    }
-    await new Promise((resolve) => server.close(resolve));
-  });
   return Object.assign(state, {
-    port: server.address().port,
+    port: await listen(context, server, host),
     use: (next) => server.setSecureContext(next),
   });
 }

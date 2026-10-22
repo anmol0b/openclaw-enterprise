@@ -29,11 +29,11 @@ graph TD
   Claim --> Config["<b>Create Configuration</b><br/>Record completed identity"]
   Config --> Agent["<b>Create Agent</b><br/>Grant exact credential access"]
   Agent --> Transport["<b>Compute Driver</b><br/>Trusted-proxy credentials"]
-  Transport --> Deploy["<b>Ordinary deploy</b><br/>Record first revision"]
-  Deploy --> Observe["<b>Same provisioning handle</b><br/>Observe admitted revision"]
+  Transport --> Deploy["<b>Ordinary deploy</b><br/>Record first version"]
+  Deploy --> Observe["<b>Same provisioning handle</b><br/>Observe saved version"]
   Observe -->|Pending| Observe
-  Observe -->|Activated| UI["<b>Agent deployment view</b><br/>Open existing revision"]
-  Observe -->|Failed| Terminal["<b>Creation failed</b><br/>Keep Agent and revision"]
+  Observe -->|Activated| UI["<b>Agent deployment view</b><br/>Open existing version"]
+  Observe -->|Failed| Terminal["<b>Creation failed</b><br/>Keep Agent and version"]
   Claim -->|Failure| Failed["<b>Retain outputs</b><br/>Retry known failures"]
   Failed -->|Uncertain write| Recovery["<b>Recovery required</b><br/>Do not repeat blindly"]
 
@@ -67,9 +67,9 @@ Secret before source-backed provisioning. [Console recovery](../reference/consol
 reuses confirmed sources and safely retries uncertain registration.
 Installation discovery preserves catalog metadata.
 
-Create Agent sends the parsed inline Configuration, ordinary Secret bindings, model-auth references, supported Agent options, selected repository bindings with an explicit access profile, and a stable request ID. The provisioning worker owns exact Secret grants; Slack has no special worker path. After an uncertain admission response, the Console resends the same request ID and accepted inputs, without resaving acknowledged Secrets.
+Create Agent sends a stable request ID, inline Configuration, Secret and model-auth references, Agent options, and repository bindings with an explicit access profile. The worker grants Secret access, including Slack. After uncertain admission, Retry sends the same ID and inputs without saving Secrets again.
 
-On ordinary draft creation paths, Console creates the Configuration and Agent, then grants access to the selected Slack Secrets. A grant failure retains the saved Agent and offers Retry credential access on that Agent, without repeating creation.
+For a draft, Console creates the Configuration and Agent, then grants access to selected Slack Secrets. Retry credential access keeps that Agent.
 
 ### 2. OCC admits one job
 
@@ -111,14 +111,16 @@ freeing the serial worker.
 
 `packages/occ/src/index.ts:OpenClawController.deployAgent`
 
-The job records its first revision ID. `packages/occ/src/index.ts:observeProvisioningDeployment`
-defers work without consuming retries until that revision activates or fails. The same handle reports
+The job records its first Agent revision ID. `packages/occ/src/index.ts:observeProvisioningDeployment`
+defers work without consuming retries until that version activates or fails. The same handle reports
 success or the deployment’s safe error; meanwhile `progress` names its wait. Stop during rollout yields `REVISION_STOPPED`; Stop or deletion
 before handoff yields `PROVISIONING_CANCELLED` and says which happened. Status retains the Agent ID; both IDs survive restart.
 
 Create Agent (`apps/controller/src/console/agents/create.mjs:waitForProvisioning`) shows the job's named
 wait and waits one second between status reads, spending it on details such as a full Pod quota, cancelling unfinished reads
-at the next poll. Leaving the page stops polling, not provisioning.
+at the next poll. Admission, status and retry report the stored client `requestId`.
+If absent or different, Create keeps the original request and any confirmed job.
+`meta.requestId` identifies each HTTP request. Leaving stops polling, not provisioning.
 If the first deployment fails, open the existing Agent, correct the cause and deploy a new version.
 After an intentional Stop, deploy when ready. Reconciliation owns startup and activation;
 subsequent deployments use Deploy.

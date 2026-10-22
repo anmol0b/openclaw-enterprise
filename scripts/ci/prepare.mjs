@@ -208,7 +208,7 @@ function requireEnv(names, env = process.env) {
 }
 
 function fileStem(file) {
-  return slug(basename(file).replace(/\.test\.mjs$/, ""), "_") || "test_file";
+  return slug(basename(file).replace(/\.test\.(?:mjs|ts)$/, ""), "_") || "test_file";
 }
 
 function normalizeStatePath(statePath) {
@@ -668,15 +668,52 @@ async function createAndMigrateDatabase(
     );
   }
   const server = existingServer ?? (await ensurePostgresServer(statePath, state));
-  const source = template === undefined ? undefined : templateDatabase(state, server, template);
+  const source =
+    template === undefined
+      ? await laneTemplateDatabase(statePath, state, server, kind)
+      : templateDatabase(state, server, template);
+  return createDatabase(statePath, state, server, { kind, label, source });
+}
+
+// The server's migrated database, one per kind, that each file's database of that kind
+// copies. Migrating takes a pnpm process and seconds of CPU, and it ran once per file
+// under the CI state lock, where each test's own copy waited behind it: a worker revision
+// file's first test waited for the runner to migrate the files that start with it
+// (finding 2178). A copy is the same database (schemas, their ACLs, every migration).
+// PostgreSQL copies only a database without sessions, and nothing connects to the
+// template: its URL is never handed out. Lane cleanup drops it with the other databases.
+async function laneTemplateDatabase(statePath, state, server, kind) {
+  const existing = state.resources.find(
+    (resource) =>
+      resource.kind === "postgres-database" &&
+      resource.laneTemplate === kind &&
+      resource.owner === state.prefix &&
+      resource.status === "ready" &&
+      resource.composeProject === server.name &&
+      resource.port === server.port,
+  );
+  if (existing) {
+    return existing.name;
+  }
+  const created = await createDatabase(statePath, state, server, {
+    kind,
+    label: "lane_template",
+    laneTemplate: kind,
+  });
+  return created.name;
+}
+
+async function createDatabase(statePath, state, server, { kind, label, source, laneTemplate }) {
   const name = databaseName(kind, label);
   const resource = addResource(state, "postgres-database", {
     name,
     composeProject: server.name,
     port: server.port,
+    ...(laneTemplate === undefined ? {} : { laneTemplate }),
   });
   await writeState(statePath, state);
 
+  const grant = `GRANT CREATE ON DATABASE ${quoteIdentifier(name)} TO occ_migrator;`;
   await postgresExec(
     server,
     [
@@ -689,28 +726,32 @@ async function createAndMigrateDatabase(
       "postgres",
       "-c",
       `CREATE DATABASE ${quoteIdentifier(name)}${source === undefined ? "" : ` TEMPLATE ${quoteIdentifier(source)}`}`,
+      // A copy carries the template's schemas, their ACLs and every migration, but not
+      // the database-level grant, which lives in pg_database, so it is granted from here.
+      // Each -c is its own request (CREATE DATABASE refuses a transaction block) and psql
+      // stops at the first error. Every test's copy runs this under the CI state lock,
+      // where each `docker compose exec` costs about 0.25 s (finding 2180).
+      ...(source === undefined ? [] : ["-c", grant]),
     ],
     "database-create",
   );
-  // A copy carries the template's schemas, their ACLs and every migration, but not the
-  // database-level grant, which lives in pg_database.
-  await postgresExec(
-    server,
-    [
-      "psql",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-U",
-      "postgres",
-      "-d",
-      name,
-      "-c",
-      `GRANT CREATE ON DATABASE ${quoteIdentifier(name)} TO occ_migrator;${source === undefined ? " CREATE SCHEMA occ AUTHORIZATION occ_migrator; CREATE SCHEMA drizzle AUTHORIZATION occ_migrator; REVOKE CREATE ON SCHEMA public FROM PUBLIC;" : ""}`,
-    ],
-    "database-schema",
-  );
   const migrationUrl = postgresUrl("occ_migrator", "occ-migrator-local", server.port, name);
   if (source === undefined) {
+    await postgresExec(
+      server,
+      [
+        "psql",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        "postgres",
+        "-d",
+        name,
+        "-c",
+        `${grant} CREATE SCHEMA occ AUTHORIZATION occ_migrator; CREATE SCHEMA drizzle AUTHORIZATION occ_migrator; REVOKE CREATE ON SCHEMA public FROM PUBLIC;`,
+      ],
+      "database-schema",
+    );
     await execFile(process.env.OPENCLAW_CI_COREPACK_BIN ?? "corepack", ["pnpm", "db:migrate"], {
       env: { OCC_MIGRATION_DATABASE_URL: migrationUrl },
       stage: "database-migrate",
@@ -971,6 +1012,57 @@ function imageBuildArgs(state, role, localStore) {
   ];
 }
 
+// CI_RUNNER_DEADLINE_MS (Unix epoch milliseconds; the run-ci-lane action sets it five
+// minutes before the job's timeout-minutes) is when the lane's test files must have stopped.
+// A lane image build may use the time before it less this reserve for the rest of preparation
+// (an Envoy image, a seccomp profile, a fixture build or k3d imports in some lanes) and the
+// tests: the image lanes' test phases took at most 102-171 s per lane over 29 runs each
+// (10-19/20). A build
+// that misses the image cache can take 20 min: on #2905 the engine image probe below, then
+// bounded by a fixed 20 min, was stopped mid-build, the build after it took 4 more min, and
+// the tests got 40 s (finding 2103). Tests shorten the reserve.
+const imageBuildTestReserveMs =
+  Number(process.env.OPENCLAW_CI_IMAGE_BUILD_TEST_RESERVE_MS) > 0
+    ? Number(process.env.OPENCLAW_CI_IMAGE_BUILD_TEST_RESERVE_MS)
+    : 3 * 60_000;
+
+// What a lane image build may still take, or undefined outside a lane with a deadline.
+function imageBuildBudgetMs() {
+  const deadline = Number(process.env.CI_RUNNER_DEADLINE_MS ?? "");
+  if (!Number.isSafeInteger(deadline) || deadline <= 0) {
+    return undefined;
+  }
+  return deadline - imageBuildTestReserveMs - Date.now();
+}
+
+// The lane cannot pass once its image build has used the time its tests need, so it stops
+// with this instead of building on and cutting every test file at the deadline.
+function imageBuildOutOfTime(role, limitMs) {
+  const message =
+    `The ${role} image did not finish building within this lane's time` +
+    (limitMs > 0 ? ` (stopped after ${Math.round(limitMs / 1000)} s)` : "") +
+    `; the lane keeps ${Math.round(imageBuildTestReserveMs / 1000)} s before its deadline ` +
+    "for the rest of preparation and its tests, so it stops here. A build that misses the " +
+    "image cache, for example after a change to the image inputs, can take about 20 min.";
+  process.stdout.write(`::error title=Image build out of lane time::${message}\n`);
+  return Object.assign(new Error(message), { imageBuildOutOfTime: true });
+}
+
+// Runs a lane image build command within the lane's budget (unbounded without one).
+async function laneImageCommand(role, args, budgetMs = imageBuildBudgetMs()) {
+  if (budgetMs !== undefined && budgetMs < 1_000) {
+    throw imageBuildOutOfTime(role, 0);
+  }
+  try {
+    return await execFile(process.env.OCC_DOCKER_BIN ?? "docker", args, { timeoutMs: budgetMs });
+  } catch (error) {
+    if (budgetMs !== undefined && error.timedOut) {
+      throw imageBuildOutOfTime(role, budgetMs);
+    }
+    throw error;
+  }
+}
+
 // A restored build otherwise downloads every cached layer (about 20 s for the
 // runtime image) only to load an image the engine often already holds: the
 // hosted runners' Docker data comes from a shared image cache. Resolve the
@@ -980,7 +1072,11 @@ function imageBuildArgs(state, role, localStore) {
 // would load. The warm job, which builds every step for its export, and any probe
 // failure (a timeout, an engine error, unreadable metadata, a failed tag) build as before. The log
 // says "absent" only when the engine reports no such image, "different" when it
-// holds another image under that reference, and "probe-failed" otherwise.
+// holds another image under that reference, and "probe-failed" otherwise. In a lane with a
+// deadline the probe, which builds on a cache miss, may use the whole image build budget;
+// running out of it ends preparation ("out-of-time") instead of building again with no time
+// left for the tests. The trade-off: a probe that hangs, rather than builds slowly, no longer
+// hands over to a fresh build after 20 min in the longer lanes.
 async function reuseEngineImage(state, role, args, tag) {
   if (args[0] !== "buildx" || !args.includes("--load")) {
     return false;
@@ -993,22 +1089,31 @@ async function reuseEngineImage(state, role, args, tag) {
   try {
     directory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "oce-image-probe-"));
     const metadata = join(directory, "metadata.json");
-    await execFile(
-      docker,
-      [
-        "buildx",
-        "build",
-        "--output",
-        "type=image,push=false,store=false",
-        "--provenance=false",
-        "--metadata-file",
-        metadata,
-        ...args.slice(2).filter((arg) => arg !== "--load"),
-      ],
-      // A cache miss builds the image here; the build below then reuses those
-      // steps from the same builder and only exports and loads.
-      { timeoutMs: 20 * 60_000 },
-    );
+    const probeArgs = [
+      "buildx",
+      "build",
+      "--output",
+      "type=image,push=false,store=false",
+      "--provenance=false",
+      "--metadata-file",
+      metadata,
+      ...args.slice(2).filter((arg) => arg !== "--load"),
+    ];
+    // A cache miss builds the image here; the build below then reuses those
+    // steps from the same builder and only exports and loads.
+    const budgetMs = imageBuildBudgetMs();
+    if (budgetMs === undefined) {
+      await execFile(docker, probeArgs, { timeoutMs: 20 * 60_000 });
+    } else {
+      try {
+        await laneImageCommand(role, probeArgs, budgetMs);
+      } catch (error) {
+        if (error.imageBuildOutOfTime) {
+          outcome = "out-of-time";
+        }
+        throw error;
+      }
+    }
     const id = JSON.parse(await readFile(metadata, "utf8"))["containerimage.config.digest"];
     if (!/^sha256:[a-f0-9]{64}$/u.test(id ?? "")) {
       return false;
@@ -1036,7 +1141,10 @@ async function reuseEngineImage(state, role, args, tag) {
     await boundedImageCommand(["tag", id, tag]);
     outcome = "reused";
     return true;
-  } catch {
+  } catch (error) {
+    if (error.imageBuildOutOfTime) {
+      throw error;
+    }
     outcome = "probe-failed";
     return false;
   } finally {
@@ -1085,7 +1193,7 @@ async function buildRuntimeImages(
   };
   const build = async (role, args) => {
     if (!cacheWarm) {
-      return execFile(process.env.OCC_DOCKER_BIN ?? "docker", args);
+      return laneImageCommand(role, args);
     }
     const exportArgs = imageCacheExportArgs(role, args);
     // A failed or overrunning build fails the job and keeps nothing.
@@ -3120,8 +3228,8 @@ async function prepareK3dModelLane(statePath, state, env, options) {
 
 // `template` (optional) is an OCC_TEST_DATABASE_URL that an earlier prepareFile call
 // returned for this state. The file's database is then a copy of that database
-// (CREATE DATABASE ... TEMPLATE) instead of a freshly migrated one. The worker revision
-// suite copies the database the runner prepared for its file, one copy per test.
+// (CREATE DATABASE ... TEMPLATE) instead of a copy of the lane template. The worker
+// revision suite copies the database the runner prepared for its file, one copy per test.
 async function prepareFile({ lane, file, statePath, template }) {
   const name = assertLane(lane);
   if (!file) {
@@ -3199,6 +3307,9 @@ async function prepareFileWithState({ name, relativeFile, resolvedStatePath, tem
     });
     resourceIds.push(database.resourceId);
     env.OCC_TEST_DATABASE_URL = database.appUrl;
+    if (relativeFile === "tests/integration/sandbox-driver-openshell-k3d-real.test.mjs") {
+      env.OCC_TEST_OPENSHELL_POLICY_MIGRATION_DATABASE_URL = database.migrationUrl;
+    }
     if (name === "postgres-application" && relativeFile === nativeIAMBarrierFile) {
       env.OCC_TEST_NATIVE_IAM_BARRIER_CI = "1";
       env.OCC_TEST_NATIVE_IAM_BARRIER_DATABASE = database.name;

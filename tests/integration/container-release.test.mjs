@@ -158,12 +158,14 @@ test("a chart retry accepts matching files across Helm package timestamps and re
   const second = join(directory, "second");
   const changed = join(directory, "changed");
   await Promise.all([mkdir(first), mkdir(second), mkdir(changed)]);
-  for (const destination of [first, second]) {
-    execFileSync(helm, ["package", staged, "--destination", destination]);
-    if (destination === first) {
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-    }
-  }
+  execFileSync(helm, ["package", staged, "--destination", first]);
+  // Helm 3.19 stamps each tar entry with the time it writes it, rounded to the nearest second
+  // (Go's archive/tar). Every first entry rounds to at most the second nearest to now, so
+  // packaging again once now is past the next half second gives every entry a later timestamp,
+  // without waiting a fixed 2 s.
+  const laterSecond = (Math.round(Date.now() / 1_000) + 0.5) * 1_000 + 50;
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, laterSecond - Date.now())));
+  execFileSync(helm, ["package", staged, "--destination", second]);
   const archiveName = "openclaw-enterprise-0.1.0.tgz";
   const firstArchive = join(first, archiveName);
   const secondArchive = join(second, archiveName);
@@ -648,16 +650,18 @@ test("prepared OCI metadata cannot cross source, image, attempt, CI or base-imag
   }
 });
 
+async function writeOciBlob(layout, value) {
+  const bytes = Buffer.from(JSON.stringify(value));
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  await writeFile(join(layout, "blobs/sha256", hash), bytes);
+  return { digest: `sha256:${hash}`, size: bytes.length };
+}
+
 test("OCI archive validation binds both platforms to their real manifest and config blobs", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "enterprise-oci-platforms-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, "blobs/sha256"), { recursive: true });
-  async function blob(value) {
-    const bytes = JSON.stringify(value);
-    const hash = createHash("sha256").update(bytes).digest("hex");
-    await writeFile(join(directory, "blobs/sha256", hash), bytes);
-    return { digest: `sha256:${hash}`, size: Buffer.byteLength(bytes) };
-  }
+  const blob = (value) => writeOciBlob(directory, value);
   const manifests = [];
   const configs = [];
   // These are actual OCI scratch-image configs/manifests in a tar archive.
@@ -820,12 +824,10 @@ test("separate platform exports assemble into a digest-bound archive and reject 
     for (const arch of ["amd64", "arm64"]) {
       const layout = join(output, arch);
       await mkdir(join(layout, "blobs/sha256"), { recursive: true });
-      async function blob(value, mediaType) {
-        const bytes = Buffer.from(JSON.stringify(value));
-        const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-        await writeFile(join(layout, "blobs/sha256", digest.slice(7)), bytes);
-        return { digest, size: bytes.length, mediaType };
-      }
+      const blob = async (value, mediaType) => ({
+        ...(await writeOciBlob(layout, value)),
+        mediaType,
+      });
       const config = await blob(
         { os: "linux", architecture: fault === "platform" ? "amd64" : arch },
         "application/vnd.oci.image.config.v1+json",

@@ -26,6 +26,7 @@ import {
   takeLayoutShifts,
   trackSettledFetches,
   waitForCondition,
+  waitForEnabled,
   waitForIdleFetches,
   waitForSettledFetches,
 } from "./console-agents-browser-helpers.mjs";
@@ -63,6 +64,88 @@ async function routeDedicatedProvisioning(page, fixture, namespace) {
     }),
   );
 }
+
+test("Create keeps provisioning reads and retries on the admitted job", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Provision response identity", { ready: true });
+  const { page } = await newPage(t, fixture);
+  await routeDedicatedProvisioning(page, fixture, namespace);
+  const root = `/namespaces/${namespace.id}/agents/provision`;
+  const url = `${root}/work_create`;
+  const other = `${root}/work_other`;
+  const job = { workId: "work_create", status: "queued", url };
+  const requests = apiRequests(page, fixture.origin);
+  const admissions = [];
+  const failure = { code: "PROVISIONING_FAILED", message: "Another job failed." };
+  const otherJob = { workId: "work_other", url: other, status: "failed", error: failure };
+  await page.route(`**${root}`, (route) => {
+    const body = route.request().postDataJSON();
+    admissions.push(body);
+    const { requestId } = body;
+    const responses = [
+      // An internally consistent admission for another request by the same caller.
+      { ...otherJob, status: "queued", requestId: `req_${randomUUID()}` },
+      // An older controller that did not identify the request.
+      job,
+      // The expected request and work ID with another job's URL.
+      { ...job, requestId, url: other },
+      { ...job, requestId },
+    ];
+    const provisioning = responses[admissions.length - 1];
+    assert.ok(provisioning);
+    return route.fulfill({ status: 202, json: { data: { provisioning } } });
+  });
+  await page.route(`**${other}*`, (route) => route.fulfill({ json: { data: otherJob } }));
+  // The honest admission's first poll then returns a complete response for that other job.
+  await page.route(`**${url}`, (route) =>
+    route.fulfill({ json: { data: { ...otherJob, requestId: admissions[0].requestId } } }),
+  );
+  await page.route(`**${url}/retry`, (route) =>
+    route.fulfill({
+      status: 202,
+      json: {
+        data: {
+          ...job,
+          requestId: admissions[0].requestId,
+          status: "failed",
+          error: {
+            code: "PROVISIONING_REJECTED",
+            message: "This job ended.",
+          },
+        },
+      },
+    }),
+  );
+
+  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+  await page.getByRole("button", { name: "Start without Preset" }).click();
+  await page.getByLabel("Agent name").fill("Provision response identity");
+  await enterManualModel(page, "test-model-key");
+  await page.getByRole("button", { name: "Create Agent" }).click();
+  const alert = page.getByRole("alert");
+  const retry = page.getByRole("button", { name: "Retry provisioning request" });
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await alert
+      .filter({
+        hasText: "Retry resubmits the same request ID",
+      })
+      .waitFor();
+    assert.equal(pathRequests(requests, "GET", other).length, 0);
+    assert.equal(pathRequests(requests, "GET", url).length, 0);
+    assert.equal(admissions.length, attempt);
+    await retry.click();
+  }
+  await alert.filter({ hasText: "Outcome unknown after provisioning admission" }).waitFor();
+  assert.equal(admissions.length, 4);
+  for (const body of admissions) {
+    assert.deepEqual(body, admissions[0]);
+  }
+  await retry.click();
+  await alert.filter({ hasText: /This job ended/ }).waitFor();
+  assert.equal(pathRequests(requests, "POST", `${url}/retry`).length, 1);
+  assert.equal(pathRequests(requests, "POST", `${other}/retry`).length, 0);
+});
 
 test("Dedicated Agent creation offers Retry only for a transient provisioning failure", async (t) => {
   const fixture = await createConsoleAppFixture(t);
@@ -136,7 +219,8 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
       json(
         {
           provisioning: {
-            workId: `work_${bodies.length}`,
+            requestId: body.requestId,
+            workId: `work_${work}`,
             status: "queued",
             phase: "accepted",
             attemptCount: 0,
@@ -169,6 +253,7 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
       json(
         {
           provisioning: {
+            requestId: bodies[1].requestId,
             workId: "work_2",
             status: "failed",
             phase: "transport",
@@ -217,6 +302,7 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
               }),
             }
           : json({
+              requestId: bodies[3].requestId,
               workId: "work_4",
               status: "succeeded",
               phase: "handoff",
@@ -232,6 +318,7 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
     const { agentId: createdAgentId, ...error } = failures[index - 1];
     await route.fulfill(
       json({
+        requestId: bodies[index - 1].requestId,
         workId: `work_${index}`,
         status: "failed",
         phase: "accepted",
@@ -262,7 +349,7 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
   await retry.click();
   await page.getByText(/^The request does not match the operation contract\./).waitFor();
   assert.equal(await retry.isVisible(), false);
-  assert.equal(await page.getByLabel("Agent name").isDisabled(), false);
+  await waitForEnabled(page.getByLabel("Agent name"));
   await page.getByLabel("Agent name").fill("Taken name");
   await page.getByRole("button", { name: "Create Agent" }).click();
   await page
@@ -271,7 +358,7 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
     )
     .waitFor();
   assert.equal(await retry.isVisible(), false);
-  assert.equal(await page.getByLabel("Agent name").isDisabled(), false);
+  await waitForEnabled(page.getByLabel("Agent name"));
 
   await page.getByLabel("Agent name").fill("Free name");
   await page.getByRole("button", { name: "Create Agent" }).click();
@@ -305,7 +392,7 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
     .waitFor();
   assert.equal(retries, 2);
   assert.equal(await retry.isVisible(), false);
-  assert.equal(await page.getByLabel("Agent name").isDisabled(), false);
+  await waitForEnabled(page.getByLabel("Agent name"));
   await page.getByRole("button", { name: "Create Agent" }).click();
   await page
     .getByText(
@@ -316,7 +403,7 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
   assert.notEqual(bodies[2].requestId, bodies[1].requestId);
   // A cancelled job cannot be retried either; the next submit uses a new request ID.
   assert.equal(await retry.isVisible(), false);
-  assert.equal(await page.getByLabel("Agent name").isDisabled(), false);
+  await waitForEnabled(page.getByLabel("Agent name"));
   await page.getByRole("button", { name: "Create Agent" }).click();
   // Retry calls the job's retry endpoint, which cannot recover a finished job; the text
   // must point at Create Agent for that case.
@@ -340,8 +427,8 @@ test("Dedicated Agent creation offers Retry only for a transient provisioning fa
   assert.equal(await retry.isVisible(), false);
   assert.equal(await page.getByLabel("Agent name").isDisabled(), true);
   assert.equal(await page.getByLabel("Service account token Secret").isDisabled(), true);
-  assert.equal(await page.getByRole("button", { name: "Create Agent" }).isDisabled(), false);
-  assert.equal(await page.getByRole("button", { name: "Start over" }).isDisabled(), false);
+  await waitForEnabled(page.getByRole("button", { name: "Create Agent" }));
+  await waitForEnabled(page.getByRole("button", { name: "Start over" }));
   await page.getByRole("button", { name: "Create Agent" }).click();
   await page.waitForURL(new RegExp(`/agents/${agentIds[2]}\\?`));
   assert.equal(bodies.length, 5);
@@ -364,15 +451,17 @@ test("Dedicated Agent creation shows the API's named reason when a provisioning 
     "The requested platform resource already exists.",
     "Secret sec_00000000-0000-4000-8000-00000000dead, which this provisioning request uses, was deleted. Submit a new Agent provisioning request.",
   ];
-  let jobs = 0;
+  const requestIds = [];
   await page.route(`**/namespaces/${namespace.id}/agents/provision`, async (route) => {
-    jobs += 1;
+    const { requestId } = route.request().postDataJSON();
+    const jobs = requestIds.push(requestId);
     await route.fulfill({
       status: 202,
       contentType: "application/json",
       body: JSON.stringify({
         data: {
           provisioning: {
+            requestId,
             workId: `work_${jobs}`,
             status: "queued",
             phase: "accepted",
@@ -402,6 +491,7 @@ test("Dedicated Agent creation shows the API's named reason when a provisioning 
             contentType: "application/json",
             body: JSON.stringify({
               data: {
+                requestId: requestIds[work - 1],
                 workId: `work_${work}`,
                 status: "failed",
                 phase: "accepted",
@@ -442,18 +532,29 @@ test("Dedicated Agent creation shows the API's named reason when a provisioning 
       )
       .waitFor();
     assert.equal(await retry.isVisible(), false);
-    assert.equal(await page.getByLabel("Agent name").isDisabled(), false);
+    await waitForEnabled(page.getByLabel("Agent name"));
   }
-  assert.equal(jobs, 2);
+  assert.equal(requestIds.length, 2);
 });
 
-// The stopped guidance is not an error, so it does not take the error colour.
+// The stopped guidance is not an error, so neither its text nor its block's stripe takes the
+// error colour.
 async function assertNotErrorColour(locator) {
-  const [colour, errorColour] = await locator.evaluate((node) => {
+  const [colour, stripe, errorColour] = await locator.evaluate((node) => {
     const view = node.ownerDocument.defaultView;
-    return [view.getComputedStyle(node).color, view.getComputedStyle(node.closest(".error")).color];
+    const probe = node.ownerDocument.createElement("span");
+    probe.style.color = "var(--color-danger)";
+    node.ownerDocument.body.append(probe);
+    const danger = view.getComputedStyle(probe).color;
+    probe.remove();
+    return [
+      view.getComputedStyle(node).color,
+      view.getComputedStyle(node.closest(".status")).borderLeftColor,
+      danger,
+    ];
   });
   assert.notEqual(colour, errorColour);
+  assert.notEqual(stripe, errorColour);
 }
 
 // An owner's Stop during the first deployment fails provisioning with REVISION_STOPPED. A Stop
@@ -481,13 +582,16 @@ test("Dedicated Agent creation reports a stop during or before the first deploym
   const updatedAt = new Date().toISOString();
   const meta = { requestId: "req_00000000-0000-4000-8000-000000000001" };
   const url = `/namespaces/${namespace.id}/agents/provision/work_stopped`;
-  await page.route(`**/namespaces/${namespace.id}/agents/provision`, (route) =>
-    route.fulfill({
+  let clientRequestId;
+  await page.route(`**/namespaces/${namespace.id}/agents/provision`, (route) => {
+    clientRequestId = route.request().postDataJSON().requestId;
+    return route.fulfill({
       status: 202,
       contentType: "application/json",
       body: JSON.stringify({
         data: {
           provisioning: {
+            requestId: clientRequestId,
             workId: "work_stopped",
             status: "queued",
             phase: "admitted",
@@ -498,8 +602,8 @@ test("Dedicated Agent creation reports a stop during or before the first deploym
         },
         meta,
       }),
-    }),
-  );
+    });
+  });
   const cancelled = (agentId, by) => ({
     agentId,
     error: {
@@ -578,6 +682,7 @@ test("Dedicated Agent creation reports a stop during or before the first deploym
       contentType: "application/json",
       body: JSON.stringify({
         data: {
+          requestId: clientRequestId,
           workId: "work_stopped",
           status: "failed",
           phase: "configuration",
@@ -655,6 +760,7 @@ test("Dedicated Agent creation keeps one provisioning label while the job retrie
   const updatedAt = new Date().toISOString();
   const meta = { requestId: "req_00000000-0000-4000-8000-000000000001" };
   const url = `/namespaces/${namespace.id}/agents/provision/work_label`;
+  let clientRequestId;
   const job = (status, extra = {}) => ({
     workId: "work_label",
     status,
@@ -664,13 +770,17 @@ test("Dedicated Agent creation keeps one provisioning label while the job retrie
     url,
     ...extra,
   });
-  await page.route(`**/namespaces/${namespace.id}/agents/provision`, (route) =>
-    route.fulfill({
+  await page.route(`**/namespaces/${namespace.id}/agents/provision`, (route) => {
+    clientRequestId = route.request().postDataJSON().requestId;
+    return route.fulfill({
       status: 202,
       contentType: "application/json",
-      body: JSON.stringify({ data: { provisioning: job("queued") }, meta }),
-    }),
-  );
+      body: JSON.stringify({
+        data: { provisioning: { ...job("queued"), requestId: clientRequestId } },
+        meta,
+      }),
+    });
+  });
   // The worker starts the job, waits to retry it, then retries it twice before it fails.
   const reads = [
     job("running"),
@@ -689,7 +799,10 @@ test("Dedicated Agent creation keeps one provisioning label while the job retrie
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ data: reads[Math.min(read++, reads.length - 1)], meta }),
+      body: JSON.stringify({
+        data: { ...reads[Math.min(read++, reads.length - 1)], requestId: clientRequestId },
+        meta,
+      }),
     }),
   );
 
@@ -744,6 +857,7 @@ test("Dedicated Agent creation names a full Namespace Pod quota while it waits",
     const updatedAt = new Date().toISOString();
     const meta = { requestId: "req_00000000-0000-4000-8000-000000000001" };
     const url = `/namespaces/${namespace.id}/agents/provision/work_quota`;
+    let clientRequestId;
     const agentId = "agt_00000000-0000-4000-8000-00000000a617";
     const revisionId = "rev_00000000-0000-4000-8000-00000000a617";
     const job = (status, extra = {}) => ({
@@ -759,10 +873,14 @@ test("Dedicated Agent creation names a full Namespace Pod quota while it waits",
     let submitted = false;
     await page.route(`**/namespaces/${namespace.id}/agents/provision`, (route) => {
       submitted = true;
+      clientRequestId = route.request().postDataJSON().requestId;
       return route.fulfill({
         status: 202,
         contentType: "application/json",
-        body: JSON.stringify({ data: { provisioning: job("queued") }, meta }),
+        body: JSON.stringify({
+          data: { provisioning: { ...job("queued"), requestId: clientRequestId } },
+          meta,
+        }),
       });
     });
     // The job starts, creates its Agent, hands off its first deployment, which waits on the
@@ -786,7 +904,10 @@ test("Dedicated Agent creation names a full Namespace Pod quota while it waits",
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ data: reads[Math.min(read++, reads.length - 1)], meta }),
+        body: JSON.stringify({
+          data: { ...reads[Math.min(read++, reads.length - 1)], requestId: clientRequestId },
+          meta,
+        }),
       }),
     );
     const attempts =
@@ -961,14 +1082,16 @@ test("Dedicated Agent creation names a full Namespace Pod quota while it waits",
 // Since #2744 a job past handoff names its first deployment's wait, but Create Agent showed one
 // "Provisioning Agent…" line until the job ended, about 48 s on oce-dogfood-b (finding 1690). It
 // now adds the wait's sentence, the one the deployment status shows. A fresh deployment read's
-// quota wait comes first, a refused read clears the detail, and an unavailable one keeps the
-// job's newer wait. A member who can't read the deployment gets only the job's own pending code,
-// which adds nothing, so the line stays as is.
+// quota or image pull wait (finding 1881) comes first and stands alone, a refused read clears
+// the detail, and an unavailable one keeps the job's newer wait. A member who can't read the
+// deployment gets only the job's own pending code, which adds nothing, so the line stays as is.
 test("Dedicated Agent creation names the first deployment's wait while it provisions", async (t) => {
   const runtime = "Waiting for the runtime to become ready.";
   const node = "Workloads are ready; waiting for the workspace node to connect to the Gateway.";
   const quotaFull =
     "The Namespace's Pod quota is full. Stop or delete an Agent, or ask an administrator to raise the quota.";
+  const pullFailed =
+    "Kubernetes cannot pull a container image for this Agent and keeps retrying. Ask an administrator to check the runtime image reference and that the cluster's nodes can pull from its registry.";
   const stopping =
     "The Agent was stopped; its gateway is finishing active work before the stop completes.";
   for (const reader of ["deployment reader", "member without deployment access"]) {
@@ -980,6 +1103,7 @@ test("Dedicated Agent creation names the first deployment's wait while it provis
     const updatedAt = new Date().toISOString();
     const meta = { requestId: "req_00000000-0000-4000-8000-000000000001" };
     const url = `/namespaces/${namespace.id}/agents/provision/work_named`;
+    let clientRequestId;
     const agentId = "agt_00000000-0000-4000-8000-00000000a690";
     const revisionId = "rev_00000000-0000-4000-8000-00000000a690";
     const job = (status, extra = {}) => ({
@@ -1007,25 +1131,34 @@ test("Dedicated Agent creation names the first deployment's wait while it provis
     let submitted = false;
     await page.route(`**/namespaces/${namespace.id}/agents/provision`, (route) => {
       submitted = true;
+      clientRequestId = route.request().postDataJSON().requestId;
       return route.fulfill({
         status: 202,
         contentType: "application/json",
-        body: JSON.stringify({ data: { provisioning: job("queued") }, meta }),
+        body: JSON.stringify({
+          data: { provisioning: { ...job("queued"), requestId: clientRequestId } },
+          meta,
+        }),
       });
     });
     // Each poll: the job's named wait, then what the deployment read that follows it answers.
-    // The job hands off its first deployment, which waits for the runtime, the Pod quota and the
-    // workspace node while that read is briefly unavailable (503). Then the job still names the
-    // runtime wait while the read already reports the Pod quota, and then the reader loses access
-    // (403). A stop's gateway drain follows, then no recorded wait, and the job fails. The quota
-    // and the stop stand alone. A member can't read the deployment and gets the job's own code.
+    // The job hands off its first deployment, which waits for the runtime. The read names an
+    // image pull failure before the job does. The deployment then waits for the Pod quota, then
+    // the job names the image pull and the workspace node while the read is briefly unavailable
+    // (503). Then the job still names the runtime wait while the read already reports the Pod
+    // quota, and then the reader loses access (403). A stop's gateway drain follows, then no
+    // recorded wait, and the job fails. The image pull, the quota and the stop stand alone. A
+    // member can't read the deployment and gets the job's own code.
     const runtimeWait = { code: "REVISION_INCOMPLETE", message: runtime };
     const quotaWait = { code: "NAMESPACE_POD_QUOTA_EXCEEDED", message: quotaFull };
+    const pullWait = { code: "REVISION_IMAGE_PULL_FAILED", message: pullFailed };
     const stopWait = { code: "AGENT_STOP_YIELDED", message: stopping };
     const polls = deploymentReader
       ? [
           [runtimeWait, runtimeWait],
+          [runtimeWait, pullWait],
           [quotaWait, quotaWait],
+          [pullWait, 503],
           [{ code: "WORKSPACE_NODE_PENDING", message: node }, 503],
           [runtimeWait, quotaWait],
           [runtimeWait, 403],
@@ -1050,13 +1183,16 @@ test("Dedicated Agent creation names the first deployment's wait while it provis
       route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ data: reads[Math.min(read++, reads.length - 1)], meta }),
+        body: JSON.stringify({
+          data: { ...reads[Math.min(read++, reads.length - 1)], requestId: clientRequestId },
+          meta,
+        }),
       }),
     );
     await page.route(
       `**/namespaces/${namespace.id}/agents/${agentId}/deployments/${revisionId}`,
       (route) => {
-        // Job reads 2 to 7 carry the polls; the first handed-off one and the last record no wait.
+        // Job reads from 2 on carry the polls; the first handed-off one and the last name no wait.
         const answer = deploymentReader ? (polls[read - 3]?.[1] ?? null) : 403;
         if (typeof answer === "number") {
           return route.fulfill({
@@ -1107,7 +1243,7 @@ test("Dedicated Agent creation names the first deployment's wait while it provis
         for (const record of records) {
           if (record.target.nodeType === 1 && record.target.getAttribute("role") === "status") {
             const text = [...record.addedNodes].map((node) => node.textContent).join("");
-            if (text.startsWith("Provisioning") || text.startsWith("The ")) {
+            if (/^(?:Provisioning|The |Kubernetes )/.test(text)) {
               globalThis.provisioningWrites.push(text);
             }
           }
@@ -1134,7 +1270,9 @@ test("Dedicated Agent creation names the first deployment's wait while it provis
             "Provisioning queued…",
             "Provisioning Agent…",
             `Provisioning Agent… ${runtime}`,
+            pullFailed,
             quotaFull,
+            pullFailed,
             `Provisioning Agent… ${node}`,
             quotaFull,
             "Provisioning Agent…",
@@ -1184,10 +1322,18 @@ for (const [name, leave] of [
 
     const provision = `/namespaces/${namespace.id}/agents/provision`;
     const url = `${provision}/work_slow_detail`;
-    const job = { url, agentId, revisionId, phase: "handoff", status: "running" };
-    await page.route(`**${provision}`, (route) =>
-      route.fulfill({ status: 202, json: { data: { provisioning: job } } }),
-    );
+    const job = {
+      workId: "work_slow_detail",
+      url,
+      agentId,
+      revisionId,
+      phase: "handoff",
+      status: "running",
+    };
+    await page.route(`**${provision}`, (route) => {
+      job.requestId = route.request().postDataJSON().requestId;
+      return route.fulfill({ status: 202, json: { data: { provisioning: job } } });
+    });
     const finishPoll = Promise.withResolvers();
     await page.route(`**${url}`, async (route) => {
       // Let the browser report cancellation before navigation can cancel the detail read itself.
@@ -1255,15 +1401,41 @@ test("Agent creation rejects non-object native Configuration JSON before Configu
   await enterManualModel(page, "unused-invalid-config-key", "gpt-4.1");
   await page.getByLabel("Agent name").fill("Broken Agent");
   await openAdvancedSettings(page);
-  await page.getByLabel("Configuration JSON").fill("[]");
+  const json = page.getByLabel("Configuration JSON");
+  const jsonError = page.locator("#configuration-json-error");
+  await json.fill("[]");
   await page.getByText("Advanced settings", { exact: true }).click();
   await page.getByRole("button", { name: "Create Agent" }).click();
 
-  const validation = await page
-    .getByLabel("Configuration JSON")
-    .evaluate((node) => node.validationMessage);
-  assert.equal(validation, "Enter a valid JSON object.");
-  assert.equal(await page.getByLabel("Configuration JSON").isVisible(), true);
+  // One persistent message under the field, linked to it; no browser bubble (finding 1903).
+  await jsonError
+    .getByText("Enter a valid JSON object, not an array or a single value.", { exact: true })
+    .waitFor();
+  assert.equal(await json.evaluate((node) => node.validationMessage), "");
+  assert.equal(await json.getAttribute("aria-invalid"), "true");
+  assert.match(await json.getAttribute("aria-describedby"), /\bconfiguration-json-error\b/);
+  assert.equal(
+    await page.evaluate(() => globalThis.document.activeElement?.id),
+    "configuration-json",
+  );
+  assert.equal(await json.isVisible(), true);
+
+  // Editing clears the message; a parse error names its line and column.
+  await json.fill('{\n  "model": 1,\n}');
+  assert.equal(await jsonError.isHidden(), true);
+  assert.equal(await json.getAttribute("aria-invalid"), null);
+  assert.doesNotMatch(
+    (await json.getAttribute("aria-describedby")) ?? "",
+    /\bconfiguration-json-error\b/,
+  );
+  await page.getByRole("button", { name: "Create Agent" }).click();
+  await jsonError
+    .getByText("Invalid JSON at line 3, column 1. Enter a valid JSON object.", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page.evaluate(() => globalThis.document.activeElement?.id),
+    "configuration-json",
+  );
   assert.equal(secretPostRequests(requests, namespace.id).length, 1);
   assert.equal(configurationPostRequests(requests, namespace.id).length, 0);
   assert.equal(agentPostRequests(requests, namespace.id).length, 0);
@@ -1307,7 +1479,7 @@ test("Agent creation offers mainline Anthropic models before credentials and sav
     "api_key",
   );
   const authMethod = page.getByLabel("Authentication method", { exact: true });
-  assert.equal(await authMethod.isEnabled(), true);
+  await waitForEnabled(authMethod);
   assert.deepEqual(
     await authMethod
       .locator("option:not([disabled])")
@@ -1729,7 +1901,7 @@ test("Agent creation names the Configuration field that holds an inline model cr
   assert.equal(secretPostRequests(requests, namespace.id).length, secretsBefore);
   assert.equal(configurationPostRequests(requests, namespace.id).length, 0);
   assert.equal(agentPostRequests(requests, namespace.id).length, 0);
-  assert.equal(await configuration.isDisabled(), false);
+  await waitForEnabled(configuration);
 });
 
 test("Agent creation reports unavailable Secret storage before creating Configuration or Agent", async (t) => {
@@ -1856,8 +2028,8 @@ test("Agent creation shows the API's duplicate-name conflict, a not-ready Namesp
   const name = page.getByLabel("Agent name");
   const create = page.getByRole("button", { name: "Create Agent" });
   await page.getByRole("button", { name: "Create Agent", disabled: false }).waitFor();
-  assert.equal(await name.isDisabled(), false);
-  assert.equal(await create.isDisabled(), false);
+  await waitForEnabled(name);
+  await waitForEnabled(create);
 
   // A new name saves through the same Configuration.
   await name.fill("Free Agent");
@@ -2083,6 +2255,15 @@ test("Agent creation retries a denied credential grant without duplicating its s
   const fixture = await createConsoleAppFixture(t);
   const installation = await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Credential grant retry", { ready: true });
+  const { page } = await newPage(t, fixture);
+  // Exercise the supported draft path; dedicated provisioning has separate workflow coverage.
+  await routeInstallationWithoutProvisioning(page, fixture);
+  const requests = apiRequests(page, fixture.origin);
+  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
+  await page.getByRole("button", { name: "Start with default Preset" }).click();
+  // Native IAM denies the administrator's grant authority after the session found it allowed. A
+  // session that already knows it is refused sends no grant at all
+  // (console-create-agent-member.test.mjs, finding 2109).
   fixture.policy.restrictions.push({
     id: "deny-credential-grant",
     resourceKind: "installation",
@@ -2090,12 +2271,6 @@ test("Agent creation retries a denied credential grant without duplicating its s
     action: "administer",
     effect: "deny",
   });
-  const { page } = await newPage(t, fixture);
-  // Exercise the supported draft path; dedicated provisioning has separate workflow coverage.
-  await routeInstallationWithoutProvisioning(page, fixture);
-  const requests = apiRequests(page, fixture.origin);
-  await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
-  await page.getByRole("button", { name: "Start with default Preset" }).click();
   await page.getByLabel("Agent name").fill("Grant retry Agent");
   await enterManualModel(page, "grant-retry-key", "gpt-4.1");
   const created = page.waitForResponse(
@@ -2289,7 +2464,7 @@ test("the Agents list does not move when failed deployments land", async (t) => 
     for (const { name, error } of records) {
       const row = page.getByRole("row").filter({ hasText: name });
       await row
-        .getByRole("link", { name: error ? "v1 · failed" : "v1 · succeeded", exact: true })
+        .getByRole("link", { name: error ? "v1 · Failed" : "v1 · Completed", exact: true })
         .waitFor();
     }
     await page.evaluate(() => globalThis.document.fonts.ready);

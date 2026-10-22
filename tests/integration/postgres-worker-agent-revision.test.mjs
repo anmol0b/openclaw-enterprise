@@ -16,6 +16,7 @@ import {
   ComputePreparationFailedError,
   DependencyUnavailableError,
   PostgresMetricsSnapshot,
+  SandboxGatewayUnavailableError,
   SandboxRevisionUnsupportedError,
   TransientDependencyError,
 } from "../../packages/occ/src/index.ts";
@@ -1313,9 +1314,11 @@ revisionTest(
     const unpaired = await fixture.agent("pending-node");
     const overQuota = await fixture.agent("pending-pod-quota");
     const setupRetrying = await fixture.agent("pending-workspace-setup");
+    const imagePull = await fixture.agent("pending-image-pull");
     const unscheduledRevision = await fixture.revision(unscheduled, 1);
     const overQuotaRevision = await fixture.revision(overQuota, 1);
     const setupRetryingRevision = await fixture.revision(setupRetrying, 1);
+    const imagePullRevision = await fixture.revision(imagePull, 1);
     // Admitted five minutes ago by PostgreSQL's clock, which judges work age (finding 1187),
     // and still inside the 900-second deadline.
     const unpairedRevision = await fixture.revision(unpaired, 1, { workAge: "300 seconds" });
@@ -1324,6 +1327,7 @@ revisionTest(
       [unpairedRevision.id, "WORKSPACE_NODE_PENDING"],
       [overQuotaRevision.id, "NAMESPACE_POD_QUOTA_EXCEEDED"],
       [setupRetryingRevision.id, "WORKSPACE_SETUP_RETRYING"],
+      [imagePullRevision.id, "WORKLOAD_IMAGE_PULL_FAILED"],
     ]);
     const delays = new Map([
       [unscheduledRevision.idempotencyKey, []],
@@ -1387,6 +1391,12 @@ revisionTest(
       code: "WORKSPACE_SETUP_RETRYING",
       message:
         "Workspace setup failed; Kubernetes is retrying it. If it keeps failing, ask an admin to check the Agent's workspace storage and runtime image.",
+    });
+    // Finding 1762: the kubelet cannot pull an image; fixed copy, never the image reference.
+    assert.deepEqual(await progress(imagePull, imagePullRevision), {
+      code: "REVISION_IMAGE_PULL_FAILED",
+      message:
+        "Kubernetes cannot pull a container image for this Agent and keeps retrying. Ask an administrator to check the runtime image reference and that the cluster's nodes can pull from its registry.",
     });
     const firstDelay = async (revision) => {
       const recorded = delays.get(revision.idempotencyKey);
@@ -2334,7 +2344,7 @@ revisionTest(
       failure: () =>
         new SandboxRevisionUnsupportedError(
           "SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED",
-          "OpenShell v0.1.4 cannot receive secretKeyRef environment APP_SERVER_TOKEN.",
+          "OpenShell v0.1.5 cannot receive secretKeyRef environment APP_SERVER_TOKEN.",
         ),
       expected: {
         error: {
@@ -2462,6 +2472,92 @@ revisionTest(
         dependency: "agent_gateway",
         cause: "unavailable",
       })),
+    );
+  },
+);
+
+revisionTest(
+  "a Sandbox gateway outage longer than the attempt budget waits, then the deployment activates",
+  async (fixture) => {
+    const { owner, candidate } = await fixture.admitInitialRevision("sandbox-gateway-outage");
+    const events = [];
+    // Finding 2040 (D28, finding 1658): while the OpenShell gateway is scaled down or restarting,
+    // every request of the pass answers gRPC UNAVAILABLE, which the gateway client raises as a
+    // SandboxGatewayUnavailableError. The outage holds until the test has seen more passes than
+    // the attempt budget (5), whatever their backoff, and only then does the gateway come back.
+    let held = true;
+    let passes = 0;
+    await fixture.start(
+      {
+        ...fixture.compute,
+        async prepareRevision(revision, revisionContext) {
+          if (held) {
+            passes += 1;
+            throw new SandboxGatewayUnavailableError(
+              "OpenShell CreateSandbox failed with gRPC status 14.",
+            );
+          }
+          return fixture.compute.prepareRevision(revision, revisionContext);
+        },
+      },
+      { emit: (event) => events.push(event) },
+    );
+
+    const waited = await waitFor(
+      "more passes against the stopped gateway than the attempt budget",
+      async () => {
+        const work = await fixture.observerPool.query(
+          "SELECT state, attempt_count FROM occ.controller_work WHERE idempotency_key = $1",
+          [candidate.idempotencyKey],
+        );
+        assert.notEqual(work.rows[0]?.state, "failed_permanent", "the outage spent the budget");
+        return passes > 7 && work.rows[0]?.state === "queued" ? work.rows[0] : undefined;
+      },
+      30_000,
+    );
+    assert.equal(waited.attempt_count, 0);
+    // A pass's live lease reads as `running`; read the status between passes.
+    const during = await waitFor("the deployment status between outage passes", async () => {
+      const status = await fixture.deploymentStatus(owner, candidate);
+      return status.status === "queued" ? status : undefined;
+    });
+    held = false;
+    assert.deepEqual(
+      {
+        code: during.progress?.lastAttempt?.code,
+        message: during.progress?.lastAttempt?.message,
+      },
+      {
+        code: "SANDBOX_GATEWAY_UNAVAILABLE",
+        message:
+          "The Sandbox gateway did not answer the controller yet. The controller will retry until the deployment deadline.",
+      },
+    );
+
+    const succeeded = await fixture.work(candidate, "succeeded", 30_000);
+    assert.equal(succeeded.attempt_count, 1);
+    assert.equal((await fixture.currentAgent(owner)).activeRevisionId, candidate.id);
+    const outagePasses = events.filter(
+      (event) =>
+        event.event === "worker.completed" &&
+        event.revisionId === candidate.id &&
+        event.outcome !== "success",
+    );
+    assert.ok(outagePasses.length > 7, `saw ${outagePasses.length} outage passes`);
+    assert.deepEqual(
+      new Set(
+        outagePasses.map(({ outcome, code, dependency, cause }) =>
+          JSON.stringify({ outcome, code, dependency, cause }),
+        ),
+      ),
+      new Set([
+        JSON.stringify({
+          outcome: "pending",
+          code: "SANDBOX_GATEWAY_UNAVAILABLE",
+          dependency: "sandbox_gateway",
+          cause: "unavailable",
+        }),
+      ]),
     );
   },
 );
@@ -2853,6 +2949,14 @@ for (const { label, failure, code, message } of [
     code: "SANDBOX_ADMISSION_LIMIT_REACHED",
     message:
       "The Sandbox gateway still refused new requests from the controller (request admission limit reached) at the deployment deadline.",
+  },
+  {
+    // Finding 2040: a gateway that never comes back is bounded by the deadline too.
+    label: "Sandbox gateway",
+    failure: () =>
+      new SandboxGatewayUnavailableError("OpenShell CreateSandbox failed with gRPC status 14."),
+    code: "SANDBOX_GATEWAY_UNAVAILABLE",
+    message: "The Sandbox gateway still did not answer the controller at the deployment deadline.",
   },
 ]) {
   test(

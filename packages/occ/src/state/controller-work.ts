@@ -71,6 +71,12 @@ export function deploymentProgressForWork(
       message =
         "The cluster has no room for this Agent's Pods yet; they are waiting to be scheduled.";
       break;
+    case "REVISION_IMAGE_PULL_FAILED":
+      // Fixed copy: never the image reference or the registry's response.
+      code = attempt.code;
+      message =
+        "Kubernetes cannot pull a container image for this Agent and keeps retrying. Ask an administrator to check the runtime image reference and that the cluster's nodes can pull from its registry.";
+      break;
     case "NAMESPACE_POD_QUOTA_EXCEEDED":
       // Fixed copy: never the quota's numbers or name (finding 1617).
       code = attempt.code;
@@ -143,7 +149,7 @@ export function deploymentProgressForWork(
     case "SANDBOX_GATEWAY_UNAVAILABLE":
       code = attempt.code;
       message =
-        "The Sandbox gateway did not answer the controller's read of the Harness status yet. The controller will retry until the deployment deadline.";
+        "The Sandbox gateway did not answer the controller yet. The controller will retry until the deployment deadline.";
       break;
     case "ACTIVE_REVISION_CHANGED":
       code = attempt.code;
@@ -229,7 +235,7 @@ export interface ControllerWork {
   readonly namespaceTarget?: "ready" | "deleted";
   /** See `CREDENTIAL_WITHDRAWAL_TARGET` for the revision-scoped target. */
   readonly agentTarget?:
-    "stopped" | "deleted" | "provisioned" | typeof CREDENTIAL_WITHDRAWAL_TARGET;
+    "stopped" | "deleted" | "provisioned" | "sandbox_policy" | typeof CREDENTIAL_WITHDRAWAL_TARGET;
   readonly state: ControllerWorkState;
   readonly availableAt: Date;
   readonly attemptCount: number;
@@ -280,7 +286,7 @@ export interface EnqueueWork {
   readonly namespaceTarget?: "ready" | "deleted";
   /** See `CREDENTIAL_WITHDRAWAL_TARGET` for the revision-scoped target. */
   readonly agentTarget?:
-    "stopped" | "deleted" | "provisioned" | typeof CREDENTIAL_WITHDRAWAL_TARGET;
+    "stopped" | "deleted" | "provisioned" | "sandbox_policy" | typeof CREDENTIAL_WITHDRAWAL_TARGET;
   readonly availableAt?: Date | string;
 }
 
@@ -731,7 +737,7 @@ function deploymentErrorMessage(code: string): string {
     case "SANDBOX_ADMISSION_LIMIT_REACHED":
       return "The Sandbox gateway still refused new requests from the controller (request admission limit reached) at the deployment deadline.";
     case "SANDBOX_GATEWAY_UNAVAILABLE":
-      return "The Sandbox gateway still did not answer the controller's read of the Harness status at the deployment deadline.";
+      return "The Sandbox gateway still did not answer the controller at the deployment deadline.";
     default:
       return "Deployment reconciliation failed.";
   }

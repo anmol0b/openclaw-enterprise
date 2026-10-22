@@ -1,3 +1,7 @@
+import {
+  requireConfiguration,
+  ConfigurationValidationError as SharedConfigurationValidationError,
+} from "../../packages/contracts/src/index.ts";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -40,6 +44,7 @@ import {
   DependencyUnavailableError,
   ResourceConflictError,
   ResourceStateConflictError,
+  SandboxGatewayUnavailableError,
   SandboxWorkspaceSetupRefusedError,
   ServiceAccountCredentialSecretExistsError,
   TransientDependencyError,
@@ -138,7 +143,7 @@ test("Kubernetes peer Pod selectors reject labels the API refuses before provisi
       configure(configured, podLabels);
       assert.throws(
         () => createKubernetesComputeDriver(configured),
-        /label (?:keys|values) must be Kubernetes/,
+        SharedConfigurationValidationError,
         description,
       );
     }
@@ -218,16 +223,13 @@ test("repository capability admits only configured Compute-owned native topologi
     );
     // Each Driver misses one prerequisite: a runtime, the credential endpoint, or the
     // absence of a SandboxDriver.
+    const { runtime: _runtime, ...withoutRuntime } = configured;
     const unsupported = {
       message:
         "Repository credentials require a configured Kubernetes runtime and credential endpoint without a SandboxDriver.",
     };
     assert.throws(
-      () =>
-        new KubernetesComputeDriver({
-          ...configured,
-          runtime: undefined,
-        }).validateRepositoryCredentials(harness),
+      () => new KubernetesComputeDriver(withoutRuntime).validateRepositoryCredentials(harness),
       unsupported,
     );
     assert.throws(
@@ -1196,6 +1198,10 @@ function dedicatedFirstDeployFixture({
             namespace: requestedNamespace,
             uid: `${role}-uid`,
             labels,
+            // A Pod being deleted, as during a rollout or a scale-down.
+            ...(state.terminatingRole === role
+              ? { deletionTimestamp: "2026-08-25T00:00:00Z" }
+              : {}),
           },
           ...(state.unschedulableRole === role
             ? {
@@ -1211,7 +1217,25 @@ function dedicatedFirstDeployFixture({
                   ],
                 },
               }
-            : { status: { phase: "Running", podIP: "10.42.0.12" } }),
+            : state.waitingRole === role
+              ? {
+                  status: {
+                    phase: "Pending",
+                    conditions: [{ type: "PodScheduled", status: "True" }],
+                    [state.waitingStatuses ?? "containerStatuses"]: [
+                      {
+                        name: role,
+                        state: {
+                          waiting: {
+                            reason: state.waitingReason,
+                            message: "Back-off pulling image registry.invalid/runtime:missing",
+                          },
+                        },
+                      },
+                    ],
+                  },
+                }
+              : { status: { phase: "Running", podIP: "10.42.0.12" } }),
         },
       ],
     };
@@ -1880,6 +1904,13 @@ test("Kubernetes Sandbox provisioning fails a revision at once when the provider
   failure = new Error("OpenShell workspace initialization failed.");
   await assert.rejects(prepare(), /OpenShell workspace initialization failed/);
   assert.equal(provisions.length, 2);
+  // Finding 2040: a gateway that does not answer reaches the worker as the same error, which
+  // waits for the gateway instead of spending the attempt budget.
+  failure = new SandboxGatewayUnavailableError(
+    "OpenShell CreateSandbox failed with gRPC status 14.",
+  );
+  await assert.rejects(prepare(), (error) => error === failure);
+  assert.equal(provisions.length, 3);
 });
 
 // Finding 1671: the node Secret is the Agent's, so a redeploy found a recorded device from its
@@ -2806,6 +2837,54 @@ test("a pending dedicated deploy reports an unschedulable Pod or an unpaired nod
   assert.equal(ready.pendingReason, undefined);
 });
 
+// A deploy whose container image the kubelet cannot pull names that wait instead of a
+// bare one (finding 1762); a Pod the scheduler cannot place still leads, and a Pod being
+// deleted names no wait (finding 1880).
+test("a pending dedicated deploy names a container image pull failure", async () => {
+  const { state, prepare } = dedicatedFirstDeployFixture({ clock: { now: 0 } });
+  for (const [role, statuses, reason, expected] of [
+    ["agent", "containerStatuses", "ImagePullBackOff", "WORKLOAD_IMAGE_PULL_FAILED"],
+    ["gateway", "containerStatuses", "ErrImagePull", "WORKLOAD_IMAGE_PULL_FAILED"],
+    ["agent", "initContainerStatuses", "ImagePullBackOff", "WORKLOAD_IMAGE_PULL_FAILED"],
+    ["agent", "containerStatuses", "ContainerCreating", undefined],
+    ["agent", "containerStatuses", "CrashLoopBackOff", undefined],
+  ]) {
+    Object.assign(state, { waitingRole: role, waitingStatuses: statuses, waitingReason: reason });
+    const pending = await prepare();
+    assert.equal(pending.ready, false);
+    assert.equal(pending.pendingReason, expected, `${role} ${statuses} ${reason}`);
+  }
+  Object.assign(state, {
+    waitingRole: "agent",
+    waitingStatuses: "containerStatuses",
+    waitingReason: "ImagePullBackOff",
+    unschedulableRole: "gateway",
+  });
+  assert.equal((await prepare()).pendingReason, "WORKLOAD_UNSCHEDULABLE");
+  // A Pod being deleted names no wait (finding 1880): with the unschedulable Gateway Pod
+  // being deleted, the Harness's image pull leads.
+  state.terminatingRole = "gateway";
+  assert.equal((await prepare()).pendingReason, "WORKLOAD_IMAGE_PULL_FAILED");
+  Object.assign(state, { waitingRole: undefined, unschedulableRole: undefined });
+  for (const [role, wait] of [
+    [
+      "agent",
+      {
+        waitingRole: "agent",
+        waitingStatuses: "containerStatuses",
+        waitingReason: "ImagePullBackOff",
+      },
+    ],
+    ["gateway", { unschedulableRole: "gateway" }],
+  ]) {
+    Object.assign(state, { terminatingRole: role, ...wait });
+    assert.equal((await prepare()).pendingReason, undefined, `terminating ${role}`);
+    Object.assign(state, { waitingRole: undefined, unschedulableRole: undefined });
+  }
+  state.terminatingRole = undefined;
+  assert.equal((await prepare()).pendingReason, undefined);
+});
+
 // A deploy whose Pods the Namespace's Pod quota refuses names the quota instead of a
 // bare wait (finding 1617). The Deployment controller copies its ReplicaSet's
 // ReplicaFailure condition onto the Deployment, which the driver reads, and the refused
@@ -2941,6 +3020,15 @@ test("a pending dedicated deploy names a full Namespace Pod quota", async () => 
     undefined,
   );
   setQuota({ pods: "10" }, { pods: "10" });
+  // A full Pod quota leads a container that waits on an image pull (finding 1880).
+  Object.assign(state, {
+    waitingRole: "gateway",
+    waitingStatuses: "containerStatuses",
+    waitingReason: "ImagePullBackOff",
+  });
+  assert.equal(await pendingReasonWith(agentName, podRefusal), quota);
+  assert.equal((await prepare()).pendingReason, "WORKLOAD_IMAGE_PULL_FAILED");
+  state.waitingRole = undefined;
   state.unreadableKind = "ResourceQuota";
   assert.equal(await pendingReasonWith(agentName, podRefusal), undefined);
   state.unreadableKind = undefined;
@@ -4487,7 +4575,7 @@ test("native Gateway listeners cannot overlap the private runtime status port", 
     configured.network.gatewayPort = gatewayPort;
     assert.throws(
       () => createKubernetesComputeDriver(configured),
-      /reserved runtime status port 18791/,
+      SharedConfigurationValidationError,
     );
   }
   // 18790 remains valid without the auxiliary listener; neighboring ordinary
@@ -4642,10 +4730,7 @@ test("two-cluster Compute refuses a harness routing hostname that parses as anot
   // The refusal names the harness setting, not the Gateway routing the execution plane reuses
   // it as.
   for (const hostname of ["127.1", "0x7f.1", "api.123", "harness.0x10"]) {
-    assert.throws(harness(hostname), {
-      message:
-        "Harness routing hostname must be a DNS hostname without a port or path. A numeric or 0x last label parses as IPv4; use a DNS name resolving to the gateway that its TLS certificate covers.",
-    });
+    assert.throws(harness(hostname), SharedConfigurationValidationError);
   }
   for (const hostname of [
     "Harness.example.test",
@@ -4653,21 +4738,17 @@ test("two-cluster Compute refuses a harness routing hostname that parses as anot
     "harness_1.test",
     7,
   ]) {
-    assert.throws(harness(hostname), {
-      message: "Harness routing hostname must be a DNS hostname without a port or path.",
-    });
+    assert.throws(harness(hostname), SharedConfigurationValidationError);
   }
   for (const hostname of ["", undefined]) {
-    assert.throws(harness(hostname), {
-      message: "Harness routing hostname must be explicitly configured.",
-    });
+    assert.throws(harness(hostname), SharedConfigurationValidationError);
   }
   for (const hostname of ["harness.example.test", "1password.example.test", "0x.example.test"]) {
     assert.doesNotThrow(harness(hostname), hostname);
   }
 });
 
-test("two-cluster Compute names the harness routing field it refuses", () => {
+test("two-cluster Compute rejects invalid harness routing settings", () => {
   const twoCluster = twoClusterOptions();
   const harness = (field, value) => () =>
     createKubernetesComputeDriver({
@@ -4705,7 +4786,11 @@ test("two-cluster Compute names the harness routing field it refuses", () => {
       "Harness routing Envoy HTTPS target port must be a valid port.",
     ]),
   ]) {
-    assert.throws(harness(field, value), { message }, `${field}: ${String(value)}`);
+    assert.throws(
+      harness(field, value),
+      SharedConfigurationValidationError,
+      `${field}: ${String(value)}: ${message}`,
+    );
   }
   assert.doesNotThrow(harness("envoyHttpsTargetPort", 8443));
 });
@@ -4731,17 +4816,12 @@ test("sandbox routing caps the domain length and requires two labels", () => {
     [label, label, "a".repeat(23), label].join("."),
     [label, label, label, "a".repeat(61)].join("."),
   ]) {
-    assert.throws(() => sandboxDriver(domain), {
-      message:
-        "Sandbox domain must not exceed 214 characters, leaving room for the agent-<32 hex>. prefix of dedicated Agent hostnames.",
-    });
+    assert.throws(() => sandboxDriver(domain), SharedConfigurationValidationError);
   }
-  assert.throws(() => sandboxDriver("a..b.test"), /Sandbox domain must be a DNS hostname/);
+  assert.throws(() => sandboxDriver("a..b.test"), SharedConfigurationValidationError);
   // The chart requires a dot too; a single label could never get a usable wildcard certificate.
   for (const domain of ["localhost", "previews", "a".repeat(63)]) {
-    assert.throws(() => sandboxDriver(domain), {
-      message: "Sandbox domain must have at least two DNS labels, such as previews.example.com.",
-    });
+    assert.throws(() => sandboxDriver(domain), SharedConfigurationValidationError);
   }
   assert.doesNotThrow(() => sandboxDriver("previews.localhost"));
 });
@@ -4767,15 +4847,10 @@ test("gateway routing caps the Gateway name at a label value's 63 characters", (
     longest,
   );
   for (const gatewayName of ["a".repeat(64), "a".repeat(253)]) {
-    assert.throws(() => routedDriver(gatewayName), {
-      message:
-        "Gateway routing Gateway name must not exceed 63 characters, because it is also a Kubernetes label value.",
-    });
+    assert.throws(() => routedDriver(gatewayName), SharedConfigurationValidationError);
   }
   for (const gatewayName of ["Bad_Name", "a".repeat(254)]) {
-    assert.throws(() => routedDriver(gatewayName), {
-      message: "Gateway routing Gateway name must be a DNS-safe Kubernetes resource name.",
-    });
+    assert.throws(() => routedDriver(gatewayName), SharedConfigurationValidationError);
   }
   // The two-cluster harness Gateway is labelled the same way.
   const twoCluster = twoClusterOptions();
@@ -4791,10 +4866,7 @@ test("gateway routing caps the Gateway name at a label value's 63 characters", (
           },
         },
       }),
-    {
-      message:
-        "Harness routing Gateway name must not exceed 63 characters, because it is also a Kubernetes label value.",
-    },
+    SharedConfigurationValidationError,
   );
 });
 
@@ -5674,6 +5746,43 @@ test("Kubernetes keeps a revision's gateway document rendered before the lan bin
     ...twoClusterOptions().executionCluster,
     caBundle: await readFile(certificate, "utf8"),
   };
+  await t.test(
+    "execution trust accepts certificate chains and rejects malformed or oversized bundles",
+    () => {
+      const admit = (caBundle) =>
+        createKubernetesComputeDriver({
+          ...twoClusterOptions(),
+          executionCluster: { ...executionCluster, caBundle },
+        });
+      assert.doesNotThrow(() =>
+        admit(`\n${executionCluster.caBundle}\n${executionCluster.caBundle}\n`),
+      );
+      // Delimiters alone cannot establish trust: DER parsing must still succeed. Repeated
+      // unterminated markers also exercise the input that caused repeated regex rescanning.
+      for (const [bundle, code, message] of [
+        [" \n ", "INVALID_FORMAT", /only PEM certificates/],
+        [
+          "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----",
+          "INVALID_FORMAT",
+          /invalid certificate/,
+        ],
+        [`${executionCluster.caBundle}unexpected`, "INVALID_FORMAT", /only PEM certificates/],
+        ["-----BEGIN CERTIFICATE-----\n".repeat(1024), "INVALID_FORMAT", /only PEM certificates/],
+        ["-----BEGIN CERTIFICATE-----\n".repeat(3000), "TOO_LONG", /maxLength/],
+      ]) {
+        assert.throws(
+          () => admit(bundle),
+          (error) => {
+            assert.ok(error instanceof SharedConfigurationValidationError);
+            assert.equal(error.error.details[0].path, "/executionCluster/caBundle");
+            assert.equal(error.error.details[0].code, code);
+            assert.match(error.error.details[0].message, message);
+            return true;
+          },
+        );
+      }
+    },
+  );
   const endpoint = "https://models.example.test/api/v1";
   for (const [bind, modelEndpoint, cluster] of [
     [undefined, undefined],
@@ -5934,7 +6043,7 @@ test("gateway routing startup validation and namespace membership fail closed", 
             gatewayRouting: { ...gatewayRouting, endpointPort },
           }),
         ),
-      /Gateway routing endpoint port/,
+      SharedConfigurationValidationError,
     );
   }
   for (const envoyHttpsTargetPort of [0, -1, 65536, 443.5, "10443"]) {
@@ -5945,7 +6054,7 @@ test("gateway routing startup validation and namespace membership fail closed", 
             gatewayRouting: { ...gatewayRouting, envoyHttpsTargetPort },
           }),
         ),
-      /Envoy HTTPS target port/,
+      SharedConfigurationValidationError,
     );
   }
   for (const gatewayRouting of [
@@ -5994,13 +6103,13 @@ test("gateway routing startup validation and namespace membership fail closed", 
   ]) {
     assert.throws(
       () => createKubernetesComputeDriver(routedOptions({ gatewayRouting })),
-      /Gateway routing/i,
+      SharedConfigurationValidationError,
     );
   }
 
   assert.throws(
     () => createKubernetesComputeDriver(options({ gatewayRouting })),
-    /do not configure network\.gatewayClients/i,
+    SharedConfigurationValidationError,
   );
 
   const driver = createKubernetesComputeDriver(routedOptions());
@@ -6110,7 +6219,11 @@ test("Kubernetes drivers require explicit authentication, images, and production
     ],
     [{ servicePrincipalCredentials: undefined }, /credential|projection/i],
   ]) {
-    assert.throws(() => createKubernetesComputeDriver(options(invalid)), expected);
+    assert.throws(
+      () => createKubernetesComputeDriver(options(invalid)),
+      SharedConfigurationValidationError,
+      String(expected),
+    );
   }
 
   // Narrower sources, the Pod CIDR included, start: preflight warns about them instead.
@@ -6205,7 +6318,7 @@ test("the canonical Kubernetes runtime validates channel proxy configuration", (
     const channels = { proxyUrl };
     assert.throws(
       () => createKubernetesComputeDriver(options({ runtime: { ...runtime, channels } })),
-      /HTTP\(S\) IP endpoint/i,
+      SharedConfigurationValidationError,
     );
   }
   for (const proxyUrl of [
@@ -6218,10 +6331,7 @@ test("the canonical Kubernetes runtime validates channel proxy configuration", (
     assert.throws(
       () =>
         createKubernetesComputeDriver(options({ runtime: { ...runtime, channels: { proxyUrl } } })),
-      {
-        message:
-          "Channel proxy URL IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
-      },
+      SharedConfigurationValidationError,
     );
   }
   // An unspecified host reaches the gateway Pod itself, and an IPv4-mapped host leaves as
@@ -6238,10 +6348,7 @@ test("the canonical Kubernetes runtime validates channel proxy configuration", (
     assert.throws(
       () =>
         createKubernetesComputeDriver(options({ runtime: { ...runtime, channels: { proxyUrl } } })),
-      {
-        message:
-          "Channel proxy URL host must not be an unspecified or IPv4-mapped IPv6 address; write the proxy's own IPv4 or IPv6 address.",
-      },
+      SharedConfigurationValidationError,
       proxyUrl,
     );
   }
@@ -6268,7 +6375,7 @@ test("the canonical Kubernetes runtime validates channel proxy configuration", (
   ]) {
     assert.throws(
       () => createKubernetesComputeDriver(options({ runtime: { ...runtime, channels } })),
-      /Managed channel proxy/i,
+      SharedConfigurationValidationError,
     );
   }
 });
@@ -6320,7 +6427,7 @@ test("the canonical Kubernetes runtime validates the dedicated Codex model endpo
   ]) {
     assert.throws(
       () => createKubernetesComputeDriver(options({ runtime: { ...runtime, codexModelBaseUrl } })),
-      /Codex model endpoint/,
+      SharedConfigurationValidationError,
     );
   }
   // IPv4 hosts the URL parser rewrites to another address name the IPv4 rule.
@@ -6332,10 +6439,7 @@ test("the canonical Kubernetes runtime validates the dedicated Codex model endpo
   ]) {
     assert.throws(
       () => createKubernetesComputeDriver(options({ runtime: { ...runtime, codexModelBaseUrl } })),
-      {
-        message:
-          "Codex model endpoint IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
-      },
+      SharedConfigurationValidationError,
       codexModelBaseUrl,
     );
   }
@@ -6354,7 +6458,8 @@ test("the canonical Kubernetes runtime validates the dedicated Codex model endpo
   ]) {
     assert.throws(
       () => createKubernetesComputeDriver(options({ runtime: { ...runtime, codexModelBaseUrl } })),
-      (error) => /^Codex model endpoint /.test(error.message) && message.test(error.message),
+      SharedConfigurationValidationError,
+      String(message),
       JSON.stringify(codexModelBaseUrl),
     );
   }
@@ -6425,13 +6530,15 @@ test("every NetworkPolicy peer namespace must be a Kubernetes namespace name", (
       "kube/system",
       "foo_bar",
     ]) {
-      assert.throws(() => createKubernetesComputeDriver({ ...base, ...peer(namespace) }), {
-        message: `${description} namespace must be a Kubernetes namespace name: a DNS label of at most 63 characters.`,
-      });
+      assert.throws(
+        () => createKubernetesComputeDriver({ ...base, ...peer(namespace) }),
+        SharedConfigurationValidationError,
+      );
     }
-    assert.throws(() => createKubernetesComputeDriver({ ...base, ...peer("") }), {
-      message: `${description} namespace must be explicitly configured.`,
-    });
+    assert.throws(
+      () => createKubernetesComputeDriver({ ...base, ...peer("") }),
+      SharedConfigurationValidationError,
+    );
   }
   // The execution cluster's DNS peer goes through the same check.
   const twoCluster = twoClusterOptions();
@@ -6448,10 +6555,7 @@ test("every NetworkPolicy peer namespace must be a Kubernetes namespace name", (
           },
         },
       }),
-    {
-      message:
-        "DNS peer namespace must be a Kubernetes namespace name: a DNS label of at most 63 characters.",
-    },
+    SharedConfigurationValidationError,
   );
 });
 
@@ -6473,7 +6577,7 @@ test("the canonical Kubernetes runtime validates native OpenClaw session capacit
         createKubernetesComputeDriver(
           options({ runtime: { ...runtime, nativeOpenClawSessionCapacity } }),
         ),
-      /session capacity must be an integer between 1 and 1024/i,
+      SharedConfigurationValidationError,
     );
   }
 });
@@ -6544,7 +6648,7 @@ test("dedicated Codex localhost seccomp profile is validated and rendered only o
     assert.throws(
       () =>
         createKubernetesComputeDriver(options({ runtime: { ...runtime, codexSeccompProfile } })),
-      /Codex seccomp localhost profile/i,
+      SharedConfigurationValidationError,
     );
   }
 
@@ -6558,7 +6662,7 @@ test("dedicated Codex localhost seccomp profile is validated and rendered only o
           },
         }),
       ),
-    /unsupported option securityContext/i,
+    SharedConfigurationValidationError,
   );
 });
 
@@ -7233,6 +7337,7 @@ test("a ServiceAccount credential rollback deletes only the Secret holding its o
     await stored(fixture);
     await assert.rejects(
       fixture.driver.deleteServiceAccountCredential(input(fixture, "at-request-fixture")),
+      { message: "delete failed", statusCode: 409 },
     );
     assert.equal(fixture.storedToken(), "at-request-fixture");
   });
@@ -7260,7 +7365,9 @@ test("a ServiceAccount credential rollback deletes only the Secret holding its o
     assert.equal(fixture.storedToken(), "at-request-fixture");
     assert.deepEqual(fixture.deletes, []);
     // Account deletion still refuses it instead of passing over it silently.
-    await assert.rejects(fixture.driver.deleteServiceAccountCredential(input(fixture)));
+    await assert.rejects(fixture.driver.deleteServiceAccountCredential(input(fixture)), {
+      message: /^Refusing unowned Kubernetes Secret service-account-[a-f0-9]{32}\.$/,
+    });
     assert.deepEqual(fixture.deletes, []);
   });
 
@@ -8743,9 +8850,9 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
   let started = false;
   // Execute the generated Gateway startup program: every session must use the
   // enrolled worker without requiring a user-selected Cloud Worker destination.
-  runInNewContext(GATEWAY_RUNTIME_ENTRYPOINT, {
+  // Keep JSON in the VM realm, as the wrapper's native deep comparison requires.
+  const sandbox = {
     Buffer,
-    JSON,
     URL,
     console,
     process: {
@@ -8806,8 +8913,8 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
       }
       return nodeRequire(specifier);
     },
-  });
-  await Promise.resolve();
+  };
+  await runInNewContext(GATEWAY_RUNTIME_ENTRYPOINT, sandbox);
   assert.equal(started, true);
   const effectiveConfiguration = JSON.parse(files.get("/home/node/.openclaw/openclaw.json"));
   assert.equal(effectiveConfiguration.cloudWorkers.requiredProfile, "dedicated-native");
@@ -8815,6 +8922,27 @@ test("dedicated OpenClaw renders an enrolled Harness without exposing model cred
     provider: "device",
     settings: { device: deviceId, inference: "worker" },
   });
+  // Restart the wrapper against its generated writable configuration. The
+  // admitted revision still owns the profile; only the exact generated value is reusable.
+  started = false;
+  const restart = {
+    ...sandbox,
+    process: { ...sandbox.process, env: { ...sandbox.process.env } },
+  };
+  await runInNewContext(GATEWAY_RUNTIME_ENTRYPOINT, restart);
+  assert.equal(started, true);
+
+  effectiveConfiguration.cloudWorkers.profiles["dedicated-native"].settings.device = "b".repeat(64);
+  files.set("/home/node/.openclaw/openclaw.json", JSON.stringify(effectiveConfiguration));
+  started = false;
+  await assert.rejects(
+    runInNewContext(GATEWAY_RUNTIME_ENTRYPOINT, {
+      ...sandbox,
+      process: { ...sandbox.process, env: { ...sandbox.process.env } },
+    }),
+    /worker profile conflicts with admitted configuration/u,
+  );
+  assert.equal(started, false);
 });
 
 test("account-token authentication grants only the exact Codex revision outbound HTTPS", () => {
@@ -9178,7 +9306,9 @@ test("native channel providers require Secret bindings and project them only to 
     },
     undefined,
   ]) {
-    const removed = createKubernetesComputeDriver(options({ runtime }));
+    const removed = createKubernetesComputeDriver(
+      options(runtime === undefined ? {} : { runtime }),
+    );
     const disabledRevision = {
       ...revision,
       compute: { id: removed.id, implementation: removed.implementation },
@@ -11799,7 +11929,11 @@ test("SDK resource requirements still require explicit CPU and memory requests a
       /Namespace default memory request/i,
     ],
   ]) {
-    assert.throws(() => createKubernetesComputeDriver(options({ resources })), expected);
+    assert.throws(
+      () => createKubernetesComputeDriver(options({ resources })),
+      SharedConfigurationValidationError,
+      String(expected),
+    );
   }
 });
 
@@ -11807,12 +11941,15 @@ test("production drivers reject injected clients and fail closed without their k
   for (const clients of [{}, undefined]) {
     assert.throws(
       () => createKubernetesComputeDriver({ ...options(), clients }),
-      /client|inject|configuration/i,
+      SharedConfigurationValidationError,
     );
   }
 
   const inheritedClients = Object.assign(Object.create({ clients: {} }), options());
-  assert.throws(() => createKubernetesComputeDriver(inheritedClients), /client|inject/i);
+  assert.throws(
+    () => createKubernetesComputeDriver(inheritedClients),
+    SharedConfigurationValidationError,
+  );
 
   const driver = createKubernetesComputeDriver(
     options({
@@ -12163,7 +12300,7 @@ test("immutable image policy accepts digests and rejects mutable tags", () => {
           },
         }),
       ),
-    /digest|immutable/i,
+    SharedConfigurationValidationError,
   );
   // The OCI image specification allows only `sha256` and lowercase hex for SHA-256
   // digests; containerd refuses any other spelling at pull time, so the Driver refuses
@@ -12181,7 +12318,7 @@ test("immutable image policy accepts digests and rejects mutable tags", () => {
       };
       assert.throws(
         () => createKubernetesComputeDriver(options({ images })),
-        /immutable SHA-256 digest/,
+        SharedConfigurationValidationError,
         `${role} ${description}`,
       );
     }
@@ -12224,9 +12361,7 @@ test("Compute refuses an uppercase image repository path", () => {
         };
         assert.throws(
           () => createKubernetesComputeDriver(options({ images })),
-          new RegExp(
-            `${role === "gateway" ? "Gateway" : "Agent"} image repository path must be lowercase`,
-          ),
+          SharedConfigurationValidationError,
           `${role} ${name}${suffix}`,
         );
       }
@@ -12255,7 +12390,7 @@ test("projected ServicePrincipal tokens require an audience and bounded expirati
   ]) {
     assert.throws(
       () => createKubernetesComputeDriver(options({ servicePrincipalCredentials: credentials })),
-      /audience|expiration|token/i,
+      SharedConfigurationValidationError,
     );
   }
 
@@ -13246,43 +13381,47 @@ function separateResources() {
   return configured;
 }
 
-test("resource quantities written as bare numbers name the field and the quoting fix", () => {
-  const cases = [
-    ["gateway", "limits", "cpu", 4, /Gateway CPU limit \(resources\.gateway\.limits\.cpu\)/],
-    ["agent", "limits", "cpu", 1, /Agent CPU limit \(resources\.agent\.limits\.cpu\)/],
-    ["agent", "requests", "cpu", 0.5, /Agent CPU request \(resources\.agent\.requests\.cpu\)/],
-  ];
-  for (const [role, kind, field, value, name] of cases) {
+test("resource quantities reject bare numbers with structured field diagnostics", () => {
+  for (const [role, kind, field, value] of [
+    ["gateway", "limits", "cpu", 4],
+    ["agent", "limits", "cpu", 1],
+    ["agent", "requests", "cpu", 0.5],
+  ]) {
     const configured = separateResources();
     configured.resources[role][kind][field] = value;
-    assert.throws(() => KubernetesComputeDriver.validateConfiguration(configured), name);
     assert.throws(
-      () => KubernetesComputeDriver.validateConfiguration(configured),
-      new RegExp(`must be a quoted Kubernetes quantity string: write "${value}", not ${value}\\.`),
+      () => requireConfiguration(KubernetesComputeDriver, configured),
+      (error) => {
+        assert.ok(error instanceof SharedConfigurationValidationError);
+        assert.ok(
+          error.error.details.some(({ path }) => path === `/resources/${role}/${kind}/${field}`),
+        );
+        return true;
+      },
     );
   }
   const defaults = separateResources();
   defaults.resources.namespace.containerDefaults.limits.cpu = 4;
   assert.throws(
-    () => KubernetesComputeDriver.validateConfiguration(defaults),
-    /Namespace default CPU limit \(resources\.namespace\.containerDefaults\.limits\.cpu\) must be a quoted/,
+    () => requireConfiguration(KubernetesComputeDriver, defaults),
+    SharedConfigurationValidationError,
   );
   const quota = separateResources();
   quota.resources.namespace.quota.pods = 10;
   assert.throws(
-    () => KubernetesComputeDriver.validateConfiguration(quota),
-    /Quota pods \(resources\.namespace\.quota\.pods\) must be a quoted/,
+    () => requireConfiguration(KubernetesComputeDriver, quota),
+    SharedConfigurationValidationError,
   );
   // A missing value is still reported as missing, and quoted cores pass.
   const missing = separateResources();
   delete missing.resources.gateway.limits.cpu;
   assert.throws(
-    () => KubernetesComputeDriver.validateConfiguration(missing),
-    /Gateway CPU limit must be explicitly configured/,
+    () => requireConfiguration(KubernetesComputeDriver, missing),
+    SharedConfigurationValidationError,
   );
   const quoted = separateResources();
   quoted.resources.gateway.limits.cpu = "4";
-  KubernetesComputeDriver.validateConfiguration(quoted);
+  requireConfiguration(KubernetesComputeDriver, quoted);
 });
 
 // Expected ordering comes from the API server's Quantity.Cmp semantics. These
@@ -13318,9 +13457,7 @@ test("resource requests must fit their limits before Namespace or workload prepa
       } else {
         assert.throws(
           () => createKubernetesComputeDriver(configured),
-          (error) =>
-            error.message.includes(`resources.${role}.requests.${resource}`) &&
-            error.message.includes("cannot exceed its limit"),
+          SharedConfigurationValidationError,
         );
       }
     }
@@ -13331,15 +13468,17 @@ test("transport secret prefix must produce a DNS-safe credential Secret name", (
   for (const transportSecretPrefix of ["Bad_Prefix", "bad prefix", `${"a".repeat(242)}`]) {
     assert.throws(
       () =>
-        KubernetesComputeDriver.validateConfiguration(
+        requireConfiguration(
+          KubernetesComputeDriver,
           options({
             runtime: { transportSecretPrefix, gatewayStorageClassName: "local-path" },
           }),
         ),
-      /runtime\.transportSecretPrefix must produce a DNS-safe Agent transport Secret name/,
+      SharedConfigurationValidationError,
     );
   }
-  KubernetesComputeDriver.validateConfiguration(
+  requireConfiguration(
+    KubernetesComputeDriver,
     options({
       runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" },
     }),
@@ -13358,7 +13497,7 @@ test("real gateways require an explicit SQLite-compatible storage class", () => 
             },
           }),
         ),
-      /SQLite-compatible gateway storage class must be explicitly configured/,
+      SharedConfigurationValidationError,
     );
   }
 });
@@ -13380,7 +13519,7 @@ test("gateway storage class names must be Kubernetes resource names", () => {
             },
           }),
         ),
-      /SQLite-compatible gateway storage class must be a DNS-safe Kubernetes resource name/,
+      SharedConfigurationValidationError,
     );
   }
   for (const gatewayStorageClassName of ["a".repeat(253), "gp3.encrypted"]) {
@@ -13463,6 +13602,12 @@ test("Gateway and Harness storage are separate and preserve ephemeral Codex cred
           name: privateVolume.name,
           mountPath: "/home/node/.openclaw/state",
           subPath: "state",
+          readOnly: false,
+        },
+        {
+          name: privateVolume.name,
+          mountPath: "/home/node/.openclaw/client",
+          subPath: "client",
           readOnly: false,
         },
         {
@@ -14796,9 +14941,13 @@ test("stopping a provider-owned Kubernetes revision waits for Sandbox workload t
       assert.fail("stop must not provision a Harness workload");
     },
     async cleanup() {
+      if (cleanupFailure !== undefined) {
+        throw cleanupFailure;
+      }
       cleanupComplete = true;
     },
   };
+  let cleanupFailure;
   const driver = new KubernetesComputeDriver(options(), { sandboxDriver });
   const revision = routedRevision(driver, {
     id: "revision-provider-stop",
@@ -14906,7 +15055,14 @@ test("stopping a provider-owned Kubernetes revision waits for Sandbox workload t
     async () => false,
     () => withYieldingComputeStop(() => driver.stopRevision(revision)),
   );
-  assert.equal(podObservations, 2);
+  assert.equal(podObservations, 2); // Finding 2040: a gateway that does not answer the Sandbox cleanup reaches the worker as the
+  // same error, so an exclusive predecessor's stop waits for the gateway in the revision pass.
+  cleanupComplete = false;
+  cleanupFailure = new SandboxGatewayUnavailableError(
+    "OpenShell GetSandbox failed with gRPC status 14.",
+  );
+  await assert.rejects(driver.stopRevision(revision), (error) => error === cleanupFailure);
+  assert.equal(cleanupComplete, false);
 });
 
 test("stop and retirement end credential-source access through Sandbox cleanup", async () => {
@@ -15051,7 +15207,7 @@ test("retiring a running embedded revision waits for gateway Pods and removes ow
       runtime: {
         transportSecretPrefix: "transport",
         gatewayStorageClassName: "local-path",
-        channels: { secretPrefix: "channel", proxyUrl: "http://192.0.2.10:3128" },
+        channels: { proxyUrl: "http://192.0.2.10:3128" },
       },
     }),
   );
@@ -16304,9 +16460,9 @@ function workspaceSetupFixture(
         },
         namespace: options().resources.namespace,
       },
-      runtime: runtime
-        ? { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" }
-        : undefined,
+      ...(runtime
+        ? { runtime: { transportSecretPrefix: "transport", gatewayStorageClassName: "local-path" } }
+        : {}),
       ...computeOptions,
     }),
     {

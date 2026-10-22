@@ -6,8 +6,10 @@ import {
   newPage,
   repositoryCheckbox,
   setSlackSelection,
+  waitForEnabled,
 } from "./console-agents-browser-helpers.mjs";
 import { openCreateSecretDialog } from "./console-agents-test-support.mjs";
+import { expectDeploymentOutcome } from "./console-deployment-activity-helpers.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 
 for (const issuesEnabled of [true, false]) {
@@ -104,14 +106,14 @@ for (const issuesEnabled of [true, false]) {
     assert.equal(agent.executionMode, "dedicated");
     assert.deepEqual(agent.harnessAuth, { method: "api_key", source: modelSecret.ref });
     assert.deepEqual(agent.repositoryBindings, expectedBindings);
-    await page.getByRole("heading", { name: "Create new version" }).waitFor();
+    await page.getByRole("heading", { name: "Prepare this version" }).waitFor();
     await page
       .getByText(`application · ${label}, documentation · ${label}`, { exact: true })
       .waitFor();
     // The operator grant is deliberately separate from Console authentication
     // selection. Real managed IAM writes authorize the same Agent's model Secret.
     await grantModelAccess(agent);
-    await page.getByRole("button", { name: "Channels", exact: true }).click();
+    await page.getByRole("tab", { name: "Channels", exact: true }).click();
     await page.getByRole("button", { name: "Configure Slack", exact: true }).click();
     await setSlackSelection(
       page.getByRole("combobox", { name: "Channels", exact: true }),
@@ -144,7 +146,7 @@ for (const issuesEnabled of [true, false]) {
     const text = await page.locator("body").innerText();
     assert.equal(text.includes("xapp-synthetic-demo"), false);
     assert.equal(text.includes("xoxb-synthetic-demo"), false);
-    assert.equal(await deploy.isEnabled(), true);
+    await waitForEnabled(deploy);
     const admittedResponse = page.waitForResponse(
       (result) =>
         result.url() === `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}/deploy` &&
@@ -200,11 +202,8 @@ for (const issuesEnabled of [true, false]) {
     assert.equal(deployment.status, 200);
     assert.equal(deployment.data.deploymentId, revision.id);
     assert.equal(deployment.data.status, "queued");
-    await page
-      .locator(".deployment-outcome")
-      .filter({ hasText: "Recorded status: queued" })
-      .waitFor();
-    await page.getByRole("button", { name: "Configuration", exact: true }).click();
+    await expectDeploymentOutcome(page, "Queued");
+    await page.getByRole("tab", { name: "Configuration", exact: true }).click();
     await page
       .getByRole("heading", { name: `Version v${revision.revision}`, exact: true })
       .waitFor();

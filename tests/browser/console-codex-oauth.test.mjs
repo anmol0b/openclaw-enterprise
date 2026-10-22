@@ -12,6 +12,7 @@ import {
   login,
   nativeValues,
   newPage,
+  waitForEnabled,
 } from "./console-agents-browser-helpers.mjs";
 import { createReadyConsoleNamespace } from "./console-ready-namespace.mjs";
 
@@ -222,7 +223,7 @@ test("Codex OAuth console saves a credential source and reuses it for plugin edi
   const loginsBeforeBrowse = gateway.calls.filter(
     (call) => call.operation === "startDeviceAuthorization",
   ).length;
-  await page.getByRole("button", { name: "Plugins", exact: true }).click();
+  await page.getByRole("tab", { name: "Plugins", exact: true }).click();
   assert.equal(
     await page.getByRole("button", { name: "Sign in with OAuth", exact: true }).count(),
     0,
@@ -280,7 +281,7 @@ test("Codex OAuth console saves a credential source and reuses it for plugin edi
   assert.equal(withOtherSource.status, 200, JSON.stringify(withOtherSource.body));
 
   // Reconnection is a separate, explicit authentication save with a newly completed login.
-  await page.getByRole("button", { name: "Credentials", exact: true }).click();
+  await page.getByRole("tab", { name: "Credentials", exact: true }).click();
   assert.equal(await page.getByLabel("Authentication source").inputValue(), "credential_source");
   await signInReady(page, advanceApiClock);
   assert.deepEqual((await fixture.request("GET", agentPath)).data.harnessAuth, originalAuth);
@@ -398,7 +399,7 @@ test("saving ChatGPT OAuth before sign-in names the missing step and sends nothi
   await save.click();
   await page.getByText("Complete ChatGPT sign-in before saving.", { exact: true }).waitFor();
   await expectNoText(page, /Service unavailable/);
-  assert.equal(await save.isEnabled(), true);
+  await waitForEnabled(save);
   assert.equal(
     requests.some((request) => request.method === "PATCH" && request.path === agentPath),
     false,
@@ -420,8 +421,5 @@ test("sign-in unavailable at the credential service shows the API cause once", a
     )
     .waitFor();
   assert.equal(await page.getByRole("link", { name: "Open Codex sign-in" }).isVisible(), false);
-  assert.equal(
-    await page.getByRole("button", { name: "Sign in with OAuth", exact: true }).isEnabled(),
-    true,
-  );
+  await waitForEnabled(page.getByRole("button", { name: "Sign in with OAuth", exact: true }));
 });

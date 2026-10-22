@@ -394,6 +394,7 @@ func TestAgentLogsRejectsInvalidFlagsBeforeAnyRequest(t *testing.T) {
 		}
 	}
 	// --follow exits cleanly only when the lookup failed because of cancellation.
+	t.Setenv("OCC_NAMESPACE", "ns_55555555-5555-4555-8555-555555555555")
 	for _, follow := range []bool{false, true} {
 		args := []string{"agent", "logs", "agt_1", "--source", "gateway"}
 		if follow {
@@ -401,7 +402,8 @@ func TestAgentLogsRejectsInvalidFlagsBeforeAnyRequest(t *testing.T) {
 		}
 		stub := &runtimeLogStub{t: t}
 		_, _, err := runLogsCommand(t, context.Background(), stub, args...)
-		if err == nil || !strings.Contains(err.Error(), "has no readable revisions") {
+		// The hint keeps the selected Namespace so the copied command targets the same Agent.
+		if err == nil || !strings.Contains(err.Error(), `agent agt_1 has no readable revisions; run "occ --namespace ns_1 agent deploy agt_1" first`) {
 			t.Fatalf("follow=%v: expected a missing revision error, got %v", follow, err)
 		}
 		if len(stub.queries) != 0 {
@@ -878,7 +880,7 @@ func TestAgentRuntimePrintsALostHarnessSandboxFirst(t *testing.T) {
 		// A crash-looping Harness is told apart from a first start (finding 1043).
 		{
 			map[string]any{"state": "starting", "code": "HARNESS_RESTARTING", "exitCode": float64(1), "restarts": float64(3)},
-			"Harness Sandbox: starting (HARNESS_RESTARTING, last exit code 1, restart 3). The Harness process exited and OpenShell is restarting it; if this persists, read its Sandbox logs (occ agent logs AGENT_ID --source sandbox).\n\n",
+			"Harness Sandbox: starting (HARNESS_RESTARTING, last exit code 1, restart 3). The Harness process exited and OpenShell is restarting it; if this persists, read its Sandbox logs (occ --namespace ns_1 agent logs agt_1 --source sandbox --revision rev_1).\n\n",
 		},
 		{
 			map[string]any{"state": "starting", "code": "HARNESS_RESTARTING", "exitCode": float64(-1), "restarts": float64(1)},
@@ -903,7 +905,7 @@ func TestAgentRuntimePrintsALostHarnessSandboxFirst(t *testing.T) {
 		if test.harness != nil {
 			description["harness"] = test.harness
 		}
-		if err := app.printRuntime(description); err != nil {
+		if err := app.printRuntime(description, "ns_1", "agt_1", "rev_1"); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.HasPrefix(out.String(), test.want) {
@@ -912,7 +914,31 @@ func TestAgentRuntimePrintsALostHarnessSandboxFirst(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeNamesTheExactSandboxLogsCommandForARestartingHarness(t *testing.T) {
+	// A stale environment scope must not replace the explicitly selected Namespace in the hint.
+	t.Setenv("OCC_NAMESPACE", "ns_55555555-5555-4555-8555-555555555555")
+	restarting := map[string]any{"state": "starting", "code": "HARNESS_RESTARTING", "exitCode": float64(1), "restarts": float64(2)}
+	for _, args := range [][]string{
+		{"agent", "runtime", "agt_1", "--revision", "rev_2"},
+		// The default selection reads the newer revision, so the hint pins it.
+		{"agent", "runtime", "agt_1"},
+	} {
+		stub := &runtimeLogStub{t: t, activeID: "rev_1", revisions: `[{"id":"rev_2","revision":2},{"id":"rev_1","revision":1}]`, podless: []string{"rev_2"}, harness: restarting}
+		out, _, err := runLogsCommand(t, context.Background(), stub, args...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		want := "Harness Sandbox: starting (HARNESS_RESTARTING, last exit code 1, restart 2). The Harness process exited and OpenShell is restarting it; " +
+			"if this persists, read its Sandbox logs (occ --namespace ns_1 agent logs agt_1 --source sandbox --revision rev_2).\n\n"
+		if !strings.HasPrefix(out, want) {
+			t.Errorf("%v: output = %q, want prefix %q", args, out, want)
+		}
+	}
+}
+
 func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
+	// A stale environment scope must not replace the explicitly selected Namespace in the hint.
+	t.Setenv("OCC_NAMESPACE", "ns_55555555-5555-4555-8555-555555555555")
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
@@ -933,7 +959,7 @@ func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
 	if !strings.Contains(out.String(), "stopped-agent") {
 		t.Fatalf("stdout = %q", out.String())
 	}
-	if want := "notice: stop requested; run \"occ agent deploy agt_1\" to start the Agent again\n"; errOut.String() != want {
+	if want := "notice: stop requested; run \"occ --namespace ns_1 agent deploy agt_1\" to start the Agent again\n"; errOut.String() != want {
 		t.Fatalf("stderr = %q, want %q", errOut.String(), want)
 	}
 	// Structured output stays machine-readable: the notice goes to stderr only.
@@ -948,7 +974,7 @@ func TestAgentStopNamesTheDeployCommandThatStartsTheAgentAgain(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.String()), &decoded); err != nil || decoded["id"] != "agt_1" {
 		t.Fatalf("json stdout = %q, %v", out.String(), err)
 	}
-	if want := "notice: stop requested; run \"occ agent deploy agt_1\" to start the Agent again\n"; errOut.String() != want {
+	if want := "notice: stop requested; run \"occ --namespace ns_1 agent deploy agt_1\" to start the Agent again\n"; errOut.String() != want {
 		t.Fatalf("json stderr = %q, want %q", errOut.String(), want)
 	}
 	stop, _, err := New(io.Discard, io.Discard).Find([]string{"agent", "stop"})
@@ -1007,6 +1033,7 @@ func TestRedirectIsReportedWithItsTargetAndNotFollowed(t *testing.T) {
 		name     string
 		location string
 		want     string
+		hostCase bool
 	}{
 		{
 			name:     "other origin",
@@ -1014,18 +1041,27 @@ func TestRedirectIsReportedWithItsTargetAndNotFollowed(t *testing.T) {
 			want:     "redirected to https://" + strings.TrimPrefix(target.URL, "http://") + "/installation; occ does not follow redirects, so set OCC_URL (or --url) to https://" + strings.TrimPrefix(target.URL, "http://") + " ",
 		},
 		{name: "same origin", location: "/elsewhere/installation", want: "/elsewhere/installation; occ does not follow redirects, and OCC_URL must be the origin that serves the OCC API directly"},
+		{name: "same origin host case", hostCase: true, want: "/elsewhere/installation; occ does not follow redirects, and OCC_URL must be the origin that serves the OCC API directly"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var sawKey string
 			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				sawKey = r.Header.Get("x-api-key")
-				w.Header().Set("location", testCase.location)
+				location := testCase.location
+				if testCase.hostCase {
+					location = "http://" + strings.ToLower(r.Host) + "/elsewhere/installation"
+				}
+				w.Header().Set("location", location)
 				w.WriteHeader(http.StatusPermanentRedirect)
 			}))
 			defer origin.Close()
 			keyFile := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
 			command := New(io.Discard, io.Discard)
-			command.SetArgs([]string{"installation", "get", "--url", origin.URL, "--service-key-file", keyFile})
+			originURL := origin.URL
+			if testCase.hostCase {
+				originURL = strings.Replace(originURL, "127.0.0.1", "LOCALHOST", 1)
+			}
+			command.SetArgs([]string{"installation", "get", "--url", originURL, "--service-key-file", keyFile})
 			err := command.Execute()
 			if err == nil {
 				t.Fatal("expected the redirect to fail the command")
@@ -1143,5 +1179,37 @@ func TestExplicitEmptyFlagValuesAreRefusedBeforeAnyWork(t *testing.T) {
 	command.SetArgs(append(slices.Clone(connection), "agent", "runtime", "agt_1", "--revision", "rev_1", "--ca-bundle="))
 	if err := command.Execute(); err == nil || requests != 1 {
 		t.Fatalf("--ca-bundle=: error = %v after %d requests, want the server's error after 1", err, requests)
+	}
+}
+
+// The real client must retain policy diagnostics through the ordinary CLI error path.
+func TestPolicyUpdatePrintsConfigurationDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.URL.Path != "/namespaces/"+testNamespaceID+"/agents/"+testAgentID+"/sandbox-policy/networking" {
+			t.Errorf("unexpected policy request: %s %s", request.Method, request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusConflict)
+		fmt.Fprint(writer, `{"error":{"code":"RESOURCE_CONFLICT","message":"The requested network policy exceeds the Installation delegation ceiling.","details":[{"path":"/additions/0","code":"OUTSIDE_CEILING","message":"The grant exceeds the Installation delegation ceiling."},{"path":"/additions/1","code":"INVALID_VALUE","message":"invalid \u001b[31mvalue","providerPayload":"must-not-print"},{"path":"/additions/2","code":"INVALID_VALUE","message":"invalid \u007fvalue"},{"path":"/additions/3","code":"INVALID_VALUE","message":"invalid \u009bvalue"}]},"meta":{}}`)
+	}))
+	defer server.Close()
+	key := writeKeyFile(t, `{"data":{"key":"test-key"}}`)
+	file := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(file, []byte(`{"expectedVersion":1,"additions":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := New(io.Discard, io.Discard)
+	command.SetArgs([]string{"--url", server.URL, "--service-key-file", key, "--namespace", testNamespaceID, "agent", "policy", "update", testAgentID, "--file", file})
+	err := command.Execute()
+	if err == nil {
+		t.Fatal("policy rejection was not returned")
+	}
+	for _, want := range []string{"The requested network policy exceeds the Installation delegation ceiling.", `"path":"/additions/0"`, `"code":"OUTSIDE_CEILING"`, `"message":"The grant exceeds the Installation delegation ceiling."`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing diagnostic %q in %s", want, err)
+		}
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\x7f\u009b") || strings.Contains(err.Error(), "/additions/1") || strings.Contains(err.Error(), "/additions/2") || strings.Contains(err.Error(), "/additions/3") || strings.Contains(err.Error(), "providerPayload") || strings.Contains(err.Error(), "must-not-print") {
+		t.Fatalf("unsafe error fields were printed: %q", err.Error())
 	}
 }

@@ -171,6 +171,11 @@ ${body}`,
   return output;
 }
 
+// The fixture's 2 s exit grace and 60 s backstop leave a real file's runner time to report. The
+// one-test files below take a shorter grace (and backstop) so their own waits stay short; each
+// wait they race stays longer than the grace, as the defaults are.
+const exitGraceMs = 500;
+
 // Finding 1223: a teardown step left running past its limit can hold its process open (a pool's
 // socket, a child), so the file sat idle after its last test until the runner's file timeout
 // killed it. A file that abandoned a step now exits once its own teardown is done. Runs the
@@ -180,7 +185,7 @@ test("an abandoned teardown step that holds its process open does not keep the f
     t,
     `// A root after hook registered after cleanup, slower than the exit grace, still finishes.
 after(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  await new Promise((resolve) => setTimeout(resolve, ${exitGraceMs * 2}));
   console.log("later after hook finished");
 });
 test("a stuck step is abandoned at its limit", async () => {
@@ -188,6 +193,7 @@ test("a stuck step is abandoned at its limit", async () => {
   await abandonStep();
 });
 `,
+    { fixtureOptions: { exitGraceMs } },
   );
   // Finding 1246: the exit grace starts once every root after hook has run, not at cleanup.
   assert.match(output, /later after hook finished/);
@@ -200,6 +206,7 @@ test("a teardown step abandoned by a later root after hook does not keep the fil
     `after(abandonStep);
 test("nothing is abandoned during the tests", () => {});
 `,
+    { fixtureOptions: { exitGraceMs } },
   );
 });
 
@@ -214,7 +221,7 @@ test("a later root after hook that fails after an abandoned step does not keep t
 });
 test("a stuck step is abandoned at its limit", abandonStep);
 `,
-    { fixtureOptions: { exitBackstopMs: 4_000 }, status: 1 },
+    { fixtureOptions: { exitGraceMs, exitBackstopMs: exitGraceMs * 2 }, status: 1 },
   );
   assert.match(output, /later after hook failed/);
 });
@@ -229,10 +236,55 @@ test("a later root after hook that abandons a step and fails does not keep the f
 });
 test("nothing is abandoned during the tests", () => {});
 `,
-    { fixtureOptions: { exitBackstopMs: 4_000 }, status: 1 },
+    { fixtureOptions: { exitGraceMs, exitBackstopMs: exitGraceMs * 2 }, status: 1 },
   );
   assert.match(output, /later after hook failed/);
 });
+
+// Runs a test's steps within `budgetMs`, kept under the test's own timeout. Each step waits only
+// for what is left of the budget, so a step that never ends fails by name, with the steps before
+// it, their times, and `describe()`, instead of the test timeout naming nothing (finding 1945).
+// A step's own failure (a waitFor limit or an assertion) keeps its message and gains the same.
+function stepBudget(budgetMs, describe = () => undefined) {
+  const started = Date.now();
+  const done = [];
+  const where = (name, stepStarted) => {
+    const detail = describe();
+    return [
+      `step "${name}" after ${Date.now() - stepStarted} ms (${Date.now() - started} ms into the budget)`,
+      `earlier steps: ${done.length > 0 ? done.join(", ") : "none"}`,
+      ...(detail === undefined ? [] : [detail]),
+    ].join("; ");
+  };
+  return async function step(name, run) {
+    const stepStarted = Date.now();
+    let timer;
+    let budgetError;
+    const expired = new Promise((resolve, reject) => {
+      timer = setTimeout(
+        () => {
+          budgetError = new Error(
+            `Timed out within the ${budgetMs} ms step budget at ${where(name, stepStarted)}.`,
+          );
+          reject(budgetError);
+        },
+        Math.max(0, started + budgetMs - stepStarted),
+      );
+    });
+    try {
+      const value = await Promise.race([Promise.resolve().then(run), expired]);
+      done.push(`${name} ${Date.now() - stepStarted} ms`);
+      return value;
+    } catch (error) {
+      if (error === budgetError) {
+        throw error;
+      }
+      throw new Error(`${error?.message ?? error} (${where(name, stepStarted)})`, { cause: error });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
 
 // The worker is serial. A Compute wait that only saves a later pass asks whether
 // other Work is waiting and ends early when it is, so another Agent's deploy
@@ -243,9 +295,16 @@ test(
   async (context) => {
     const { computeWorkWaiting } =
       await import("../../apps/controller/src/drivers/compute/operation-context.ts");
-    const fixture = await setup(context);
-    const first = await fixture.agent("waiting-first", { executionMode: "dedicated" });
-    const second = await fixture.agent("waiting-second", { executionMode: "dedicated" });
+    // Where the first Agent's pass is, for a step that runs out of time.
+    let pass = "not started";
+    const step = stepBudget(27_000, () => `first pass: ${pass}`);
+    const fixture = await step("revision fixture setup", () => setup(context));
+    const first = await step("the first Agent's creation", () =>
+      fixture.agent("waiting-first", { executionMode: "dedicated" }),
+    );
+    const second = await step("the second Agent's creation", () =>
+      fixture.agent("waiting-second", { executionMode: "dedicated" }),
+    );
     const prepared = [];
     let secondRevision;
     let wait;
@@ -258,11 +317,16 @@ test(
         }
         // The first Agent's pass waits, as for its node to pair; nothing else is
         // queued yet, so nothing is waiting for the worker.
+        pass = "asking whether Work waits before the second Agent's revision";
         const before = await computeWorkWaiting();
+        pass = "admitting the second Agent's revision";
         secondRevision = await fixture.revision(second, 1);
         const started = Date.now();
         let endedEarly = false;
+        let checks = 0;
         while (Date.now() - started < 10_000) {
+          checks += 1;
+          pass = `waiting for other Work (check ${checks}, ${Date.now() - started} ms)`;
           if (await computeWorkWaiting()) {
             endedEarly = true;
             break;
@@ -270,17 +334,26 @@ test(
           await delay(25);
         }
         wait = { before, endedEarly, ms: Date.now() - started };
-        return {
+        pass = `preparing after a ${wait.ms} ms wait (ended early: ${endedEarly})`;
+        const result = {
           ...(await fixture.compute.prepareRevision(revision, deploymentContext)),
           ready: false,
         };
+        pass = `ended pending after a ${wait.ms} ms wait (ended early: ${endedEarly})`;
+        return result;
       },
     };
-    await fixture.start(compute);
-    const firstRevision = await fixture.revision(first, 1);
-    await waitFor("the second Agent to deploy during the first pass", async () => secondRevision);
-    await fixture.work(secondRevision, "succeeded");
-    await fixture.work(firstRevision, "succeeded");
+    await step("worker start", () => fixture.start(compute));
+    const firstRevision = await step("the first Agent's revision admission", () =>
+      fixture.revision(first, 1),
+    );
+    await step("the second Agent's revision during the first pass", () =>
+      waitFor("the second Agent to deploy during the first pass", async () => secondRevision),
+    );
+    await step("the second Agent's Work to succeed", () =>
+      fixture.work(secondRevision, "succeeded"),
+    );
+    await step("the first Agent's Work to succeed", () => fixture.work(firstRevision, "succeeded"));
     assert.equal(wait.before, false, "the pass's own Agent is not other Work");
     assert.equal(wait.endedEarly, true);
     assert.ok(wait.ms < 5_000, `the wait ended early (${wait.ms} ms)`);

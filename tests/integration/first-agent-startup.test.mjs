@@ -12,6 +12,7 @@ import {
   firstAgentPriorPatPolicyWarning,
   firstAgentRevisionValuesMatch,
 } from "../../scripts/first-agent-model.mjs";
+import { listen } from "../helpers/listen.mjs";
 
 const repository = await realpath(resolve(import.meta.dirname, "../.."));
 const firstAgent = join(repository, "scripts", "first-agent.mjs");
@@ -267,6 +268,39 @@ test("first-Agent control UI requires the launcher-owned native admin endpoint",
   assert.match(await readFile(engineLog, "utf8"), /compose .* port controller 3000/);
 });
 
+test("first-Agent admits a native admin origin on the default HTTPS port", async (t) => {
+  const { directory, engineLog, env } = await fixture(t, "openshell");
+  const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
+  const host = "console.occ-dev-first-agent-test.oce.localhost";
+  // The canonical origin current Local Setup records for port 443, the explicit
+  // :443 form older Local Setup recorded, and forms that are still refused.
+  for (const [browserOrigin, admitted] of [
+    [`https://${host}`, true],
+    [`https://${host}:443`, true],
+    [`https://${host}:443/`, false],
+    [`https://${host}/`, false],
+    [`https://${host}:0443`, false],
+  ]) {
+    await rm(engineLog, { force: true });
+    await writeFile(
+      join(directory, "state.json"),
+      `${JSON.stringify({
+        ...state,
+        browserOrigin,
+        nativeAdminDomain: "agents.occ-dev-first-agent-test.oce.localhost",
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const output = runFirstAgent(env, "--harness", "codex", "--control-ui");
+    if (admitted) {
+      assert.match(output, /docker did not complete successfully/, browserOrigin);
+    } else {
+      assert.match(output, /native admin endpoint is invalid/, browserOrigin);
+      await assert.rejects(readFile(engineLog), { code: "ENOENT" });
+    }
+  }
+});
+
 test("first-Agent runs psql through the k3d PostgreSQL StatefulSet", async (t) => {
   const { directory, engineLog, env } = await fixture(t, "none");
   const server = createServer((request, response) => {
@@ -279,9 +313,7 @@ test("first-Agent runs psql through the k3d PostgreSQL StatefulSet", async (t) =
     response.writeHead(data === undefined ? 404 : 200, { "content-type": "application/json" });
     response.end(JSON.stringify(data === undefined ? { error: { code: "NOT_FOUND" } } : { data }));
   });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  t.after(() => server.close());
+  await listen(t, server);
   const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
   await writeFile(
     join(directory, "state.json"),
