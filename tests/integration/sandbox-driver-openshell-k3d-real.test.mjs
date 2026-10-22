@@ -7439,6 +7439,16 @@ test(
       },
       caller: "authenticated Control UI operator.admin through Envoy",
       modelTurns: [],
+      modelProbeOmissions:
+        selectedHarness === "codex"
+          ? [
+              {
+                kind: "command-conversion-denied",
+                reason:
+                  "Source/schema coverage only: Codex's advertised automations schema omits command payloads, and the Gateway adapter validates callback arguments against that schema. This case does not test an invalid model invocation.",
+              },
+            ]
+          : [],
       directInvocationProbes: [],
     };
     // Retain completed-phase evidence even if a later assertion fails.
@@ -7470,8 +7480,11 @@ test(
     ).stdout.trim();
     const taskMarker = `TASK-${randomUUID()}`;
     const taskPath = `/tmp/${taskMarker}`;
+    // The native proof needs the terminal exec result rather than a process handle.
+    const taskTool =
+      selectedHarness === "openclaw" ? "exec with awaitResults: true" : "your shell tool";
     await turn(
-      `Use your shell tool to run node -e ${JSON.stringify(`require('node:fs').writeFileSync('${taskPath}',require('node:os').hostname());console.log('${taskMarker}')`)}. Report the real tool output.`,
+      `Use ${taskTool} to run node -e ${JSON.stringify(`require('node:fs').writeFileSync('${taskPath}',require('node:os').hostname());console.log('${taskMarker}')`)}. Report the real tool output.`,
       taskMarker,
     );
     const taskEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
@@ -7644,22 +7657,31 @@ test(
       toolsAllow: [],
     };
     const ordinaryBefore = await client.request("cron.get", { id: job.id });
-    for (const [kind, patch, resultPattern] of [
-      [
-        "command-conversion-denied",
-        { payload: commandPayload },
-        ["automation command payloads cannot be created or edited", "job.payload.kind:"],
-      ],
+    const updateProbes = [
       [
         "cross-agent-session-target-denied",
         { sessionTarget: `session:agent:outside-${randomUUID()}:main` },
         "session target outside caller scope",
       ],
-    ]) {
+    ];
+    // Native OC exposes the generic dispatcher; Codex does not retain it and omits
+    // command payloads from its schema. Keep this invalid-input probe native-only.
+    if (selectedHarness === "openclaw") {
+      updateProbes.unshift([
+        "command-conversion-denied",
+        { payload: commandPayload },
+        ["automation command payloads cannot be created or edited", "job.payload.kind:"],
+      ]);
+    }
+    for (const [kind, patch, resultPattern] of updateProbes) {
       const marker = `UPDATE-DENIED-${randomUUID()}`;
       const args = { action: "update", jobId: job.id, job: patch };
+      const invocation =
+        kind === "command-conversion-denied"
+          ? `dispatch_action exactly once with ${JSON.stringify({ id: "openclaw:core:automations", args })}`
+          : `automations exactly once with ${JSON.stringify(args)}`;
       await turn(
-        `Call automations exactly once with ${JSON.stringify(args)}. Report the returned error; do not retry, substitute a job, or use another interface.`,
+        `Call ${invocation}. Report the returned error; do not retry, substitute a job, or use another interface.`,
         marker,
       );
       const evidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
@@ -7669,6 +7691,9 @@ test(
         expectedArguments: args,
         resultPattern,
       });
+      if (kind === "command-conversion-denied") {
+        assert.equal(evidence.toolName, "dispatch_action");
+      }
       assert.deepEqual(await client.request("cron.get", { id: job.id }), ordinaryBefore);
       assert.equal(
         await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath),
@@ -7704,7 +7729,7 @@ test(
       const searchRequests = searchBatches.map(({ present, absent }) => ({
         queries: [...present, ...absent].map((query) => ({ query, limit: 1 })),
       }));
-      const childTask = `Use exec to run node -e 'console.log(6*7, "${childResult}")'. Use tool_search once for each of these exact requests: ${JSON.stringify(searchRequests)}. Inspect the actual returned catalog; do not infer availability from direct schemas. If agents_list is available, call it once. If automations is available, try action=update, jobId=${foreignJob.id}, job={"name":"child-must-not-set-this"} once. Otherwise report those tools are unavailable. Do not use another interface. End your reply with exactly ${childMarker}.`;
+      const childTask = `Use exec with awaitResults: true to run node -e 'console.log(6*7, "${childResult}")'. Use tool_search once for each of these exact requests: ${JSON.stringify(searchRequests)}. Inspect the actual returned catalog; do not infer availability from direct schemas. If agents_list is available, call it once. If automations is available, try action=update, jobId=${foreignJob.id}, job={"name":"child-must-not-set-this"} once. Otherwise report those tools are unavailable. Do not use another interface. End your reply with exactly ${childMarker}.`;
       const spawnHistory = await turn(
         `Use sessions_spawn exactly once with label=${childLabel} and task=${JSON.stringify(childTask)}. Do not perform its task yourself.`,
         spawnMarker,

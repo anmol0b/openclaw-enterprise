@@ -696,6 +696,13 @@ const sessionEvidenceScript = String.raw`
           isError: Boolean(isError),
           matchesTarget,
           exitCode: Number.isInteger(targetResult?.details?.exitCode) ? targetResult.details.exitCode : undefined,
+          resultDetails: {
+            type: targetResult?.details === null ? "null" : typeof targetResult?.details,
+            keys: targetResult?.details && typeof targetResult.details === "object"
+              ? Object.keys(targetResult.details).slice(0, 16).map((key) => key.slice(0, 64)) : [],
+            status: ["running", "completed", "failed", "approval-pending", "pending", "deferred", "blocked", "error"]
+              .includes(targetResult?.details?.status) ? targetResult.details.status : undefined,
+          },
           errorText: isError ? textOf(targetResult?.content) : undefined,
           // Native Codex emits this terminal reason when MCP approval is denied.
           deniedByUser: textOf(message.content).includes("user rejected MCP tool call"),
@@ -1718,7 +1725,7 @@ export function createNativePluginAssertions({
       assert.equal(
         result.exitCode,
         options.expectedExitCode,
-        `native tool ${matched.name} must exit with code ${options.expectedExitCode}`,
+        `native tool ${matched.name} must exit with code ${options.expectedExitCode}: ${JSON.stringify(result.resultDetails)}`,
       );
     }
     if (proofMode === "codex") {
@@ -1782,7 +1789,7 @@ export function createNativePluginAssertions({
     assert.equal(
       evidence.calls.length,
       1,
-      "the denied turn must attempt exactly the requested tool",
+      `the denied turn must attempt exactly the requested tool: ${JSON.stringify(evidence.diagnostics)}`,
     );
     assert.equal(evidence.results.length, 1, "the denied call must have a terminal result");
     assert.equal(evidence.results[0].toolCallId, evidence.calls[0].id);

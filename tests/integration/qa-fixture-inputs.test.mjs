@@ -2112,7 +2112,11 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
   } finally {
     restore.close();
   }
-  for (const details of [{ exitCode: 1 }, undefined]) {
+  for (const details of [
+    { exitCode: 1 },
+    undefined,
+    { status: "running", sessionId: "fixture-process" },
+  ]) {
     const text = JSON.stringify({ type: "message", message: { ...rows[2], details } });
     const update = new DatabaseSync(databasePath);
     try {
@@ -2124,7 +2128,9 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
     }
     await assert.rejects(
       native.assertSessionToolCallEvidence({}, { ...shellEvidence, expectedExitCode: 0 }),
-      /must exit with code 0/,
+      details?.status === "running"
+        ? /must exit with code 0: .*"status":"running"/
+        : /must exit with code 0/,
     );
   }
   // Tools without structured exit status retain their existing evidence contract.
@@ -2222,6 +2228,24 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
       update.close();
     }
   }
+  await t.test("does not treat an assistant refusal as a denied tool call", async () => {
+    replaceTranscript([
+      { role: "user", content: "denied-fixture" },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "I cannot call that tool. denied-fixture" }],
+        stopReason: "stop",
+      },
+    ]);
+    await assert.rejects(native.assertSessionToolPolicyDeniedEvidence({}, denial), (error) => {
+      assert.match(error.message, /the denied turn must attempt exactly the requested tool/);
+      const [summary] = error.message.split("\n");
+      const diagnostic = JSON.parse(summary.slice(summary.indexOf("{")));
+      assert.deepEqual(diagnostic.observedToolNames, []);
+      assert.equal(diagnostic.finalAssistantDiagnostics.mentionsUnavailable, true);
+      return true;
+    });
+  });
   const dispatchedCall = {
     role: "assistant",
     content: [
