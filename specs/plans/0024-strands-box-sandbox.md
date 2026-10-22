@@ -46,17 +46,22 @@ Credential Proxy remains outside this phase.
 
 ## Current evidence and gaps
 
-The fixed-source Box build, selected containment tests, restricted Pod native
-command execution, and persistent transport prerequisites have run. These
-probes do not implement a Driver or exercise OCE deployment. The existing OCE
-Codex profile alone does not run Box.
+The Bookworm runtime and fixed-source Box build, containment probes, and
+persistent transport prerequisites have run. A local real Helm installation has
+completed database initialization and started the API and Worker. Normal APIs
+created a dedicated Codex Agent using an explicitly synthetic model credential.
+The new Driver is wired in the local prototype; no model tool turn has passed.
 
-A valid, authorized model credential and its supported authentication
-configuration are required before the model lane.
+Restricted tenant admission rejects the candidate's `procMount: Unmasked`, even
+with Pod user namespaces enabled. Keep that as an explicit compatibility gap.
+A scoped local admission exception, if authorized, demonstrates conditional
+functionality only. It does not qualify the default OCE security configuration.
 
-Runtime ABI, secret handoff, provider network grants, original startup command,
-and all OCE lifecycle behavior remain required proof. Nothing in this plan
-authorizes a production rollout or changes an internal runtime version pin.
+A personal API key was separately verified with direct native Codex, but it has
+not been delivered to this installation. Finish credential-free startup checks
+before using a few short model calls. Record every remaining packaging, mount,
+startup, and lifecycle gap. No production rollout or internal pin change is
+authorized.
 
 ## Change record
 

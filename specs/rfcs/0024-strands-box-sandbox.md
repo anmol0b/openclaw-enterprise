@@ -93,13 +93,35 @@ select that revision alone. Cleanup removes only owned revision resources,
 waits for workload termination, and retains the Agent workspace for redeploy.
 Namespace cleanup uses the same ownership checks across that Namespace.
 
-The initial qualified Pod candidate uses `hostUsers: false`, UID/GID 1000,
+The proposed Pod candidate uses `hostUsers: false`, UID/GID 1000,
 `allowPrivilegeEscalation: false`, dropped capabilities, a read-only root, bounded
 writable volumes, a Localhost seccomp profile, and `procMount: Unmasked` inside
 the Pod user namespace. This last setting is a material node/admission requirement,
 not permission to expose host namespaces or run a privileged Harness. Node
 provisioning owns installation of the profile. OCE does not install it through
 a privileged workload on shared clusters.
+
+## Restricted admission compatibility gap
+
+A real local OCE installation admitted a dedicated Codex revision through the
+normal API and reached the new Driver. Its Deployment could not create a Pod:
+OCE tenant Namespaces enforce the Kubernetes Restricted standard, which refuses
+`procMount: Unmasked` even with `hostUsers: false`. Removing that setting admitted
+the diagnostic Pod, but the fixed Box build then failed while mounting its fresh
+`/proc` with `Operation not permitted`. These are separate observed failures.
+
+Do not silently lower tenant admission or report this as default OCE compatibility.
+A specifically authorized local admission exception can test conditional
+functionality, but a supported deployment needs an explicit reviewed placement
+or admission design, or a compatible Box implementation. The Kubernetes
+[user namespace documentation](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/)
+also retains the default/empty ProcMount requirement under Restricted.
+
+The credential-free startup lane additionally requires the complete three-binary
+Box package, a canonical `/var/run` identity-token path in the adapter image,
+directory grants for rotating Secret projections, exact executable grants, and
+non-overlapping filesystem grants. These corrections are local work in progress;
+a regular Agent model tool turn and lifecycle qualification have not passed.
 
 ## Kubernetes provider routing refinement
 
