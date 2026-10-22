@@ -7419,6 +7419,24 @@ test(
           ])
         ).stdout,
       );
+    // The native gpt-6-astra deployment uses Code Mode. Bind its complete program
+    // so a returned value proves this real call rather than model-written JSON.
+    const codeModeCallSpec = (code) => {
+      const codeModeCall = { title: "Gateway policy qualification", code, awaitResults: true };
+      return {
+        prompt: `Call exec exactly once with ${JSON.stringify(codeModeCall)}.`,
+        evidence: { toolName: "exec", codeModeCall },
+      };
+    };
+    const toolCallSpec = (name, args) =>
+      selectedHarness === "openclaw"
+        ? codeModeCallSpec(`return await ${name}(${JSON.stringify(args)});`)
+        : {
+            prompt: `Call ${name} exactly once with ${JSON.stringify(args)}.`,
+            evidence: { toolName: name, expectedArguments: args },
+          };
+    const catalogExpression = ({ present, absent }) =>
+      `catalog.all().filter(tool => ${JSON.stringify([...present, ...absent])}.includes(tool.toolName)).map(tool => ({name: tool.toolName, source: tool.source, callableName: tool.callableName}))`;
     const proof = {
       scenarioComplete: false,
       harness: selectedHarness,
@@ -7480,17 +7498,18 @@ test(
     ).stdout.trim();
     const taskMarker = `TASK-${randomUUID()}`;
     const taskPath = `/tmp/${taskMarker}`;
-    // The native proof needs the terminal exec result rather than a process handle.
-    const taskTool =
-      selectedHarness === "openclaw" ? "exec with awaitResults: true" : "your shell tool";
+    const taskCommand = `node -e ${JSON.stringify(`require('node:fs').writeFileSync('${taskPath}',require('node:os').hostname());console.log('${taskMarker}')`)}`;
+    const nativeTask = toolCallSpec("exec", { command: taskCommand, awaitResults: true });
     await turn(
-      `Use ${taskTool} to run node -e ${JSON.stringify(`require('node:fs').writeFileSync('${taskPath}',require('node:os').hostname());console.log('${taskMarker}')`)}. Report the real tool output.`,
+      selectedHarness === "openclaw"
+        ? nativeTask.prompt
+        : `Use your shell tool to run ${taskCommand}. Report the real tool output.`,
       taskMarker,
     );
     const taskEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
       sessionKey,
       turnMarker: taskMarker,
-      toolName: selectedHarness === "codex" ? "bash" : "exec",
+      ...(selectedHarness === "openclaw" ? nativeTask.evidence : { toolName: "bash" }),
       resultPattern: taskMarker,
       ...(selectedHarness === "openclaw" ? { expectedExitCode: 0 } : {}),
     });
@@ -7513,6 +7532,7 @@ test(
     });
 
     const scheduledMarker = `SCHEDULED-${randomUUID()}`;
+    const scheduledCall = toolCallSpec("agents_list", {});
     const name = `policy-schedule-${randomUUID()}`;
     const jobDefinition = {
       name,
@@ -7522,20 +7542,18 @@ test(
       wakeMode: "now",
       payload: {
         kind: "agentTurn",
-        message: `Call agents_list once, then reply with ${scheduledMarker}.`,
+        message: `${scheduledCall.prompt} Then reply with ${scheduledMarker}.`,
         toolsAllow: ["agents_list"],
       },
       delivery: { mode: "none" },
     };
     const createMarker = `CREATE-${randomUUID()}`;
-    await turn(
-      `Use automations once with action=add and job=${JSON.stringify(jobDefinition)}. Create this disabled ordinary Agent task without changing its requested fields.`,
-      createMarker,
-    );
+    const createCall = toolCallSpec("automations", { action: "add", job: jobDefinition });
+    await turn(createCall.prompt, createMarker);
     await native.assertSessionToolCallEvidence(topology.agent, {
       sessionKey,
       turnMarker: createMarker,
-      toolName: "automations",
+      ...createCall.evidence,
       resultPattern: name,
     });
     const listed = await client.request("cron.list", { includeDisabled: true });
@@ -7548,15 +7566,12 @@ test(
     const updatedName = `policy-updated-${randomUUID()}`;
     const updateMarker = `UPDATE-${randomUUID()}`;
     const ordinaryUpdate = { action: "update", jobId: job.id, job: { name: updatedName } };
-    await turn(
-      `Call automations exactly once with ${JSON.stringify(ordinaryUpdate)}. Do not change any other job fields.`,
-      updateMarker,
-    );
+    const updateCall = toolCallSpec("automations", ordinaryUpdate);
+    await turn(updateCall.prompt + " Do not change any other job fields.", updateMarker);
     const updateEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
       sessionKey,
       turnMarker: updateMarker,
-      toolName: "automations",
-      expectedArguments: ordinaryUpdate,
+      ...updateCall.evidence,
       resultPattern: updatedName,
     });
     const updatedJob = await client.request("cron.get", { id: job.id });
@@ -7565,14 +7580,12 @@ test(
     assert.deepEqual(updatedJob.payload, job.payload);
     proof.modelTurns.push({ kind: "scoped-update", ...updateEvidence, jobId: job.id });
     const runMarker = `RUN-${randomUUID()}`;
-    await turn(
-      `Use automations once with action=run, runMode=force and jobId=${job.id}. Do not create another job.`,
-      runMarker,
-    );
+    const runCall = toolCallSpec("automations", { action: "run", runMode: "force", jobId: job.id });
+    await turn(runCall.prompt + " Do not create another job.", runMarker);
     await native.assertSessionToolCallEvidence(topology.agent, {
       sessionKey,
       turnMarker: runMarker,
-      toolName: "automations",
+      ...runCall.evidence,
       resultPattern: "runId",
     });
     const run = await waitFor(
@@ -7595,7 +7608,7 @@ test(
     const scheduledEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
       sessionKey: scheduledSessionKey,
       turnMarker: scheduledMarker,
-      toolName: "agents_list",
+      ...scheduledCall.evidence,
       resultPattern: "main",
     });
     assert.equal(
@@ -7623,15 +7636,19 @@ test(
     });
     const foreignBefore = await client.request("cron.get", { id: foreignJob.id });
     const foreignMarker = `FOREIGN-${randomUUID()}`;
+    const foreignCall = toolCallSpec("automations", {
+      action: "update",
+      jobId: foreignJob.id,
+      job: { name: "model-must-not-set-this" },
+    });
     await turn(
-      `Call automations exactly once with action=update, jobId=${foreignJob.id}, job={"name":"model-must-not-set-this"}. Report the returned error; do not retry, substitute a job, or use another interface.`,
+      foreignCall.prompt + " Report the returned error; do not retry or use another interface.",
       foreignMarker,
     );
     const foreignEvidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
       sessionKey,
       turnMarker: foreignMarker,
-      toolName: "automations",
-      expectedArguments: { action: "update", jobId: foreignJob.id },
+      ...foreignCall.evidence,
       resultPattern: `Automation not found: ${foreignJob.id}`,
     });
     assert.deepEqual(await client.request("cron.get", { id: foreignJob.id }), foreignBefore);
@@ -7664,8 +7681,8 @@ test(
         "session target outside caller scope",
       ],
     ];
-    // Native OC exposes the generic dispatcher; Codex does not retain it and omits
-    // command payloads from its schema. Keep this invalid-input probe native-only.
+    // Code Mode can submit these exact arguments to its real callable. Codex's
+    // schema omits command payloads; its invalid-input coverage remains source-only.
     if (selectedHarness === "openclaw") {
       updateProbes.unshift([
         "command-conversion-denied",
@@ -7676,24 +7693,17 @@ test(
     for (const [kind, patch, resultPattern] of updateProbes) {
       const marker = `UPDATE-DENIED-${randomUUID()}`;
       const args = { action: "update", jobId: job.id, job: patch };
-      const invocation =
-        kind === "command-conversion-denied"
-          ? `dispatch_action exactly once with ${JSON.stringify({ id: "openclaw:core:automations", args })}`
-          : `automations exactly once with ${JSON.stringify(args)}`;
+      const invocation = toolCallSpec("automations", args);
       await turn(
-        `Call ${invocation}. Report the returned error; do not retry, substitute a job, or use another interface.`,
+        invocation.prompt + " Report the returned error; do not retry or use another interface.",
         marker,
       );
       const evidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
         sessionKey,
         turnMarker: marker,
-        toolName: "automations",
-        expectedArguments: args,
+        ...invocation.evidence,
         resultPattern,
       });
-      if (kind === "command-conversion-denied") {
-        assert.equal(evidence.toolName, "dispatch_action");
-      }
       assert.deepEqual(await client.request("cron.get", { id: job.id }), ordinaryBefore);
       assert.equal(
         await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath),
@@ -7720,25 +7730,20 @@ test(
         "gateway_process",
       ];
       const childExclusions = [...intrinsicChildExclusions, ...administrativeCatalogWithholding];
-      const searchBatches = [childExclusions.slice(0, 5), childExclusions.slice(5)].map(
-        (absent) => ({
-          present: ["read"],
-          absent,
-        }),
+      const childCatalog = { present: ["read"], absent: childExclusions };
+      const childProgram = codeModeCallSpec(
+        `const command = await exec(${JSON.stringify({ command: `node -e ${JSON.stringify(`console.log(6*7, "${childResult}")`)}`, awaitResults: true })}); return {...command, catalog: ${catalogExpression(childCatalog)}};`,
       );
-      const searchRequests = searchBatches.map(({ present, absent }) => ({
-        queries: [...present, ...absent].map((query) => ({ query, limit: 1 })),
-      }));
-      const childTask = `Use exec with awaitResults: true to run node -e 'console.log(6*7, "${childResult}")'. Use tool_search once for each of these exact requests: ${JSON.stringify(searchRequests)}. Inspect the actual returned catalog; do not infer availability from direct schemas. If agents_list is available, call it once. If automations is available, try action=update, jobId=${foreignJob.id}, job={"name":"child-must-not-set-this"} once. Otherwise report those tools are unavailable. Do not use another interface. End your reply with exactly ${childMarker}.`;
+      const childTask = `${childProgram.prompt} Inspect the returned command and admitted catalog. Do not use another interface. End your reply with exactly ${childMarker}.`;
+      const spawnCall = toolCallSpec("sessions_spawn", { label: childLabel, task: childTask });
       const spawnHistory = await turn(
-        `Use sessions_spawn exactly once with label=${childLabel} and task=${JSON.stringify(childTask)}. Do not perform its task yourself.`,
+        spawnCall.prompt + " Do not perform its task yourself.",
         spawnMarker,
       );
       const spawnEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
         sessionKey,
         turnMarker: spawnMarker,
-        toolName: "sessions_spawn",
-        expectedArguments: { label: childLabel, task: childTask },
+        ...spawnCall.evidence,
         resultPattern: "accepted",
       });
       const spawnResultMessage = spawnHistory.messages.find(
@@ -7754,14 +7759,7 @@ test(
           .join("\n"),
       );
       // History retains tool JSON content but projects away arbitrary result details.
-      const accepted = spawnEvidence.targetName
-        ? JSON.parse(
-            spawnEnvelope.result.content
-              .filter((part) => part.type === "text")
-              .map((part) => part.text)
-              .join("\n"),
-          )
-        : spawnEnvelope;
+      const accepted = spawnEnvelope.value;
       assert.equal(accepted.status, "accepted");
       assert.ok(
         typeof accepted.childSessionKey === "string" && accepted.childSessionKey.length > 0,
@@ -7787,31 +7785,13 @@ test(
       const allowed = await native.assertSessionToolCallEvidence(topology.agent, {
         sessionKey: child.key,
         turnMarker: childMarker,
-        toolName: "exec",
+        ...childProgram.evidence,
         resultPattern: `42 ${childResult}`,
         expectedExitCode: 0,
+        expectedCatalog: childCatalog,
       });
-      // OC intrinsically denies these task tools to children. Also verify the baseline's
-      // administrative catalog, including tools without an intrinsic child exclusion.
-      // These are withholding checks; the parent above proves an actual foreign-job refusal.
-      const catalogSearches = [];
-      for (const expectedCatalog of searchBatches) {
-        catalogSearches.push(
-          await native.assertSessionToolCallEvidence(topology.agent, {
-            sessionKey: child.key,
-            turnMarker: childMarker,
-            toolName: "tool_search",
-            expectedCatalog,
-          }),
-        );
-      }
-      for (const toolName of childExclusions) {
-        await native.assertNoSessionToolCallEvidence(topology.agent, {
-          sessionKey: child.key,
-          turnMarker: childMarker,
-          toolName,
-        });
-      }
+      // The exact program inspects the actual complete catalog. Outer exec-only
+      // transcripts cannot establish that an arbitrary nested tool was never called.
       assert.deepEqual(await client.request("cron.get", { id: foreignJob.id }), foreignAfter);
       proof.modelTurns.push({
         kind: "child-capability-withholding",
@@ -7822,7 +7802,7 @@ test(
         allowed,
         intrinsicChildExclusions,
         administrativeCatalogWithholding,
-        catalogSearches,
+        admittedCatalog: allowed.catalog,
         foreignJobUnchanged: true,
       });
     } else {
@@ -7892,16 +7872,20 @@ test(
     ]) {
       const marker = `COMMAND-${randomUUID()}`;
       const args = { ...operation, jobId: job.id };
+      const invocation = toolCallSpec("automations", args);
       await turn(
-        `Call automations exactly once with ${JSON.stringify(args)}. Report the returned error; do not retry or use another interface.`,
+        invocation.prompt + " Report the returned error; do not retry or use another interface.",
         marker,
       );
       const evidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
         sessionKey,
         turnMarker: marker,
-        toolName: "automations",
-        expectedArguments: args,
-        resultPattern: `Automation not found: ${job.id}`,
+        ...invocation.evidence,
+        // Resolving a kind-less payload uses cron.get's legacy wire wording.
+        resultPattern:
+          kind === "kind-less-command-update-denied"
+            ? `cron job not found: ${job.id}`
+            : `Automation not found: ${job.id}`,
       });
       assert.deepEqual(await client.request("cron.get", { id: job.id }), commandBefore);
       assert.equal(
@@ -7982,11 +7966,12 @@ test(
       proof.directInvocationProbes.push({ tool, action: args.action, status: response.status });
     }
     const beforeMarker = `BEFORE-REDEPLOY-${randomUUID()}`;
-    const beforeHistory = await turn("Call agents_list once.", beforeMarker);
+    const beforeCall = toolCallSpec("agents_list", {});
+    const beforeHistory = await turn(beforeCall.prompt, beforeMarker);
     await native.assertSessionToolCallEvidence(topology.agent, {
       sessionKey,
       turnMarker: beforeMarker,
-      toolName: "agents_list",
+      ...beforeCall.evidence,
       resultPattern: "main",
     });
     assert.ok(typeof beforeHistory.sessionId === "string" && beforeHistory.sessionId.length > 0);
@@ -8067,20 +8052,21 @@ test(
     );
     const afterMarker = `AFTER-REDEPLOY-${randomUUID()}`;
     const afterCatalog = { present: ["read"], absent: ["agents_list"] };
-    const discoveryPrompt =
-      selectedHarness === "openclaw"
-        ? `First call tool_search with ${JSON.stringify({ queries: ["read", "agents_list"].map((query) => ({ query, limit: 1 })) })}. Inspect its actual results to determine whether agents_list remains available. `
-        : "";
+    const afterList = toolCallSpec("automations", { action: "list" });
+    const afterCatalogCall = codeModeCallSpec(
+      `return {catalog: ${catalogExpression(afterCatalog)}};`,
+    );
     const afterHistory = await turn(
-      discoveryPrompt +
-        "If your tool interface still exposes agents_list, invoke it exactly once and report its refusal. Do not use another interface or substitute tool. Then call automations with action=list exactly once.",
+      selectedHarness === "openclaw"
+        ? `${afterCatalogCall.prompt} Then ${afterList.prompt}`
+        : "If your tool interface still exposes agents_list, invoke it exactly once and report its refusal. Do not use another interface or substitute tool. Then call automations with action=list exactly once.",
       afterMarker,
     );
     assert.equal(afterHistory.sessionId, beforeHistory.sessionId);
     await native.assertSessionToolCallEvidence(topology.agent, {
       sessionKey,
       turnMarker: afterMarker,
-      toolName: "automations",
+      ...afterList.evidence,
       resultPattern: "jobs",
     });
     const afterSearch =
@@ -8088,7 +8074,7 @@ test(
         ? await native.assertSessionToolCallEvidence(topology.agent, {
             sessionKey,
             turnMarker: afterMarker,
-            toolName: "tool_search",
+            ...afterCatalogCall.evidence,
             expectedCatalog: afterCatalog,
           })
         : undefined;
@@ -8112,7 +8098,7 @@ test(
         expectedArguments: {},
         resultPattern: "OpenClaw tool is not available for this turn: agents_list",
       });
-    } else {
+    } else if (selectedHarness === "codex") {
       await native.assertNoSessionToolCallEvidence(topology.agent, {
         sessionKey,
         turnMarker: afterMarker,

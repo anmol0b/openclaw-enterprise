@@ -449,6 +449,7 @@ const sessionEvidenceScript = String.raw`
   const resultPatterns = JSON.parse(process.argv[4]);
   const expectedArguments = JSON.parse(process.argv[5] || "null");
   const expectedCatalog = JSON.parse(process.argv[6] || "null");
+  const codeModeCall = JSON.parse(process.argv[7] || "null");
   const databasePath = "/home/node/.openclaw/agents/main/agent/openclaw-agent.sqlite";
   const db = new DatabaseSync(databasePath, { readOnly: true });
   function contains(value, needle) {
@@ -661,18 +662,41 @@ const sessionEvidenceScript = String.raw`
         // Thrown errors name the dispatcher as a string; canonical results carry tool metadata.
         const hasEnvelope = (envelope?.tool !== null && typeof envelope?.tool === "object") ||
           envelope?.result !== undefined;
-        const matchesTarget = !call.targetId || (message.toolName === call.name && (hasEnvelope
+        const matchesDispatcherTarget = !call.targetId || (message.toolName === call.name && (hasEnvelope
           ? envelope.tool?.name === toolName && envelope.tool?.source === "openclaw" &&
             envelope.tool?.id === (call.targetId === toolName ? "openclaw:core:" + toolName : call.targetId) &&
             Array.isArray(envelope.result?.content)
           : message.isError === true));
-        const targetResult = call.targetId && hasEnvelope ? envelope.result : message;
-        // The dispatcher writes its canonical target failure to the outer details.status.
-        const isError = message.isError === true || (call.targetId && typeof envelope?.status === "string");
+        // Code Mode returns guest values, so inspect them only after matching the
+        // complete fixture-authored program, title and synchronous execution request.
+        // Keep the real outer exec identity; this does not invent an inner transcript call.
+        const exactCodeMode = codeModeCall !== null && call.matchesArguments && message.toolName === "exec";
+        const cell = exactCodeMode ? message.details : undefined;
+        const value = cell?.value;
+        const returnedFailure = cell?.status === "completed" && value?.status === "error" && typeof value.error === "string";
+        const thrownFailure = cell?.status === "failed" && cell.bridgeDispatchStarted === true;
+        const matchesTarget = matchesDispatcherTarget && (codeModeCall === null ||
+          (exactCodeMode && (cell?.status === "completed" || thrownFailure)));
+        const targetResult = exactCodeMode
+          ? { content: message.content, details: cell?.status === "completed" ? value : cell }
+          : call.targetId && hasEnvelope ? envelope.result : message;
+        // Dedicated Gateway proxies return an error value; input validation can throw.
+        const isError = message.isError === true || returnedFailure || thrownFailure ||
+          (call.targetId && typeof envelope?.status === "string");
         const groups = expectedCatalog && Array.isArray(message.details?.results)
           ? message.details.results : undefined;
-        const matchesCatalog = expectedCatalog === null || (
-          call.matchesSearchArguments === true && message.details?.truncated !== true &&
+        const codeModeCatalog = exactCodeMode ? cell?.value?.catalog : undefined;
+        const matchesCodeModeCatalog = Array.isArray(codeModeCatalog) &&
+          codeModeCatalog.every((candidate) => typeof candidate?.name === "string" &&
+            candidate.source === "openclaw" && typeof candidate.callableName === "string") &&
+          [...(expectedCatalog?.present ?? []), ...(expectedCatalog?.absent ?? [])].every((name) => {
+            const exact = codeModeCatalog.filter((candidate) => candidate.name === name);
+            return expectedCatalog.present.includes(name)
+              ? exact.length === 1 && exact[0].callableName === name : exact.length === 0;
+          });
+        const matchesCatalog = expectedCatalog === null || (codeModeCall !== null
+          ? exactCodeMode && cell?.status === "completed" && matchesCodeModeCatalog
+          : (call.matchesSearchArguments === true && message.details?.truncated !== true &&
           groups?.length === expectedCatalog.present.length + expectedCatalog.absent.length &&
           [...expectedCatalog.present, ...expectedCatalog.absent].every((name) => {
             const matched = groups.filter((group) => group.query === name);
@@ -685,7 +709,7 @@ const sessionEvidenceScript = String.raw`
             return expectedCatalog.present.includes(name)
               ? exact.length === 1 && exact[0].source === "openclaw" && exact[0].id === "openclaw:core:" + name
               : exact.length === 0;
-          })
+          }))
         );
         const matchedResultPattern = resultPatterns.find((pattern) =>
           contains(targetResult, pattern) || textOf(targetResult?.content).includes(pattern));
@@ -695,7 +719,9 @@ const sessionEvidenceScript = String.raw`
           toolName: message.toolName,
           isError: Boolean(isError),
           matchesTarget,
-          exitCode: Number.isInteger(targetResult?.details?.exitCode) ? targetResult.details.exitCode : undefined,
+          exitCode: Number.isInteger(targetResult?.details?.exitCode) &&
+            (codeModeCall === null || (cell?.status === "completed" && targetResult.details.status === "completed"))
+              ? targetResult.details.exitCode : undefined,
           resultDetails: {
             type: targetResult?.details === null ? "null" : typeof targetResult?.details,
             keys: targetResult?.details && typeof targetResult.details === "object"
@@ -703,14 +729,16 @@ const sessionEvidenceScript = String.raw`
             status: ["running", "completed", "failed", "approval-pending", "pending", "deferred", "blocked", "error"]
               .includes(targetResult?.details?.status) ? targetResult.details.status : undefined,
           },
-          errorText: isError ? textOf(targetResult?.content) : undefined,
+          errorText: isError || (exactCodeMode && cell?.status === "failed")
+            ? textOf(targetResult?.content) : undefined,
+          ...(exactCodeMode ? { codeModeProgramVerified: true } : {}),
           // Native Codex emits this terminal reason when MCP approval is denied.
           deniedByUser: textOf(message.content).includes("user rejected MCP tool call"),
           matchesResult: matchesTarget && matchesCatalog && (resultPatterns.length
             ? matchedResultPattern !== undefined
             : hasStructuredResult(targetResult?.content)),
           matchedResultPattern,
-          ...(expectedCatalog ? { matchesCatalog, catalog: groups?.map((group) => ({
+          ...(expectedCatalog ? { matchesCatalog, catalog: exactCodeMode ? codeModeCatalog : groups?.map((group) => ({
             query: group.query,
             names: group.candidates?.map((candidate) => candidate.name),
             truncated: group.truncated === true,
@@ -1562,8 +1590,24 @@ export function createNativePluginAssertions({
 
   async function sessionEvidence(
     agent,
-    { sessionKey, turnMarker, toolName, resultPattern, expectedArguments, expectedCatalog },
+    {
+      sessionKey,
+      turnMarker,
+      toolName,
+      resultPattern,
+      expectedArguments,
+      expectedCatalog,
+      codeModeCall,
+    },
   ) {
+    if (codeModeCall !== undefined) {
+      assert.equal(proofMode, "openclaw");
+      assert.equal(toolName, "exec");
+      assert.ok(typeof codeModeCall.code === "string" && codeModeCall.code.length > 0);
+      assert.ok(typeof codeModeCall.title === "string" && codeModeCall.title.length > 0);
+      assert.equal(codeModeCall.awaitResults, true);
+      assert.equal(expectedArguments, undefined);
+    }
     const execution = await execGateway(agent, [
       "node",
       "-e",
@@ -1574,8 +1618,9 @@ export function createNativePluginAssertions({
       JSON.stringify(
         Array.isArray(resultPattern) ? resultPattern : resultPattern ? [resultPattern] : [],
       ),
-      JSON.stringify(expectedArguments ?? null),
+      JSON.stringify(codeModeCall ?? expectedArguments ?? null),
       JSON.stringify(expectedCatalog ?? null),
+      JSON.stringify(codeModeCall ?? null),
     ]);
     const evidence = JSON.parse(execution.stdout);
     for (const result of evidence.results ?? []) {
@@ -1663,7 +1708,8 @@ export function createNativePluginAssertions({
     );
     const matched = evidence.calls.find(
       (call) =>
-        (options.expectedArguments === undefined || call.matchesArguments === true) &&
+        ((options.expectedArguments === undefined && options.codeModeCall === undefined) ||
+          call.matchesArguments === true) &&
         evidence.results.some(
           (result) =>
             result.toolCallId === call.id &&
@@ -1777,6 +1823,7 @@ export function createNativePluginAssertions({
         : {}),
       ...(proofMode === "codex" ? { codexMirrorTurnVerified: true } : {}),
       resultMatched: true,
+      ...(options.codeModeCall ? { codeModeProgramVerified: result.codeModeProgramVerified } : {}),
       ...(options.expectedExitCode === undefined ? {} : { exitCode: result.exitCode }),
       approvedReviewIds: approvedReviews.map((review) => review.id),
     };
@@ -1852,7 +1899,10 @@ export function createNativePluginAssertions({
         patterns.every((pattern) => typeof pattern === "string" && pattern.length),
       "policy proof requires the expected native refusal",
     );
-    assert.ok(options.expectedArguments, "policy proof requires the intended invocation target");
+    assert.ok(
+      options.expectedArguments || options.codeModeCall,
+      "policy proof requires the intended invocation target",
+    );
     const evidence = await assertSessionToolFailureEvidence(agent, options);
     assert.equal(
       evidence.calls[0].matchesArguments,
@@ -1862,12 +1912,15 @@ export function createNativePluginAssertions({
     assert.equal(
       evidence.results[0].matchesResult,
       true,
-      "the attempted tool must return the policy refusal",
+      `the attempted tool must return the policy refusal: ${JSON.stringify({ resultDetails: evidence.results[0].resultDetails, errorLines: evidence.results[0].errorLines })}`,
     );
     return {
       sessionId: evidence.sessionId,
       toolCallId: evidence.calls[0].id,
       toolName: evidence.calls[0].name,
+      ...(options.codeModeCall
+        ? { codeModeProgramVerified: evidence.results[0].codeModeProgramVerified }
+        : {}),
       ...(Array.isArray(options.resultPattern)
         ? { matchedRefusal: evidence.results[0].matchedResultPattern }
         : {}),

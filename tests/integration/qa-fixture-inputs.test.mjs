@@ -2523,6 +2523,143 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
       );
     });
   }
+  await t.test("binds Code Mode evidence to the exact real-tool program", async (t) => {
+    const codeModeCall = {
+      title: "Gateway policy qualification",
+      code: 'return await exec({"command":"printf TOOL-SUCCESS","awaitResults":true});',
+      awaitResults: true,
+    };
+    const completed = {
+      status: "completed",
+      value: { status: "completed", exitCode: 0, aggregated: "TOOL-SUCCESS" },
+    };
+    const replaceCodeMode = (details, args = codeModeCall) =>
+      replaceTranscript(
+        [
+          { role: "user", content: "code-mode-fixture" },
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "code-mode-call", name: "exec", arguments: args }],
+          },
+          {
+            role: "toolResult",
+            toolCallId: "code-mode-call",
+            toolName: "exec",
+            isError: false,
+            content: [{ type: "text", text: JSON.stringify(details) }],
+            details,
+          },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "code-mode-fixture" }],
+            stopReason: "stop",
+          },
+        ],
+        ["exec"],
+      );
+    const options = {
+      sessionKey,
+      turnMarker: "code-mode-fixture",
+      toolName: "exec",
+      codeModeCall,
+      resultPattern: "TOOL-SUCCESS",
+      expectedExitCode: 0,
+    };
+    replaceCodeMode(completed);
+    const proof = await native.assertSessionToolCallEvidence({}, options);
+    assert.equal(proof.codeModeProgramVerified, true);
+    assert.equal(proof.exitCode, 0);
+    await t.test("rejects guest-manufactured success without the exact program", async () => {
+      replaceCodeMode(completed, {
+        ...codeModeCall,
+        code: 'return {status:"completed",exitCode:0,aggregated:"TOOL-SUCCESS"};',
+      });
+      await assert.rejects(
+        native.assertSessionToolCallEvidence({}, options),
+        /matching successful result/,
+      );
+    });
+    for (const value of [
+      { status: "running", exitCode: 0, aggregated: "TOOL-SUCCESS" },
+      { status: "completed", exitCode: 1, aggregated: "TOOL-SUCCESS" },
+    ]) {
+      replaceCodeMode({ ...completed, value });
+      await assert.rejects(
+        native.assertSessionToolCallEvidence({}, options),
+        /must exit with code 0/,
+      );
+    }
+    await t.test("correlates returned Gateway errors and thrown bridge errors", async () => {
+      const refusal = "cron job not found: fixture-job";
+      const call = {
+        ...codeModeCall,
+        code: 'return await automations({"action":"update","jobId":"fixture-job","job":{"payload":{"timeoutSeconds":1}}});',
+      };
+      const denied = {
+        sessionKey,
+        turnMarker: options.turnMarker,
+        toolName: "exec",
+        codeModeCall: call,
+        resultPattern: refusal,
+      };
+      for (const details of [
+        { status: "completed", value: { status: "error", error: refusal } },
+        { status: "failed", bridgeDispatchStarted: true, error: refusal },
+      ]) {
+        replaceCodeMode(details, call);
+        assert.equal(
+          (await native.assertSessionToolPolicyDeniedEvidence({}, denied)).codeModeProgramVerified,
+          true,
+        );
+      }
+      replaceCodeMode({ status: "failed", bridgeDispatchStarted: false, error: refusal }, call);
+      await assert.rejects(
+        native.assertSessionToolPolicyDeniedEvidence({}, denied),
+        /refusal must belong to the attempted target/,
+      );
+      replaceCodeMode(
+        { status: "completed", value: { status: "error", error: "unrelated fixture error" } },
+        call,
+      );
+      await assert.rejects(
+        native.assertSessionToolPolicyDeniedEvidence({}, denied),
+        /must return the policy refusal/,
+      );
+    });
+    await t.test(
+      "checks the actual complete catalog alongside the child's command result",
+      async () => {
+        const call = {
+          ...codeModeCall,
+          code: 'const command = await exec({"command":"printf TOOL-SUCCESS","awaitResults":true}); return {...command, catalog: catalog.all().filter(tool => ["read","gateway"].includes(tool.toolName)).map(tool => ({name: tool.toolName, source: tool.source, callableName: tool.callableName}))};',
+        };
+        const readHandle = { name: "read", source: "openclaw", callableName: "read" };
+        const details = {
+          status: "completed",
+          value: { ...completed.value, catalog: [readHandle] },
+        };
+        const catalogOptions = {
+          ...options,
+          codeModeCall: call,
+          expectedCatalog: { present: ["read"], absent: ["gateway"] },
+        };
+        replaceCodeMode(details, call);
+        const proof = await native.assertSessionToolCallEvidence({}, catalogOptions);
+        assert.deepEqual(proof.catalog, [readHandle]);
+        assert.equal(proof.exitCode, 0);
+        details.value.catalog.push({
+          name: "gateway",
+          source: "openclaw",
+          callableName: "gateway",
+        });
+        replaceCodeMode(details, call);
+        await assert.rejects(
+          native.assertSessionToolCallEvidence({}, catalogOptions),
+          /matching successful result/,
+        );
+      },
+    );
+  });
   await t.test("retains direct native Codex call and mirror correlation", async () => {
     const prefix = "codex:thread-fixture:turn-fixture";
     const messages = [
