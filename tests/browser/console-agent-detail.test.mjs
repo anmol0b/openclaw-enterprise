@@ -28,11 +28,18 @@ import {
   settledView,
   takeLayoutShifts,
   trackSettledFetches,
+  waitForEnabled,
   waitForInputValue,
   waitForSettledFetches,
   statusTone,
 } from "./console-agents-browser-helpers.mjs";
 import { createRuntimeAuthFixture } from "./console-agents-runtime-auth-fixture.mjs";
+import {
+  deploymentRecordUrl,
+  expectDeploymentOutcome,
+  expectVersionRecord,
+  openFailureDetails,
+} from "./console-deployment-activity-helpers.mjs";
 import {
   openAdvancedSettings,
   withholdPermissionSummary,
@@ -65,7 +72,7 @@ test("Agent detail separates the current version, viewed version, and latest dep
     [pending.id, "queued"],
   ]) {
     await page.route(
-      `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}/deployments/${revisionId}`,
+      deploymentRecordUrl(fixture, namespace.id, agent.id, revisionId),
       async (route) => {
         await route.fulfill({
           status: 200,
@@ -119,9 +126,8 @@ test("Agent detail separates the current version, viewed version, and latest dep
   await overview.nth(0).getByText("v1", { exact: true }).waitFor();
   await overview.nth(1).getByText("v2 · Queued").waitFor();
   await overview.nth(2).getByText("Not verified").waitFor();
-  const activity = page.locator(".deployment-status");
+  const activity = await expectDeploymentOutcome(page, "Queued");
   await activity.getByText("Most recent visible deployment · v2").waitFor();
-  await activity.getByText("Recorded status: Queued").waitFor();
   await activity.getByText("Waiting for a worker claim.").waitFor();
   await activity.getByText("No reconciliation result is available yet.").waitFor();
   // Simulate a subsequent status read. Persistence and attribution are proved
@@ -140,9 +146,8 @@ test("Agent detail separates the current version, viewed version, and latest dep
   await activity.getByText("Since", { exact: true }).waitFor();
   assert.equal(await activity.getByText("Waiting for a worker claim.").count(), 0);
   await activity.getByText("Successful completion is not recorded yet.").waitFor();
-  const versionRecord = page.locator(".version-deployment-record");
+  const versionRecord = await expectVersionRecord(page, "Completed");
   await versionRecord.getByRole("heading", { name: "This version’s deployment record" }).waitFor();
-  await versionRecord.getByText("Recorded outcome: Completed").waitFor();
   // D331: a startup warning says what happened to the plugin, not only its code.
   await versionRecord
     .getByText(
@@ -227,7 +232,7 @@ test("Agent detail separates the current version, viewed version, and latest dep
   await observations.getByText(/Observed /).waitFor();
   await observations.getByText("slack / authentication").waitFor();
   assert.equal(await waiting.isVisible(), false);
-  assert.equal(await runDiagnostics.isEnabled(), true);
+  await waitForEnabled(runDiagnostics);
   assert.equal(await focused(runDiagnostics), true);
   const description = () =>
     runDiagnostics.evaluate(
@@ -290,8 +295,8 @@ test("Agent detail separates the current version, viewed version, and latest dep
   // That run started by dropping the earlier result's description, and nothing described the
   // button again.
   assert.equal(await runDiagnostics.getAttribute("aria-describedby"), null);
-  await versionRecord.getByText("Recorded outcome: Completed").waitFor();
-  await activity.getByText("Recorded status: Queued").waitFor();
+  await expectVersionRecord(page, "Completed");
+  await expectDeploymentOutcome(page, "Queued", { folded: false });
   assert.ok(pathRequests(requests, "GET", deploymentPath).length >= 1);
   assert.ok(
     pathRequests(
@@ -311,7 +316,7 @@ test("Agent detail separates the current version, viewed version, and latest dep
   const newer = await fixture.deployAgent(namespace.id, agent.id);
   let newerStatus = "queued";
   await page.route(
-    `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}/deployments/${newer.id}`,
+    deploymentRecordUrl(fixture, namespace.id, agent.id, newer.id),
     async (route) => {
       await route.fulfill({
         status: 200,
@@ -346,10 +351,8 @@ test("Agent detail separates the current version, viewed version, and latest dep
   await activity.getByRole("button", { name: "Refresh deployment" }).click();
   await overview.nth(0).getByText("v3", { exact: true }).waitFor();
   await overview.nth(1).getByText("v3 · Failed").waitFor();
-  // The failure's card leads the page and folds Deployment details (finding 2094); open them.
-  await page.getByRole("region", { name: "Deployment needs attention" }).waitFor();
-  await activity.getByText("Deployment details", { exact: true }).click();
-  await activity.getByText("Recorded status: Failed").waitFor();
+  await openFailureDetails(page);
+  await expectDeploymentOutcome(page, "Failed", { folded: false });
   await activity
     .getByText("REVISION_FINALIZATION_INCOMPLETE: Deployment reconciliation failed.")
     .waitFor();
@@ -1727,7 +1730,7 @@ test("Dedicated OpenClaw credentials and plugins do not offer Codex-only control
     await page.getByLabel("Authentication source").locator('option[value="codex_pat"]').count(),
     0,
   );
-  assert.equal(await page.getByLabel("API key Secret", { exact: true }).isEnabled(), true);
+  await waitForEnabled(page.getByLabel("API key Secret", { exact: true }));
 
   // A credentialless Codex catalog does not make an OpenClaw harness compatible with its plugins.
   const capabilities = page.waitForResponse(
@@ -2157,15 +2160,12 @@ test("Agent credential Secret picker searches, validates, and preserves duplicat
       hasText: "Access denied. You do not have permission to manage this Secret binding.",
     })
     .waitFor();
-  assert.equal(await dialog.getByLabel("Name", { exact: true }).isDisabled(), false);
+  await waitForEnabled(dialog.getByLabel("Name", { exact: true }));
   assert.equal(
     await dialog.getByLabel("Value", { exact: true }).inputValue(),
     "synthetic-duplicate-value",
   );
-  assert.equal(
-    await dialog.getByRole("button", { name: "Create Secret", exact: true }).isDisabled(),
-    false,
-  );
+  await waitForEnabled(dialog.getByRole("button", { name: "Create Secret", exact: true }));
   await page.unroute(`**/namespaces/${namespace.id}/secrets`, failSecretCreate);
 
   const distinctName = "Combobox Agent corrected service account token";
@@ -2234,10 +2234,7 @@ test("Agent credentials report partial harness Secret grant failure", async (t) 
     .getByText(/Authentication source saved, but this Agent's Secret access could not be confirmed/)
     .waitFor();
   assert.equal(await page.getByLabel("Authentication source").isDisabled(), true);
-  assert.equal(
-    await page.getByRole("button", { name: "Retry credential access" }).isDisabled(),
-    false,
-  );
+  await waitForEnabled(page.getByRole("button", { name: "Retry credential access" }));
   assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
 
   const current = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`);
@@ -2792,7 +2789,7 @@ test("Agent stop uncertainty requires refresh before another stop request", asyn
   assert.equal(interceptedStops, 1);
   assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 1);
   // Readback permits an explicit new intent; it never resends the masked request.
-  assert.equal(await page.getByRole("button", { name: "Request Stop again" }).isEnabled(), true);
+  await waitForEnabled(page.getByRole("button", { name: "Request Stop again" }));
 });
 
 test("An uncertain repeated Stop offers only Refresh stop status", async (t) => {
@@ -2872,10 +2869,7 @@ test("an uncertain Stop the API never received reads back as still requested to 
   const notice = stopRegion.getByText("The Agent is still requested to run.", { exact: true });
   await notice.waitFor();
   assert.deepEqual(await statusTone(notice), { className: "status", tone: "info", role: "status" });
-  assert.equal(
-    await stopRegion.getByRole("button", { name: "Stop Agent", exact: true }).isEnabled(),
-    true,
-  );
+  await waitForEnabled(stopRegion.getByRole("button", { name: "Stop Agent", exact: true }));
 });
 
 test("Agent stop denial keeps the Agent running with permission feedback", async (t) => {
@@ -2935,7 +2929,7 @@ test("Agent stop denial keeps the Agent running with permission feedback", async
 
   await page.getByText("You do not have permission to stop this Agent").waitFor();
   assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 1);
-  assert.equal(await page.getByRole("button", { name: "Stop Agent" }).isDisabled(), false);
+  await waitForEnabled(page.getByRole("button", { name: "Stop Agent" }));
   const current = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${agent.id}`);
   assert.equal(current.data.desiredRuntimeState, "running");
   assert.equal(current.data.activeRevisionId, active.revision.id);
@@ -2981,7 +2975,7 @@ test("a read-only principal sees Agent mutation controls disabled or absent befo
     .locator(".agent-toolbar-actions")
     .getByRole("button", { name: "Open version draft" });
   await openDraft.waitFor();
-  assert.equal(await openDraft.isEnabled(), true);
+  await waitForEnabled(openDraft);
   // The answer denies operate and delete, so the page has no danger zone at all (UX spec 3.9):
   // a reader is not offered Stop or Delete, disabled or not.
   await waitForDangerZoneRows(page, { stop: false, delete: false });

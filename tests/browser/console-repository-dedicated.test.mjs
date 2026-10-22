@@ -6,8 +6,10 @@ import {
   newPage,
   repositoryCheckbox,
   setSlackSelection,
+  waitForEnabled,
 } from "./console-agents-browser-helpers.mjs";
 import { openCreateSecretDialog } from "./console-agents-test-support.mjs";
+import { expectDeploymentOutcome } from "./console-deployment-activity-helpers.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
 
 for (const issuesEnabled of [true, false]) {
@@ -144,7 +146,7 @@ for (const issuesEnabled of [true, false]) {
     const text = await page.locator("body").innerText();
     assert.equal(text.includes("xapp-synthetic-demo"), false);
     assert.equal(text.includes("xoxb-synthetic-demo"), false);
-    assert.equal(await deploy.isEnabled(), true);
+    await waitForEnabled(deploy);
     const admittedResponse = page.waitForResponse(
       (result) =>
         result.url() === `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}/deploy` &&
@@ -200,10 +202,7 @@ for (const issuesEnabled of [true, false]) {
     assert.equal(deployment.status, 200);
     assert.equal(deployment.data.deploymentId, revision.id);
     assert.equal(deployment.data.status, "queued");
-    await page
-      .locator(".deployment-outcome")
-      .filter({ hasText: "Recorded status: Queued" })
-      .waitFor();
+    await expectDeploymentOutcome(page, "Queued");
     await page.getByRole("tab", { name: "Configuration", exact: true }).click();
     await page
       .getByRole("heading", { name: `Version v${revision.revision}`, exact: true })

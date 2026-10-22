@@ -32,11 +32,17 @@ import {
   settlePageRequests,
   trackSettledFetches,
   waitForCondition,
+  waitForEnabled,
   waitForIdleFetches,
   waitForInputValue,
   waitForSettledFetches,
   statusTone,
 } from "./console-agents-browser-helpers.mjs";
+import {
+  deploymentActivity,
+  deploymentRecordUrl,
+  expectDeploymentOutcome,
+} from "./console-deployment-activity-helpers.mjs";
 import { createRuntimeAuthFixture } from "./console-agents-runtime-auth-fixture.mjs";
 import {
   expectNativeAdminHidden,
@@ -1178,33 +1184,30 @@ test("Agent detail rereads native admin access once when a pending deployment ac
   // Deployment activity reads a recorded status the worker would write; the native admin
   // reads stay on the real API so the card reflects the Agent's actual active revision.
   let deploymentStatus = "running";
-  await page.route(
-    `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}/deployments/${pending.id}`,
-    (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          data: {
-            deploymentId: pending.id,
-            namespaceId: namespace.id,
-            agentId: agent.id,
-            status: deploymentStatus,
-            error: null,
-            warnings: [],
-            progress: null,
-          },
-          meta: { requestId: "req_test_native_admin_follow" },
-        }),
+  await page.route(deploymentRecordUrl(fixture, namespace.id, agent.id, pending.id), (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          deploymentId: pending.id,
+          namespaceId: namespace.id,
+          agentId: agent.id,
+          status: deploymentStatus,
+          error: null,
+          warnings: [],
+          progress: null,
+        },
+        meta: { requestId: "req_test_native_admin_follow" },
       }),
+    }),
   );
   await page.clock.install({ time: new Date("2026-10-03T12:00:00Z") });
   const url = detailUrl(fixture, namespace.id, agent.id, pending.id, "configuration");
   await login(page, fixture, url);
   await page.getByRole("heading", { name: "Native admin follow Agent" }).waitFor();
-  const activity = page.locator(".deployment-status");
+  const activity = await expectDeploymentOutcome(page, "In progress");
   const card = page.locator(".native-admin-access");
-  await activity.getByText("Recorded status: In progress").waitFor();
   await card
     .getByText(
       "Native admin UI is unavailable because no version of this Agent is serving: a deployment is in progress or has failed. Check Deployment activity, then refresh access.",
@@ -1216,7 +1219,7 @@ test("Agent detail rereads native admin access once when a pending deployment ac
   await fixture.activateRevision(namespace.id, agent.id, pending.id);
   deploymentStatus = "succeeded";
   await page.clock.runFor(DEPLOYMENT_POLL_MS);
-  await activity.getByText("Recorded status: Completed").waitFor();
+  await expectDeploymentOutcome(page, "Completed", { folded: false });
   await card
     .getByText(
       "Native admin UI is not enabled in this Agent’s current version. Someone who can edit its Configuration can enable it (see the native admin UI guide) and deploy a new version.",
@@ -1281,7 +1284,7 @@ for (const [dmPolicy, groupPolicy, enterpriseOrgInstall] of [
     await login(page, fixture, url);
     const edit = page.getByRole("button", { name: "Edit Slack", exact: true });
     await edit.waitFor();
-    assert.equal(await edit.isEnabled(), true);
+    await waitForEnabled(edit);
     await edit.click();
     const dialog = page.getByRole("dialog", { name: "Edit Slack" });
     if (enterpriseOrgInstall) {
@@ -1625,8 +1628,10 @@ test("Agent tabs replace only their content and preserve surrounding panels and 
   // Late reads (for example the sharing policy) change the page height; measure after them.
   await waitForIdleFetches(page);
   await page.getByRole("tab", { name: "Channels", exact: true }).scrollIntoViewIfNeeded();
+  const agentActions = await page.locator(".agent-toolbar-actions").elementHandles();
+  assert.equal(agentActions.length, 1, "Agent detail mounted its page actions");
   const panels = await page
-    .locator("h1, .agent-toolbar, .native-admin-access, .revision-selector, .agent-tabs")
+    .locator("h1, .native-admin-access, .revision-selector, .agent-tabs")
     .elementHandles();
   const top = await page.evaluate(() => globalThis.scrollY);
   requests.length = 0;
@@ -1635,7 +1640,7 @@ test("Agent tabs replace only their content and preserve surrounding panels and 
   await page.getByRole("button", { name: "Configure Slack", exact: true }).waitFor();
   assert.equal(new URL(page.url()).searchParams.get("tab"), "channels");
   // The surrounding DOM must stay mounted; a fast full-page rerender still loses focus and scroll.
-  for (const panel of panels) {
+  for (const panel of [...agentActions, ...panels]) {
     assert.equal(await panel.evaluate((node) => node.isConnected), true);
   }
   assert.ok(Math.abs((await page.evaluate(() => globalThis.scrollY)) - top) < 2);
@@ -2314,7 +2319,7 @@ test("a failed native admin status read keeps the card, its error and Refresh ac
   await card.getByRole("alert").getByText("Service unavailable", { exact: false }).waitFor();
   assert.equal(await card.isVisible(), true);
   const reload = card.getByRole("button", { name: "Refresh access" });
-  assert.equal(await reload.isEnabled(), true);
+  await waitForEnabled(reload);
 
   // A later answer still decides visibility: this Installation has native admin disabled.
   const reads = () => requests.filter((request) => request.path === nativeAdminPath).length;
@@ -2789,25 +2794,23 @@ test("a deployment finishing on the poll keeps a typing reader's Workspace edito
   const { page } = await newPage(t, fixture);
   const requests = apiRequests(page, fixture.origin);
   let status = "running";
-  await page.route(
-    `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}/deployments/${second.id}`,
-    (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          data: {
-            deploymentId: second.id,
-            namespaceId: namespace.id,
-            agentId: agent.id,
-            status,
-            error: null,
-            warnings: [],
-            progress: null,
-          },
-          meta: { requestId: "req_test_workspace_poll" },
-        }),
+  await page.route(deploymentRecordUrl(fixture, namespace.id, agent.id, second.id), (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          deploymentId: second.id,
+          namespaceId: namespace.id,
+          agentId: agent.id,
+          status,
+          error: null,
+          warnings: [],
+          progress: null,
+        },
+        meta: { requestId: "req_test_workspace_poll" },
       }),
+    }),
   );
   await page.clock.install({ time: new Date("2026-10-18T12:00:00Z") });
   await login(
@@ -2824,10 +2827,7 @@ test("a deployment finishing on the poll keeps a typing reader's Workspace edito
   // The reread of USER.md is held until the reader has typed in it.
   const userPath = `/namespaces/${namespace.id}/agents/${agent.id}/workspace/files/USER.md`;
   const userReread = await holdRequests(t, page, `${fixture.origin}${userPath}`, { once: true });
-  await page
-    .locator(".deployment-status")
-    .getByText("Recorded status: In progress")
-    .waitFor({ state: "attached" });
+  await expectDeploymentOutcome(page, "In progress");
 
   // The reader is typing in AGENTS.md with a selection in the middle of the text.
   const file = page.getByLabel("AGENTS.md", { exact: true });
@@ -2851,10 +2851,7 @@ test("a deployment finishing on the poll keeps a typing reader's Workspace edito
   await fixture.activateRevision(namespace.id, agent.id, second.id, first.revision.id);
   status = "succeeded";
   await page.clock.runFor(DEPLOYMENT_POLL_MS);
-  await page
-    .locator(".deployment-status")
-    .getByText("Recorded status: Completed")
-    .waitFor({ state: "attached" });
+  await expectDeploymentOutcome(page, "Completed", { folded: false });
   await waitForInputValue(soul, `# SOUL.md served by ${second.id}\n`);
   await userReread.requested;
 
@@ -2937,9 +2934,9 @@ async function openWorkspaceVersions(t, name, workspaceFilesAccess, count = 2) {
         versions[current].id,
       );
       current += 1;
-      const refresh = page
-        .locator(".deployment-status")
-        .getByRole("button", { name: "Refresh deployment" });
+      const refresh = deploymentActivity(page).getByRole("button", {
+        name: "Refresh deployment",
+      });
       await (keepFocus ? refresh.evaluate((button) => button.click()) : refresh.click());
     },
   };
@@ -2998,10 +2995,7 @@ test("a Workspace reread keeps a missing file's notice and clears a failed rerea
   const user = form("USER.md");
   await identity.getByText(missingNotice, { exact: true }).waitFor();
   assert.equal(await identityError.textContent(), "");
-  assert.equal(
-    await page.getByRole("button", { name: "Save IDENTITY.md", exact: true }).isEnabled(),
-    true,
-  );
+  await waitForEnabled(page.getByRole("button", { name: "Save IDENTITY.md", exact: true }));
 
   // The gateway cannot read SOUL.md; IDENTITY.md is still missing and says nothing new.
   await nextVersion(["SOUL.md"]);
@@ -3466,7 +3460,7 @@ test("explicit missing-file readback settles an uncertain workspace create witho
     message: "The requested workspace file was not found.",
   });
   await form.getByText("USER.md is missing. Save to create it.", { exact: true }).waitFor();
-  assert.equal(await editor.isEnabled(), true);
+  await waitForEnabled(editor);
   assert.equal(await editor.inputValue(), "", "explicit Reload discards the uncertain draft");
   assert.equal(writeRequests().length, 1, "readback never automatically repeats a write");
   await editor.fill("# Deliberate replacement create\n");
@@ -4133,7 +4127,7 @@ test("Console can repeat Stop without treating the selected version as cleanup c
   // Stop shows with the rest of the page once Deployment activity settles.
   await repeat.waitFor();
   assert.equal(await repeat.count(), 1, "the existing Stop API permits another authorized intent");
-  assert.equal(await repeat.isEnabled(), true);
+  await waitForEnabled(repeat);
   await repeat.focus();
   await repeat.press("Enter");
   let dialog = page.getByRole("dialog", { name: "Stop this Agent?" });
@@ -4175,7 +4169,7 @@ test("Console can repeat Stop without treating the selected version as cleanup c
   await page
     .getByText("No version is selected. Deploy a new version to start this Agent.")
     .waitFor();
-  assert.equal(await repeat.isEnabled(), true);
+  await waitForEnabled(repeat);
   assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 1);
   await repeat.click();
   const noSelectionResult = page.waitForResponse(

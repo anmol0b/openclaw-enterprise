@@ -3,10 +3,12 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { openShellLogDecision } from "../../apps/controller/src/drivers/sandbox/openshell-log-decisions.ts";
 import { createConsoleAppFixture, fileConsoleApp } from "../helpers/console-app.mjs";
 import { grantRole } from "../helpers/iam-grants.mjs";
-import { createRuntimeLogComputeDriver } from "../helpers/runtime-logs.mjs";
+import {
+  createProviderSandboxDriver,
+  createRuntimeLogComputeDriver,
+} from "../helpers/runtime-logs.mjs";
 import {
   apiRequests,
   detailUrl,
@@ -18,6 +20,7 @@ import {
   settlePageRequests,
   trackSettledFetches,
   waitForCondition,
+  waitForEnabled,
   waitForIdleFetches,
 } from "./console-agents-browser-helpers.mjs";
 
@@ -669,6 +672,48 @@ test("the log message column stays readable beside the version list", async (t) 
   }
 });
 
+// The Pod cards share the status strip's width. Fixed-width columns left a dedicated Agent's two
+// cards at about 265 px each beside the version list, Pod names and container states wrapping
+// over 3-4 lines next to about 280 px of blank strip (finding 2100, at 1440 on a live install).
+// Here the strip is a little narrower, so the old layout leaves that gap from 1600 px.
+test("runtime Pod cards fill the status strip at desktop and phone widths", async (t) => {
+  const { fixture, computeDriver, namespace, agent, revisionId } = await logsFixture(t);
+  computeDriver.state.harnessPod = { ready: true };
+  const { page } = await newPage(t, fixture);
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, revisionId, "logs"));
+  const strip = page.locator(".runtime-strip");
+  await strip.getByRole("heading", { name: "Agent (Harness)" }).waitFor();
+  await strip.getByRole("heading", { name: "Gateway" }).waitFor();
+  for (const width of [1440, 1600, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const { row, tracks, cards } = await strip.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      return {
+        row: { left: box.left, right: box.right },
+        tracks: globalThis.getComputedStyle(node).gridTemplateColumns.split(" "),
+        cards: [...node.querySelectorAll(".runtime-pod")].map((card) => {
+          const rect = card.getBoundingClientRect();
+          return { top: rect.top, left: rect.left, right: rect.right };
+        }),
+      };
+    });
+    assert.equal(cards.length, 2);
+    // No column is left without a card, whatever the strip's width.
+    const used = tracks.filter((track) => Number.parseFloat(track) > 0);
+    assert.ok(used.length <= cards.length, `columns ${tracks.join(" ")} at ${width}px`);
+    // Each row of cards starts at the strip's left edge and its last card ends at its right edge.
+    const rows = Map.groupBy(cards, ({ top }) => Math.round(top));
+    assert.equal(rows.size, width === 390 ? 2 : 1, `card rows at ${width}px`);
+    for (const rowCards of rows.values()) {
+      assert.ok(Math.abs(rowCards[0].left - row.left) <= 1, `first card starts at ${width}px`);
+      assert.ok(
+        Math.abs(rowCards.at(-1).right - row.right) <= 1,
+        `cards end ${row.right - rowCards.at(-1).right}px before the strip's edge at ${width}px`,
+      );
+    }
+  }
+});
+
 test("log levels stay on one line and keep log columns aligned", async (t) => {
   const { fixture, computeDriver, namespace, agent, revisionId } = await logsFixture(t);
   const levels = ["error", "warn", "info", "debug"];
@@ -1213,7 +1258,7 @@ test("a log reader without operate reads log text in the Logs tab without runtim
   const pod = computeDriver.podName({ id: revisionId });
   await page.getByText(`Showing gateway in ${pod}.`).waitFor();
   assert.equal(await page.locator(".runtime-pod").count(), 0);
-  assert.equal(await page.locator("#runtime-log-source").isDisabled(), false);
+  await waitForEnabled(page.locator("#runtime-log-source"));
   // Without status the console names no Pod; OCC reads the source's current Pod.
   const [first] = logRequests(requests, revisionId);
   assert.equal(new URL(first.path, fixture.origin).searchParams.has("pod"), false);
@@ -1315,7 +1360,7 @@ test("a log reader without operate reads log text in the Logs tab without runtim
   await page.getByRole("tab", { name: "Configuration", exact: true }).click();
   await page.getByRole("tab", { name: "Logs", exact: true }).click();
   await pane.getByText("log reader can see this").waitFor();
-  assert.equal(await page.locator("#runtime-log-source").isDisabled(), false);
+  await waitForEnabled(page.locator("#runtime-log-source"));
   assert.equal(statusReads(), before);
   assert.equal(await page.getByRole("note").count(), 0);
 });
@@ -1589,36 +1634,11 @@ test("a source picked while a refresh reads clears the kept lines at once", asyn
 test("the Sandbox source shows redacted policy decisions without a Pod picker", async (t) => {
   const computeDriver = createRuntimeLogComputeDriver({ sandboxNamespace: "tenant-console" });
   const secret = `Zq9${randomUUID().replaceAll("-", "")}`;
-  const sandboxState = { lines: [], error: undefined };
-  const sandboxRequests = [];
-  const sandboxDriver = {
-    id: "console-sandbox",
-    capability: "sandbox",
-    implementation: "openshell",
-    facets: ["networking", "filesystem", "process"],
-    async provisionHarness(context) {
-      return {
-        namespaceName: context.namespace.name,
-        resourceName: `sb-${context.revision.id.slice(4, 12)}`,
-        agentId: context.revision.agentId,
-        revisionId: context.revision.id,
-      };
-    },
-    async cleanup() {},
-    async readSandboxLogs(context, request) {
-      sandboxRequests.push({ namespace: context.namespace.name, ...request });
-      if (sandboxState.error !== undefined) {
-        throw sandboxState.error;
-      }
-      return {
-        sandbox: `sb-${context.revision.id.slice(4, 12)}`,
-        observedAt: "2026-09-30T12:00:05.000Z",
-        // Native OCSF decoding belongs to the Driver; OCC sanitizes the shared records.
-        lines: sandboxState.lines.map(openShellLogDecision),
-        bufferTotal: sandboxState.lines.length,
-      };
-    },
-  };
+  const {
+    driver: sandboxDriver,
+    state: sandboxState,
+    logRequests: sandboxRequests,
+  } = createProviderSandboxDriver();
   const fixture = await createConsoleAppFixture(t, {
     computeDriver,
     sandboxDriver,

@@ -29,6 +29,7 @@ import {
   selectSecret,
   settlePageRequests,
   repositoryCheckbox,
+  waitForEnabled,
   waitForInputValue,
   statusTone,
 } from "./console-agents-browser-helpers.mjs";
@@ -48,16 +49,10 @@ import {
   createRepositoryLaunchFixture,
   waitForCreateFormReads,
 } from "./console-agents-test-support.mjs";
-
-// A failure's card leads the Agent page and folds Deployment details (finding 2094); a reader
-// opens them for the record's evidence.
-async function openFoldedDetails(page) {
-  await page.getByRole("region", { name: "Deployment needs attention" }).waitFor();
-  const details = page.locator(".deployment-status > details");
-  if (!(await details.evaluate((node) => node.open))) {
-    await details.locator("summary").click();
-  }
-}
+import {
+  expectDeploymentOutcome,
+  openFailureDetails,
+} from "./console-deployment-activity-helpers.mjs";
 
 const defaultCodexPreset = JSON.parse(
   await readFile(new URL("../../deploy/presets/default-codex.json", import.meta.url), "utf8"),
@@ -499,7 +494,7 @@ test("Agent creation keeps loading and empty repository discovery safe for an or
   releaseOptions();
   await page.getByText(/No approved repositories are available/).waitFor();
   await waitForCreateFormReads(page);
-  assert.equal(await page.getByRole("button", { name: "Create Agent" }).isEnabled(), true);
+  await waitForEnabled(page.getByRole("button", { name: "Create Agent" }));
 
   await enterManualModel(page, "repository-fixture-model-key", "gpt-5.1");
   await page.getByLabel("Agent name").fill("Ordinary Agent");
@@ -591,7 +586,7 @@ test("Dedicated repository Agent keeps its bindings through Slack save and the c
     .getByText("Complete these in Credentials before deploying: Slack Secret bindings.")
     .waitFor();
   assert.equal(await page.getByRole("button", { name: "Deploy new version" }).isDisabled(), true);
-  assert.equal(await page.getByLabel("Slack app token").isEnabled(), true);
+  await waitForEnabled(page.getByLabel("Slack app token"));
   assert.equal(
     pathRequests(
       requests,
@@ -644,10 +639,7 @@ test("Agent creation distinguishes unavailable repository choices from denied Ag
     "https://github.com/openclaw/openclaw-enterprise/blob/main/docs/guides/repository-credentials/team-runbook.md",
   );
   await waitForCreateFormReads(unavailablePage);
-  assert.equal(
-    await unavailablePage.getByRole("button", { name: "Create Agent" }).isEnabled(),
-    true,
-  );
+  await waitForEnabled(unavailablePage.getByRole("button", { name: "Create Agent" }));
   // A missing repository composition cannot recover by retrying, so no Retry is offered.
   assert.equal(
     await unavailablePage.getByRole("button", { name: "Retry repository choices" }).isVisible(),
@@ -793,7 +785,7 @@ test("Agent creation blocks selective Agent-create IAM unavailability even when 
   fixture.controller.selectDriver("iam", originalIAM.id);
   await page.getByRole("button", { name: "Retry repository choices", exact: true }).click();
   await page.getByText("Select repositories for this Agent.", { exact: false }).waitFor();
-  assert.equal(await page.getByRole("button", { name: "Create Agent" }).isEnabled(), true);
+  await waitForEnabled(page.getByRole("button", { name: "Create Agent" }));
 });
 
 for (const failure of [
@@ -855,7 +847,7 @@ for (const failure of [
     await page.unroute(path, failDiscovery);
     await page.getByRole("button", { name: "Retry repository choices", exact: true }).click();
     await page.getByText(/No approved repositories are available/).waitFor();
-    assert.equal(await page.getByRole("button", { name: "Create Agent" }).isEnabled(), true);
+    await waitForEnabled(page.getByRole("button", { name: "Create Agent" }));
     const createdResponse = page.waitForResponse(
       (response) =>
         response.url().endsWith(`/namespaces/${namespace.id}/agents`) &&
@@ -970,7 +962,7 @@ test("Agent creation recovers from stale authoritative admission without replaci
     await page.getByRole("button", { name: "Remove example/application" }).isDisabled(),
     true,
   );
-  assert.equal(await page.getByRole("button", { name: "Start a new draft" }).isEnabled(), true);
+  await waitForEnabled(page.getByRole("button", { name: "Start a new draft" }));
 
   await page.getByRole("button", { name: "Reload repository choices" }).click();
   await page
@@ -982,7 +974,7 @@ test("Agent creation recovers from stale authoritative admission without replaci
     true,
   );
   assert.equal(await page.getByRole("button", { name: "Create Agent" }).isDisabled(), true);
-  assert.equal(await page.getByRole("button", { name: "Start a new draft" }).isEnabled(), true);
+  await waitForEnabled(page.getByRole("button", { name: "Start a new draft" }));
   assert.equal(agentPostRequests(requests, namespace.id).length, 1);
 
   fixture.policy.restrictions.pop();
@@ -1018,7 +1010,7 @@ test("Agent creation recovers from stale authoritative admission without replaci
     .waitFor();
   assert.equal(await page.locator(".repository-options input").count(), 0);
   assert.equal(await page.getByRole("button", { name: "Create Agent" }).isDisabled(), true);
-  assert.equal(await page.getByRole("button", { name: "Start a new draft" }).isEnabled(), true);
+  await waitForEnabled(page.getByRole("button", { name: "Start a new draft" }));
   assert.equal(agentPostRequests(requests, namespace.id).length, 1);
 
   // Even a post-authorization optional outage cannot satisfy a repository-scoped retry.
@@ -1073,7 +1065,7 @@ test("Agent creation recovers from stale authoritative admission without replaci
 
   await page.getByRole("button", { name: "Reload repository choices" }).click();
   await page.getByText(/Repository choices reloaded/).waitFor();
-  assert.equal(await repositoryCheckbox(page, "example/application").isEnabled(), true);
+  await waitForEnabled(repositoryCheckbox(page, "example/application"));
   assert.equal(await page.locator(".repository-card").count(), 0);
   // Refreshing policy permits editing; it must not turn this saved attempt into an ordinary Agent.
   assert.equal(await page.getByRole("button", { name: "Create Agent" }).isDisabled(), true);
@@ -1368,6 +1360,7 @@ test("Dedicated Agent creation opens deployment details after provisioning with 
       json(
         {
           provisioning: {
+            requestId: provisionBody.requestId,
             workId: "work_create",
             status: "queued",
             phase: "admitted",
@@ -1392,6 +1385,7 @@ test("Dedicated Agent creation opens deployment details after provisioning with 
     await route.fulfill(
       json({
         provisioning: {
+          requestId: provisionBody.requestId,
           workId: "work_create",
           status: allowProvisioningSuccess ? "succeeded" : "running",
           phase: allowProvisioningSuccess ? "handoff" : "configuration",
@@ -1518,13 +1512,12 @@ test("Dedicated Agent creation opens deployment details after provisioning with 
     );
   });
   // Creation must hand off to the detail page while deployment is still queued.
-  const deploymentPanel = page.locator(".deployment-status");
-  await deploymentPanel.getByText("Recorded status: Queued", { exact: true }).waitFor();
+  const deploymentPanel = await expectDeploymentOutcome(page, "Queued");
   assert.equal(await page.getByRole("heading", { name: "Create Agent", exact: true }).count(), 0);
   deploymentStatus = "failed";
   await deploymentPanel.getByRole("button", { name: "Refresh deployment", exact: true }).click();
-  await openFoldedDetails(page);
-  await deploymentPanel.getByText("Recorded status: Failed", { exact: true }).waitFor();
+  await openFailureDetails(page);
+  await expectDeploymentOutcome(page, "Failed", { folded: false });
   await deploymentPanel
     .getByText("DEPENDENCY_UNAVAILABLE: Deployment reconciliation failed.", { exact: true })
     .waitFor();
@@ -1913,6 +1906,7 @@ test("Dedicated Agent creation reuses separately saved Secret references after p
       json(
         {
           provisioning: {
+            requestId: bodies.at(-1).requestId,
             workId: "work_retry",
             status: "succeeded",
             phase: "handoff",

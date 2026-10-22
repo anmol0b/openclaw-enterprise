@@ -72,6 +72,7 @@ export type AgentProvisioningDeploymentProgress = {
 } | null;
 
 export interface AgentProvisioningProgress {
+  readonly requestId: string;
   readonly workId: string;
   readonly status: AgentProvisioningStatus;
   readonly phase: AgentProvisioningRecord["completedPhase"];
@@ -235,6 +236,7 @@ export function provisioningProgress(
     status = "running";
   }
   return Object.freeze({
+    requestId: record.requestId,
     workId: record.workId,
     status,
     phase: record.completedPhase,

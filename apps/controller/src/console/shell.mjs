@@ -1,6 +1,18 @@
 import { displayDate } from "./agents/list.mjs";
 import { element, button } from "./dom.mjs";
 
+export function brandContents(size) {
+  const displayName =
+    document.querySelector('meta[name="occ-console-display-name"]')?.content ??
+    "OpenClaw Enterprise";
+  const src =
+    document.querySelector('meta[name="occ-console-logo"]')?.content ?? "/console/oce-mascot.png";
+  return [
+    element("img", { src, alt: "", width: String(size), height: String(size) }),
+    element("span", { className: "brand-name", title: displayName }, displayName),
+  ];
+}
+
 export function panel(target, title, description, actionLabel, action, requestId) {
   target.replaceChildren(
     element(
@@ -143,12 +155,7 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
       element(
         "main",
         { className: "auth" },
-        element(
-          "p",
-          { className: "brand" },
-          element("img", { src: "/console/oce-mascot.png", alt: "", width: "40", height: "40" }),
-          "OpenClaw Enterprise",
-        ),
+        element("p", { className: "brand" }, ...brandContents(40)),
         element("h1", {}, title),
         element("p", { role: "status", className: "muted" }, description),
         action ? button(actionLabel, action) : null,
@@ -418,7 +425,7 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
       return;
     }
     const scope = app.querySelector(".content .scope");
-    if (scope && route().feature === "agents") {
+    if (scope && ["agents", "secrets"].includes(route().feature)) {
       scope.textContent = `Namespace · ${readable.find((item) => item.id === namespaceId)?.name ?? "No available selection"}`;
     }
   }
@@ -462,8 +469,8 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
       menuControls = null;
     }
     const nav = element("nav", { className: "nav", "aria-label": "Main navigation" });
-    const icons = { agents: "◇", namespaces: "▤" };
-    for (const name of ["agents", "namespaces"]) {
+    const icons = { agents: "◇", secrets: "⚿", namespaces: "▤" };
+    for (const name of ["agents", "secrets", "namespaces"]) {
       const link = element(
         "a",
         {
@@ -534,8 +541,7 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
       element(
         "p",
         { className: "brand" },
-        element("img", { src: "/console/oce-mascot.png", alt: "", width: "20", height: "20" }),
-        "OpenClaw Enterprise",
+        ...brandContents(20),
         debug
           ? element(
               "span",
@@ -553,14 +559,13 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
     );
     const main = element("main", { className: "content", id: "main" });
     const selected = namespaces.find((item) => item.id === namespaceId);
-    const scope =
-      feature === "agents"
-        ? `Namespace · ${selected?.name ?? (session && !namespaceAdmissionPending ? "No available selection" : "Checking access")}`
-        : feature === "settings"
-          ? "Your account"
-          : feature === "backends"
-            ? "Installation-wide · Experimental"
-            : "Installation-wide";
+    const scope = ["agents", "secrets"].includes(feature)
+      ? `Namespace · ${selected?.name ?? (session && !namespaceAdmissionPending ? "No available selection" : "Checking access")}`
+      : feature === "settings"
+        ? "Your account"
+        : feature === "backends"
+          ? "Installation-wide · Experimental"
+          : "Installation-wide";
     // Settings is about the account, and Namespaces lists them: neither has a Namespace scope.
     const scopeSelector =
       feature === "namespaces" || feature === "settings"
@@ -612,7 +617,13 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
         );
     const view = element("div", { "aria-live": "polite", "aria-busy": "true" });
     main.append(header);
-    if (recovery && session && feature !== "agents" && namespaceId !== null && !selected) {
+    if (
+      recovery &&
+      session &&
+      !["agents", "secrets"].includes(feature) &&
+      namespaceId !== null &&
+      !selected
+    ) {
       if (feature === "namespaces" && namespaces.length) {
         main.append(
           element(
@@ -646,12 +657,7 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
       "div",
       { className: "topbar" },
       mobileToggle,
-      element(
-        "p",
-        { className: "brand brand--bar" },
-        element("img", { src: "/console/oce-mascot.png", alt: "", width: "20", height: "20" }),
-        "OpenClaw Enterprise",
-      ),
+      element("p", { className: "brand brand--bar" }, ...brandContents(20)),
       session ? accountMenus().top.account : null,
     );
     const wrapper = element("div", {}, topbar, main);
@@ -773,7 +779,7 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
   // Agents (finding 1897).
   function renderNamespaceRows(view, items) {
     const list = element("ul", {
-      className: "collection namespace-rows",
+      className: "collection",
       "aria-label": pages.namespaces,
     });
     for (const item of sorted(items)) {
@@ -813,10 +819,10 @@ export function createShell({ app, pages, route, pageUrl, navigate, loadPage, lo
     view.replaceChildren(
       element(
         "div",
-        { className: "namespace-table" },
+        { className: "resource-list namespace-table" },
         element(
           "div",
-          { className: "namespace-table-head", "aria-hidden": "true" },
+          { className: "resource-list-header namespace-table-head", "aria-hidden": "true" },
           element("span", {}, "Namespace"),
           element("span", {}, "Status"),
           element("span", {}, "Created"),
