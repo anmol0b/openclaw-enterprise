@@ -5,7 +5,7 @@ rfc: ../rfcs/0024-strands-box-sandbox.md
 # Implementation plan: Strands Box sandbox integration
 
 - **ID:** RFC-0024
-- **Delivery status:** Planned
+- **Delivery status:** In progress
 - **Authority:** [Proposed decision](../rfcs/0024-strands-box-sandbox.md)
 - **Source baseline:** `7d472f3f7d3b5104deb7e18ae7a2627ce1da0f91`
 
@@ -60,4 +60,10 @@ authorizes a production rollout or changes an internal runtime version pin.
 
 ## Change record
 
-- 2026-10-22: Drafted from the pinned source and local ARM64 probes during local qualification. RFC submission and implementation pending.
+- 2026-10-22: Drafted from the pinned source and local ARM64 probes during local qualification. RFC submitted as draft PR #3230; implementation remains unqualified.
+
+- 2026-10-22: Submitted the Namespace provider-route refinement before changing
+  the Sandbox/Kubernetes Compute contract. Ordinary Box egress rejects WebSocket
+  upgrades; Node requires jitless execution. Native adapter probes passed, but
+  regular Agent integration remains pending. Use a small number of short model
+  calls after credential-free checks; do not run broad model matrices by default.

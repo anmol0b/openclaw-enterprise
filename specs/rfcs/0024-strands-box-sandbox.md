@@ -101,6 +101,40 @@ not permission to expose host namespaces or run a privileged Harness. Node
 provisioning owns installation of the profile. OCE does not install it through
 a privileged workload on shared clusters.
 
+## Kubernetes provider routing refinement
+
+The current Kubernetes Compute configuration requires one fixed provider address
+and writes a Gateway host alias for every provider endpoint. This cannot express
+revision-owned Services inside the prepared Agent Namespace.
+
+Extend `network.providerHarness` with an explicit `{ mode: "namespace", port }`
+alternative; keep the existing fixed-address shape unchanged. Namespace routing
+uses ordinary cluster DNS and admits only an endpoint Service name in the prepared
+Namespace, on the configured port. Cross-cluster execution is initially refused.
+
+Add optional `SandboxDriver.harnessPeerLabels(context)` with the same Namespace
+and revision context as `workspaceNodePeerLabels`. It returns the exact revision's
+Harness ingress Pod labels. Kubernetes Compute requires this method for Namespace
+routing, verifies the Namespace/Agent/revision/workload ownership labels, and
+uses them for Gateway egress. During preparation, retain the serving predecessor's
+peer until cutover. No labels means no network grant. This is separate from the
+workspace-node peer: a provider may use different ingress and enrollment relays.
+The change belongs to the Sandbox contract and Kubernetes Compute, with no
+provider-name branch in OCC core.
+
+The Box Driver also requires an explicit control-plane Namespace and Pod selector
+for authenticated readiness ingress. Its own NetworkPolicy grants that peer and
+the exact Agent Gateway ingress, DNS, declared model destinations, and the fixed
+Gateway destination derived from the owned enrollment Secret. Unsupported route
+shapes fail closed; ordinary HTTP egress is not evidence of WebSocket support.
+
+The loaded Box HTTP proxy rejects WebSocket upgrades. The adapter therefore has
+a reverse byte channel to the one approved Gateway destination; the workload
+cannot supply a different host or port. TLS remains end-to-end on TLS routes.
+Box Linux seccomp also refuses Node V8 executable `mprotect`; the current adapter
+uses `--jitless`. Full OpenClaw compatibility and performance remain qualification
+requirements, not established support.
+
 ## Evidence and required verification
 
 Local credential-free probes on Debian 13 ARM64 and k3s 1.35.9 showed:
