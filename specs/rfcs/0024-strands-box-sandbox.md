@@ -1,0 +1,144 @@
+---
+status: Proposed
+implementation_status: Not implemented
+author: Kimiyu-186
+---
+
+# Proposal: Strands Box as a Sandbox Driver
+
+- **ID:** RFC-0024
+- **Created:** 2026-10-22
+- **Implementation plan:** [Sandbox integration](../plans/0024-strands-box-sandbox.md)
+
+## Decision
+
+Add an optional bundled Strands Box Sandbox Driver for dedicated Codex on
+Kubernetes ARM64. Preserve the existing [SandboxDriver contract](../../docs/reference/drivers/sandbox.md)
+and the Compute-owned Harness startup command. Introduce an explicit Installation
+selector and provider configuration for Box. Credential Proxy integration is a
+separate phase.
+
+This is a proposal. No production Driver or Installation selector is implemented.
+The evidence below establishes prerequisites, not an OCE Agent deployment.
+
+## Problem
+
+Box can contain a local process, but OCE needs an authenticated Harness endpoint,
+workspace-node enrollment, persistent workspace storage, and revision cleanup.
+Running `codex app-server` directly in Box does not preserve the startup command
+that Compute prepares. The native WebSocket listener also stays inside Box's
+private network namespace.
+
+The inspected baselines are OCE commit
+`7d472f3f7d3b5104deb7e18ae7a2627ce1da0f91` and Box commit
+`c4a2443791d5656c87025d861d733648416649ab`. This Box source supports Linux ARM64;
+the v0.1.0 release does not supply a Linux binary. OCE's existing Codex version
+is `0.163.0-alpha.2`. This proposal does not change that version.
+
+## Installation and ownership
+
+Reserve packageless `drivers.sandbox.id: strands-box-sandbox` for this bundled
+implementation. Other existing selections keep their current behavior. Validate
+its configuration before creating resources:
+
+- `kubernetes.seccompProfile`: a node-local relative path to the reviewed Box
+  profile. Reject traversal and a missing profile; never fall back to Unconfined.
+- `kubernetes.nodeSelector`: nodes qualified for ARM64, Pod user namespaces,
+  and the exact profile. An eligibility label alone is not qualification.
+- `policy.network.endpoints`: explicit host and port grants that Box translates
+  to both connection and HTTP authorization. The Driver separately derives the
+  exact Agent Gateway route from Compute's prepared inputs.
+
+Omit editable and live network-policy support in the first implementation.
+The Driver declares only facets demonstrated by its actual policy and runtime.
+It rejects any Credential Gateway attachment in this phase. It does not mint,
+refresh, substitute, or inject provider credentials.
+
+Compute continues to own admission, workload identity, Gateway routing,
+transport authentication, baseline tenant isolation, and activation. The Driver
+uses `requirements.image` and `requirements.command` unchanged, with a runtime
+image that includes the fixed Box build and its transport adapters. It must not
+substitute another image or bypass OCE's login and real-model startup checks.
+
+The Driver projects every prepared environment Secret reference, file,
+ServiceAccount token, PVC subpath, and mount mode to the exact revision Pod.
+Unsupported inputs fail before workload creation. Workspace setup uses the
+existing private setup payload and completion marker before Harness execution.
+Secret values remain in Kubernetes Secret delivery and private runtime memory
+or files; they must not enter Box's stored configuration, logs, or revisions.
+The secret handoff into the contained startup process needs its own verified
+implementation; the credential-free prototype does not prove this handoff.
+
+## Runtime and transport
+
+One revision owns one Box workload. A trusted adapter inside Box starts the
+original Harness command, with its log streams separated from the adapter
+protocol. The Harness keeps its native WebSocket listener and authentication.
+An outer adapter exposes the provider-owned endpoint, checks the exact Agent
+transport token, and relays independent connections over the inherited pipe to
+the inner adapter. The inner adapter connects to the native listener inside
+Box. Its messages contain connection identity and data, not OCE operations.
+
+Rejected connections create no inner session. Reconnection does not restart the
+Harness. Concurrent connections retain separate native sessions and request IDs.
+Both adapters need message-size, queue, connection-count, and shutdown bounds;
+the production limits remain to be selected and tested. The outer adapter is
+trusted provider code, has no model credential, and must not execute commands
+received from a client.
+
+`harnessStatus` reports serving only after a native authenticated handshake.
+It preserves OCE's held startup-failure response when the model probe fails.
+`observeHarness` reads the revision Pod's actual state. Endpoint and peer labels
+select that revision alone. Cleanup removes only owned revision resources,
+waits for workload termination, and retains the Agent workspace for redeploy.
+Namespace cleanup uses the same ownership checks across that Namespace.
+
+The initial qualified Pod candidate uses `hostUsers: false`, UID/GID 1000,
+`allowPrivilegeEscalation: false`, dropped capabilities, a read-only root, bounded
+writable volumes, a Localhost seccomp profile, and `procMount: Unmasked` inside
+the Pod user namespace. This last setting is a material node/admission requirement,
+not permission to expose host namespaces or run a privileged Harness. Node
+provisioning owns installation of the profile. OCE does not install it through
+a privileged workload on shared clusters.
+
+## Evidence and required verification
+
+Local credential-free probes on Debian 13 ARM64 and k3s 1.35.9 showed:
+
+| Probe                                                   | Observed result                                                                                              |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| RuntimeDefault                                          | Box refuses because user namespaces are blocked.                                                             |
+| Existing OCE Codex profile                              | User namespace passes; Box's additional namespace operation is refused.                                      |
+| Experimental exact syscall additions, ordinary Pod      | Fresh proc mount is refused.                                                                                 |
+| Same profile, Pod user namespace and proc setting above | Box-contained Codex initializes.                                                                             |
+| Native Codex `command/exec` inside Box                  | Workspace write succeeds; outside read and write fail; outside marker is unchanged.                          |
+| Persistent transport prototype                          | Missing/wrong tokens return 401; reconnect and two concurrent sessions initialize through one Codex process. |
+
+The profile extends the captured runtime baseline; it is an experimental
+candidate, not a production-approved artifact. Network-policy enforcement,
+model turns, the full OCE startup command, and Agent lifecycle are still unproved.
+An upstream filesystem test also has a reproducible parent-rename EBUSY
+expectation failure; the protected write remains refused. Qualification must
+resolve or explicitly account for that upstream compatibility result.
+
+Acceptance requires the normal OCE API, worker, database, Kubernetes Compute,
+Sandbox Driver, Gateway, and contained Harness path. Prove an actual model tool
+call, private workspace-node enrollment, denied network/file access, stop,
+redeploy with workspace persistence, successor cutover, and owned-resource
+cleanup. Extend the regular Agent QA workflow; mocks do not establish these
+outcomes.
+
+## Alternatives and decisions needed
+
+Direct host access to Box's private WebSocket listener does not work. A fresh
+stdio Codex per incoming connection loses the revision process lifecycle.
+Codex Unix transport uses a protected daemon directory in private `/tmp`; the
+simple shared-directory probe did not produce a host-reachable socket. The
+pipe adapter retains native WebSocket session semantics without changing Codex.
+
+An installed Driver package could avoid a new bundled selector, but would need
+a real pinned production package and image distribution. Test-only factory
+injection or a manually placed package is not Installation qualification.
+
+Maintainers must review the bundled selection, runtime packaging, secret handoff,
+and Pod security requirements before the proposal and implementation can merge.
