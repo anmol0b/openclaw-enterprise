@@ -2334,7 +2334,11 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
     const call = structuredClone(dispatchedCall);
     call.content[0].arguments.args = { action: "run", jobId: "fixture-job" };
     const result = { ...rows[6], toolCallId: "dispatched-call", toolName: "dispatch_action" };
-    const options = { ...denial, turnMarker: "dispatched-fixture" };
+    const options = {
+      ...denial,
+      turnMarker: "dispatched-fixture",
+      expectedArguments: { action: "run", jobId: "fixture-job" },
+    };
     for (const details of [
       undefined,
       { status: "error", tool: "dispatch_action", error: "Automation not found: fixture-job" },
