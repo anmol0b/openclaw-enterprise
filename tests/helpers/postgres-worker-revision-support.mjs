@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { encodeRepositoryCredentialSessionFiles } from "../../apps/controller/src/drivers/repo/github/credentials/client/config.ts";
+import { RepositoryReceiptStore } from "../../apps/controller/src/backends/repository-credentials/receipt-store.ts";
 import { waitFor } from "./wait-for.mjs";
 
 // Helpers shared by the postgres-worker-agent-revision*.test.mjs files.
@@ -42,14 +43,18 @@ export async function advanceCleanupRetries(fixture, revision) {
   );
 }
 
-// This boundary Driver supplies protocol observations. The real worker, native
-// IAM, State, and PostgreSQL queue own every lifecycle decision asserted below;
-// these cases do not qualify the concrete credential service or Compute runtime.
-export function repositoryBoundary({ count = 1, deadlineWallMs = Date.now() + 120_000 } = {}) {
+// This boundary Driver supplies synthetic sessions backed by the actual receipt
+// owner. The real worker, IAM, State, and PostgreSQL queue own the lifecycle
+// decisions; these cases do not qualify the concrete credential service or Compute.
+export function repositoryBoundary({
+  count = 1,
+  backendId = "repository-provider",
+  deadlineWallMs = Date.now() + 120_000,
+} = {}) {
   const bindings = Array.from({ length: count }, (_, index) => ({
     repositoryRef: `repository-${index}-${randomUUID()}`,
     profile: "read",
-    backendId: "repository-provider",
+    backendId,
     grant: {
       providerInstanceId: "repository-provider-instance",
       repositoryId: `repository-${index}`,
@@ -58,14 +63,54 @@ export function repositoryBoundary({ count = 1, deadlineWallMs = Date.now() + 12
   }));
   const admissions = new Map();
   const sessions = new Map();
+  const ownership = new Map();
   const calls = [];
+  const generation = randomUUID();
+  let receipts;
+  const dispose = async (sessionId) => {
+    const session = sessions.get(sessionId);
+    const owned = ownership.get(sessionId);
+    if (session === undefined || owned === undefined) {
+      return undefined;
+    }
+    if (session.state === "DISPOSED") {
+      return session;
+    }
+    const disposed = { ...session, state: "DISPOSED" };
+    await receipts.dispose(owned.admissionId, owned.input, generation, {
+      ...disposed,
+      activeUses: 0,
+      cleanup: {
+        active: 0,
+        pending: 0,
+        uncertain: 0,
+        auxiliaryPending: false,
+        revoked: 0,
+        expired: 0,
+      },
+    });
+    sessions.set(sessionId, disposed);
+    admissions.set(owned.admissionId, disposed);
+    return disposed;
+  };
   const driver = {
     id: "repository-worker-boundary",
     implementation: "repository-worker-boundary",
     capability: "repo",
     maintenanceIntervalMs: 3_600_000,
+    durableBrokerReceipts: true,
+    bindReceiptState(state) {
+      receipts = new RepositoryReceiptStore(state, {
+        driverId: driver.id,
+        implementation: driver.implementation,
+        backendId,
+      });
+    },
+    async checkAdmissionReady() {
+      assert.ok(receipts, "repository boundary requires its fixture's receipt state");
+    },
     async listOptions() {
-      return { options: [], descriptionsPending: false };
+      return { options: [] };
     },
     resolve() {
       return { bindings, sessionDurationSeconds: 60 };
@@ -76,17 +121,35 @@ export function repositoryBoundary({ count = 1, deadlineWallMs = Date.now() + 12
       if (existing !== undefined) {
         return { kind: "recovered", status: existing };
       }
-      if (input.recoverOnly) {
+      const bound = {
+        namespaceId: input.namespaceId,
+        repositoryRef: input.binding.repositoryRef,
+        profile: input.binding.profile,
+        expectedBinding: input.binding.grant,
+        durationSeconds: input.durationSeconds,
+        deadlineWallMs: input.deadlineWallMs,
+        preparedOnly: input.preparedOnly,
+      };
+      const admission = await receipts.admission(
+        input.admissionId,
+        bound,
+        generation,
+        input.recoverOnly === true,
+      );
+      if (admission.kind === "missing") {
         return { kind: "missing" };
       }
+      assert.equal(admission.kind, "reserved");
       const session = {
         sessionId: `session_${randomUUID()}`,
         state: "OPEN",
         deadlineWallMs: Math.min(Date.now() + input.durationSeconds * 1000, input.deadlineWallMs),
         binding: input.binding.grant,
       };
+      await receipts.bind(input.admissionId, bound, generation, session);
       admissions.set(input.admissionId, session);
       sessions.set(session.sessionId, session);
+      ownership.set(session.sessionId, { admissionId: input.admissionId, input: bound });
       return {
         kind: "created",
         session,
@@ -110,22 +173,12 @@ export function repositoryBoundary({ count = 1, deadlineWallMs = Date.now() + 12
     },
     async close(sessionId) {
       calls.push({ operation: "close", sessionId });
-      const session = sessions.get(sessionId);
-      if (session === undefined) {
-        return undefined;
-      }
-      const disposed = { ...session, state: "DISPOSED" };
-      sessions.set(sessionId, disposed);
-      for (const [admissionId, admitted] of admissions) {
-        if (admitted.sessionId === sessionId) {
-          admissions.set(admissionId, disposed);
-        }
-      }
-      return disposed;
+      return dispose(sessionId);
     },
   };
   return {
     driver,
+    dispose,
     calls,
     snapshot: {
       driver: { id: driver.id, implementation: driver.implementation },

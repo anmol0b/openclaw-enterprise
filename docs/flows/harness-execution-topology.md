@@ -1,7 +1,7 @@
 ---
 created: 2026-08-21
-updated: 2026-10-16
-last_updated_session: Codex/01a13654-be66-7741-b54f-f8ae80f2d496
+updated: 2026-10-22
+last_updated_session: fix-2185
 ---
 
 # Harness Execution Topology Flow
@@ -184,9 +184,9 @@ refs preserve native ID namespaces, including `codex/`. OpenClaw separates the
 explicit provider for thread start, resume, and turns; the Harness probe keeps the
 native ID.
 
-Kubelet probes private `/readyz` on runtime-backed workloads. Gates remain:
-Gateway plugin/native status, Codex plugin state and authenticated app-server
-WebSocket, or dedicated OpenClaw identity. Responses are bodyless `200` or `503`.
+Kubelet probes private `/readyz` on runtime-backed workloads. Gates: Gateway
+plugin status and native `/startupz` and `/readyz`, Codex plugin state and
+authenticated app-server WebSocket, or dedicated OpenClaw identity.
 While first-deploy [workspace setup](workspace-files.md) is pending, embedded
 preparation starts the replacement Gateway itself before activation. If the Gateway
 of a version that never served (its Service still selects no Pod) is unready,

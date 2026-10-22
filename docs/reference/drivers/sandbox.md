@@ -17,7 +17,7 @@ SSH, or installed Compute combinations. See [Driver selection](selection.md).
 ### Driver interface
 
 The [shared interface](../../../packages/contracts/src/index.ts) exposes the
-required `facets` and `cleanup` members, an optional `harnessHome`, and optional lifecycle and policy methods.
+required `facets` and `cleanup` members, an optional `harnessHome`, and optional lifecycle, policy and transport methods.
 
 | Member                                           | Contract                                                                                                                                                                                                                                                                                                                                                                                          |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -54,6 +54,22 @@ Agent revision already serving at startup or one that failed permanently. An end
 `codexPermissionProfile: ":danger-full-access"` when the provider supplies the
 sandbox boundary. Kubernetes Compute projects that selection to the Gateway;
 without it, the Codex bridge retains its configured sandbox behavior.
+
+The endpoint may supply `tls.caBundle`: public PEM CA certificates for a WSS
+origin. It accepts no private keys, client credentials or source paths. Omission
+keeps system trust. Kubernetes Compute mounts this trust read-only into only the
+exact dedicated Agent Gateway, combining any execution-cluster root into one
+`NODE_EXTRA_CA_CERTS` bundle. Certificate and hostname verification remain enabled.
+The separate immutable revision ConfigMap precedes Gateway rollout and is removed
+after revision workloads terminate; changing its certificates requires a new revision.
+
+`enrollHarness(context, installation)` is required when a revision has a protected
+egress plan. Compute calls it after committing the verified installation and
+checking current evidence again. The Driver authenticates the exact Harness
+transport and binds a fresh startup challenge to that execution and plan before
+releasing its first model probe. A starting transport can remain pending for the
+next reconcile. Enrollment conveys neither credential material nor permission to
+send; see [protected static inference](../credential-sources/protected-inference.md).
 
 `observeHarness(context)` reads the provider's own lifecycle record of a dedicated
 Agent revision's Harness Sandbox, without contacting the Harness. It answers `running`,
@@ -117,6 +133,11 @@ paired Sandbox can consume them. The Sandbox must apply every attachment and
 reject any it did not issue. After the Harness is ready, Compute asks the
 gateway whether each attachment is applied before activating the Agent revision.
 
+A private WSS Harness endpoint may supply public CA trust in `tls.caBundle`. Compute
+projects that bundle through an immutable revision ConfigMap into only this Gateway; Node
+verifies the peer certificate and hostname, activation checks the same trust, and
+retirement removes it after the workloads.
+
 ### Sandbox resource identity
 
 `SandboxResourceRef` contains `namespaceName`, `resourceName`, `agentId`, and
@@ -131,10 +152,13 @@ implementation advertising it must declare the configuration contribution
 [shared definition contract](selection.md#configuration-definitions-and-discovery).
 OCC resolves it through the registry before admission. Expected provider refusals
 throw the shared `ConfigurationValidationError` with safe `error.details`.
-`admitNetworkPolicy(additions, version, defaults?)` validates every requested
+`admitNetworkPolicy(additions, version, defaults?, scope?)` validates every requested
 constraint and returns a detached snapshot of Driver identity, version, defaults,
 and additions. The snapshot is consumed by provisioning; changed startup defaults
-cannot reinterpret an admitted revision.
+cannot reinterpret an admitted revision. `scope.repositoryCredentials` marks an
+Agent with repository bindings: a Driver that routes repository hosts only through
+its own path refuses a rule that reaches them with a
+`SandboxNetworkPolicyConflictError` naming the rule.
 
 `observeNetworkPolicy(context, snapshot)` returns the provider resource version,
 policy version, load state, and whether the complete candidate matches.
@@ -247,6 +271,7 @@ as the `reason`. OpenShell throws it for gRPC `PERMISSION_DENIED` and
 | Deployment rejects the Harness                       | Confirm dedicated execution and that the provider can preserve the approved identity, token, mounts, login mode, and Secret references. |
 | Cleanup keeps retrying after the Pod disappears      | Check the stable Sandbox resource reference and provider bootstrap resources. Pod absence alone does not prove cleanup completed.       |
 | Containment is unavailable or ownership is ambiguous | Restore the provider or correct ownership. Never activate a workload without the required containment.                                  |
+| A gateway request fails                              | Worker diagnostics carry only the method, gRPC status and a fixed validation category, never supplier text or request values.           |
 
 ## Implementations
 

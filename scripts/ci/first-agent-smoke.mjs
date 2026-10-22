@@ -16,7 +16,17 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, realpath, rm, statfs, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  statfs,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -34,7 +44,7 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const occ = join(root, "bin", "occ");
-const workDirectory = resolve(
+export const workDirectory = resolve(
   process.env.OCC_FIRST_AGENT_SMOKE_DIRECTORY ??
     join(process.env.RUNNER_TEMP ?? "/tmp", "first-agent-smoke"),
 );
@@ -85,7 +95,7 @@ const nodeBaseImage =
 const modelNetwork = { name: slotNames.model, subnet: slotNames.subnet };
 const modelAddress = slotNames.modelAddress;
 const nodeModelAddress = slotNames.nodeModelAddress;
-const modelContainer = slotNames.model;
+export const modelContainer = slotNames.model;
 const noncePattern = "OCE_SMOKE_[A-Za-z0-9-]+|FIRST_AGENT_[A-Za-z0-9-]+";
 const minute = 60_000;
 // Both stop requests share one serial worker. Per Agent, allow the selected
@@ -100,7 +110,7 @@ function log(message) {
   process.stdout.write(`[first-agent-smoke] ${message}\n`);
 }
 
-function run(command, args, { env = process.env, input, timeout = 5 * minute, label } = {}) {
+export function run(command, args, { env = process.env, input, timeout = 5 * minute, label } = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(command, args, { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] });
     const stdout = [];
@@ -314,7 +324,7 @@ async function pushedDigest(tag) {
   return reference;
 }
 
-async function buildImages() {
+async function buildImages({ preparedGit = false } = {}) {
   const revision = (await run("git", ["rev-parse", "--verify", "HEAD"])).stdout.trim();
   assert.match(revision, /^[a-f0-9]{40}$/);
   await mkdir(workDirectory, { recursive: true });
@@ -326,7 +336,14 @@ async function buildImages() {
       run,
     }),
   );
-  await step("loopback registry", () =>
+  if (preparedGit) {
+    const name = "skipper-prepared-compute-model.mjs";
+    const companion = join(modelDirectory, name);
+    await copyFile(join(root, "tests", "fixtures", name), companion);
+    await chmod(companion, 0o644); // The model fixture runs as the image's non-root user.
+    await rm(join(modelDirectory, "ca-key.pem"));
+  }
+  const registryContainer = await step("loopback registry", () =>
     run("docker", [
       "run",
       "--detach",
@@ -407,7 +424,36 @@ async function buildImages() {
   const [controller, runtime] = await step("registry digests", () =>
     Promise.all([pushedDigest(controllerTag), pushedDigest(smokeRuntimeTag)]),
   );
+  const repository = {};
+  if (preparedGit) {
+    const tag = `${registry}/oce-smoke/repository:${revision}`;
+    await step("repository service image build", () =>
+      run(
+        "docker",
+        [
+          "buildx",
+          "build",
+          "--load",
+          ...cacheArguments("runtime"),
+          ...cacheBuildArguments,
+          "--file",
+          "deploy/runtime/Dockerfile",
+          "--target",
+          "repository-credentials-service",
+          "--label",
+          `org.opencontainers.image.revision=${revision}`,
+          "--tag",
+          tag,
+          ".",
+        ],
+        { timeout: 30 * minute, label: "repository-build" },
+      ),
+    );
+    repository.OCC_DEVELOPMENT_REPOSITORY_IMAGE = await pushedDigest(tag);
+    repository.OCC_SKIPPER_IMAGE_REGISTRY_CONTAINER = registryContainer.stdout.trim();
+  }
   await exportEnvironment({
+    ...repository,
     OCC_DEVELOPMENT_CONTROLLER_IMAGE: controller,
     OCC_KUBERNETES_RUNTIME_IMAGE: runtime,
     OCC_FIRST_AGENT_SMOKE_MODEL_DIRECTORY: modelDirectory,
@@ -419,11 +465,17 @@ async function buildImages() {
 // ---------------------------------------------------------------------------
 // run
 
-function createApi(origin, key) {
+export function createApi(origin, key) {
   return async (method, path, body) => {
+    const url = new URL(path, origin);
+    assert.equal(
+      url.origin,
+      origin,
+      "refusing to send the smoke key outside the controller origin",
+    );
     let response;
     try {
-      response = await fetch(new URL(path, origin), {
+      response = await fetch(url, {
         method,
         redirect: "error",
         signal: AbortSignal.timeout(30_000),
@@ -559,16 +611,21 @@ async function printWatchLog() {
   }
 }
 
-async function startLocalSetup(environment) {
-  const stopWatching = watchCluster();
-  try {
-    await run(occ, ["dev", "up"], { env: environment, timeout: 25 * minute, label: "dev-up" });
-  } catch (error) {
-    await stopWatching({ finalCapture: true });
-    await printWatchLog();
-    throw error;
+export async function startLocalSetup(environment, { privateInstall = false } = {}) {
+  if (privateInstall) {
+    // Private acceptance retains only named stages, never installation or cluster logs.
+    await run(occ, ["dev", "up"], { env: environment, timeout: 30 * minute });
+  } else {
+    const stopWatching = watchCluster();
+    try {
+      await run(occ, ["dev", "up"], { env: environment, timeout: 25 * minute, label: "dev-up" });
+    } catch (error) {
+      await stopWatching({ finalCapture: true });
+      await printWatchLog();
+      throw error;
+    }
+    await stopWatching();
   }
-  await stopWatching();
   const directory = environment.OCC_DEVELOPMENT_STATE_DIRECTORY;
   const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
   const key = JSON.parse(await readFile(state.keyPath, "utf8"));
@@ -583,7 +640,7 @@ async function startLocalSetup(environment) {
   };
 }
 
-function kubectl(stack, args, options = {}) {
+export function kubectl(stack, args, options = {}) {
   return run("kubectl", ["--kubeconfig", stack.kubeconfig, "--context", stack.context, ...args], {
     timeout: 2 * minute,
     ...options,
@@ -593,8 +650,14 @@ function kubectl(stack, args, options = {}) {
 // Answer api.openai.com inside the cluster with the stand-in provider. Agent
 // Pods reach it through their ordinary model egress NetworkPolicy and verify
 // its certificate against the CA added to the runtime image.
-async function routeModelProvider(stack, modelDirectory, runtimeImage, credentialDigests) {
+export async function routeModelProvider(
+  stack,
+  modelDirectory,
+  runtimeImage,
+  { journey = "PROBE_PUBLIC_READ_JOURNEY", cleanup = [], credentialDigests } = {},
+) {
   await run("docker", ["network", "create", "--subnet", modelNetwork.subnet, modelNetwork.name]);
+  cleanup.push(() => run("docker", ["network", "rm", modelNetwork.name]));
   // Fixed addresses: Docker would otherwise give the node the provider's address.
   await run("docker", [
     "network",
@@ -604,6 +667,14 @@ async function routeModelProvider(stack, modelDirectory, runtimeImage, credentia
     modelNetwork.name,
     `k3d-${stack.state.cluster}-server-0`,
   ]);
+  cleanup.push(() =>
+    run("docker", [
+      "network",
+      "disconnect",
+      modelNetwork.name,
+      `k3d-${stack.state.cluster}-server-0`,
+    ]),
+  );
   const providerArgs = [
     "run",
     "--detach",
@@ -624,17 +695,23 @@ async function routeModelProvider(stack, modelDirectory, runtimeImage, credentia
     "--env",
     `PROBE_ENDPOINT_ECHO_PATTERN=${noncePattern}`,
     "--env",
-    "PROBE_ENDPOINT_CREDENTIAL_DIGESTS",
-    "--env",
-    "PROBE_PUBLIC_READ_JOURNEY=1",
+    `${journey}=1`,
+    // With digests, the stand-in answers only these credentials and names each caller.
+    ...(credentialDigests === undefined ? [] : ["--env", "PROBE_ENDPOINT_CREDENTIAL_DIGESTS"]),
     "--entrypoint",
     "node",
     runtimeImage,
     "/fixture/endpoint.mjs",
   ];
-  await run("docker", providerArgs, {
-    env: { ...process.env, PROBE_ENDPOINT_CREDENTIAL_DIGESTS: JSON.stringify(credentialDigests) },
+  const { stdout: containerId } = await run("docker", providerArgs, {
+    env: {
+      ...process.env,
+      ...(credentialDigests === undefined
+        ? {}
+        : { PROBE_ENDPOINT_CREDENTIAL_DIGESTS: JSON.stringify(credentialDigests) }),
+    },
   });
+  cleanup.push(() => run("docker", ["rm", "--force", containerId.trim()]));
   await waitFor(
     "the stand-in provider to listen",
     async () => ({ done: (await modelEvents()).some(({ event }) => event === "listening") }),
@@ -1602,12 +1679,9 @@ async function smoke() {
       enablePublicReader(stack),
     );
     await step("route api.openai.com to the stand-in provider", () =>
-      routeModelProvider(
-        stack,
-        modelDirectory,
-        process.env.OCC_KUBERNETES_RUNTIME_IMAGE,
+      routeModelProvider(stack, modelDirectory, process.env.OCC_KUBERNETES_RUNTIME_IMAGE, {
         credentialDigests,
-      ),
+      }),
     );
     // The two Agents are independent; deploy them together to bound CI time.
     const [embedded, codex, control] = await Promise.all([
@@ -1679,12 +1753,14 @@ async function summarize() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const command = process.argv[2];
   try {
-    if (command === "images") {
-      await buildImages();
+    if (command === "images" || command === "prepared-git-images") {
+      await buildImages({ preparedGit: command === "prepared-git-images" });
     } else if (command === "run") {
       await smoke();
     } else {
-      throw new Error("Usage: node scripts/ci/first-agent-smoke.mjs images|run");
+      throw new Error(
+        "Usage: node scripts/ci/first-agent-smoke.mjs images|prepared-git-images|run",
+      );
     }
   } catch (error) {
     process.stderr.write(`first-agent-smoke: ${error.stack ?? error.message}\n`);

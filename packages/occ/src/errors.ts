@@ -92,9 +92,22 @@ export class DeletionRetryOwnedError extends AuthorizationDeniedError {
  * remaining distinguishable from explicit denials for HTTP and audit handling.
  */
 export class DependencyUnavailableError extends AuthorizationDeniedError {
-  constructor(message = "A required platform dependency is unavailable.") {
+  /** Fixed Driver-owned request diagnostics; never copy supplier text or request values here. */
+  readonly requestDiagnostic?: {
+    readonly method: string;
+    readonly grpcStatus: number;
+    readonly validationCategory: "POLICY_SAFETY" | "POLICY_MIDDLEWARE_VALIDATION" | "UNKNOWN";
+  };
+
+  constructor(
+    message = "A required platform dependency is unavailable.",
+    requestDiagnostic?: NonNullable<DependencyUnavailableError["requestDiagnostic"]>,
+  ) {
     super(message);
     this.name = "DependencyUnavailableError";
+    if (requestDiagnostic !== undefined) {
+      this.requestDiagnostic = Object.freeze({ ...requestDiagnostic });
+    }
   }
 }
 
@@ -506,6 +519,37 @@ export class ResourceStateConflictError extends ResourceConflictError {
 }
 
 /**
+ * A Sandbox Driver refuses a network policy rule it names, such as a grant beside its
+ * repository route. OCC returns the message; the policy worker fails the application at once.
+ */
+export class SandboxNetworkPolicyConflictError extends ResourceStateConflictError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SandboxNetworkPolicyConflictError";
+  }
+}
+
+const PROTECTED_EXECUTION_NETWORK_POLICY_MESSAGES = {
+  save: "Protected execution applies to this Agent: the Credential Proxy routes alone govern its egress, so network policy additions are refused; only an empty policy can be saved.",
+  apply:
+    "This Agent's active revision runs under protected execution: the Credential Proxy routes alone govern its egress, so live network policy application is refused.",
+  deploy:
+    "Protected execution keeps only the Credential Proxy egress policy, so this Agent's network policy additions are refused. Remove them, then deploy.",
+} as const;
+
+/**
+ * Finding 2053: a protected execution runs under its exact Credential Proxy egress policy, so
+ * an Agent's network policy additions are refused when saved, applied live or deployed, never
+ * dropped from the protected profile. HTTP returns 409 SANDBOX_POLICY_PROTECTED_EXECUTION.
+ */
+export class ProtectedExecutionNetworkPolicyError extends ResourceStateConflictError {
+  constructor(operation: keyof typeof PROTECTED_EXECUTION_NETWORK_POLICY_MESSAGES) {
+    super(PROTECTED_EXECUTION_NETWORK_POLICY_MESSAGES[operation]);
+    this.name = "ProtectedExecutionNetworkPolicyError";
+  }
+}
+
+/**
  * The Configuration moved past the generation the update named. HTTP marks it with an
  * `/expectedGeneration` detail, so a caller can tell it from other Configuration conflicts,
  * such as one reserved for provisioning, and reread before saving again.
@@ -664,6 +708,13 @@ export const NAMESPACE_NAME_CONFLICT =
 export const DELETED_NAMESPACE_NAME_CONFLICT =
   "This name belongs to a deleted Namespace and cannot be reused. Choose a different name.";
 
+/**
+ * A revision admits one installed egress execution (UNIQUE (namespace_id, revision_id)); a
+ * second Sandbox for the same revision is refused alike by the memory and PostgreSQL stores.
+ */
+export const EGRESS_REVISION_INSTALLED_CONFLICT =
+  "Egress revision already has an installed execution.";
+
 export class AgentDeletingError extends ResourceConflictError {
   constructor(message = "The Agent is being deleted.") {
     super(message);
@@ -789,13 +840,19 @@ export class SandboxNamespaceRefusedError extends Error {
 }
 
 /** A step of dedicated activation that completes by itself once a workload catches up. */
-export type ActivationPendingCode = "WORKSPACE_NODE_PENDING" | "WORKSPACE_NODE_BINDING_PENDING";
+export type ActivationPendingCode =
+  | "WORKSPACE_NODE_PENDING"
+  | "WORKSPACE_NODE_BINDING_PENDING"
+  | "REPOSITORY_GIT_MATERIAL_PENDING"
+  | "WORKSPACE_NODE_RECONNECT_PENDING";
 
 /**
  * Activation found its workloads ready but is still waiting for one of them:
- * the Gateway has not applied the workspace node it was handed, or the Harness
- * node has not connected to the Gateway. The worker records `code` so status
- * names the wait. The message stays in the controller.
+ * the Gateway has not applied the workspace node it was handed, the Harness
+ * node has not connected to the Gateway, the Sandbox has not installed the
+ * version's first repository Git credential, or the node has not reconnected
+ * after that install reset the Sandbox's connections. The worker records
+ * `code` so status names the wait. The message stays in the controller.
  */
 export class ActivationPendingError extends Error {
   readonly code: ActivationPendingCode;
@@ -856,12 +913,28 @@ export class ActivationFailedError extends Error {
  * with `code`. The message stays in the controller; status shows a fixed text.
  */
 export class SandboxRevisionUnsupportedError extends Error {
-  readonly code: "SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED" | "SANDBOX_HARNESS_UNSUPPORTED";
+  readonly code:
+    | "SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED"
+    | "SANDBOX_HARNESS_UNSUPPORTED"
+    | "SANDBOX_REPOSITORY_RECIPIENT_UNVERIFIED";
 
   constructor(code: SandboxRevisionUnsupportedError["code"], message: string) {
     super(message);
     this.name = "SandboxRevisionUnsupportedError";
     this.code = code;
+  }
+}
+
+/** The selected Sandbox cannot authenticate the required recipient of repository credentials. */
+export class SandboxRepositoryRecipientUnverifiedError extends SandboxRevisionUnsupportedError {
+  static readonly description =
+    "The selected Sandbox cannot verify the recipient required for repository session delivery. Select a Sandbox with repository access or a Compute-owned Harness.";
+
+  constructor() {
+    super(
+      "SANDBOX_REPOSITORY_RECIPIENT_UNVERIFIED",
+      SandboxRepositoryRecipientUnverifiedError.description,
+    );
   }
 }
 
@@ -957,7 +1030,10 @@ export class CredentialSourceRevisionError extends Error {
  * again. The message stays in the controller.
  */
 export class CredentialWithdrawalRefusedError extends Error {
-  readonly code: "CREDENTIAL_WITHDRAWAL_MISCONFIGURED" | "CREDENTIAL_WITHDRAWAL_OWNERSHIP_CONFLICT";
+  readonly code:
+    | "CREDENTIAL_WITHDRAWAL_MISCONFIGURED"
+    | "CREDENTIAL_WITHDRAWAL_OWNERSHIP_CONFLICT"
+    | "CREDENTIAL_WITHDRAWAL_REQUIRES_RUNTIME_RETIREMENT";
 
   constructor(code: CredentialWithdrawalRefusedError["code"], message: string) {
     super(message);

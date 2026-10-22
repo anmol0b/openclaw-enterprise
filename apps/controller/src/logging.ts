@@ -47,6 +47,7 @@ const ALLOWED_FIELDS = new Set([
   "activationMs",
   "agentId",
   "attempt",
+  "candidatePreparationReached",
   "cause",
   "code",
   "computeDriverId",
@@ -57,6 +58,7 @@ const ALLOWED_FIELDS = new Set([
   "elapsedMs",
   "errorClass",
   "event",
+  "grpcStatus",
   "host",
   "keyHash",
   "lane",
@@ -75,12 +77,14 @@ const ALLOWED_FIELDS = new Set([
   "providerId",
   "readinessWaitMs",
   "reason",
+  "repositoryRef",
   "requestId",
   "restrictionIds",
   "result",
   "revisionId",
   "route",
   "sandboxDriverId",
+  "sandboxId",
   "signal",
   "skippedUserCount",
   "skippedUserIds",
@@ -88,6 +92,7 @@ const ALLOWED_FIELDS = new Set([
   "status",
   "step",
   "stopYields",
+  "validationCategory",
   "workId",
 ]);
 
@@ -218,6 +223,18 @@ function safeScalar(key: string, value: unknown): string | number | boolean | un
   if (key === "stopYields") {
     return typeof value === "number" && value >= 0 ? safeNumber(key, value) : undefined;
   }
+  if (key === "grpcStatus") {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 16
+      ? value
+      : undefined;
+  }
+  if (key === "validationCategory") {
+    return value === "POLICY_SAFETY" ||
+      value === "POLICY_MIDDLEWARE_VALIDATION" ||
+      value === "UNKNOWN"
+      ? value
+      : undefined;
+  }
   if (typeof value === "string") {
     return safeString(value);
   }
@@ -326,6 +343,12 @@ function sanitizedEvent(
       key === "message" &&
       eventName !== "compute.preflight-warning" &&
       eventName !== "worker.compute-prepare-failed"
+    ) {
+      continue;
+    }
+    if (
+      key === "candidatePreparationReached" &&
+      (eventName !== "worker.compute-prepare-failed" || typeof value !== "boolean")
     ) {
       continue;
     }

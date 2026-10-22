@@ -639,7 +639,7 @@ export function installFixture(scenario, evidence) {
     namespaceId,
     agentId: agent.id,
     version: 1,
-    additions: [],
+    additions: scenario.policyState === "protected" ? [policyGrant] : [],
   };
   if (scenario.policyState === "failed") {
     sandboxPolicy.application = {
@@ -1051,9 +1051,12 @@ export function installFixture(scenario, evidence) {
         }
         if (method === "POST") {
           const uncertain = scenario.credentialRegistrationOutcome && !credentialRegistrationFailed;
+          const id = nextId("csr");
           const saved = {
             ...body,
-            id: nextId("csr"),
+            id,
+            config: body.config ?? {},
+            ref: { kind: "credential_source", namespaceId, id },
             namespaceId,
             driverId: "credential-gateway-storybook",
             state:
@@ -1067,6 +1070,17 @@ export function installFixture(scenario, evidence) {
             // Preserve the server-owned registration after an uncertain response;
             // recovery operates on the saved source, never another model Secret.
             credentialRegistrationFailed = true;
+            if (scenario.credentialRegistrationOutcome === "different-source") {
+              const otherId = nextId("csr");
+              const other = {
+                ...saved,
+                id: otherId,
+                name: "Another model registration",
+                ref: { ...saved.ref, id: otherId },
+              };
+              credentialSources.set(other.id, other);
+              return response(other, 201);
+            }
             return error(503, "DEPENDENCY_UNAVAILABLE");
           }
           return response(saved, 201);
@@ -1117,7 +1131,7 @@ export function installFixture(scenario, evidence) {
         }
         if (method === "PATCH") {
           Object.assign(saved, body, { generation: saved.generation + 1 });
-          return response(saved);
+          return response({ ...saved, id: scenario.configurationSaveResponseId ?? saved.id });
         }
       }
       if (resource === "permissions" && method === "GET") {
@@ -1414,7 +1428,10 @@ export function installFixture(scenario, evidence) {
               },
             });
           }
-          return response({ success: true, data: { additions: body.additions } });
+          return response({
+            success: true,
+            data: scenario.policyState === "incompletePreview" ? {} : { additions: body.additions },
+          });
         }
         if (scenario.policyState && suffix === "/sandbox-policy/networking" && method === "GET") {
           if (scenario.policyState === "ownerDenied") {
@@ -1439,6 +1456,7 @@ export function installFixture(scenario, evidence) {
             policy: sandboxPolicy,
             configuration: policyDescriptor,
             editingEnabled: policyEditing,
+            protectedExecution: scenario.policyState === "protected",
             ceiling: [policyGrant],
             defaults:
               scenario.policyState === "unsupported"
@@ -1452,7 +1470,7 @@ export function installFixture(scenario, evidence) {
                       },
                     ],
                   },
-            ...(scenario.policyState === "unsupported"
+            ...(scenario.policyState === "unsupported" || scenario.policyState === "protected"
               ? {}
               : { defaultsRevisionId: candidateRevisionId }),
             capability:
@@ -1484,6 +1502,13 @@ export function installFixture(scenario, evidence) {
           if (scenario.policyState === "editDenied") {
             return error(403, "AUTHORIZATION_DENIED");
           }
+          if (scenario.policyState === "protected" && body.additions.length > 0) {
+            return error(
+              409,
+              "SANDBOX_POLICY_PROTECTED_EXECUTION",
+              "Protected execution applies to this Agent: the Credential Proxy routes alone govern its egress, so network policy additions are refused; only an empty policy can be saved.",
+            );
+          }
           if (body.expectedVersion !== sandboxPolicy.version) {
             return error(409, "RESOURCE_STATE_CONFLICT");
           }
@@ -1493,7 +1518,11 @@ export function installFixture(scenario, evidence) {
             additions: body.additions,
           };
           delete sandboxPolicy.application;
-          return response(sandboxPolicy);
+          return response(
+            scenario.policyState === "unconfirmedSave"
+              ? { ...sandboxPolicy, additions: [] }
+              : sandboxPolicy,
+          );
         }
         if (
           scenario.policyState &&

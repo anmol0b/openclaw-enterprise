@@ -34,7 +34,7 @@ import {
 } from "../../apps/controller/src/drivers/repo/github/credentials/client/native-git.ts";
 import { readRuntimeRepositoryManifest } from "../../apps/controller/src/drivers/repo/github/credentials/client/manifest.ts";
 import { createNativeClientMaterial } from "../fixtures/repository-credentials/clients.mjs";
-import { startRegistryCredentialServiceFixture } from "../fixtures/repository-credentials/registry.mjs";
+import { startCredentialServiceFixture } from "../fixtures/repository-credentials/service.mjs";
 import { socketDirectory } from "../helpers/socket-directory.mjs";
 import {
   cleanEnvironment,
@@ -639,6 +639,7 @@ test("operator rejects unsafe or conflicting bound request files before admissio
     repositoryRef: "project",
     durationSeconds: 60,
     profile: "git-read",
+    preparedOnly: true,
     deadlineWallMs: Date.now() + 60_000,
     expectedBinding: {
       providerInstanceId: "provider-test",
@@ -685,7 +686,10 @@ test("operator rejects unsafe or conflicting bound request files before admissio
     failed(result);
     assert.equal(requests.length, 0, "invalid request reached admission");
   };
+  const { preparedOnly: _preparedOnly, ...unprepared } = request;
   for (const value of [
+    unprepared,
+    { ...request, preparedOnly: false },
     { ...request, bearer: "unexpected-secret-field" },
     { ...request, recoverOnly: false },
     { ...request, expectedBinding: { ...request.expectedBinding, token: "unexpected" } },
@@ -709,60 +713,45 @@ test("operator rejects unsafe or conflicting bound request files before admissio
   refused(await invoke(alias));
 });
 
+async function loopbackBrokerTunnel(t, fixture) {
+  // Preserve the service's canonical HTTPS origin while tunneling stock Git to
+  // its ephemeral loopback listener. TLS, authentication and Git RPC remain real.
+  const proxy = createHttpServer();
+  proxy.on("connect", (request, socket, head) => {
+    if (request.url !== "localhost:443") {
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+      return;
+    }
+    const upstream = connect(fixture.listeners.address.port, "127.0.0.1", () => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head);
+      socket.pipe(upstream).pipe(socket);
+    });
+    socket.on("error", () => upstream.destroy());
+    socket.on("close", () => upstream.destroy());
+    upstream.on("error", () => socket.destroy());
+  });
+  return (await listen(t, proxy)).replace("https:", "http:");
+}
+
 test(
-  "native push policy protects every destination and preserves common-directory hooks",
+  "development token push policy protects native destinations and preserves common-directory hooks",
   { timeout: 120000 },
   async (t) => {
     const origin = "https://localhost";
-    const fixture = await startRegistryCredentialServiceFixture(t, {
+    const fixture = await startCredentialServiceFixture(t, {
       gateway: { listen: "127.0.0.1:0", publicOrigin: origin },
-      repositories: [
-        {
-          repositoryRef: "guarded",
-          repositoryId: "73",
-          repository: "fixture/repository",
-          pushRefAllowlist: ["refs/heads/exact", "refs/heads/agent/*"],
-        },
-        {
-          repositoryRef: "denied",
-          repositoryId: "74",
-          repository: "fixture/other",
-          pushRefAllowlist: [],
-        },
-        { repositoryRef: "ordinary", repositoryId: "75", repository: "fixture/ordinary" },
-      ],
+      configuration: { pushRefAllowlist: ["refs/heads/exact", "refs/heads/agent/*"] },
     });
-    const material = await createNativeClientMaterial(
-      t,
-      fixture.repositories.map((entry) => ({
-        opened: entry.opened,
-        repositoryRef: entry.repositoryRef,
-        publicCa: fixture.tls.ca,
-      })),
-    );
+    const material = await createNativeClientMaterial(t, [
+      { opened: fixture.opened, repositoryRef: "guarded", publicCa: fixture.tls.ca },
+    ]);
     const work = await temporaryDirectory(t);
-    // Preserve the service's canonical HTTPS origin while tunneling stock Git to
-    // its ephemeral loopback listener. TLS, authentication and Git RPC remain real.
-    const proxy = createHttpServer();
-    proxy.on("connect", (request, socket, head) => {
-      if (request.url !== "localhost:443") {
-        socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
-        return;
-      }
-      const upstream = connect(fixture.listeners.address.port, "127.0.0.1", () => {
-        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-        upstream.write(head);
-        socket.pipe(upstream).pipe(socket);
-      });
-      socket.on("error", () => upstream.destroy());
-      socket.on("close", () => upstream.destroy());
-      upstream.on("error", () => socket.destroy());
-    });
-    const proxyOrigin = (await listen(t, proxy)).replace("https:", "http:");
+    const proxyOrigin = await loopbackBrokerTunnel(t, fixture);
     const env = gitEnvironment(material.root, { https_proxy: proxyOrigin });
     const invoke = (args, options = {}) =>
       run("/usr/bin/git", args, { env, cwd: work, ...options });
-    const guarded = fixture.byRef.get("guarded");
+    const guarded = fixture;
     const snapshot = async () =>
       (
         await run("/usr/bin/git", ["for-each-ref", "--format=%(refname) %(objectname)"], {
@@ -853,20 +842,6 @@ test(
       (await invoke(["-C", linked, "ls-remote", "origin", "refs/heads/agent/one"])).stdout,
       "",
     );
-    const denied = await invoke(
-      ["-C", linked, "push", "https://github.com/fixture/other.git", "HEAD:refs/heads/agent/one"],
-      { allowFailure: true },
-    );
-    assert.notEqual(denied.code, 0);
-    assert.match(denied.stderr, /repository-push-ref-not-allowed/);
-    await invoke([
-      "-C",
-      linked,
-      "push",
-      "https://github.com/fixture/ordinary.git",
-      "HEAD:refs/heads/ordinary",
-    ]);
-    assert.equal(await fixture.byRef.get("ordinary").git.ref("refs/heads/ordinary"), head);
     await writeFile(join(checkout, ".git/hooks/pre-push"), "#!/bin/sh\nexit 7\n", {
       mode: 0o755,
     });

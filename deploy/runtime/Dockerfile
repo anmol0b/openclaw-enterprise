@@ -1,6 +1,6 @@
-ARG OPENCLAW_COMMIT=aff376aa64bed3f14733c8dd942bda045d4dc1d7
-ARG NODE_BASE_IMAGE=docker.io/library/node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
-ARG NODE_RUNTIME_BASE_IMAGE=docker.io/library/node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+ARG OPENCLAW_COMMIT=48eb73cbbfa7d9de626248bf054aea6a707fe018
+ARG NODE_BASE_IMAGE=docker.io/library/node:24.22.1-bookworm@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a
+ARG NODE_RUNTIME_BASE_IMAGE=docker.io/library/node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 
 # Refresh installed Debian packages; the pinned upstream images can predate
 # security updates. Keep the full toolchain out of the final runtime.
@@ -56,7 +56,7 @@ RUN set -eu; \
     cp -R .build/repository-credentials/client/dist "$client/dist"; \
     chmod 0755 .build/runtime-client/opt .build/runtime-client/opt/oce; \
     chmod -R a+rX "$client"; \
-    chmod 0555 "$client/bin/gh"; \
+    chmod 0555 "$client/bin/gh" "$client/bin/oce-github"; \
     test -f "$client/dist/drivers/repo/github/credentials/client/router.js"; \
     test -f "$client/dist/drivers/repo/github/credentials/client/native-git.js"; \
     test -x "$client/dist/drivers/repo/github/credentials/client/hooks/pre-push"; \
@@ -87,7 +87,7 @@ FROM node-build-base AS openclaw-source
 # Keep the source identity separate from its unreleased package version.
 ARG OPENCLAW_COMMIT
 ENV GIT_COMMIT=${OPENCLAW_COMMIT}
-ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-21T23:48:21Z
+ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-22T23:20:54Z
 ENV OPENCLAW_PREFER_PNPM=1
 WORKDIR /source
 RUN --mount=type=secret,id=build-ca,required=false \
@@ -95,7 +95,7 @@ RUN --mount=type=secret,id=build-ca,required=false \
     if [ -f /run/secrets/build-ca ]; then export CURL_CA_BUNDLE=/run/secrets/build-ca; fi; \
     curl --fail --location --silent --show-error \
       "https://codeload.github.com/openclaw/openclaw/tar.gz/${GIT_COMMIT}" -o /tmp/openclaw-source.tar.gz; \
-    echo '35b18728938421c6b5831198be521d4fae256edac606fa47482d54fce9c24e13  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
+    echo '1f49c8f716dd3a3c573ad73faaf286d988c49118fe55dda623c039475e93f580  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
     tar -xzf /tmp/openclaw-source.tar.gz --strip-components=1; \
     rm /tmp/openclaw-source.tar.gz
 # TODO: Remove this bridge patch when OpenClaw supports networkProxy.readOnlyPaths.
@@ -134,7 +134,7 @@ RUN --mount=type=secret,id=build-ca,required=false \
 FROM node-build-base AS openclaw-dependency-inputs
 ARG OPENCLAW_COMMIT
 ENV GIT_COMMIT=${OPENCLAW_COMMIT}
-ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-21T23:48:21Z
+ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-22T23:20:54Z
 ENV OPENCLAW_PREFER_PNPM=1
 WORKDIR /source
 COPY --from=openclaw-source /inputs/ ./
@@ -161,7 +161,7 @@ COPY --from=openclaw-source /source/ ./
 # Exercise the original caller through the public RPC before and after the
 # placement acknowledgment, including revocation, against this exact source.
 COPY deploy/runtime/openclaw-required-worker-authority-regression.patch /tmp/openclaw-required-worker-authority-regression.patch
-RUN echo 'fedec7335f557c20f401a577543d77ba8ed244aca5909d85ad4207a990fb758d  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
+RUN echo '9757a5a11cbcfb762e5005264cf2f43388f000192d65c33038143d907eff80fd  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-required-worker-authority-regression.patch
 RUN --network=none OPENCLAW_VITEST_RUNTIME=node OPENCLAW_VITEST_MAX_WORKERS=1 pnpm_config_verify_deps_before_run=false \
     node --import ./scripts/tsx.mjs scripts/test-projects.mts src/gateway/server.required-placement-scopes.test.ts
@@ -255,7 +255,7 @@ ENV PATH=/app/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 
 WORKDIR /app
 
-RUN node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 24 || minor < 16) throw new Error(`OpenClaw Enterprise runtime images require Node.js 24.16+; found ${process.version}.`);'
+RUN node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major !== 24 || minor < 22 || (minor === 22 && patch < 1)) throw new Error(`OpenClaw Enterprise runtime images require Node.js 24.22.1+; found ${process.version}.`);'
 
 RUN apt-get update && apt-get install -y --no-install-recommends tini git ca-certificates curl openssh-client libstdc++6 libgomp1 python3 procps && rm -rf /var/lib/apt/lists/*
 # Version checks use throwaway state directories: gh writes a random device ID

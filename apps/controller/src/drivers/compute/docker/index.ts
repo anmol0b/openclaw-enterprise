@@ -1,3 +1,4 @@
+import { assertExecutionReleaseAllowed } from "@openclaw-enterprise/contracts";
 import { randomBytes } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import type {
@@ -49,7 +50,10 @@ import {
   validatePlaintextNativeGateway,
   validateRoutableNativeListener,
 } from "../native-gateway-transport.ts";
-import { managedGatewayConfiguration } from "../gateway-tool-policy.ts";
+import {
+  GATEWAY_TOOL_POLICY_RUNTIME,
+  managedGatewayConfiguration,
+} from "../gateway-tool-policy.ts";
 import { validateCodexApprovalPolicySetting } from "../../../gateway/codex-approval-policy.ts";
 import { unsupportedNativeGatewayAuthFields } from "../../../gateway/auth-fields.ts";
 
@@ -226,6 +230,7 @@ const { chmodSync, mkdirSync, writeFileSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 
 ${PLUGIN_RUNTIME_HELPERS}
+${GATEWAY_TOOL_POLICY_RUNTIME}
 ${startupPhaseHelper("gateway")}
 ${gatewayStateMigrationHelper("deploy the Agent again")}
 
@@ -551,10 +556,17 @@ export class DockerComputeDriver implements ComputeDriver {
     );
   }
 
+  validateExecutionAdmission(
+    revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+  ): void {
+    assertExecutionReleaseAllowed(revision);
+  }
+
   async prepareRevision(
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): Promise<ComputeReadiness> {
+    assertExecutionReleaseAllowed(revision);
     if (revision.harnessAuth !== undefined) {
       this.validateHarnessAuth();
     }

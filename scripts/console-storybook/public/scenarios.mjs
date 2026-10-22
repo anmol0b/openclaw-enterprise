@@ -2596,6 +2596,20 @@ export const scenarios = {
       "Create the Agent and confirm the source is reused, with no new model Secret or registration.",
     ],
   },
+  createCredentialRegistrationMismatch: {
+    group: "Pages/Create Agent",
+    name: "Registration response identifies a different source",
+    path: create,
+    credentialSourceTypes: modelCredentialSourceTypes,
+    credentialRegistrationOutcome: "different-source",
+    actions: dedicatedOpenclawForm,
+    description:
+      "The simulated registration succeeds, but its response identifies another source in the same Namespace.",
+    steps: [
+      "Select Create Agent. The form asks you to check registration and does not start provisioning.",
+      "Select Check credential registration. The form finds the requested source and lets you continue without registering it again.",
+    ],
+  },
   createCredentialRegistrationCleanup: {
     group: "Pages/Create Agent",
     name: "Remove failed model credential registration",
@@ -3257,7 +3271,7 @@ export const scenarios = {
       'Under the form fields, read "Your permissions in this Namespace could not be checked".',
       "Retry permission check is offered; the fixture keeps failing the read, so the text stays.",
     ],
-    gap: "The live retry that succeeds is in tests/browser/console-create-agent-member.test.mjs.",
+    gap: "The member creation browser test also covers a successful retry.",
   },
   createMember: {
     group: "Pages/Create Agent",
@@ -3271,7 +3285,7 @@ export const scenarios = {
       'Above the form, "Your access" says you can create Agents in Engineering and that an Installation administrator then gives the new Agent access to its Secrets.',
       'The form starts with the badge "From Preset · default-codex", and no mid-form note asks for Installation access.',
     ],
-    gap: "The live check is a member account on a real Installation (tests/browser/console-create-agent-member.test.mjs).",
+    gap: "The member creation browser test uses a member account and the real Installation permission check.",
   },
   createMemberGrantRefused: {
     group: "Pages/Create Agent",
@@ -3414,6 +3428,15 @@ export const scenarios = {
     actions: startOAuthLogin,
     description:
       "An Installation whose selected Drivers do not support device login reports it as unavailable. Choose another authentication method; no device code or sign-in link appears.",
+  },
+  createOAuthStartUnconfirmed: {
+    group: "Pages/Create Agent",
+    name: "ChatGPT sign-in start unconfirmed (Experimental)",
+    path: create,
+    rules: [{ suffix: "/device-authorizations", method: "POST", bodyError: true }],
+    actions: oauthForm,
+    description:
+      "Choose Sign in with OAuth. The simulated response is interrupted after its headers, so the Console cannot tell whether sign-in started. Switch authentication methods and return: a second sign-in stays unavailable.",
   },
   createOAuthError: {
     group: "Pages/Create Agent",
@@ -3987,6 +4010,18 @@ export const scenarios = {
     actions: [click("Enable gateway password access"), click("Save Configuration")],
     description:
       "A viewer without Configuration update saves: the refusal is an alert that takes focus and comes into view.",
+  },
+  configurationSaveUnconfirmed: {
+    group: "Pages/Agent detail",
+    name: "Save response names another Configuration",
+    path: draft,
+    configurationSaveResponseId: "cfg_00000000-0000-4000-8000-000000000002",
+    description:
+      "The simulated save succeeds, but the response names a different Configuration. The editor requires a reload before another save.",
+    steps: [
+      "Choose Enable gateway password access, then Save Configuration. Save stays disabled and the message says the outcome is unknown.",
+      "Choose Reload draft. The saved password reference is visible without a second save.",
+    ],
   },
   gatewayPasswordAccess: {
     group: "Pages/Agent detail",
@@ -6817,6 +6852,24 @@ export const scenarios = {
     description:
       "A file the API confirms missing says so on first load and can be created; unrelated file editors still load.",
   },
+  workspaceResourceMissing: {
+    group: "Components/Workspace",
+    name: "Agent unavailable while reading a file",
+    path: `${revision}&tab=workspace`,
+    deployed: true,
+    rules: [
+      {
+        suffix: "/AGENTS.md",
+        method: "GET",
+        status: 404,
+        code: "NOT_FOUND",
+        message: "The requested platform resource was not found.",
+        once: true,
+      },
+    ],
+    description: "The Agent was unavailable, so the editor cannot assume AGENTS.md is empty.",
+    steps: ["Choose Reload AGENTS.md. Once its contents load, edit the file to enable Save."],
+  },
   workspaceUnknown: {
     group: "Components/Workspace",
     name: "Write outcome unknown",
@@ -6831,7 +6884,7 @@ export const scenarios = {
       click("Save AGENTS.md"),
     ],
     description:
-      "An uncertain write blocks retry until Reload lets the reader inspect current content.",
+      "After an uncertain save, reload the same file to inspect its contents before deciding whether to save again.",
   },
   workspaceMissingReadback: {
     group: "Components/Workspace",
@@ -7053,7 +7106,7 @@ export const scenarios = {
     ],
     actions: [click("Delete Agent"), click("Permanently delete Agent")],
     description:
-      "The request may have started cleanup. Refresh status instead of submitting again.",
+      "Deletion may have started. Refresh deletion status checks this Agent without sending another deletion request.",
   },
   createFlow: {
     group: "Flows",
@@ -7475,7 +7528,7 @@ export const scenarios = {
     rules: [{ suffix: "/stop", method: "POST", status: 503, once: true }],
     actions: [click("Stop Agent"), { selector: ".agent-stop-dialog button.danger", click: true }],
     description:
-      "An uncertain stop response requires a status refresh before another stop request.",
+      "Stop may have been accepted. Refresh stop status checks this Agent without sending another stop request.",
   },
   stopFlow: {
     group: "Flows",
@@ -7542,6 +7595,8 @@ for (const [id, state, name] of [
   ["policyDenialsMissingMetadata", "missingMetadata", "Policy denial with unknown metadata"],
   ["policyDenialsFailed", "failed", "Policy application unconfirmed"],
   ["policyDenialsApplyRejected", "applyRejected", "Policy saved but live application rejected"],
+  ["policyIncompletePreview", "incompletePreview", "Policy preview omits the validated rules"],
+  ["policyUnconfirmedSave", "unconfirmedSave", "Policy save returns different rules than reviewed"],
   ["policyDenialsEditDenied", "editDenied", "Independent policy permission denied"],
   ["policyDenialsCeilingDenied", "ceilingDenied", "Policy addition exceeds the delegation ceiling"],
   [
@@ -7556,6 +7611,7 @@ for (const [id, state, name] of [
     "noCredential",
     "Policy logs unavailable without runtime credentials",
   ],
+  ["policyDenialsProtected", "protected", "Protected execution refuses network policy additions"],
 ]) {
   scenarios[id] = {
     group: "Pages/Agent detail",
@@ -7605,6 +7661,14 @@ for (const [id, state, name] of [
           ],
         }
       : {}),
+    ...(state === "protected"
+      ? {
+          steps: [
+            "The tab states that protected execution applies: the Credential Proxy routes alone govern this Agent's egress, so network policy additions are refused. The proposal editor and Apply are unavailable.",
+            "A rule saved before protected execution applied blocks every protected deploy. Choose Remove saved network rules and confirm the saved policy is now empty.",
+          ],
+        }
+      : {}),
     ...(state === "ceilingDenied"
       ? {
           steps: [
@@ -7619,6 +7683,21 @@ for (const [id, state, name] of [
           steps: [
             "Review a suggestion, then choose Review changes and Save and apply to current revision.",
             "Confirm the alert states the policy was saved but application was not confirmed. The saved version increases and the rule remains saved; do not infer live enforcement.",
+          ],
+        }
+      : {}),
+    ...(state === "incompletePreview"
+      ? {
+          steps: [
+            "Choose Review suggestion, then Review changes. The preview omits the rules; your proposal stays editable and Save is unavailable.",
+          ],
+        }
+      : {}),
+    ...(state === "unconfirmedSave"
+      ? {
+          steps: [
+            "Review a suggestion, then choose Review changes and Save and apply to current revision.",
+            "The save response omits the rule. Confirm that live application was not requested, then choose Refresh policy to see the rule that was saved.",
           ],
         }
       : {}),

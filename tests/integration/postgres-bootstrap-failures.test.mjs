@@ -14,8 +14,10 @@ import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs
 import { createInstallationDriverConfiguration } from "../helpers/installation-driver-configuration.mjs";
 import { createControllerWorker } from "../../apps/controller/src/worker.ts";
 import { createTestSecretDriver } from "../helpers/secret-driver.mjs";
+import { injectJson } from "../helpers/inject-json.mjs";
 import { jsonLines } from "../helpers/json-lines.mjs";
 import { withPool } from "../helpers/postgres-database.mjs";
+import { temporaryDirectory } from "../helpers/temporary-directory.mjs";
 import { admittedLoggingLevel } from "../../packages/contracts/src/index.ts";
 import { createTestConfigurationDriver } from "../helpers/configuration-driver.mjs";
 import { createTestKubernetesComputeDriver } from "../helpers/kubernetes-compute.mjs";
@@ -273,12 +275,7 @@ async function bootstrapWithLostCommitAcknowledgement(environment) {
 }
 
 async function request(app, method, url, apiKey, body) {
-  const response = await app.inject({
-    method,
-    url,
-    headers: { "x-api-key": apiKey, host: "127.0.0.1" },
-    ...(body === undefined ? {} : { payload: body }),
-  });
+  const response = await injectJson(app, method, url, { key: apiKey, body });
   const parsed = response.body.length === 0 ? undefined : response.json();
   return { status: response.statusCode, body: parsed };
 }
@@ -801,8 +798,7 @@ test(
   requiresFailurePostgres,
   async (context) => {
     const { environment } = await bootstrapExistingInstallation(context, "stored-name");
-    const configurationRoot = await privateOutputDirectory("openclaw-bootstrap-stored-name-");
-    context.after(() => rm(configurationRoot, { recursive: true, force: true }));
+    const configurationRoot = await temporaryDirectory(context, "openclaw-bootstrap-stored-name-");
     // An Installation stored before OCC applied the Name rule can hold a trailing NBSP:
     // PostgreSQL's name check accepts it.
     await withPool(migratorDatabaseUrl(), (pool) =>

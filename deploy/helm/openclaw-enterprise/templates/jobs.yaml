@@ -1,3 +1,5 @@
+{{- if not .Values.preprovisionedNamespace }}
+{{- $repositoryGit := include "openclaw.repositoryCredentials.gitEnabled" . -}}
 {{- $jobName := printf "%s-initialization" .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- /* On install, preserve evidence from an earlier attempt before Helm runs any hooks.
       This is a point-in-time lookup, not a lock or proof the installation is new. */ -}}
@@ -42,13 +44,20 @@ spec:
             items:
               - key: {{ .Values.installation.key | quote }}
                 path: installation.yaml
-        {{- if .Values.repositoryCredentials.enabled }}
+        {{- if .Values.api.consoleTheme.configMapName }}
+        - name: console-theme
+          configMap:
+            name: {{ .Values.api.consoleTheme.configMapName | quote }}
+        {{- end }}
+        {{- if $repositoryGit }}
         - name: repository-registry
           configMap:
             name: {{ .Values.repositoryCredentials.registryConfigMapName | quote }}
             items:
               - key: {{ .Values.repositoryCredentials.registryKey | quote }}
                 path: registry.json
+        {{- end }}
+        {{- if .Values.repositoryCredentials.enabled }}
         - name: repository-public-ca
           secret:
             secretName: {{ .Values.repositoryCredentials.publicCaSecretName | quote }}
@@ -88,14 +97,25 @@ spec:
               value: production
             - name: OCC_CONFIG_PATH
               value: /etc/openclaw/installation/installation.yaml
+            {{- if .Values.api.consoleTheme.configMapName }}
+            - name: OCC_CONSOLE_THEME_DIR
+              value: /etc/openclaw/console-theme
+            {{- end }}
           volumeMounts:
             - name: installation-startup
               mountPath: /etc/openclaw/installation
               readOnly: true
-            {{- if .Values.repositoryCredentials.enabled }}
+            {{- if .Values.api.consoleTheme.configMapName }}
+            - name: console-theme
+              mountPath: /etc/openclaw/console-theme
+              readOnly: true
+            {{- end }}
+            {{- if $repositoryGit }}
             - name: repository-registry
               mountPath: /etc/openclaw/repository-registry
               readOnly: true
+            {{- end }}
+            {{- if .Values.repositoryCredentials.enabled }}
             - name: repository-public-ca
               mountPath: /etc/openclaw/repository-ca
               readOnly: true
@@ -153,3 +173,4 @@ spec:
               mountPath: {{ .Values.database.caMountPath | quote }}
               readOnly: true
             {{- end }}
+{{- end }}

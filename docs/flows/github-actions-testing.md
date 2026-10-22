@@ -64,11 +64,22 @@ Each lane owns its tests, environment, required inputs and preparation settings.
 
 CI uses the event checkout without external service credentials. Impact and Suite Audit start independently. In every mode, `static-checks` verifies checkout identity and runs workspace, lint, format, OpenAPI and docs checks (no product tests), alone in docs mode. The [coverage map](../testing/ci.md#tests-in-each-workflow) lists matrix jobs and the separate `runtime-image-fixture`; tests mode runs only selected lanes. Image startup, PostgreSQL Application and the `checks-baseline` and `checks-browser` parts use `blacksmith-32vcpu-ubuntu-2404` for its 8 CPUs, k3d fixture and observability for its NetworkPolicy-enforcing kernel; `runtime-image-fixture` uses `ubuntu-22.04`. Other lanes, Static Checks and audit use `blacksmith-16vcpu-ubuntu-2404`.
 
-For a PR, the selector verifies the tested checkout and that the event head is the merge's second parent, then compares the first parent (the current base) and tested trees. Git path decoding preserves a leading UTF-8 BOM as filename data; paths outside the allowlist select full. API reference outputs and Markdown under `docs/reference/api/` select full for `openapi:check`. Only nonempty changes to allowlisted regular Markdown files select docs mode. Registered test files (with documentation and their own lane manifest entries) select tests mode: their `ci` lanes in either tree (`checks-baseline-1` if only the fixture job would run). Other test-tree, code, configuration, workflow or unknown changes and non-PR events select full. Missing or unverifiable policy or source evidence selects full or fails closed. Policy comes from that first parent; a base without it selects full. `CI Required` re-verifies the mode (and tests mode's lane set) and requires impact, audit and every selected job to succeed and the rest skipped. Full and tests modes aggregate same-source results of their lanes; docs mode does not aggregate or invent test artifacts.
+The selector verifies that the tested merge has the event head as its second parent. It
+compares that tree with its first parent, the current base, using policy from the base.
+Git path decoding preserves a leading UTF-8 BOM. Only a nonempty set of allowlisted
+regular Markdown changes selects docs mode; generated API references, including Markdown
+under `docs/reference/api/`, require full CI for `openapi:check`.
 
-The impact summary shows the mode, a fixed reason category, and accepted test
-lanes. Selector failures fail the job; unavailable evidence reports unavailable.
-The summary includes no changed paths or arbitrary selector output.
+Registered test changes may include docs and their own lane-manifest entries. CI runs
+the owning lanes from either tree, adds `checks-baseline-2` for TypeScript, and uses
+`checks-baseline-1` if only the fixture job would run. Other changes and non-PR events
+select full CI. Missing policy or unverifiable source selects full or fails closed.
+
+`CI Required` rechecks the mode and selected lanes. Impact, audit and selected jobs must
+succeed; other jobs must be skipped. Full and tests modes aggregate results from the same
+source. Docs mode produces no test artifacts. The impact summary shows mode, fixed reason
+and accepted lanes; it omits paths and raw output. Selector errors fail the job, and missing
+evidence is reported as unavailable.
 
 For full-mode PRs, `affected-packages` verifies merge identity and checkout
 cleanliness, then reports declared workspace dependents. It is advisory and does
@@ -107,7 +118,7 @@ The provider job uses the shared `blacksmith-8vcpu-ubuntu-2404` runner for image
 
 For `logging-collector`, `scripts/ci/prepare.mjs:prepareLane` pre-pulls the pinned Collector, Node, Prometheus and Grafana images before publishing lane inputs. The metrics test and preparation share the digests in `scripts/ci/metrics-monitoring-images.mjs:metricsMonitoringImages`. `scripts/ci/prepare.mjs:ensureDockerSourceImage` reuses a verified local repository digest or pulls through `scripts/ci/image-pull.mjs:pullImage`, then verifies that digest before tests start containers. Registry 5xx and rate limits retry within the shared pull budget; missing manifests and authorization refusals fail preparation immediately. Explicit unpinned Node overrides keep the existing test-owned pull behavior.
 
-`checks-browser`, `checks-browser-2`, `postgres-auth`, `postgres-platform`, `images-model-probes`, `images-runtime-startup`, `images-runtime-startup-2` and `images-runtime-startup-3` use separate runners and required artifacts. `scripts/ci/prepare.mjs:imageBuildArgs` enables scoped BuildKit caches for hosted image jobs: packaging exports; probes, runtime startup and `repository-credentials-platform` restore. Images load into the job's Docker engine; cache credentials stay in preparation.
+`checks-browser`, `checks-browser-2`, `postgres-auth`, `postgres-platform`, `images-model-probes`, `images-runtime-startup`, `images-runtime-startup-2` and `images-runtime-startup-3` use separate runners and required artifacts. `scripts/ci/prepare.mjs:imageBuildArgs` enables scoped BuildKit caches for hosted image jobs: packaging exports; probes and runtime startup restore. Images load into the job's Docker engine; cache credentials stay in preparation.
 
 Kubernetes fixture startup records phase timings and host snapshots. On failure,
 reads with time and size limits save `<state-file>.diagnostics.json` outside the cluster directory

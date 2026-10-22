@@ -10,11 +10,11 @@ import { defaultAgentModel } from "../../apps/controller/src/console/agents/star
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { imageSmokeTimeoutMultiplier } from "./image-smoke-timeout.mjs";
+import { temporaryDirectory } from "./temporary-directory.mjs";
 import { followContainer } from "./docker-follow.mjs";
 import { GATEWAY_RUNTIME_ENTRYPOINT as DOCKER_GATEWAY_RUNTIME_ENTRYPOINT } from "../../apps/controller/src/drivers/compute/docker/index.ts";
 import { nodeProgramArguments } from "../../apps/controller/src/drivers/compute/node-program.ts";
@@ -228,8 +228,7 @@ export function failureTail(output, limit = failureOutputLimit) {
 }
 
 export async function temporaryGatewayConfiguration(t, harnessId) {
-  const directory = await mkdtemp(join(tmpdir(), "oce-runtime-image-config-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await temporaryDirectory(t, "oce-runtime-image-config-");
 
   const path = join(directory, "openclaw.json");
   await writeFile(path, JSON.stringify(createAdmittedRuntimeImageConfiguration(harnessId)));
@@ -364,6 +363,34 @@ export function jsonLogEntries(output) {
       }
     })
     .filter((entry) => entry !== undefined);
+}
+
+// A new volume owned by the Gateway user, for mounting at `mountPath` (the
+// Gateway home or its ~/.openclaw) as its PersistentVolume is. `seed`, a shell
+// command run first as root with `seedVolumes` also mounted, can fill it.
+export async function gatewayStateVolume(t, mountPath, { seed, seedVolumes = [] } = {}) {
+  const volume = `oce-runtime-image-state-${randomBytes(6).toString("hex")}`;
+  await runDocker(["volume", "create", volume]);
+  t.after(() => runDocker(["volume", "rm", "-f", volume]).catch(() => {}));
+  // As root, like the Docker Driver's workspace setup: a new volume mounted
+  // below the image's home can be root-owned.
+  await runDocker([
+    "run",
+    "--rm",
+    "--user",
+    "0:0",
+    "--network",
+    "none",
+    "--volume",
+    `${volume}:${mountPath}`,
+    ...seedVolumes.flatMap((value) => ["--volume", value]),
+    "--entrypoint",
+    "sh",
+    image,
+    "-c",
+    `${seed === undefined ? "" : `${seed} && `}chown -R 1000:1000 ${mountPath}`,
+  ]);
+  return volume;
 }
 
 export async function runGatewaySmoke(t, harnessId, options = {}) {

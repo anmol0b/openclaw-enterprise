@@ -19,10 +19,15 @@ export function createGitHubProtocol({
   keyPair = sharedRsaKeyPair("github-app"),
   tokenLifetimeMs = 3600000,
   tokenResponse = (packet) => packet,
+  additionalPermissions = [],
+  installationAccess = false,
+  encodeIssueResponse = JSON.stringify,
+  beforeIssue,
   beforeIssueResponse,
   beforeMetadataResponse,
   issueResponse = (response) => response,
   issueResponseGate,
+  draftResponse = (body) => body,
   revokeStatus = 204,
 }) {
   const { privateKey, publicKey } = keyPair;
@@ -31,6 +36,8 @@ export function createGitHubProtocol({
     publicKey,
     lifetimeMs: tokenLifetimeMs,
     repositoryId,
+    additionalPermissions,
+    installationAccess,
   });
   const resources = createRepositoryResources({ repository, repositoryId, description });
   const trace = [];
@@ -78,6 +85,7 @@ export function createGitHubProtocol({
         request.method === "POST" &&
         url.pathname === `/app/installations/${fixtureInstallationId}/access_tokens`
       ) {
+        await beforeIssue?.();
         // The provider owns the token before response gates can delay or lose its delivery.
         const { token, expires, permissions } = authority.issue(
           request.headers.authorization,
@@ -95,7 +103,10 @@ export function createGitHubProtocol({
             repositories: [resources.repo],
           }),
         });
-        json(issued.status, issued.body);
+        if (!disconnect(request, response, url)) {
+          response.writeHead(issued.status, { "content-type": "application/json" });
+          response.end(encodeIssueResponse(issued.body));
+        }
         return;
       }
       if (request.method === "DELETE" && url.pathname === "/installation/token") {
@@ -144,7 +155,13 @@ export function createGitHubProtocol({
         });
         response.end(result.raw);
       } else {
-        json(result.status, result.body, result.headers);
+        const createPull =
+          request.method === "POST" && url.pathname === "/repos/" + repository + "/pulls";
+        if (createPull) {
+          entry.forwardedOperationId = Object.hasOwn(request.headers, "x-oce-operation-id");
+          entry.usedBearer = request.headers.authorization.startsWith("Bearer ");
+        }
+        json(result.status, createPull ? draftResponse(result.body) : result.body, result.headers);
       }
     } catch (error) {
       // Keep failure evidence safe: assertion values may include signing input.

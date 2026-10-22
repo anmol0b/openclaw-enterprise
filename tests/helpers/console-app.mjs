@@ -294,7 +294,7 @@ export async function createConsoleAppFixture(t, options = {}) {
       permissions: role.permissions.map((item) => ({ ...item })),
     })),
     bindings: seed.bindings.map((binding) => ({ ...binding })),
-    restrictions: [],
+    restrictions: /** @type {import("../../packages/contracts/src/index.ts").Restriction[]} */ ([]),
   };
   // These grant-free accounts are fixture setup. Accounts added later through
   // createAccountWithPolicy are also shareable, because State resolves identities live.
@@ -318,14 +318,16 @@ export async function createConsoleAppFixture(t, options = {}) {
       return super.transact((unit) => policyUnit.run(unit, () => work(unit)));
     }
   }
-  const platformState =
+  const basePlatformState =
     options.state ??
     new ConsolePlatformState({
+      preparedTokenProof: options.preparedTokenProof,
       auditSink,
       // Live lookup, so people enrolled after construction can be bound like in Postgres.
       resolveIAMIdentity: (identityId) =>
         policy.identities.find((identity) => identity.id === identityId),
     });
+  const platformState = options.wrapState?.(basePlatformState) ?? basePlatformState;
   const iamDriver = new NativeIAMDriver(
     {
       async loadNativeIAMState() {
@@ -337,22 +339,21 @@ export async function createConsoleAppFixture(t, options = {}) {
           const namespaces = await view.namespaces.listNamespaces();
           const roles = [];
           const bindings = [];
-          const identities = [];
+          const principals = [];
           for (const namespace of namespaces) {
-            // Browser-created Agents must participate in the same live IAM evaluation
-            // as their browser-created credential grants.
-            for (const agent of await view.agents.listAgents(namespace.id)) {
-              identities.push({
+            principals.push(...(await view.iamPolicy.listServicePrincipals(namespace.id)));
+            principals.push(
+              ...(await view.agents.listAgents(namespace.id)).map((agent) => ({
                 id: agent.servicePrincipalId,
-                kind: "service_principal",
                 namespaceId: agent.namespaceId,
                 agentId: agent.id,
-              });
-            }
+                kind: "service_principal",
+              })),
+            );
             roles.push(...(await view.iamPolicy.listRoles(namespace.id)));
             bindings.push(...(await view.iamPolicy.listAccessBindings(namespace.id)));
           }
-          return { roles, bindings, identities };
+          return { roles, bindings, principals };
         };
         const unit = policyUnit.getStore();
         const managed = await (unit ? readPolicy(unit) : platformState.read(readPolicy));
@@ -360,8 +361,8 @@ export async function createConsoleAppFixture(t, options = {}) {
           ...policy,
           identities: [
             ...policy.identities,
-            ...managed.identities.filter(
-              (identity) => !policy.identities.some((existing) => existing.id === identity.id),
+            ...managed.principals.filter(
+              (principal) => !policy.identities.some((identity) => identity.id === principal.id),
             ),
           ],
           roles: [...policy.roles, ...managed.roles],
@@ -429,6 +430,7 @@ export async function createConsoleAppFixture(t, options = {}) {
     createController(installation) {
       controller = new OpenClawController(installation, {
         state: platformState,
+        preparedTokens: options.preparedTokens,
         sandboxNetworkPolicyCeiling: options.sandboxNetworkPolicyCeiling,
         driverConfigurations: options.driverConfigurations,
         ...(options.now === undefined ? {} : { now: options.now }),
@@ -567,6 +569,11 @@ export async function createConsoleAppFixture(t, options = {}) {
 
   const adminSession = await signIn();
 
+  /**
+   * @param {string} method
+   * @param {string} path
+   * @param {{session?: typeof adminSession | null, headers?: Record<string, string>, body?: unknown}} [options]
+   */
   async function request(method, path, { session = adminSession, headers = {}, body } = {}) {
     const result = await rawRequest(method, path, {
       headers:
@@ -735,6 +742,10 @@ export async function createConsoleAppFixture(t, options = {}) {
     return secret.data;
   }
 
+  /**
+   * @param {string} label
+   * @param {(principal: import("../../packages/contracts/src/index.ts").Principal) => void} configurePolicy
+   */
   async function createAccountWithPolicy(label, configurePolicy) {
     const accountCredentials = {
       email: `${label}-${randomUUID()}@example.com`,

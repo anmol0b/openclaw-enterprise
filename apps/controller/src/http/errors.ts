@@ -33,6 +33,7 @@ import {
   PostgresCommitOutcomeUnknownError,
   ResourceConflictError,
   ResourceStateConflictError,
+  ProtectedExecutionNetworkPolicyError,
   RuntimeCredentialsForbiddenByClusterError,
   RuntimeLogsError,
   ScopeViolationError,
@@ -821,6 +822,10 @@ export function requestFailure(error: unknown): RequestFailure {
     return failure(409, "RESOURCE_CONFLICT", error.message, [
       { path: "/expectedGeneration", code: "INVALID_VALUE" },
     ]);
+  }
+  if (error instanceof ProtectedExecutionNetworkPolicyError) {
+    // Finding 2053: raised only after the caller's policy or deploy grants, with a fixed message.
+    return failure(409, "SANDBOX_POLICY_PROTECTED_EXECUTION", error.message);
   }
   if (error instanceof ResourceStateConflictError) {
     return failure(409, "RESOURCE_CONFLICT", error.message, error.details);

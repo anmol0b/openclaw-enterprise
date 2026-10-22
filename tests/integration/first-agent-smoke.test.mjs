@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
@@ -8,6 +9,7 @@ import { GATEWAY_STOP_TIMEOUT_MS } from "../../apps/controller/src/drivers/compu
 import {
   STOP_PHASE_TIMEOUT_MS,
   agentStopDiagnostic,
+  createApi,
   observeAgentStop,
   smokeSlotNames,
   waitFor,
@@ -15,6 +17,22 @@ import {
 } from "../../scripts/ci/first-agent-smoke.mjs";
 
 const revision = "rev_00000000-0000-4000-8000-000000000001";
+
+test("smoke API sends its key only to the selected controller origin", async (t) => {
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push([request.url, request.headers["x-api-key"]]);
+    response.end('{"data":"ok"}');
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const host = "127.0.0.1:" + server.address().port;
+  const key = "synthetic-smoke-key";
+  assert.equal(await createApi("http://" + host, key)("GET", "/namespaces"), "ok");
+  const other = createApi("http://127.0.0.1:1", key);
+  await assert.rejects(other("GET", "//" + host + "/unexpected"), /outside the controller origin/);
+  assert.deepEqual(requests, [["/namespaces", key]]);
+});
 
 function virtualClock() {
   let elapsed = 0;

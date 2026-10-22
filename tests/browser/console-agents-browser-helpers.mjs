@@ -26,6 +26,7 @@ export function persistedDeploymentError(code, data) {
 }
 
 export function apiRequests(page, origin) {
+  /** @type {{ method: string, path: string, body: unknown }[]} */
   const requests = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -119,6 +120,7 @@ export function fileBrowser() {
   return sharedBrowser;
 }
 
+/** @returns {Promise<{ page: import("playwright").Page, artifacts: string }>} */
 export async function newPage(t, fixture, options = {}) {
   const artifacts = await artifactDirectory(t);
   assert.ok(
@@ -175,6 +177,7 @@ const signedInPath = /\/console\/(agents|backends|namespaces|settings|secrets)/;
 // keeps that tab's session storage and history across the sign-in. So does a fixture served
 // over TLS or under another host name, whose cookies are what such a test checks. Tests about
 // the sign-in page itself use the form directly or loginThroughForm.
+/** @param {string | URL} [path] */
 export async function login(
   page,
   fixture,
@@ -271,6 +274,7 @@ export async function consoleStorage(page) {
   });
 }
 
+/** @param {ReturnType<typeof apiRequests>} requests */
 export function nonAuthWriteRequests(requests) {
   return requests.filter(
     (request) => request.method !== "GET" && !request.path.startsWith("/api/auth/sign-"),
@@ -310,6 +314,7 @@ export function detailUrl(fixture, namespaceId, agentId, revision, tab) {
   return url;
 }
 
+/** @param {ReturnType<typeof apiRequests>} requests */
 export function pathRequests(requests, method, path) {
   return requests.filter((request) => request.method === method && request.path === path);
 }
@@ -499,6 +504,7 @@ export async function slackSelectionValue(input) {
     .evaluateAll((chips) => chips.map((chip) => chip.getAttribute("title")).join(", "));
 }
 
+/** @param {import("playwright").Page} page @param {string} name */
 export function repositoryCheckbox(page, name) {
   return page
     .locator("#repository-results .repository-result-row")
@@ -515,6 +521,13 @@ export function repositoryCheckbox(page, name) {
 // With `afterServer`, the server answers first and the page gets that answer on release (a
 // write that landed while the page waits); if that answer is lost, the page's request fails
 // rather than being sent again. With `fulfill`, the held request gets that response.
+/**
+ * @param {import("node:test").TestContext} t
+ * @param {import("playwright").Page} page
+ * @param {Parameters<import("playwright").Page["route"]>[0]} url
+ * @param {{ once?: boolean, method?: string, afterServer?: boolean, fulfill?: Parameters<import("playwright").Route["fulfill"]>[0] | null }} [options]
+ * @returns {Promise<{ requested: Promise<void>, release: () => void, wasRequested: () => boolean }>}
+ */
 export async function holdRequests(
   t,
   page,
@@ -604,6 +617,7 @@ export function recordLayoutShifts() {
 
 // Returns the layout shifts recorded since the last call, and their total.
 export async function takeLayoutShifts(page) {
+  /** @type {{ value: number, sources: { node: string, text?: string, from: number[], to: number[] }[] }[]} */
   const shifts = await page.evaluate(() => globalThis.__layoutShifts.splice(0));
   return { shift: shifts.reduce((sum, entry) => sum + entry.value, 0), shifts };
 }
