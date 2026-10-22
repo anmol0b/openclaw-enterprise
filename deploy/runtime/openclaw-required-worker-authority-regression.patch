@@ -401,7 +401,7 @@ diff --git a/src/gateway/server.required-placement-scopes.test.ts b/src/gateway/
 +            replacePaths: [`gateway.auth.identityScopes.${writers.scope}`],
 +          });
 +        },
-+        /operator source authority is no longer active/,
++        /^Gateway requester authority changed$/,
 +      );
 +      if (!afterAcknowledgment) {
 +        await expect(revoked.created).rejects.toThrow(/gateway policy changed/);

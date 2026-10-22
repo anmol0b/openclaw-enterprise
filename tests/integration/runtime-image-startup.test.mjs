@@ -1738,7 +1738,7 @@ assert.equal(provenance.sourceArchiveSha256, "1f49c8f716dd3a3c573ad73faaf286d988
 assert.equal(provenance.openclawBridgePatchSha256, "2e529593cb72c69be86cf7bb927aa555de50bc7ef923e80b37ba67df9bc1a624");
 assert.equal(Object.hasOwn(provenance, "openclawConnectPatchSha256"), false);
 assert.equal(provenance.codexDependencyPinPatchSha256, "686dcb3fcdd384150845f7af5b5f3bf46b2dc6ee24ab8f5b629b10566e18afd4");
-assert.equal(provenance.openclawRequiredWorkerAuthorityRegressionPatchSha256, "9757a5a11cbcfb762e5005264cf2f43388f000192d65c33038143d907eff80fd");
+assert.equal(provenance.openclawRequiredWorkerAuthorityRegressionPatchSha256, "0fda64033083d4db4ba13b823445ded303cdcd4d392ecf0d2413b19f7516bc66");
 assert.equal(provenance.codex.version, "0.163.0-alpha.2");
 assert.equal(Object.hasOwn(provenance, "codexPatchSha256"), false);
 assert.equal(Object.hasOwn(provenance, "codexVersion"), false);
