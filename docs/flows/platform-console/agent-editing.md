@@ -121,7 +121,7 @@ stay locked while pending. Snapshot views deploy current settings. Failed reads
 send no bodyless deploy POST; success opens the version. Uncertain POSTs require
 history readback before retry; browser reads are not atomic with admission.
 
-`apps/controller/src/console/drafts.mjs:createDraftStore` holds document-local drafts.
+`apps/controller/src/console/drafts.mts:createDraftStore` holds document-local drafts.
 `console.mjs:resetReads` and `detail.mjs:renderTab` capture fields before teardown,
 excluding passwords. Namespace and Agent keys isolate drafts; session expiry,
 user change, logout, exit, and reload clear them. Nothing enters browser storage
@@ -130,7 +130,7 @@ channel snapshots include controls and staged Secret metadata. Reload draft reap
 only the reader's edits, naming overlaps and skipped choices. Save and Cancel
 clear captures; pending saves retain recovery guards.
 
-`dom.mjs:dismissOnBackdrop` requires press and click outside the topmost editor.
+`dom.mts:dismissOnBackdrop` requires press and click outside the topmost editor.
 Like Escape, cancellation discards channel drafts, clears Secret inputs, and
 retains plugin selections. Pending channel saves and Secret creation prevent dismissal.
 

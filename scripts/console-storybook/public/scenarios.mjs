@@ -413,6 +413,204 @@ const shareExistingPerson = [
 
 // Page failures use the HTTP boundary; isolated component previews receive their input state.
 export const scenarios = {
+  secrets: {
+    group: "Pages/Secrets",
+    name: "Populated",
+    path: "/console/secrets",
+    description:
+      "The library shows names and IDs. The privacy notice explains why stored values are never returned. Simulated UI proof.",
+    steps: [
+      "Search by name or ID. Tab to a result and press Enter; its dialog names the Namespace and lists consumers.",
+      "Create a Secret with a dummy value, replace it, then delete it. Switch Namespace to inspect isolation in navigation.",
+    ],
+  },
+  secretsMobile: {
+    group: "Pages/Secrets",
+    name: "Mobile",
+    path: "/console/secrets",
+    mobile: true,
+    description: "The Secret list and dialogs at phone width. Simulated UI proof.",
+  },
+  secretsSearch: {
+    group: "Pages/Secrets",
+    name: "No search matches",
+    path: "/console/secrets",
+    actions: [{ selector: '[aria-label="Search Secrets"]', value: "no-such-secret" }],
+    description: "Clear the search to see the Secrets in this Namespace again.",
+  },
+  secretsEmpty: {
+    group: "Pages/Secrets",
+    name: "Empty",
+    path: "/console/secrets",
+    emptySecrets: true,
+    description: "An authorized list without Secrets offers creation.",
+  },
+  secretsLoading: {
+    group: "Pages/Secrets",
+    name: "Loading",
+    path: "/console/secrets",
+    rules: [{ path: presetSecretsPath, hold: true }],
+    description: "Namespace admission succeeds while the Secret list is still loading.",
+  },
+  secretsUnavailable: {
+    group: "Pages/Secrets",
+    name: "Read unavailable",
+    path: "/console/secrets",
+    rules: [{ path: presetSecretsPath, status: 503 }],
+    description: "A failed Secret collection read shows recovery, with no stale rows.",
+  },
+  secretsNoNamespace: {
+    group: "Pages/Secrets",
+    name: "No readable Namespace",
+    path: "/console/secrets",
+    emptyNamespaces: true,
+    description: "Secret requests require an admitted Namespace selection.",
+  },
+  secretsNamespaceNotReady: {
+    group: "Pages/Secrets",
+    name: "Namespace provisioning",
+    path: "/console/secrets",
+    namespaceStatus: "provisioning",
+    description: "Metadata stays readable; creation and replacement wait for Namespace readiness.",
+  },
+  secretsCreate: {
+    group: "Pages/Secrets",
+    name: "Create",
+    path: "/console/secrets",
+    actions: [click("Create Secret")],
+    description:
+      "The header identifies the Namespace. The form preserves whitespace and explains that you can replace a saved value but cannot retrieve it.",
+    steps: [
+      "Enter a name and a dummy value. Use Show value beside the Value label, then hide it again.",
+      "Press Enter from Secret name to submit. After the save, Close is the only dialog action.",
+    ],
+  },
+  secretsMissingValue: {
+    group: "Pages/Secrets",
+    name: "Missing value",
+    path: "/console/secrets",
+    actions: [
+      click("Create Secret"),
+      { selector: "#secret-name", value: "Team API key" },
+      { selector: 'dialog button[type="submit"]', click: true },
+    ],
+    description: "Required-value errors remain beside their field; no request is sent.",
+  },
+  secretsCreateDenied: {
+    group: "Pages/Secrets",
+    name: "Create denied",
+    path: "/console/secrets",
+    denySecretCreate: true,
+    actions: [
+      click("Create Secret"),
+      { selector: "#secret-name", value: "Team API key" },
+      { selector: "#secret-value", value: "synthetic-story-value" },
+      { selector: 'dialog button[type="submit"]', click: true },
+    ],
+    description:
+      "The API refuses creation, clears the entered value and disables the refused write.",
+  },
+  secretsUnknownSave: {
+    group: "Pages/Secrets",
+    name: "Unknown save outcome",
+    path: "/console/secrets",
+    rules: [{ path: presetSecretsPath, method: "POST", bodyError: true }],
+    actions: [
+      click("Create Secret"),
+      { selector: "#secret-name", value: "Team API key" },
+      { selector: "#secret-value", value: "synthetic-story-value" },
+      { selector: 'dialog button[type="submit"]', click: true },
+    ],
+    description:
+      "An unreadable reply leaves an amber warning that the outcome is unknown. The value is erased and this dialog cannot resubmit.",
+  },
+  secretsConsumers: {
+    group: "Pages/Secrets",
+    name: "Consumers and restricted references",
+    path: "/console/secrets",
+    secretConsumers: {
+      agents: ["agt_00000000-0000-4000-8000-000000000001"],
+      configurations: ["cfg_00000000-0000-4000-8000-000000000001"],
+      credentialSources: [],
+      provisioningRequests: [],
+      unreadable: 2,
+      truncated: true,
+    },
+    actions: [click("Demo model API key (simulated)")],
+    description:
+      "Agent links and other consumer IDs are grouped by resource. The blue notice explains restricted visibility; the amber warning identifies an incomplete list. Simulated UI proof.",
+  },
+  secretsReplace: {
+    group: "Pages/Secrets",
+    name: "Replace value",
+    path: "/console/secrets",
+    actions: [click("Demo model API key (simulated)"), click("Replace value")],
+    description:
+      "Replacement preserves the reference and explains deployment and CredentialSource handoff. Existing values are never loaded.",
+  },
+  secretsReplaceDenied: {
+    group: "Pages/Secrets",
+    name: "Replace denied",
+    path: "/console/secrets",
+    rules: [{ suffix: "/secrets/sec_demo_model", method: "PATCH", status: 403, code: "FORBIDDEN" }],
+    actions: [
+      click("Demo model API key (simulated)"),
+      click("Replace value"),
+      { selector: "#secret-value", value: "synthetic-story-value" },
+      { selector: 'dialog button[type="submit"]', click: true },
+    ],
+    description: "A denied replacement clears the entered value and disables further submission.",
+  },
+  secretsDelete: {
+    group: "Pages/Secrets",
+    name: "Delete confirmation",
+    path: "/console/secrets",
+    actions: [click("Demo model API key (simulated)"), click("Delete Secret")],
+    description:
+      "Permanent storage deletion requires confirmation and explains upstream revocation and previously delivered values.",
+  },
+  secretsDeleteConflict: {
+    group: "Pages/Secrets",
+    name: "Concurrent reference conflict",
+    path: "/console/secrets",
+    rules: [
+      {
+        suffix: "/secrets/sec_demo_model",
+        method: "DELETE",
+        status: 409,
+        code: "RESOURCE_CONFLICT",
+      },
+    ],
+    actions: [
+      click("Demo model API key (simulated)"),
+      click("Delete Secret"),
+      click("Permanently delete Secret"),
+    ],
+    description:
+      "A newly added reference can refuse deletion after the detail read. Reopen the detail to inspect current consumers.",
+  },
+  secretsDeletionUnconfirmed: {
+    group: "Pages/Secrets",
+    name: "Deletion could not be confirmed",
+    path: "/console/secrets",
+    rules: [
+      { suffix: "/secrets/sec_demo_model", method: "DELETE", bodyError: true },
+      {
+        suffix: "/secrets/sec_demo_model",
+        skip: 1,
+        data: { id: "sec_different", name: "Different Secret (simulated)" },
+      },
+    ],
+    actions: [
+      click("Demo model API key (simulated)"),
+      click("Delete Secret"),
+      click("Permanently delete Secret"),
+      click("Check deletion status"),
+    ],
+    description:
+      "The delete response was lost, then the status check returned a different Secret. The dialog leaves the outcome unknown and offers no second Delete.",
+  },
+
   runtimeImages: {
     group: "Pages/Navigation",
     name: "Debug runtime images",
@@ -1296,9 +1494,10 @@ export const scenarios = {
     name: "Account",
     path: "/console/settings",
     description:
-      "An account card with initials, name and email, and a Session card with Sign out. There are no editable settings in this release.",
+      "An account card with initials, name and email, and a Session card with Sign out. Administrators can inspect read-only Installation Driver schemas. There are no editable settings in this release.",
     steps: [
       "Check that the page has no Namespace selector and that the account card shows initials, name and email.",
+      "Inspect Installation Driver schemas below the cards; no startup values or mutation controls are shown.",
       "Choose Sign out in the Session card: “Signing out…” appears, then the sign-in page.",
       "At a phone width, Sign out spans the Session card.",
     ],
@@ -3651,6 +3850,39 @@ export const scenarios = {
       "When the grants are written, the note goes, Direct Agent grants lists the new binding, and navigation is available again. If you tried Back above, Back now reaches the draft and Forward returns through Configuration to Access.",
     ],
   },
+  agentSharingHoldsAfterDelete: {
+    group: "Pages/Agent detail",
+    name: "Sharing holds navigation after Delete",
+    path: `${draft}&tab=access`,
+    deployed: true,
+    rules: [
+      {
+        suffix: "/iam/access-bindings",
+        method: "POST",
+        delayMs: 4000,
+        once: true,
+      },
+      // The deletion status poll never answers, so the Agent stays deleting.
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001",
+        skip: 1,
+        hold: true,
+      },
+    ],
+    actions: [
+      ...shareExistingPerson,
+      click("Delete Agent"),
+      { selector: ".agent-delete-dialog button.danger", click: true },
+      { selector: "a.page-back", click: true },
+    ],
+    description:
+      "The story shares the Agent, deletes it while the first grant is pending, then selects ← Agents. Delete replaces the page with its deletion row; the note above that row says why the page stays until both grants are written, about 4 s later.",
+    steps: [
+      "While the note “This page stays open until sharing finishes.” shows above Danger zone, select ← Agents or Agents in the sidebar: the page stays and the note remains. Select Reset story to replay the hold.",
+      "When the grants are written, the note goes and ← Agents opens the Agents list.",
+    ],
+    gap: "The deletion status check never answers here, so the Agent stays deleting.",
+  },
   agentSharingRemoved: {
     group: "Pages/Agent detail",
     name: "Direct Agent grant removed",
@@ -5429,7 +5661,7 @@ export const scenarios = {
     name: "Account menu",
     actions: account,
     description:
-      "The account row (initials, name and email) opens Settings and Sign out. Namespace selection is available directly in the page header.",
+      "The account row in the dark navigation opens a light menu with Settings and Sign out. Use the arrow keys to check focus inside the menu, then Escape to return to the account.",
   },
   menuMobile: {
     group: "Components/Navigation",
@@ -7238,6 +7470,27 @@ export const scenarios = {
 
 for (const [id, state, name] of [
   ["policyDenials", "ready", "Policy denials and reviewed network additions"],
+  [
+    "policyConfigurationAlternate",
+    "alternate",
+    "Another Driver renders enum fields from its schema",
+  ],
+  ["policyConfigurationLoading", "discoveryLoading", "Configuration discovery loading"],
+  ["policyConfigurationDenied", "discoveryDenied", "Configuration discovery denied"],
+  ["policyConfigurationStale", "stalePreview", "A superseded preview preserves the newer draft"],
+  [
+    "policyConfigurationRefresh",
+    "refreshRace",
+    "Overlapping policy refreshes retain the newest read",
+  ],
+  ["policyConfigurationJson", "json", "Complex fields retain invalid JSON for correction"],
+  [
+    "policyConfigurationHidden",
+    "ownerDenied",
+    "Policy hidden while independent logs remain visible",
+  ],
+  ["policyConfigurationInvalid", "invalid", "Configuration preview field errors"],
+  ["policyConfigurationConflict", "conflict", "Configuration version conflict retains draft"],
   ["policyDenialsEmpty", "empty", "No denials in the loaded window"],
   ["policyDenialsDisabled", "disabled", "Policy editing disabled"],
   ["policyDenialsUnsupported", "unsupported", "Sandbox policy capability unavailable"],
@@ -7267,15 +7520,40 @@ for (const [id, state, name] of [
     deployed: true,
     candidateDeploymentStatus: "succeeded",
     policyState: state,
+    ...(state === "discoveryLoading"
+      ? { rules: [{ suffix: "/driver-configurations", hold: true }] }
+      : {}),
+    ...(state === "discoveryDenied"
+      ? { rules: [{ suffix: "/driver-configurations", status: 403 }] }
+      : {}),
+    ...(state === "stalePreview" ? { rules: [{ suffix: "/validate", delayMs: 3000 }] } : {}),
     description:
       "Observed denial records, aggregated provider suggestions, and governed policy additions remain distinct.",
     steps: [
       "Expand a denial to inspect the sanitized log. Review its exact executable and endpoint before saving an addition.",
-      "Use + to add a proposed rule and × to remove it. Confirm these local edits do not save. Review changes and return with Back to editing.",
+      "Use the schema field Add and Remove controls to edit proposed rules. Confirm these local edits do not save. Review changes and return with Back to editing.",
       "Compare Save (current revision unchanged) with Save and apply to current revision (pending, then confirmed with a provider version). Apply saved policy to current revision is unavailable while a proposal has unsaved edits.",
       "Disable policy editing and confirm approved grants remain visible. Check the empty, denied, unsupported, missing metadata, and unconfirmed stories.",
     ],
     gap: "Simulated UI proof only. These fixtures do not prove authorization, persistence, enforcement, or provider policy activation.",
+    ...(state === "refreshRace"
+      ? {
+          description:
+            "Another operator's simulated saves advance the policy between two overlapping reads.",
+          steps: [
+            "Double-click Refresh policy. The older read returns first; wait for saved policy v3.",
+            "Apply the saved policy to the current revision. Observe pending status, then simulated provider confirmation from continued polling.",
+          ],
+        }
+      : {}),
+    ...(state === "ownerDenied"
+      ? {
+          steps: [
+            "Refresh denials and confirm the independent log window loads even though discovery has no policy descriptor.",
+            "Scroll to the policy and suggestion permission refusals. Confirm neither offers a retry or editing control.",
+          ],
+        }
+      : {}),
     ...(state === "unsupported"
       ? {
           steps: [
@@ -7287,7 +7565,7 @@ for (const [id, state, name] of [
       ? {
           steps: [
             "Review the suggested outside.example.org addition and compare it with the Installation delegation ceiling.",
-            "Choose Review changes and Save and apply to current revision. The ceiling rejection must be announced and brought into view, with the attempted addition preserved for correction.",
+            "Choose Review changes. The preview ceiling rejection must be announced and brought into view, with the attempted addition preserved for correction.",
             "Confirm the saved policy version and additions are unchanged. This preview simulates the API rejection; the browser integration exercises actual OCC admission.",
           ],
         }
@@ -7307,5 +7585,26 @@ for (const [id, state, name] of [
     ...(state === "noCredential"
       ? { rules: [{ suffix: "/runtime/logs", status: 503, code: "DEPENDENCY_UNAVAILABLE" }] }
       : {}),
+  };
+}
+
+// The shell and assets are produced by the API's actual theme loader/renderer.
+for (const [id, source, name, theme] of [
+  ["themeSignIn", "login", "Custom sign-in", "custom"],
+  ["themeNavigation", "agents", "Custom desktop navigation", "custom"],
+  ["themeMobile", "mobile", "Custom mobile navigation", "custom"],
+  ["themeLongName", "agents", "Long product name", "long-name"],
+  ["themeEmpty", "agentsEmpty", "Custom empty state", "custom"],
+  ["themeDenied", "agentsDenied", "Custom denied state", "custom"],
+  ["themeLoading", "agentsLoading", "Custom loading state", "custom"],
+  ["themeCredentials", "authMissing", "Custom missing credentials", "custom"],
+  ["themePublicError", "sessionUnavailable", "Custom public error", "custom"],
+]) {
+  scenarios[id] = {
+    ...scenarios[source],
+    name,
+    theme,
+    description:
+      "Deployment branding from the production theme loader. Resource, session, and runtime states are simulated.",
   };
 }

@@ -1,4 +1,4 @@
-import { renderAgentSandboxPolicy } from "./sandbox-policy.mjs";
+import { renderAgentDriverConfigurations } from "../driver-configurations.mjs";
 import {
   button,
   element,
@@ -231,7 +231,7 @@ const PROBE_STATUS_DETAIL_TEXT = {
     "The model provider rejected the request: billing or credit problem (billing). Check the provider account's plan and credits, then deploy a new version.",
 };
 
-// A Codex check retried once, after a timeout or a transient failure, holds its second
+// A Codex check retried once, after a timeout or a reliability failure, holds its second
 // attempt's detail with this suffix; the advice is the same as for the bare token.
 const RETRIED_DETAIL_SUFFIX = "-attempt2";
 
@@ -1292,6 +1292,13 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   ];
   let selectedTab = tabsForSelection.includes(tab) ? tab : "configuration";
   let deployInFlight = false;
+  // The draft holds below are declared before a deleting Agent's early return: ← Agents and the
+  // reload check read them on that page too (finding 2125).
+  let draftEditorNavigationBlock = null;
+  // Whether a draft editor's write is in flight (its block names the save to wait for).
+  let draftEditorSaving = false;
+  // Set while a saved draft refreshes in place; tab and version changes wait for it.
+  let refreshingDraft = false;
   // A share or binding removal in flight. Its writes belong to this page, so other versions and
   // pages wait for it (finding 2108); tabs do not, since the panel stays with the page.
   let sharingWrite = false;
@@ -1363,6 +1370,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     return true;
   };
   context.setLeaveGuard?.(refuseLeave);
+  // The writes that hold Back and the sidebar make a reload or tab close ask first too. A draft
+  // reread does not: a reload would lose nothing (finding 1938).
+  context.setWriteInFlight?.(() => sharingWrite || Boolean(draftWriteInFlight({ rereads: false })));
   const currentVersionValue = element("strong", { className: "stat-value" });
   const currentVersionNote = element("p", { className: "stat-help" });
   // The summary's loading text follows the 250 ms rule: a read that settles sooner never shows
@@ -1593,9 +1603,6 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   );
   const tabControls = new Map();
   const revisionControls = new Map();
-  let draftEditorNavigationBlock = null;
-  // Whether a draft editor's write is in flight (its block names the save to wait for).
-  let draftEditorSaving = false;
   // A refused leave says why beside the control whose request holds the page (finding 1962).
   // The configuration, channels and repositories editors write their block into their own
   // feedback; every other hold writes it here.
@@ -1651,7 +1658,14 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   }
   function showLeaveBlock() {
     const reason = leaveReason();
-    if (!draftEditorBlocksNavigation()) {
+    if (deleting) {
+      // Delete replaced the page, editors and tab panel included, with its deletion row: a
+      // write still in flight says why above that row (finding 2125).
+      showLeaveNote(view, reason, "start");
+      if (leaveNote.isConnected) {
+        leaveNote.scrollIntoView({ block: "nearest" });
+      }
+    } else if (!draftEditorBlocksNavigation()) {
       showLeaveNote(content, reason, "start");
       // The note tops the tab panel, which may be scrolled out of view; focus stays put.
       if (leaveNote.isConnected) {
@@ -1671,6 +1685,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     }
   }
   function draftEditorBlocksNavigation() {
+    if (deleting) {
+      // The editors went with Delete, so their unsaved changes no longer hold the page; a write
+      // in flight still does.
+      return draftWriteInFlight();
+    }
     return (
       selected === "draft" &&
       (deployInFlight ||
@@ -1683,11 +1702,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   }
   // A write in flight, whose answer only this page can handle: the sidebar and Back wait for it
   // too (finding 1937). An uncertain or stale editor is kept as a draft, so they may leave it.
-  function draftWriteInFlight() {
+  // `rereads` counts the draft's reread after a save as one.
+  function draftWriteInFlight({ rereads = true } = {}) {
     return (
       selected === "draft" &&
       (deployInFlight ||
-        refreshingDraft ||
+        (rereads && refreshingDraft) ||
         authenticationSaveState === "saving" ||
         activeCredentials?.isSaving() ||
         (["configuration", "plugins", "repositories", "channels"].includes(selectedTab) &&
@@ -2054,8 +2074,6 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   }
   // Shown once by the tab a draft refresh rebuilds after a save (finding 1445).
   let savedNotice = "";
-  // Set while a saved draft refreshes in place; tab and version changes wait for it.
-  let refreshingDraft = false;
   let activityPanel = deploymentStatus;
   let activityRevisionId;
   let viewedSnapshot = null;
@@ -3601,6 +3619,17 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   // page to its summary, made about 12 reads, scrolled to the top and dropped focus with no
   // saved message (finding 1445). `focus` names the button that takes focus afterwards.
   async function refreshDraftInPlace({ agent: freshAgent = null, saved = "", focus = null } = {}) {
+    if (deleting) {
+      // Delete took the editors: there is nothing to rebuild, and a settled save no longer holds
+      // the page (finding 2125).
+      draftEditorNavigationBlock = null;
+      draftEditorSaving = false;
+      authenticationSaveState = "idle";
+      if (context.isCurrent()) {
+        updateNavigationControls();
+      }
+      return;
+    }
     if (freshAgent && freshAgent.configurationId !== agent.configurationId) {
       // The draft now edits another Configuration; reload the page for it.
       context.navigate(target("draft", selectedTab), namespaceId, true);
@@ -3880,7 +3909,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     }
     if (tab === "policy") {
       state.reusable = false;
-      content.append(renderAgentSandboxPolicy(tabContext, { agent, revisionId: selected }));
+      content.append(renderAgentDriverConfigurations(tabContext, { agent, revisionId: selected }));
       state.loading = false;
       content.style.minHeight = "";
       return;
