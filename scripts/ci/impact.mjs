@@ -86,8 +86,8 @@ const manifestPath = /^scripts\/ci\/test-suites\/[a-z0-9-]+\.json$/;
 const suiteIndexPath = "scripts/ci/test-suites.json";
 const laneName = /^[a-z0-9-]+$/;
 // Static Checks lints, format-checks and builds documentation in every mode.
-// Part 2 typechecks TypeScript tests. Part 1 supplies the matrix lane when
-// only the runtime image fixture (a separate job) would otherwise run.
+// Test-only changes run the owning lanes. TypeScript tests also need part 2's
+// typecheck. Part 1 supplies the matrix lane when only the image fixture would run.
 const typecheckLane = "checks-baseline-2";
 const fallbackLane = "checks-baseline-1";
 const fixtureLane = "runtime-image-fixture";
@@ -294,6 +294,9 @@ function selectTestLanes(mergeBase, tested, tests, manifests) {
     for (const name of lanes) {
       selected.add(name);
     }
+    if (path.endsWith(".ts")) {
+      selected.add(typecheckLane);
+    }
     // Other files may read, copy or run a test file; then its lanes are not enough.
     const name = path.slice(path.lastIndexOf("/") + 1);
     const grep = spawnSync(
@@ -326,9 +329,6 @@ function selectTestLanes(mergeBase, tested, tests, manifests) {
         throw new InspectionError("another file refers to a changed test", "referenced_test");
       }
     }
-  }
-  if (tests.some((path) => path.endsWith(".test.ts"))) {
-    selected.add(typecheckLane);
   }
   if ([...selected].every((name) => name === fixtureLane)) {
     selected.add(fallbackLane);

@@ -11,7 +11,7 @@ import { once } from "node:events";
 import { after } from "node:test";
 
 import { FilesystemConfigurationDriver } from "../../apps/controller/src/drivers/configuration/filesystem/index.ts";
-import { createControllerAuth } from "../../apps/controller/src/auth/index.ts";
+import { createControllerAuth } from "./password-hasher.mjs";
 import { backendSummariesFromDefinitions } from "../../apps/controller/src/composition/installation-config.ts";
 import { resolveApprovedHarness } from "../../apps/controller/src/composition/production-harness.ts";
 import { createFastifyApp } from "../../apps/controller/src/index.ts";
@@ -417,6 +417,7 @@ export async function createConsoleAppFixture(t, options = {}) {
     ...(options.observabilityUrl === undefined
       ? {}
       : { observabilityUrl: options.observabilityUrl }),
+    ...(options.consoleTheme === undefined ? {} : { consoleTheme: options.consoleTheme }),
     ...(options.nativeAdmin === undefined ? {} : { nativeAdmin: options.nativeAdmin }),
     ...(options.agentRuntimeLogs === undefined
       ? {}
@@ -429,6 +430,7 @@ export async function createConsoleAppFixture(t, options = {}) {
       controller = new OpenClawController(installation, {
         state: platformState,
         sandboxNetworkPolicyCeiling: options.sandboxNetworkPolicyCeiling,
+        driverConfigurations: options.driverConfigurations,
         ...(options.now === undefined ? {} : { now: options.now }),
         recordOperations: options.recordOperations ?? false,
         backends,

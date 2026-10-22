@@ -1,4 +1,18 @@
+import type { Namespace } from "@openclaw-enterprise/contracts";
+import { type createApiClient, requestFailure, responseFields } from "./api-client.mjs";
 import { button, dismissOnBackdrop, element, field, statusBlock, validateFields } from "./dom.mjs";
+import type { createNavigation } from "./navigation.mjs";
+
+/** The part of the mounted page context used by Namespaces and Secrets. */
+export interface NamespacePageContext {
+  view: HTMLElement;
+  request: ReturnType<typeof createApiClient>;
+  navigate: ReturnType<typeof createNavigation>["navigate"];
+  isCurrent(): boolean;
+  onExpired(): void;
+  /** While `writing()`: `held` says why the page stayed; `released` runs when leaving goes ahead. */
+  holdWhileWriting(hold: { writing(): boolean; held(): void; released?(): void }): void;
+}
 
 // The API's Name rule, mirrored because the console loads no contracts code: PLAIN_TEXT_PATTERN
 // and NAME_MAX_CHARACTERS in packages/contracts/src/api/plain-text.ts, counted in characters
@@ -13,7 +27,7 @@ const LONE_SURROGATE = /\p{Cs}/u;
  * Why the API would refuse `value` as a Namespace name once trimmed (the console sends it
  * trimmed), or "" when it would accept it. An empty name is the required check's to report.
  */
-export function namespaceNameProblem(value) {
+export function namespaceNameProblem(value: string) {
   const name = value.trim();
   if (name === "") {
     return "";
@@ -31,9 +45,18 @@ export function namespaceNameProblem(value) {
 // API has no advisory Installation permission answer, so a refusal is the only exact sign that
 // creation is not allowed (finding 2059). The page's Refresh, or a browser reload, offers
 // creation again: after an administrator grants access, nothing else would (finding 2083).
-let createRefusedFor = null;
+let createRefusedFor: string | null = null;
 
-export function renderNamespaces(context, items, renderRows) {
+export function renderNamespaces(
+  context: NamespacePageContext & {
+    operatorId: string;
+    installationAdmin: boolean | null;
+    fromRefresh: boolean;
+    reload(): Promise<void>;
+  },
+  items: readonly Namespace[],
+  renderRows: (view: HTMLElement, feature: "namespaces", items: readonly Namespace[]) => void,
+) {
   if (context.fromRefresh) {
     createRefusedFor = null;
   }
@@ -149,7 +172,7 @@ export function renderNamespaces(context, items, renderRows) {
     let pending = false;
     let unknown = false;
     let forbidden = false;
-    let created = null;
+    let created = false;
 
     function close() {
       if (pending) {
@@ -171,19 +194,18 @@ export function renderNamespaces(context, items, renderRows) {
         void context.reload().then(() => {
           const active = document.activeElement;
           if (!active || active === document.body || !active.isConnected) {
-            document.querySelector("[data-create-namespace]")?.focus();
+            document.querySelector<HTMLElement>("[data-create-namespace]")?.focus();
           }
         });
       }
     }
 
-    context.setLeaveGuard(() => {
-      if (pending) {
+    context.holdWhileWriting({
+      writing: () => pending,
+      held: () =>
         feedback.replaceChildren(
           statusBlock("info", null, "Wait for Namespace creation to finish before leaving."),
-        );
-      }
-      return pending;
+        ),
     });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -206,20 +228,26 @@ export function renderNamespaces(context, items, renderRows) {
         if (!context.isCurrent()) {
           return;
         }
+        const { id, name: createdName, status } = responseFields(result);
         if (
-          typeof result?.id !== "string" ||
-          typeof result?.name !== "string" ||
-          result.status !== "provisioning"
+          typeof id !== "string" ||
+          typeof createdName !== "string" ||
+          status !== "provisioning"
         ) {
           throw new Error("Invalid Namespace creation response");
         }
-        created = result;
+        created = true;
         // Creating a Namespace grants the creator nothing, so a role that may create but not
         // read Namespaces would open Agents into "Namespace unavailable". Read the list the
         // Agents page reads; when it cannot be read, offer Open Agents as before (finding 2044).
         const readable = await context.request("/namespaces").then(
-          (listed) => !Array.isArray(listed) || listed.some((item) => item?.id === created.id),
-          (error) => (error.status === 401 ? null : error.status !== 403),
+          (listed) =>
+            !Array.isArray(listed) ||
+            listed.some((item: unknown) => responseFields(item).id === id),
+          (cause: unknown) => {
+            const { status } = requestFailure(cause);
+            return status === 401 ? null : status !== 403;
+          },
         );
         if (!context.isCurrent()) {
           return;
@@ -230,7 +258,7 @@ export function renderNamespaces(context, items, renderRows) {
         }
         title.textContent = "Namespace created";
         if (readable) {
-          description.textContent = `${created.name} has been created. Provisioning is in progress; Agents can be saved as drafts, but deployment waits until the Namespace is ready.`;
+          description.textContent = `${createdName} has been created. Provisioning is in progress; Agents can be saved as drafts, but deployment waits until the Namespace is ready.`;
           dialog.replaceChildren(
             title,
             description,
@@ -242,14 +270,14 @@ export function renderNamespaces(context, items, renderRows) {
                 "Open Agents",
                 () => {
                   dialog.close();
-                  context.navigate("agents", created.id);
+                  context.navigate("agents", id);
                 },
                 { tone: "primary" },
               ),
             ),
           );
         } else {
-          description.textContent = `${created.name} has been created.`;
+          description.textContent = `${createdName} has been created.`;
           dialog.setAttribute(
             "aria-describedby",
             "create-namespace-description create-namespace-access",
@@ -275,11 +303,12 @@ export function renderNamespaces(context, items, renderRows) {
             ),
           );
         }
-        dialog.querySelector(".dialog-actions button:last-child").focus();
-      } catch (error) {
+        dialog.querySelector<HTMLButtonElement>(".dialog-actions button:last-child")?.focus();
+      } catch (cause) {
         if (!context.isCurrent()) {
           return;
         }
+        const error = requestFailure(cause);
         if (error.status === 401) {
           context.onExpired();
           return;
@@ -288,7 +317,7 @@ export function renderNamespaces(context, items, renderRows) {
         if (forbidden) {
           createRefusedFor = context.operatorId;
         }
-        unknown = ![400, 403, 404, 409, 429].includes(error.status);
+        unknown = error.status === undefined || ![400, 403, 404, 409, 429].includes(error.status);
         let message;
         if (unknown) {
           message =
@@ -303,7 +332,7 @@ export function renderNamespaces(context, items, renderRows) {
           message = "Too many requests. Wait before trying again.";
         } else {
           // A 400 carries the API's own sentence naming what it refused, which other console
-          // writes show too (rejectionMessage in agents/list.mjs).
+          // writes show too (rejectionMessage in agents/list.mts).
           message =
             (error.status === 400 && error.serverMessage) ||
             "Namespace creation was refused. Check the name and try again.";

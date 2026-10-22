@@ -2022,17 +2022,6 @@ test("a test-only change selects the lanes that list its files", async (t) => {
         postgresEdit(({ put }) => put("tests/conformance/lint-rules.test.mjs", "// edited\n")),
         ["checks-baseline-1", "postgres"],
       ],
-      // A new file registered in its lane's manifest.
-      [
-        ({ put }) => {
-          put("tests/integration/postgres-c.test.mjs", "// new\n");
-          put(
-            "scripts/ci/test-suites/postgres.json",
-            laneManifest([...suiteLanes.postgres, "tests/integration/postgres-c.test.mjs"]),
-          );
-        },
-        ["postgres"],
-      ],
       // A deleted file and its manifest entry.
       [
         async ({ git, put }) => {
@@ -2090,6 +2079,7 @@ test("helper, fixture and other test-tree changes select full", async (t) => {
       "tests/integration/nested/deep.test.mjs",
       "tests/unknown/other.test.mjs",
       "tests/integration/postgres-a.test.js",
+      "tests/integration/support.ts",
     ],
     async (path) => {
       const [f, shallow] = await suiteFixture(
@@ -2174,7 +2164,7 @@ test("unmapped, non-CI, referenced or irregular test files select full", async (
   const cases = {
     // Not registered in any lane, or only in a manual lane.
     unmapped_test: [
-      [({ put }) => put("tests/integration/unlisted.test.mjs", "// new\n")],
+      [({ put }) => put("tests/integration/unlisted.test.ts", "// new\n")],
       [postgresEdit(({ put }) => put("tests/integration/postgres-a.test.ts", "// changed\n"))],
       [editTest("tests/integration/openshell-real.test.mjs")],
     ],

@@ -268,7 +268,7 @@ func initializationEvidence(data []byte, namespace, name, release, expectedUID s
 	hook := "install"
 	// Match the chart's Node invocation and the exact contents of
 	// deploy/helm/openclaw-enterprise/files/check-installation.mjs.
-	const checkScriptSHA256 = "d6919627a375f708d4d7e8142aff8bbc783c0a0565254c4372b83b7a306ffd13"
+	const checkScriptSHA256 = "6cc45ae3561aa466170d10379ef39b68e2aba1cc417710f29bbbaa2d8b964890"
 	if len(init) == 2 && init[0].Name == "installation-check" && slices.Equal(init[0].Command, []string{"node"}) &&
 		len(init[0].Args) == 3 && init[0].Args[0] == "--input-type=module" && init[0].Args[1] == "-e" &&
 		fmt.Sprintf("%x", sha256.Sum256([]byte(init[0].Args[2]))) == checkScriptSHA256 {

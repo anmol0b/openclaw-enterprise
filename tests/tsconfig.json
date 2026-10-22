@@ -4,9 +4,12 @@
     "allowJs": true,
     "composite": false,
     "declaration": false,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": false,
     "erasableSyntaxOnly": true,
-    "noEmit": true
+    "tsBuildInfoFile": "../.build/tests/tsconfig.tsbuildinfo"
   },
-  "include": ["conformance/**/*.ts", "integration/**/*.ts", "browser/**/*.ts", "docs/**/*.ts"],
-  "references": [{ "path": "../packages/occ" }]
+  "include": ["**/*.test.ts", "../scripts/console-storybook/*.stories.ts"],
+  "references": [{ "path": "../apps/controller" }]
 }

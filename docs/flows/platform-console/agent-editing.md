@@ -72,7 +72,10 @@ editing/deployment without defaults.
 **Selected version** uses `activeRevisionId`; **View version vN** opens read-only
 details without activating it. **Deployment activity** shows the newest readable
 version's persisted status, not live health. Routine completion folds; pending work,
-read errors, warnings, and cleanup stay visible. Failed deployments show the API's message
+read errors, warnings, and cleanup stay visible. A first read that lands after the
+`FIRST_ACTIVITY_WAIT_MS` reveal fills the folded one-row stand-in without opening it (the
+summary shows its outcome); cleanup, warnings, and overview errors still open it, so nothing
+above the version tabs moves. Failed deployments show the API's message
 (logs advice if it names no step) and offer Logs unless log text or version access was
 denied this sign-in. **Open Configuration** needs Agent `update` and no known Configuration
 read error or denial. **Open version draft** (`deploy` only) and **Deploy again** (per the
@@ -121,7 +124,7 @@ stay locked while pending. Snapshot views deploy current settings. Failed reads
 send no bodyless deploy POST; success opens the version. Uncertain POSTs require
 history readback before retry; browser reads are not atomic with admission.
 
-`apps/controller/src/console/drafts.mjs:createDraftStore` holds document-local drafts.
+`apps/controller/src/console/drafts.mts:createDraftStore` holds document-local drafts.
 `console.mjs:resetReads` and `detail.mjs:renderTab` capture fields before teardown,
 excluding passwords. Namespace and Agent keys isolate drafts; session expiry,
 user change, logout, exit, and reload clear them. Nothing enters browser storage
@@ -130,7 +133,7 @@ channel snapshots include controls and staged Secret metadata. Reload draft reap
 only the reader's edits, naming overlaps and skipped choices. Save and Cancel
 clear captures; pending saves retain recovery guards.
 
-`dom.mjs:dismissOnBackdrop` requires press and click outside the topmost editor.
+`dom.mts:dismissOnBackdrop` requires press and click outside the topmost editor.
 Like Escape, cancellation discards channel drafts, clears Secret inputs, and
 retains plugin selections. Pending channel saves and Secret creation prevent dismissal.
 
