@@ -87,8 +87,14 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 	if err != nil {
 		return err
 	}
+	browserDomain, err := developmentBrowserDomain(r.env)
+	if err != nil {
+		return err
+	}
 	browserPort := 0
-	if sandboxDriver == "none" {
+	// OpenShell keeps its loopback HTTP console unless a browser domain asks for
+	// the HTTPS console and native admin.
+	if sandboxDriver == "none" || browserDomain != "" {
 		browserPort, err = positiveSetting(r, "OCC_DEVELOPMENT_BROWSER_PORT", 8443, 65535)
 		if err != nil {
 			return err
@@ -124,10 +130,16 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 		KeyOwned:                    opts.KeyOutput == "",
 		SignIn:                      signIn,
 		Connections:                 connections,
+		BrowserDomain:               browserDomain,
 		directory:                   directory,
 	}
 	if err := validateClusterName(state.Cluster); err != nil {
 		return err
+	}
+	if browserDomain != "" {
+		if err := checkDevelopmentBrowserDomain(ctx, state); err != nil {
+			return err
+		}
 	}
 	if signIn == developmentSignInKeycloak {
 		if err := checkDevelopmentKeycloakHostPort(fmt.Sprintf("127.0.0.1:%d", developmentKeycloakHostPort)); err != nil {
@@ -407,7 +419,7 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string, networkPolic
 		}
 	}
 	if state.BrowserPort != 0 {
-		consoleHost, _, _ := developmentBrowserHosts(state.Cluster)
+		consoleHost, _, _ := state.browserHosts()
 		fmt.Fprintf(r.opts.Out, "Browser console: %s/console/\nBrowser CA certificate: %s\n", developmentBrowserOrigin(consoleHost, state.BrowserPort), filepath.Join(directory, "browser-ca.crt"))
 		fmt.Fprintln(r.opts.Out, "Browser CA trust: required before sign-in. See docs/guides/operate/troubleshooting.md#the-local-console-reports-a-certificate-error.")
 	} else {
@@ -711,7 +723,7 @@ func (r *runner) installKubernetesControlPlane(ctx context.Context, state *devel
 		// Private Agent routing does not imply a published HTTPS Console. The
 		// OpenShell profile signs in through the loopback HTTP API instead.
 		if state.BrowserPort != 0 {
-			consoleHost, agentDomain, cookieDomain := developmentBrowserHosts(state.Cluster)
+			consoleHost, agentDomain, cookieDomain := state.browserHosts()
 			if err := writeDevelopmentTLS(state.directory, "browser", "OCC development browser CA", []string{consoleHost, "*." + agentDomain}); err != nil {
 				return err
 			}
@@ -728,10 +740,7 @@ func (r *runner) installKubernetesControlPlane(ctx context.Context, state *devel
 				return err
 			}
 			values["auth"] = map[string]string{"baseUrl": developmentBrowserOrigin(consoleHost, state.BrowserPort)}
-			// OpenShell-owned Harnesses do not serve the native admin UI.
-			if state.SandboxDriver == "none" {
-				values["agentNativeAdmin"] = map[string]any{"enabled": true, "domain": agentDomain, "sharedCookieDomain": cookieDomain}
-			}
+			values["agentNativeAdmin"] = map[string]any{"enabled": true, "domain": agentDomain, "sharedCookieDomain": cookieDomain}
 		}
 		values["gatewayRouting"] = map[string]any{"enabled": true, "gatewayClassName": "eg", "apiKeySecretName": "occ-private-gateway-key"}
 		if hostname := developmentRoutingHostname(state); hostname != "" {

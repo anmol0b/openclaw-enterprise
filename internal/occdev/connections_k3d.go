@@ -407,11 +407,19 @@ try {
 	return nil
 }
 
+// developmentConnectionInstructions prints the callback derived from the
+// console origin: loopback HTTP, which Google Desktop clients accept, or the
+// HTTPS console under OCC_DEVELOPMENT_BROWSER_DOMAIN for Web clients.
 func developmentConnectionInstructions(state *developmentState) string {
+	origin := fmt.Sprintf("http://127.0.0.1:%d", state.APIPort)
+	if state.BrowserPort != 0 {
+		console, _, _ := state.browserHosts()
+		origin = developmentBrowserOrigin(console, state.BrowserPort)
+	}
 	return fmt.Sprintf(`Agent OAuth connections: enabled
-  Callback URI: http://127.0.0.1:%d/oauth/callback
+  Callback URI: %s/oauth/callback
   Client Workspace: %s
   Connection tool: %s (gog %s)
   Setup: docs/guides/deploy/local-agent-connections.md
-`, state.APIPort, developmentConnectionClientWorkspace, developmentGogPath, developmentGogVersion)
+`, origin, developmentConnectionClientWorkspace, developmentGogPath, developmentGogVersion)
 }

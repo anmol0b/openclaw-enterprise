@@ -48,6 +48,13 @@ Kubernetes Compute, and OpenShell. The Docker Compute branch of the CLI refuses 
 through `CheckDevelopmentConnections`. The value is recorded as `connections` in
 `state.json`.
 
+`internal/occdev/browser_k3d.go:developmentBrowserDomain` validates the optional
+`OCC_DEVELOPMENT_BROWSER_DOMAIN`, and `checkDevelopmentBrowserDomain` requires the
+console and Agent host names to resolve only to loopback before startup creates
+the cluster. With a domain, the OpenShell profile publishes the HTTPS console,
+enables Agent native administration, and prints the HTTPS callback URI; without
+one, the callback stays on the loopback HTTP API.
+
 ### 2. Generate the PKI and apply the TLS Secrets
 
 `internal/occdev/connections_k3d.go:prepareDevelopmentConnectionPKI`
@@ -122,4 +129,5 @@ back the owned cluster.
 
 ## Changelog
 
+- 2026-10-22 01:45: Added the optional browser domain for the HTTPS console and native admin. (claude-code/0aaa76e4-8457-4cdb-b732-780b69e59679 - aaac611c8)
 - 2026-10-21 23:55: Traced the optional Agent OAuth connections profile. (claude-code/0aaa76e4-8457-4cdb-b732-780b69e59679 - 2c868396c)

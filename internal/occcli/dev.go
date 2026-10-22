@@ -59,6 +59,9 @@ func developmentCommand() *cobra.Command {
 					if err := occdev.CheckDevelopmentConnections(os.Getenv); err != nil {
 						return err
 					}
+					if err := occdev.CheckDevelopmentBrowserDomain(os.Getenv); err != nil {
+						return err
+					}
 					// Reuse the established Docker startup flow. Its Kubernetes
 					// dispatch cannot recur because this branch selects Docker.
 					arguments := []string{filepath.Join(repository, "scripts", "dev-up")}

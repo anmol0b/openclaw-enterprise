@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -256,5 +257,47 @@ func TestExtractArchiveFileFindsTheReleaseBinary(t *testing.T) {
 	}
 	if err := extractArchiveFile(archive, "missing", filepath.Join(directory, "missing")); err == nil {
 		t.Fatal("a missing entry was accepted")
+	}
+}
+
+func TestDevelopmentBrowserDomainAcceptsOnlyTheKubernetesControlPlane(t *testing.T) {
+	env := map[string]string{
+		"OCC_DEVELOPMENT_BROWSER_DOMAIN": "localtest.me",
+		"OCC_DEVELOPMENT_COMPUTE_DRIVER": "kubernetes",
+		"OCC_DEVELOPMENT_CONTROL_PLANE":  "kubernetes",
+	}
+	if value, err := developmentBrowserDomain(env); err != nil || value != "localtest.me" {
+		t.Fatalf("developmentBrowserDomain = %q, %v", value, err)
+	}
+	cases := map[string]struct{ key, value, want string }{
+		"compose plane": {"OCC_DEVELOPMENT_CONTROL_PLANE", "compose", "only .localhost"},
+		"docker":        {"OCC_DEVELOPMENT_COMPUTE_DRIVER", "docker", "OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes"},
+		"keycloak":      {"OCC_DEVELOPMENT_SIGN_IN", "keycloak", "OCC_DEVELOPMENT_SIGN_IN"},
+		"single label":  {"OCC_DEVELOPMENT_BROWSER_DOMAIN", "localhost", "lowercase DNS domain"},
+		"upper case":    {"OCC_DEVELOPMENT_BROWSER_DOMAIN", "LocalTest.me", "lowercase DNS domain"},
+		"with a port":   {"OCC_DEVELOPMENT_BROWSER_DOMAIN", "localtest.me:8443", "lowercase DNS domain"},
+	}
+	for name, test := range cases {
+		copied := maps.Clone(env)
+		copied[test.key] = test.value
+		if _, err := developmentBrowserDomain(copied); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s: error %v does not mention %q", name, err, test.want)
+		}
+	}
+	docker := map[string]string{"OCC_DEVELOPMENT_BROWSER_DOMAIN": "localtest.me"}
+	if err := CheckDevelopmentBrowserDomain(func(key string) string { return docker[key] }); err == nil {
+		t.Fatal("the Docker Compute profile accepted OCC_DEVELOPMENT_BROWSER_DOMAIN")
+	}
+}
+
+func TestDevelopmentBrowserDomainMustResolveToLoopback(t *testing.T) {
+	// .localhost names resolve to loopback without DNS; .invalid names never resolve.
+	loopback := &developmentState{Cluster: "occ-dev-owned", BrowserDomain: "oce.localhost"}
+	if err := checkDevelopmentBrowserDomain(context.Background(), loopback); err != nil {
+		t.Fatalf("loopback domain refused: %v", err)
+	}
+	missing := &developmentState{Cluster: "occ-dev-owned", BrowserDomain: "example.invalid"}
+	if err := checkDevelopmentBrowserDomain(context.Background(), missing); err == nil {
+		t.Fatal("an unresolvable browser domain was accepted")
 	}
 }
