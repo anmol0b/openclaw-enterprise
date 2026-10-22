@@ -9,7 +9,7 @@ author: freeqaz
 - **ID:** RFC-0024
 - **Created:** 2026-10-22
 - **Last updated:** 2026-10-22
-- **RFC PR:** [Review URL when available]
+- **RFC PR:** [#3233](https://github.com/openclaw/openclaw-enterprise/pull/3233)
 - **Related:** [Sandbox Driver contract](../../docs/reference/drivers/sandbox.md),
   [Compute Driver contract](../../docs/reference/drivers/compute.md),
   [controller worker flow](../../docs/flows/controller-worker.md)
