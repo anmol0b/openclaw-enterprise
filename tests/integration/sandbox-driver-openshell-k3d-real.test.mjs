@@ -7873,6 +7873,7 @@ test(
       const marker = `COMMAND-${randomUUID()}`;
       const args = { ...operation, jobId: job.id };
       const invocation = toolCallSpec("automations", args);
+      context.diagnostic(`Gateway command-job probe: ${kind}`);
       await turn(
         invocation.prompt + " Report the returned error; do not retry or use another interface.",
         marker,
@@ -7881,9 +7882,9 @@ test(
         sessionKey,
         turnMarker: marker,
         ...invocation.evidence,
-        // Resolving a kind-less payload uses cron.get's legacy wire wording.
+        // Update preflights use cron.get's legacy CLI wording; run does not.
         resultPattern:
-          kind === "kind-less-command-update-denied"
+          operation.action === "update"
             ? `cron job not found: ${job.id}`
             : `Automation not found: ${job.id}`,
       });
