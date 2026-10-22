@@ -19,8 +19,9 @@ refresh need the real backend.
 3. Open **Starting**. The start request is pending, so the dialog says it is
    opening the provider and **Continue** stays disabled.
 4. Compare **Connected**, **Connected, not deployed**, **Reconnect to apply
-   changes**, and **Reconnect required**. Only the last three add a note; the
-   reconnect states make **Reconnect** a bordered button.
+   changes**, and **Reconnect required**. Only the last three add a note, and only
+   the two reconnect states offer **Reconnect**: a healthy connection refreshes
+   by itself.
 5. Open **Disconnect** and choose **Disconnect** in the dialog. The section says
    OCC is withdrawing the account, and the row shows **Disconnecting** with a
    disabled **Finish disconnecting**. **Withdrawal pending** opens in that state.

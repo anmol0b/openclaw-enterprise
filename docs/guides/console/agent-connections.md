@@ -51,6 +51,10 @@ The consent session expires after ten minutes. If it fails, the section shows
 
 ## Reconnect or disconnect
 
+A connected account stays signed in: the Credential Refresh Driver uses its
+refresh token to replace expired access tokens. **Reconnect** appears only when
+you must consent again.
+
 - **Reconnect to apply changes** appears after an administrator edits the
   template. **Reconnect required** appears when the provider no longer accepts
   the grant. Reconnecting asks for consent again, replaces the old connection,

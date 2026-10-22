@@ -302,15 +302,16 @@ export function renderAgentConnections(context, { path, agent, deployLink }) {
           ),
         );
       }
-      if (template && !templatesDenied) {
+      // The Credential Refresh Driver keeps a healthy connection signed in, so Reconnect appears
+      // only when consent must happen again: the provider stopped accepting the grant, or an
+      // administrator changed the template.
+      const reauthorize = refresh?.recoveryAction === "reauthorize";
+      if (template && !templatesDenied && (reauthorize || outdated)) {
         actions.push(
           button(
-            outdated ? "Reconnect to apply changes" : "Reconnect",
+            reauthorize ? "Reconnect" : "Reconnect to apply changes",
             (event) => openConsent(template, event.currentTarget, sourceId),
-            {
-              tone: outdated || refresh?.recoveryAction === "reauthorize" ? "secondary" : "ghost",
-              size: "sm",
-            },
+            { tone: "secondary", size: "sm" },
           ),
         );
       }

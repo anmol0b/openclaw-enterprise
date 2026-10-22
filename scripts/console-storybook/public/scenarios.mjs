@@ -496,7 +496,7 @@ export const scenarios = {
     name: "Connected",
     ...connected,
     description:
-      "A connected Gmail account that the running version holds, with Reconnect and Disconnect.",
+      "A connected Gmail account that the running version holds. OpenShell keeps it signed in, so only Disconnect is offered.",
   },
   connectionsNotDeployed: {
     group: "Components/Connections",
