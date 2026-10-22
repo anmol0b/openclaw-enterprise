@@ -95,6 +95,10 @@
                     "label": "Harness"
                   },
                   {
+                    "page": "guides/topics/remote-harness",
+                    "label": "Remote Harness"
+                  },
+                  {
                     "page": "guides/topics/workspace-files",
                     "label": "Workspace Files"
                   },
@@ -107,12 +111,24 @@
                     "label": "Console"
                   },
                   {
+                    "page": "guides/console/create-namespace",
+                    "label": "Create a Namespace"
+                  },
+                  {
                     "page": "guides/console/agent-details",
                     "label": "Console Walkthrough"
                   },
                   {
+                    "page": "guides/console/configuration-plugins-and-files",
+                    "label": "Configuration, Plugins, and Files"
+                  },
+                  {
                     "page": "guides/console/channels-and-credentials",
                     "label": "Channels and Credentials"
+                  },
+                  {
+                    "page": "guides/console/secrets",
+                    "label": "Manage Secrets"
                   },
                   {
                     "page": "guides/console/agent-sharing",
@@ -232,7 +248,10 @@
             ],
             "hidden": [
               "reference/console/debug-fields",
+              "reference/console/theming",
               "reference/console/agent-sharing",
+              "reference/console/versions-and-channel-drafts",
+              "reference/console/repository-access",
               "reference/configuration/secrets",
               "reference/security/runtime-isolation",
               "reference/agents",
@@ -445,6 +464,10 @@
                   {
                     "page": "guides/deploy/production-installation",
                     "label": "Control Plane Setup"
+                  },
+                  {
+                    "page": "guides/deploy/console-theme",
+                    "label": "Console Theme"
                   },
                   {
                     "page": "guides/deploy/private-registry-images",
@@ -839,8 +862,16 @@
                     "label": "Environment"
                   },
                   {
+                    "page": "contributing/console-ui",
+                    "label": "Console UI"
+                  },
+                  {
                     "page": "contributing/console-storybook",
                     "label": "Console Storybook"
+                  },
+                  {
+                    "page": "contributing/console-storybook-agent-workflows",
+                    "label": "Storybook Agent Workflows"
                   },
                   {
                     "page": "flows/docker-compose-development",
@@ -931,6 +962,7 @@
               "contributing/rfc-template",
               "guides/deploy/local-repository-credentials",
               "guides/deploy/local-compose-kubernetes",
+              "guides/deploy/local-sandbox-network-policy",
               "guides/deploy/openshell-credential-sources",
               "reference/settings/development",
               "design/resources",
@@ -951,7 +983,9 @@
               "flows/agent-deployment-diagnostics",
               "flows/agent-runtime-logs",
               "flows/platform-console",
+              "flows/platform-console/agent-creation",
               "flows/platform-console/agent-editing",
+              "flows/platform-console/agent-stop-and-deletion",
               "flows/platform-console/agent-sharing",
               "flows/platform-console/sign-in-return",
               "flows/platform-console/observability-link",
@@ -1000,7 +1034,10 @@
               "flows/repository-credentials",
               "flows/repository-credential-configuration",
               "testing/repository-credentials",
-              "flows/agent-presets"
+              "flows/agent-presets",
+              "reference/sandbox-policies",
+              "guides/topics/agent-sandbox-policy",
+              "flows/agent-sandbox-policy"
             ]
           }
         ]

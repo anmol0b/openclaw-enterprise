@@ -1,12 +1,35 @@
 export const pages = Object.freeze({
   agents: "Agents",
+  secrets: "Secrets",
   backends: "Backends",
   namespaces: "Namespaces",
   settings: "Settings",
 });
 
-export function createNavigation({ getNamespaceId, isLoggingOut, loadPage }) {
-  let previousCollection = "agents";
+interface LoginIntent {
+  kind: "console";
+  feature: string;
+  namespaceId: string | null;
+  revision: string | null;
+  tab: string | null;
+}
+
+interface NavigationOptions {
+  getNamespaceId(): string | null;
+  isLoggingOut(): boolean;
+  loadPage(options: {
+    fromNavigation: boolean;
+    openingAgent?: boolean;
+    restoreHistory?(url: string): void;
+  }): void;
+}
+
+export function createNavigation({ getNamespaceId, isLoggingOut, loadPage }: NavigationOptions) {
+  // The initial entry is position zero. Keep the position on replaceState, including sign-in,
+  // so a refused Back or Forward can return to its starting entry without rewriting history.
+  let position: number | null = entryPosition() ?? 0;
+  let restoring: number | null = null;
+  replaceUrl(location.href);
 
   function route() {
     const url = new URL(location.href);
@@ -24,7 +47,7 @@ export function createNavigation({ getNamespaceId, isLoggingOut, loadPage }) {
     };
   }
 
-  function pageUrl(feature, selection = getNamespaceId()) {
+  function pageUrl(feature: string, selection = getNamespaceId()) {
     const url = new URL(`/console/${feature}`, location.origin);
     if (
       !url.searchParams.has("debug") &&
@@ -51,14 +74,20 @@ export function createNavigation({ getNamespaceId, isLoggingOut, loadPage }) {
     "repositories",
     "credentials",
     "workspace",
+    "policy",
     "logs",
+    "access",
   ]);
 
-  function validIntent(intent) {
-    if (intent?.kind === "native") {
+  function validIntent(value: unknown): value is LoginIntent | { kind: "native"; key: string } {
+    if (typeof value !== "object" || value === null) {
+      return false;
+    }
+    const intent = value as Record<string, unknown>;
+    if (intent.kind === "native") {
       return typeof intent.key === "string" && /^[0-9a-f]{32}$/.test(intent.key);
     }
-    if (intent?.kind !== "console" || typeof intent.feature !== "string") {
+    if (intent.kind !== "console" || typeof intent.feature !== "string") {
       return false;
     }
     const detail = intent.feature.startsWith("agents/") && agentId.test(intent.feature.slice(7));
@@ -70,11 +99,12 @@ export function createNavigation({ getNamespaceId, isLoggingOut, loadPage }) {
         (detail &&
           typeof intent.revision === "string" &&
           (intent.revision === "draft" || revisionId.test(intent.revision)))) &&
-      (intent.tab === null || (detail && agentTabs.has(intent.tab)))
+      (intent.tab === null ||
+        (detail && typeof intent.tab === "string" && agentTabs.has(intent.tab)))
     );
   }
 
-  function captureIntent(value) {
+  function captureIntent(value: unknown) {
     if (typeof value !== "string" || !value.startsWith("/console/")) {
       return null;
     }
@@ -92,7 +122,7 @@ export function createNavigation({ getNamespaceId, isLoggingOut, loadPage }) {
     return validIntent(intent) ? intent : null;
   }
 
-  function intentUrl(intent) {
+  function intentUrl(intent: unknown) {
     if (!validIntent(intent) || intent.kind !== "console") {
       return null;
     }
@@ -109,42 +139,77 @@ export function createNavigation({ getNamespaceId, isLoggingOut, loadPage }) {
     return `/console/${intent.feature}${query.size ? `?${query}` : ""}`;
   }
 
-  function navigate(feature, selection = getNamespaceId(), replace = false) {
+  function entryPosition() {
+    const index: unknown = history.state?.consolePosition;
+    return typeof index === "number" && Number.isSafeInteger(index) ? index : null;
+  }
+
+  function replaceUrl(url: string) {
+    history.replaceState({ consolePosition: position }, "", url);
+  }
+
+  function pushUrl(url: string) {
+    position = (position ?? 0) + 1;
+    history.pushState({ consolePosition: position }, "", url);
+  }
+
+  function navigate(feature: string, selection = getNamespaceId(), replace = false) {
     if (isLoggingOut()) {
       return;
     }
     const current = route();
-    if (feature === "settings" && ["agents", "backends", "namespaces"].includes(current.feature)) {
-      previousCollection = current.feature;
+    const url = pageUrl(feature, selection);
+    if (replace) {
+      replaceUrl(url);
+    } else {
+      pushUrl(url);
     }
-    history[replace ? "replaceState" : "pushState"](
-      { previousCollection },
-      "",
-      pageUrl(feature, selection),
-    );
     // A deliberate list → detail navigation, not a refresh, deep link or history traversal.
     const openingAgent =
       !replace && current.url.pathname === "/console/agents" && Boolean(route().agentId);
     void loadPage({ fromNavigation: true, openingAgent });
   }
 
+  function traverse({
+    fromNavigation,
+    mountedUrl,
+  }: {
+    fromNavigation: boolean;
+    mountedUrl: string | null;
+  }) {
+    // popstate arrives after the browser has moved. If the page must stay open, go back by the
+    // same distance, then consume that popstate without reloading the page we kept mounted.
+    const previous = position;
+    position = entryPosition();
+    const returned = restoring !== null && position === restoring;
+    restoring = null;
+    // Never skip the admission recheck of an inert or no longer mounted page.
+    if (returned && fromNavigation && mountedUrl === location.pathname + location.search) {
+      return;
+    }
+    void loadPage({
+      fromNavigation,
+      restoreHistory(url) {
+        if (position === null || previous === null || position === previous) {
+          // An older or untracked entry has no reliable direction. Keep it available to Back
+          // without risking history.go(0), which would reload the page during its write.
+          pushUrl(url);
+        } else {
+          restoring = previous;
+          history.go(previous - position);
+        }
+      },
+    });
+  }
+
   return {
+    traverse,
+    replaceUrl,
     route,
     pageUrl,
     captureIntent,
     validIntent,
     intentUrl,
     navigate,
-    get previousCollection() {
-      return previousCollection;
-    },
-    restoreHistory() {
-      if (["agents", "backends", "namespaces"].includes(history.state?.previousCollection)) {
-        previousCollection = history.state.previousCollection;
-      }
-    },
-    resetHistory() {
-      previousCollection = "agents";
-    },
   };
 }

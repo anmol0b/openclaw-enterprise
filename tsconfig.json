@@ -20,6 +20,9 @@
       "path": "./apps/controller"
     },
     {
+      "path": "./tests"
+    },
+    {
       "path": "./tsconfig.node.json"
     }
   ],

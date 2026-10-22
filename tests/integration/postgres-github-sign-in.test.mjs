@@ -7,8 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import pg from "pg";
 import { chromium } from "playwright";
-import { composePostgresDevelopment } from "../../apps/controller/src/composition/development-postgres.ts";
-import { composeProduction } from "../../apps/controller/src/composition/production.ts";
+import { composePostgresDevelopment, composeProduction } from "../helpers/password-hasher.mjs";
 import { loadInstallationConfiguration } from "../../apps/controller/src/composition/installation-config.ts";
 import { NativeIAMDriver } from "../../packages/iam/src/index.ts";
 import { createInstallationDriverConfiguration } from "../helpers/installation-driver-configuration.mjs";
@@ -827,7 +826,7 @@ test(
     );
     await page.goto(`${origin}/console/agents/${agent.id}?namespace=${namespaceId}&revision=draft`);
     assert.equal((await (await detailResponse).json()).data.id, agent.id);
-    await page.getByRole("heading", { name: "Create new version" }).waitFor();
+    await page.getByRole("heading", { name: "Prepare this version" }).waitFor();
     await page.getByRole("tab", { name: "Configuration", exact: true }).waitFor();
     assert.ok((await page.locator("body").textContent()).includes(agent.name));
     const after = await state.loadNativeIAMState(installation.id);

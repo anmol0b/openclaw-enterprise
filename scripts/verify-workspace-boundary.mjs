@@ -98,11 +98,12 @@ for (const name of activeApplications) {
 }
 assert.ok(
   references.has("./tsconfig.node.json"),
-  "The solution must type-check Node scripts and tests.",
+  "The solution must type-check Node tooling and test helpers.",
 );
+assert.ok(references.has("./tests"), "The solution must type-check the existing test project.");
 assert.equal(
   references.size,
-  activePackages.length + activeApplications.length + 1,
+  activePackages.length + activeApplications.length + 2,
   "The solution contains an unexpected project.",
 );
 

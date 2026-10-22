@@ -20,6 +20,7 @@ import {
 } from "../helpers/kubernetes-real.mjs";
 import { reservePort, reservedPortArgs } from "./available-port.mjs";
 import { stopProcess } from "./stop-process.mjs";
+import { jsonLines as parseJsonLines } from "./json-lines.mjs";
 
 const repository = fileURLToPath(new URL("../..", import.meta.url));
 const entrypoint = fileURLToPath(new URL("../../apps/controller/src/server.mjs", import.meta.url));
@@ -389,6 +390,8 @@ async function startController(context, { kubernetesDrivers = false } = {}) {
     authSecret,
     authBaseURL: `http://127.0.0.1:${port}`,
     installationName: "PostgreSQL platform state integration",
+    // The Job's code in this process; the API below is the real server.mjs process.
+    inProcess: true,
   });
   const child = spawn(process.execPath, [...reservedPortArgs(reservation), entrypoint], {
     cwd: repository,
@@ -509,14 +512,6 @@ async function pollUntil(description, operation, { worker, timeoutMs = 15_000 } 
   assert.fail(
     `Timed out waiting for ${description}.${worker === undefined ? "" : `\n${worker.output()}`}`,
   );
-}
-
-function parseJsonLines(output) {
-  return output
-    .trim()
-    .split("\n")
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line));
 }
 
 async function request(controller, method, path, body, options = {}) {

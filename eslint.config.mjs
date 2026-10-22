@@ -74,8 +74,8 @@ export default defineConfig(
   ]),
   {
     files: [
-      "{apps,packages,scripts,tests}/**/*.{js,mjs,cjs,ts}",
-      "{scripts,tests}/**/*.{mts,cts}",
+      "{apps,packages,scripts,tests}/**/*.{js,mjs,cjs,ts,mts}",
+      "{scripts,tests}/**/*.cts",
       "*.{js,mjs,cjs,ts}",
     ],
     extends: [js.configs.recommended],
@@ -126,7 +126,7 @@ export default defineConfig(
     },
   },
   {
-    files: ["**/*.ts", "{scripts,tests}/**/*.{mts,cts}"],
+    files: ["**/*.{ts,mts}", "{scripts,tests}/**/*.cts"],
     extends: [tseslint.configs.recommended],
     rules: {
       "@typescript-eslint/no-unused-vars": [
@@ -142,7 +142,7 @@ export default defineConfig(
   },
   {
     files: [
-      "apps/controller/src/console/**/*.mjs",
+      "apps/controller/src/console/**/*.{mjs,mts}",
       "scripts/docs-site/site.mjs",
       "scripts/console-storybook/story.mjs",
       "scripts/console-storybook/public/*.mjs",

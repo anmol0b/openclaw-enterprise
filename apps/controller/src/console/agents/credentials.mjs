@@ -237,6 +237,12 @@ export function createChannelSecretsPanel({
       : message;
   }
 
+  // A refused save is danger. Secret grants left unconfirmed after a save are a warning, from
+  // the failed grant on: the Configuration itself saved (finding 2003).
+  function saveErrorTone() {
+    return state.saveError && state.saveErrorStep !== "grant" ? "danger" : "warning";
+  }
+
   function canEnterChannelCredentials() {
     return (
       revisionsLoaded &&
@@ -293,9 +299,10 @@ export function createChannelSecretsPanel({
     delete state.pendingSecretGrants[secret.id];
   }
 
-  function canDeploy() {
+  // Channel credentials are saved and complete: the next-step card's credentials step (UX spec
+  // 3.7). Deploy also needs the version history.
+  function credentialsReady() {
     return (
-      revisionsLoaded &&
       !state.saving &&
       !state.outcomeUnknown &&
       !state.reloadRequired &&
@@ -303,6 +310,10 @@ export function createChannelSecretsPanel({
       !state.unsavedSecrets &&
       hasRequiredChannelCredentials(state.values, state.configuration)
     );
+  }
+
+  function canDeploy() {
+    return revisionsLoaded && credentialsReady();
   }
 
   function deployGateMessage() {
@@ -397,8 +408,8 @@ export function createChannelSecretsPanel({
           state.saveMessage = "";
           state.carriedNote = "";
           updateGrantWarning();
-          error.textContent = state.saveGrantWarning;
           setStatusTone(error, "warning");
+          error.textContent = state.saveGrantWarning;
           status.textContent = "";
           updateControls();
           onChange();
@@ -564,8 +575,8 @@ export function createChannelSecretsPanel({
           mutationStarted && !configurationSaved && !isDefinitiveRejection(cause);
         updateGrantWarning(state.configuration.secretBindings);
         status.textContent = "";
+        setStatusTone(error, saveErrorTone());
         error.textContent = saveErrorText();
-        setStatusTone(error, "danger");
       } finally {
         if (context.isCurrent()) {
           state.saving = false;
@@ -601,27 +612,20 @@ export function createChannelSecretsPanel({
   }
 
   function render() {
-    // A refused save is danger; Secret grants left unconfirmed after a save are a warning.
     const error = element(
       "p",
-      { className: "status", "data-tone": state.saveError ? "danger" : "warning", role: "alert" },
+      { className: "status", "data-tone": saveErrorTone(), role: "alert" },
       state.saveError ? saveErrorText() : state.saveGrantWarning,
     );
     const reloadMessage = state.reloadRequired
       ? element(
           "p",
-          { className: "status", "data-tone": "danger", role: "status" },
+          { className: "status", "data-tone": "danger", role: "alert" },
           "Configuration changed. Reload this draft before saving channel Secrets.",
         )
       : null;
-    const unknownMessage =
-      state.outcomeUnknown && (!state.saveError || isDefinitiveRejection(state.saveError))
-        ? element(
-            "p",
-            { className: "status", "data-tone": "danger", role: "status" },
-            "Credential changes may have been saved. Reload this draft and inspect the saved state before deploying.",
-          )
-        : null;
+    // An unknown outcome always comes with its save error, which the error line above shows as a
+    // danger alert ("Outcome unknown…"); the deploy gate names it too (finding 2014).
     const reload =
       state.outcomeUnknown || state.reloadRequired
         ? button("Reload draft", (event) => {
@@ -637,7 +641,7 @@ export function createChannelSecretsPanel({
     shown.reload = reload;
     shown.outcome = state.saveError
       ? error
-      : (reloadMessage ?? unknownMessage ?? (shown.status?.textContent ? shown.status : null));
+      : (reloadMessage ?? (shown.status?.textContent ? shown.status : null));
     if (!slackEnabled(state.values) && state.carriedNote) {
       // Shown only to say carried Secret choices were not reapplied (finding 1525).
       section.replaceChildren(
@@ -657,7 +661,6 @@ export function createChannelSecretsPanel({
         renderSlackBindings(state),
         error,
         reloadMessage,
-        unknownMessage,
         reload ? element("div", { className: "form-actions credential-actions" }, reload) : null,
         renderUnavailableReason(),
         form,
@@ -669,6 +672,7 @@ export function createChannelSecretsPanel({
   return {
     section: slackEnabled(values) || state.carriedNote ? section : null,
     canDeploy,
+    credentialsReady,
     deployGateMessage,
     isSaving: () => state.saving,
     mutationPending: () => state.saving || state.outcomeUnknown || state.reloadRequired,

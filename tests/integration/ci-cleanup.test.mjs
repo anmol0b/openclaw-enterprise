@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { restoreLaneImages } from "../../scripts/ci/lane-images.mjs";
+import { withStateLock } from "../../scripts/ci/state-lock.mjs";
+import { waitFor, waitUntil } from "../helpers/wait-for.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
 const cleanupPath = join(repositoryRoot, "scripts/ci/cleanup.mjs");
@@ -30,25 +32,27 @@ async function commandTreeFixture(t) {
   async function waitForTermination(timeoutMs, pidPath = descendantPidPath) {
     const pid = Number(await readFile(pidPath, "utf8"));
     assert.ok(Number.isInteger(pid) && pid > 1);
-    const deadline = Date.now() + timeoutMs;
-    while (true) {
-      const observation = spawnSync("ps", ["-p", String(pid), "-o", "stat="], {
-        encoding: "utf8",
-        timeout: 1000,
-      });
-      assert.equal(observation.error, undefined, "could not observe fixture descendant");
-      const status = observation.stdout.trim();
-      if (
-        (observation.status === 1 && status === "" && observation.stderr.trim() === "") ||
-        /^Z/.test(status)
-      ) {
-        t.diagnostic(`fixture process ${pid}: ${status === "" ? "absent" : "terminated (zombie)"}`);
-        break;
-      }
-      assert.equal(observation.status, 0, "fixture process observation failed");
-      assert.ok(Date.now() < deadline, `fixture descendant ${pid} still running`);
-      await delay(50);
-    }
+    const status = await waitFor(
+      `fixture descendant ${pid} to stop running`,
+      () => {
+        const observation = spawnSync("ps", ["-p", String(pid), "-o", "stat="], {
+          encoding: "utf8",
+          timeout: 1000,
+        });
+        assert.equal(observation.error, undefined, "could not observe fixture descendant");
+        const state = observation.stdout.trim();
+        if (
+          (observation.status === 1 && state === "" && observation.stderr.trim() === "") ||
+          /^Z/.test(state)
+        ) {
+          return state;
+        }
+        assert.equal(observation.status, 0, "fixture process observation failed");
+        return undefined;
+      },
+      { timeoutMs, intervalMs: 50 },
+    );
+    t.diagnostic(`fixture process ${pid}: ${status === "" ? "absent" : "terminated (zombie)"}`);
   }
   t.after(async () => {
     for (const path of pidPaths) {
@@ -382,6 +386,61 @@ esac
   assert.equal((await stat(statePath)).mode & 0o777, 0o600);
 });
 
+test("cleanup drops a selected database before waiting for the CI state lock", async (t) => {
+  const root = await fixture(t);
+  const dropLog = join(root, "drop.log");
+  await writeExecutable(
+    join(root, "bin/docker"),
+    `#!/usr/bin/env node
+require("node:fs").appendFileSync(${JSON.stringify(dropLog)}, process.argv.at(-1) + "\\n");
+`,
+  );
+  const statePath = join(root, "state.json");
+  const state = failedDropState();
+  await writeState(statePath, state);
+  // Another process holds the lock, as the runner does while it prepares a file.
+  let release;
+  const holding = withStateLock(statePath, () => new Promise((resolve) => (release = resolve)));
+  await waitUntil("the test to hold the state lock", () => release, { intervalMs: 10 });
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { cleanupResourceIds } from ${JSON.stringify(pathToFileURL(cleanupPath).href)};
+await cleanupResourceIds(process.argv[1], ["database-1"]);`,
+      statePath,
+    ],
+    {
+      env: { ...process.env, OCC_DOCKER_BIN: join(root, "bin/docker") },
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
+  t.after(() => child.kill());
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const exited = new Promise((resolve) => child.on("close", resolve));
+  // The drop must run while the lock is still held by this test.
+  await waitUntil(
+    "the drop to run without waiting for the lock",
+    () => readFile(dropLog, "utf8").catch(() => ""),
+    { timeoutMs: 20_000, intervalMs: 10 },
+  );
+  assert.equal(
+    await readFile(dropLog, "utf8"),
+    'DROP DATABASE IF EXISTS "openclaw_ci_failed_drop" WITH (FORCE)\n',
+  );
+  // The entry stays until the drop's process takes the lock.
+  assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), state);
+  release();
+  await holding;
+  assert.equal(await exited, 0, stderr);
+  assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), {
+    ...state,
+    resources: state.resources.filter(({ id }) => id !== "database-1"),
+  });
+});
+
 for (const stream of ["stdout", "stderr"]) {
   test(
     `cleanup drains inherited ${stream} before reporting a command failure`,
@@ -431,6 +490,8 @@ for (const stream of ["stdout", "stderr"]) {
 // These are real command trees behind the supported container-binary override. The
 // wrapper and descendant do no container work; the descendant inherits both output
 // pipes and ignores TERM. Its finite lifetime also bounds a failed regression run.
+// Cleanup must leave the escaped descendant running, so the test releases it once it
+// has been observed alive instead of waiting out that lifetime in teardown.
 for (const scenario of [
   "exit-before-timeout",
   "exit-on-term",
@@ -446,6 +507,7 @@ for (const scenario of [
     async (t) => {
       const { root, descendantPidPath, waitForTermination } = await commandTreeFixture(t);
       const heartbeat = join(root, "heartbeat");
+      const release = join(root, "release");
       const descendantPath = join(root, "descendant.cjs");
       await writeFile(
         descendantPath,
@@ -458,7 +520,10 @@ for (const scenario of [
         }
       });
       let ticks = 0;
-      const timer = setInterval(() => fs.writeFileSync(${JSON.stringify(heartbeat)}, String(++ticks)), 50);
+      const timer = setInterval(() => {
+        if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+        fs.writeFileSync(${JSON.stringify(heartbeat)}, String(++ticks));
+      }, 50);
       fs.writeFileSync(${JSON.stringify(heartbeat)}, "0");
       process.send("ready");
       process.disconnect();
@@ -564,6 +629,10 @@ for (const scenario of [
           encoding: "utf8",
           timeout: 5000,
         });
+        // Released only after the observation, so a cleanup that waited for the
+        // descendant's pipes still waits out its four-second lifetime and fails the
+        // elapsed-time assertion above.
+        await writeFile(release, "");
         assert.equal(observation.error, undefined, "could not observe escaped descendant");
         assert.equal(observation.status, 0, "escaped descendant stopped during cleanup");
         assert.doesNotMatch(observation.stdout, /^Z/, "escaped descendant stopped during cleanup");
@@ -642,18 +711,18 @@ test("cleanup rejects ownerless resources before invoking cleanup commands", asy
   assert.equal((await stat(clusterDirectory)).isDirectory(), true);
 });
 
-async function waitForFile(path) {
-  const deadline = Date.now() + 5000;
-  while (true) {
-    try {
-      return await readFile(path, "utf8");
-    } catch (error) {
-      if (error.code !== "ENOENT" || Date.now() >= deadline) {
-        throw error;
-      }
-      await delay(25);
-    }
-  }
+function waitForFile(path) {
+  return waitFor(
+    path,
+    () =>
+      readFile(path, "utf8").catch((error) => {
+        if (error.code !== "ENOENT") {
+          throw error;
+        }
+        return undefined;
+      }),
+    { timeoutMs: 5000, intervalMs: 25 },
+  );
 }
 
 for (const scenario of [
@@ -752,7 +821,8 @@ for (const scenario of [
         const body =
           scenario === "fixture-exit"
             ? `import { createWorkerRevisionFixtures, disposeStep } from ${fixtureImport};
-           const { cleanup } = createWorkerRevisionFixtures(import.meta.url);
+           // A shorter exit grace than the fixture's 2 s: this file has one test to report.
+           const { cleanup } = createWorkerRevisionFixtures(import.meta.url, { exitGraceMs: 500 });
            after(cleanup);
            test("abandons cleanup", async () => {
              await assert.rejects(disposeStep("cleanup command", 500, () => cleanupState(${JSON.stringify(statePath)})), /did not finish within 500 ms/);

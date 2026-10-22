@@ -11,6 +11,8 @@ import { promisify } from "node:util";
 import {
   createKubernetesInstallationConfiguration,
   createRealKubernetesFixture,
+  diagnosticDeadlineMs,
+  withinDiagnosticDeadline,
 } from "./kubernetes-real.mjs";
 
 const execute = promisify(execFile);
@@ -21,8 +23,8 @@ const transportSecretPrefix = "openclaw-agent-transport";
 
 // The pinned Kubernetes driver, not policy.process, owns workload identity.
 // This k3d fixture leaves sandbox_uid/gid and OpenShift namespace ranges unset:
-// NVIDIA/OpenShell 5a7728c304b5528e954e9ae900cf21f84e1a12b1
-// crates/openshell-driver-kubernetes/src/config.rs:288,524-560.
+// NVIDIA/OpenShell bdb956f2cd65a635f1294fccf1d138d263bf650f
+// crates/openshell-driver-kubernetes/src/config.rs:335,569-602.
 export const OPENSHELL_KUBERNETES_WORKLOAD_IDENTITY = Object.freeze({ uid: 10001, gid: 10001 });
 
 // Compute's dedicated Codex Harness categories: the workspace, generated images, and Codex
@@ -72,20 +74,60 @@ export function registerOpenShellInstallationCleanups(context, operations) {
   }
 }
 
-// One poll of the gateway-outage proof: the revision's work back in `queued` after at least one
-// attempt, then the deployment's status. The worker can claim the work again between the two
-// reads, and a live lease reads as `running`, so that pair is read again; any other status ends
-// the wait for the proof to assert on, so a revision that failed or activated during the outage
-// still fails it (finding 1846).
+// One poll of the gateway-outage proof: the revision's work back in `queued` after a pass, then
+// the deployment's status. A pass that waited on the gateway (`last_attempt_code`
+// SANDBOX_GATEWAY_UNAVAILABLE) gives its attempt back (finding 2040); any other failed pass keeps
+// it, so the proof can still see, and then reject, one. The worker can claim the work again
+// between the two reads, and a live lease reads as `running`, so that pair is read again; any
+// other status ends the wait for the proof to assert on, so a revision that failed or activated
+// during the outage still fails it (finding 1846).
 export function outageAttemptRead({ readWork, readStatus }) {
   return async () => {
     const work = await readWork();
-    if (work?.state !== "queued" || work.attempt_count < 1) {
+    if (
+      work?.state !== "queued" ||
+      (work.attempt_count < 1 && work.last_attempt_code !== "SANDBOX_GATEWAY_UNAVAILABLE")
+    ) {
       return undefined;
     }
     const status = await readStatus();
     return status === "running" ? undefined : { work, status };
   };
+}
+
+// Finding 2017: after the gateway outage the held deployment can end failed_permanent with
+// RUNTIME_LOGIN_FAILED. The proof reads why near the failure, before its refresh checks take
+// minutes and the failed revision's Pods go: `readWorker` gives the worker's events and persisted
+// state, and `describe(worker)` the revision's Pods with the Gateway, Harness and OpenShell
+// supervisor log tails. Each read stops at the diagnostic deadline, and one that fails or stalls
+// only says so: it never replaces the failure it explains. The text is written to stderr, added
+// to `failure`'s message when the wait itself failed, and returned for the assertion.
+export async function failedRecoveryDiagnostic(
+  { readWorker, describe, failure, write = (text) => process.stderr.write(text) },
+  { timeoutMs = diagnosticDeadlineMs } = {},
+) {
+  // A worker read that failed or stalled gives `describe` no worker (an undefined timedOut
+  // would fall back to the deadline's default text).
+  const read = await withinDiagnosticDeadline(
+    () =>
+      Promise.resolve()
+        .then(readWorker)
+        .catch(() => null),
+    { timeoutMs, timedOut: null },
+  );
+  const worker = typeof read === "object" && read !== null ? read : undefined;
+  const detail = await withinDiagnosticDeadline(
+    () =>
+      Promise.resolve()
+        .then(() => describe(worker))
+        .catch((error) => `\nRecovery diagnostic unavailable: ${error?.name ?? "Error"}`),
+    { timeoutMs, timedOut: `\nRecovery diagnostic timed out after ${timeoutMs / 1_000} s` },
+  );
+  write(`OpenShell integration: gateway outage recovery failed.${detail}\n`);
+  if (failure instanceof Error) {
+    failure.message = `${failure.message}${detail}`;
+  }
+  return detail;
 }
 
 // The real model's final answer when its provider has no capacity for the selected model; the
@@ -329,6 +371,14 @@ export function createOpenShellInstallationConfiguration({
     id: "credential-gateway-openshell-kubernetes",
     configuration: { binaries: [...openshellCodexBinaries] },
   };
+  configuration.sandboxNetworkPolicyCeiling = [
+    {
+      id: "python-demo",
+      binary: "/usr/bin/python3.11",
+      host: "example.org",
+      ports: [{ from: 443, to: 443 }],
+    },
+  ];
   configuration.drivers.sandbox = {
     id: "sandbox-openshell-kubernetes",
     configuration: {
@@ -471,7 +521,7 @@ function openShellGatewayServiceName(namespace) {
   return `openshell-${openshellHash(namespace, 10)}`;
 }
 
-// OpenShell v0.1.4 runs a separate supervisor Pod per Sandbox; it (not the Harness workload) calls
+// OpenShell v0.1.5 runs a separate supervisor Pod per Sandbox; it (not the Harness workload) calls
 // the gateway back. Mirrors internal/occdev/kubernetes.go and OpenShell sandbox_runtime.rs labels.
 export const openShellSupervisorLabels = Object.freeze({
   "openshell.ai/managed-by": "openshell",
@@ -595,7 +645,7 @@ export function createOpenShellKubernetesFixture({
   openShellHelmPath,
   openShellHelmChart,
   openShellWorkspaceHelmChart,
-  openShellChartVersion = "0.1.4",
+  openShellChartVersion = "0.1.5",
 }) {
   const base = createRealKubernetesFixture({
     kubeconfigPath,
@@ -853,6 +903,9 @@ export function createOpenShellKubernetesFixture({
       "--set=server.disableTls=true",
       "--set=server.auth.allowUnauthenticatedUsers=true",
       "--set=server.drivers.kubernetes.allowDriverConfig=true",
+      // The gateway rejects every Sandbox template label it does not allow; Harness
+      // Pods carry the OCE selector labels that NetworkPolicies and Services match.
+      '--set-json=gatewayConfig.openshell\\.drivers\\.kubernetes.allowed_pod_labels=["openclaw.dev/*","app.kubernetes.io/name","app.kubernetes.io/managed-by"]',
       "--set=server.drivers.kubernetes.resourceAdmission.enabled=false",
       "--set-string=server.drivers.kubernetes.workspaceMode=operator",
       "--set-string=server.drivers.kubernetes.operatorNamespaceLabel=openshell.ai/openclaw-workspace=true",
@@ -1189,7 +1242,7 @@ export function createOpenShellKubernetesFixture({
     assert.deepEqual(
       [...initCapabilities],
       [],
-      "OpenShell v0.1.4 must not add capabilities to workload Pod init containers.",
+      "OpenShell v0.1.5 must not add capabilities to workload Pod init containers.",
     );
     const networkSidecar = pod.spec.containers.find(({ name }) =>
       ["openshell-network", "openshell-supervisor-network"].includes(name),
@@ -1197,7 +1250,7 @@ export function createOpenShellKubernetesFixture({
     assert.equal(
       networkSidecar,
       undefined,
-      "OpenShell v0.1.4 must keep its network supervisor outside the workload Pod.",
+      "OpenShell v0.1.5 must keep its network supervisor outside the workload Pod.",
     );
     const container = compatibilityBridge
       ? pod.spec.containers.find(({ name }) => name === "agent")

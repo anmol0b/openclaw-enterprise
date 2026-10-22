@@ -1,6 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
+import { validateSandboxNetworkGrants } from "@openclaw-enterprise/contracts";
 import { RepositoryTransactionLifetime } from "../ports/transaction.ts";
 import { bindPlatformUnitOfWork } from "../ports/platform-unit-of-work.ts";
 import { createPlatformReadView } from "../ports/platform-read-view.ts";
+import type { SandboxPolicy } from "@openclaw-enterprise/contracts";
 import type {
   RepositorySessionAttempt,
   RepositoryBrokerReceipt,
@@ -158,6 +161,16 @@ export interface WorkspaceSetupRepository extends WorkspaceSetupReadRepository {
   delete(namespaceId: string, agentId: string): Promise<boolean>;
 }
 
+export interface SandboxPolicyReadRepository {
+  find(namespaceId: string, agentId: string): Promise<Readonly<SandboxPolicy> | undefined>;
+}
+export interface SandboxPolicyRepository extends SandboxPolicyReadRepository {
+  save(
+    policy: SandboxPolicy,
+    expectedVersion: number,
+  ): Promise<Readonly<SandboxPolicy> | undefined>;
+}
+
 export interface AgentReadRepository {
   findAgentForBrowsing(
     namespaceId: string,
@@ -175,6 +188,11 @@ export interface AgentReadRepository {
 
 export interface AgentRepository extends AgentReadRepository {
   createAgent(agent: Agent): Promise<Readonly<Agent>>;
+  setSandboxPolicyEditing(
+    namespaceId: string,
+    agentId: string,
+    enabled: boolean,
+  ): Promise<Readonly<Agent> | undefined>;
   lockAgent(namespaceId: string, agentId: string): Promise<Readonly<Agent> | undefined>;
   updateConfiguration(
     namespaceId: string,
@@ -832,7 +850,7 @@ export type PlatformOperation =
     })
   | (PlatformOperationBase & {
       readonly kind: "agent";
-      readonly target: "stopped";
+      readonly target: "stopped" | "sandbox_policy";
       readonly operationId: string;
     })
   | (PlatformOperationBase & {
@@ -888,6 +906,7 @@ export type { AgentProvisioningRecord } from "./agent-provisioning.ts";
 export type { IAMPolicyReadRepository, IAMPolicyRepository } from "@openclaw-enterprise/contracts";
 
 export interface PlatformReadView {
+  readonly sandboxPolicies: SandboxPolicyReadRepository;
   readonly installations: InstallationReadRepository;
   readonly namespaces: NamespaceReadRepository;
   readonly configurations: ConfigurationReadRepository;
@@ -905,6 +924,7 @@ export interface PlatformReadView {
 }
 
 export interface PlatformUnitOfWork extends PlatformReadView {
+  readonly sandboxPolicies: SandboxPolicyRepository;
   readonly installations: InstallationRepository;
   readonly namespaces: NamespaceRepository;
   readonly configurations: ConfigurationRepository;
@@ -966,6 +986,7 @@ interface PlatformSnapshot {
   readonly credentialWithdrawals: Map<string, Readonly<CredentialWithdrawal>>;
   readonly serviceAccounts: Map<string, Readonly<ServiceAccount>>;
   readonly agents: Map<string, Readonly<Agent>>;
+  readonly sandboxPolicies: Map<string, Readonly<SandboxPolicy>>;
   readonly workspaceSetups: Map<string, Readonly<WorkspaceSetup>>;
   readonly revisions: Map<string, readonly Readonly<AgentRevision>[]>;
   readonly roles: Map<string, Readonly<Role>>;
@@ -1039,6 +1060,9 @@ function cloneSnapshot(snapshot: PlatformSnapshot): PlatformSnapshot {
       Array.from(snapshot.serviceAccounts, ([key, account]) => [key, immutableCopy(account)]),
     ),
     agents: new Map(Array.from(snapshot.agents, ([key, agent]) => [key, immutableCopy(agent)])),
+    sandboxPolicies: new Map(
+      Array.from(snapshot.sandboxPolicies, ([key, policy]) => [key, immutableCopy(policy)]),
+    ),
     workspaceSetups: new Map(
       Array.from(snapshot.workspaceSetups, ([key, setup]) => [key, immutableCopy(setup)]),
     ),
@@ -1266,6 +1290,10 @@ function assertCredentialSource(source: CredentialSource): void {
   }
 }
 
+// A write stores an `immutableCopy` and returns that same value: it is a deep-frozen clone of
+// plain data, so the caller cannot change the stored state through it. That holds while the
+// stored contract types carry no Date, Map, Set or typed array (see `immutableSnapshot` in
+// @openclaw-enterprise/utils). Copying it again only doubled the cost of every write.
 function repositories(
   snapshot: PlatformSnapshot,
   iamSubjects: IAMSubjectSource,
@@ -1283,7 +1311,7 @@ function repositories(
       }
       const saved = immutableCopy(installation);
       snapshot.installation = saved;
-      return immutableCopy(saved);
+      return saved;
     },
     // In-memory State has no human accounts, and its units are serialized.
     holdPrincipalAccount: async () => true,
@@ -1339,7 +1367,7 @@ function repositories(
       }
       const saved = immutableCopy(namespace);
       snapshot.namespaces.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     lockNamespace: async (namespaceId, options = {}) => {
       const namespace = snapshot.namespaces.get(namespaceId);
@@ -1400,7 +1428,7 @@ function repositories(
       }
       const saved = immutableCopy({ ...namespace, status: next });
       snapshot.namespaces.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     markNamespaceDeleted: async (namespaceId, deletedAt) => {
       const key = namespaceId;
@@ -1438,7 +1466,7 @@ function repositories(
       }
       const saved = immutableCopy({ ...namespace, deletedAt });
       snapshot.namespaces.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
   };
 
@@ -1504,7 +1532,7 @@ function repositories(
       }
       const saved = immutableCopy(preset);
       snapshot.presets.set(agentKey(preset.namespaceId, preset.id), saved);
-      return immutableCopy(saved);
+      return saved;
     },
     lockPreset: findPreset,
     updatePreset: async (namespaceId, presetId, changes) => {
@@ -1524,7 +1552,7 @@ function repositories(
         throw new ResourceStateConflictError(PRESET_NAME_CONFLICT);
       }
       snapshot.presets.set(agentKey(namespaceId, presetId), saved);
-      return immutableCopy(saved);
+      return saved;
     },
     deletePreset: async (namespaceId, presetId) => {
       if ((await findPreset(namespaceId, presetId)) === undefined) {
@@ -1586,7 +1614,7 @@ function repositories(
         ...(secretBindings === undefined ? {} : { secretBindings }),
       });
       snapshot.configurations.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     lockConfiguration: async (namespaceId, configurationId) =>
       configurations.findConfiguration(namespaceId, configurationId),
@@ -1615,7 +1643,7 @@ function repositories(
         ...(secretBindings === undefined ? {} : { secretBindings }),
       });
       snapshot.configurations.set(agentKey(namespaceId, configurationId), updated);
-      return immutableCopy(updated);
+      return updated;
     },
     deleteConfiguration: async (namespaceId, configurationId) => {
       const existing = await configurations.findConfiguration(namespaceId, configurationId);
@@ -1686,7 +1714,7 @@ function repositories(
       }
       const saved = immutableCopy(secret);
       snapshot.secrets.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     listReferences: async (namespaceId, secretId, limit) => {
       if ((await secrets.findSecret(namespaceId, secretId)) === undefined) {
@@ -1841,7 +1869,7 @@ function repositories(
         withdrawalKey(withdrawal.namespaceId, withdrawal.revisionId, withdrawal.credentialSourceId),
         saved,
       );
-      return immutableCopy(saved);
+      return saved;
     },
     reassignCredentialWithdrawal: async (
       namespaceId,
@@ -1861,7 +1889,7 @@ function repositories(
         withdrawalKey(namespaceId, revisionId, credentialSourceId),
         saved,
       );
-      return immutableCopy(saved);
+      return saved;
     },
     recordCredentialWithdrawalAttempt: async (
       namespaceId,
@@ -1885,7 +1913,7 @@ function repositories(
         withdrawalKey(namespaceId, revisionId, credentialSourceId),
         saved,
       );
-      return immutableCopy(saved);
+      return saved;
     },
     markCredentialWithdrawalRevoked: async (
       namespaceId,
@@ -1902,7 +1930,7 @@ function repositories(
         withdrawalKey(namespaceId, revisionId, credentialSourceId),
         saved,
       );
-      return immutableCopy(saved);
+      return saved;
     },
     listCredentialSources: async (namespaceId) => {
       if (snapshot.namespaces.get(namespaceId)?.deletedAt !== undefined) {
@@ -1956,7 +1984,7 @@ function repositories(
       }
       const saved = immutableCopy(source);
       snapshot.credentialSources.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     replaceCredentialSourceSecrets: async (namespaceId, credentialSourceId, secrets) => {
       const current = await findCredentialSource(namespaceId, credentialSourceId);
@@ -1975,7 +2003,7 @@ function repositories(
       }
       const saved = immutableCopy({ ...current, secrets: { ...secrets } });
       snapshot.credentialSources.set(agentKey(namespaceId, credentialSourceId), saved);
-      return immutableCopy(saved);
+      return saved;
     },
     markCredentialSourceReady: async (namespaceId, credentialSourceId) => {
       const current = await findCredentialSource(namespaceId, credentialSourceId);
@@ -1984,7 +2012,7 @@ function repositories(
       }
       const saved = immutableCopy({ ...current, state: "ready" as const });
       snapshot.credentialSources.set(agentKey(namespaceId, credentialSourceId), saved);
-      return immutableCopy(saved);
+      return saved;
     },
     markCredentialSourceDeleting: async (namespaceId, credentialSourceId) => {
       const current = await findCredentialSource(namespaceId, credentialSourceId);
@@ -1993,7 +2021,7 @@ function repositories(
       }
       const saved = immutableCopy({ ...current, state: "deleting" as const });
       snapshot.credentialSources.set(agentKey(namespaceId, credentialSourceId), saved);
-      return immutableCopy(saved);
+      return saved;
     },
     hasReferences: async (namespaceId, credentialSourceId) =>
       (await credentialSources.findBlockingReference(namespaceId, credentialSourceId)) !==
@@ -2116,7 +2144,7 @@ function repositories(
       }
       const saved = immutableCopy(account);
       snapshot.serviceAccounts.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     lockServiceAccount: async (namespaceId, serviceAccountId) =>
       serviceAccounts.findServiceAccount(namespaceId, serviceAccountId),
@@ -2130,7 +2158,7 @@ function repositories(
       }
       const updated = immutableCopy({ ...current, credential });
       snapshot.serviceAccounts.set(agentKey(namespaceId, serviceAccountId), updated);
-      return immutableCopy(updated);
+      return updated;
     },
     hasReferences: async (namespaceId, serviceAccountId) => {
       if ((await serviceAccounts.findServiceAccount(namespaceId, serviceAccountId)) === undefined) {
@@ -2179,6 +2207,99 @@ function repositories(
     findIssuedCredentialBinding: async () => undefined,
   };
 
+  const sandboxPolicies: SandboxPolicyRepository = {
+    find: async (namespaceId, agentId) => {
+      const value = snapshot.sandboxPolicies.get(agentKey(namespaceId, agentId));
+      return value === undefined ? undefined : immutableCopy(value);
+    },
+    save: async (policy, expectedVersion) => {
+      const key = agentKey(policy.namespaceId, policy.agentId);
+      const existing = snapshot.sandboxPolicies.get(key);
+      if (existing === undefined || existing.version !== expectedVersion) {
+        return undefined;
+      }
+      validateSandboxNetworkGrants(policy.additions);
+      if (
+        !snapshot.agents.has(key) ||
+        existing.id !== policy.id ||
+        policy.id !== `sbp_${policy.agentId.slice(4)}` ||
+        !Number.isInteger(policy.version) ||
+        policy.version > 2147483647 ||
+        policy.version < 1 ||
+        (policy.version !== expectedVersion && policy.version !== expectedVersion + 1)
+      ) {
+        throw new ScopeViolationError("Invalid SandboxPolicy ownership or version.");
+      }
+      const application = policy.application;
+      const previousApplication = existing.application;
+      if (
+        (policy.version === existing.version &&
+          !isDeepStrictEqual(policy.additions, existing.additions)) ||
+        (policy.version !== existing.version &&
+          (previousApplication?.state === "pending" || application !== undefined))
+      ) {
+        throw new ScopeViolationError("Invalid SandboxPolicy version transition.");
+      }
+      if (application !== undefined) {
+        const revision = (snapshot.revisions.get(key) ?? []).find(
+          ({ id }) => id === application.revisionId,
+        );
+        if (
+          revision === undefined ||
+          application.policyVersion !== policy.version ||
+          application.snapshot.version !== policy.version ||
+          !isDeepStrictEqual(application.snapshot.additions, policy.additions)
+        ) {
+          throw new ScopeViolationError("Invalid SandboxPolicy application ownership or snapshot.");
+        }
+        if (application.id === previousApplication?.id) {
+          const {
+            state: _state,
+            expectedProviderVersion: _expected,
+            providerVersion: _provider,
+            reason: _reason,
+            ...identity
+          } = application;
+          const {
+            state: _previousState,
+            expectedProviderVersion: _previousExpected,
+            providerVersion: _previousProvider,
+            reason: _previousReason,
+            ...previousIdentity
+          } = previousApplication;
+          if (
+            !isDeepStrictEqual(identity, previousIdentity) ||
+            (previousApplication.expectedProviderVersion !== undefined &&
+              previousApplication.expectedProviderVersion !==
+                application.expectedProviderVersion) ||
+            (previousApplication.state !== "pending" &&
+              !isDeepStrictEqual(application, previousApplication))
+          ) {
+            throw new ScopeViolationError("SandboxPolicy application identity is immutable.");
+          }
+        } else if (
+          previousApplication?.state === "pending" ||
+          application.state !== "pending" ||
+          application.expectedProviderVersion !== undefined
+        ) {
+          throw new ScopeViolationError("Invalid SandboxPolicy application transition.");
+        }
+      }
+      if (
+        !isDeepStrictEqual(policy.applied, existing.applied) &&
+        (application?.state !== "applied" ||
+          policy.applied?.policyVersion !== application.policyVersion ||
+          policy.applied?.revisionId !== application.revisionId ||
+          policy.applied?.providerVersion !== application.providerVersion)
+      ) {
+        throw new ScopeViolationError("Applied policy requires confirmed application evidence.");
+      }
+      const saved = immutableCopy(policy);
+      snapshot.sandboxPolicies.set(key, saved);
+      return saved;
+    },
+  };
+
   const workspaceSetups: WorkspaceSetupRepository = {
     find: async (namespaceId, agentId) => {
       const setup = snapshot.workspaceSetups.get(agentKey(namespaceId, agentId));
@@ -2218,7 +2339,7 @@ function repositories(
         ...(defaultsId === undefined ? {} : { defaultsId }),
       });
       snapshot.workspaceSetups.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     complete: async (namespaceId, agentId, id) => {
       const key = agentKey(namespaceId, agentId);
@@ -2229,7 +2350,7 @@ function repositories(
       const { files: _files, ...metadata } = setup;
       const completed = immutableCopy({ ...metadata, completed: true });
       snapshot.workspaceSetups.set(key, completed);
-      return immutableCopy(completed);
+      return completed;
     },
     delete: async (namespaceId, agentId) =>
       snapshot.workspaceSetups.delete(agentKey(namespaceId, agentId)),
@@ -2265,6 +2386,16 @@ function repositories(
           .filter((agent) => live.has(agent.namespaceId))
           .map((agent) => Object.freeze({ id: agent.id, namespaceId: agent.namespaceId })),
       );
+    },
+    setSandboxPolicyEditing: async (namespaceId, agentId, enabled) => {
+      const key = agentKey(namespaceId, agentId);
+      const current = snapshot.agents.get(key);
+      if (current === undefined) {
+        return undefined;
+      }
+      const saved = immutableCopy({ ...current, sandboxPolicyEditing: enabled });
+      snapshot.agents.set(key, saved);
+      return saved;
     },
     createAgent: async (agent) => {
       assertInitialized(snapshot);
@@ -2338,11 +2469,22 @@ function repositories(
         ...(pluginApprovers === undefined ? {} : { pluginApprovers }),
         ...(repositoryBindings === undefined ? {} : { repositoryBindings }),
         ...(repositoryAccess === undefined ? {} : { repositoryAccess }),
+        sandboxPolicyEditing: false,
         desiredRuntimeState: "stopped" as const,
         status: "active" as const,
       });
       snapshot.agents.set(key, saved);
-      return immutableCopy(saved);
+      snapshot.sandboxPolicies.set(
+        key,
+        immutableCopy({
+          id: `sbp_${agent.id.slice(4)}`,
+          namespaceId: agent.namespaceId,
+          agentId: agent.id,
+          version: 1,
+          additions: [],
+        }),
+      );
+      return saved;
     },
     lockAgent: async (namespaceId, agentId) => agents.findAgent(namespaceId, agentId),
     transitionAgentDesiredRuntimeState: async (namespaceId, agentId, expected, next) => {
@@ -2358,7 +2500,7 @@ function repositories(
       }
       const saved = immutableCopy({ ...agent, desiredRuntimeState: next });
       snapshot.agents.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     transitionAgentStatus: async (namespaceId, agentId, expected, next) => {
       const key = agentKey(namespaceId, agentId);
@@ -2381,7 +2523,7 @@ function repositories(
       }
       const saved = immutableCopy({ ...agent, status: next });
       snapshot.agents.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     updateConfiguration: async (
       namespaceId,
@@ -2474,7 +2616,7 @@ function repositories(
         ...(repositoryAccess === undefined ? {} : { repositoryAccess }),
       });
       snapshot.agents.set(agentKey(namespaceId, agentId), updated);
-      return immutableCopy(updated);
+      return updated;
     },
     compareAndClearActiveRevision: async (namespaceId, agentId, expectedRevisionId) => {
       const current = await agents.findAgent(namespaceId, agentId);
@@ -2484,7 +2626,7 @@ function repositories(
       const { activeRevisionId: _activeRevisionId, ...stopped } = current;
       const updated = immutableCopy(stopped);
       snapshot.agents.set(agentKey(namespaceId, agentId), updated);
-      return immutableCopy(updated);
+      return updated;
     },
     compareAndSetActiveRevision: async (
       namespaceId,
@@ -2502,7 +2644,7 @@ function repositories(
       }
       const updated = immutableCopy({ ...current, activeRevisionId: candidateRevisionId });
       snapshot.agents.set(agentKey(namespaceId, agentId), updated);
-      return immutableCopy(updated);
+      return updated;
     },
   };
 
@@ -2624,7 +2766,7 @@ function repositories(
         ...(plugins === undefined ? {} : { plugins }),
       });
       snapshot.revisions.set(key, Object.freeze([...previous, saved]));
-      return immutableCopy(saved);
+      return saved;
     },
   };
 
@@ -2666,6 +2808,13 @@ function repositories(
     }
     if (resourceKind === "credential_source") {
       return (await findCredentialSource(namespaceId, resourceId)) !== undefined;
+    }
+    if (resourceKind === "sandbox_policy") {
+      const policy = await sandboxPolicies.find(namespaceId, `agt_${resourceId.slice(4)}`);
+      return (
+        policy?.id === resourceId &&
+        (await agents.findAgent(namespaceId, policy.agentId))?.status === "active"
+      );
     }
     if (resourceKind === "service_account") {
       return (await serviceAccounts.findServiceAccount(namespaceId, resourceId)) !== undefined;
@@ -2742,7 +2891,7 @@ function repositories(
       }
       const saved = immutableCopy(role);
       snapshot.roles.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     deleteRole: async (namespaceId, roleId) => {
       const key = iamPolicyKey(namespaceId, roleId);
@@ -2825,7 +2974,7 @@ function repositories(
       }
       const saved = immutableCopy(binding);
       snapshot.bindings.set(key, saved);
-      return immutableCopy(saved);
+      return saved;
     },
     deleteAccessBinding: async (namespaceId, bindingId) =>
       snapshot.bindings.delete(iamPolicyKey(namespaceId, bindingId)),
@@ -2906,6 +3055,7 @@ function repositories(
     credentialSources,
     serviceAccounts,
     agents,
+    sandboxPolicies,
     workspaceSetups,
     revisions,
     iamPolicy,
@@ -2970,10 +3120,14 @@ function repositories(
           if (owner === undefined || owner.namespaceId !== operation.namespaceId) {
             throw new ScopeViolationError("Agent work does not match its exact owner.");
           }
-          if (operation.target !== "stopped" && operation.target !== "deleted") {
+          if (
+            operation.target !== "stopped" &&
+            operation.target !== "deleted" &&
+            operation.target !== "sandbox_policy"
+          ) {
             throw new ScopeViolationError("Agent work does not match its exact lifecycle target.");
           }
-          if (operation.target === "stopped" && !isNonEmptyString(operation.operationId)) {
+          if (operation.target !== "deleted" && !isNonEmptyString(operation.operationId)) {
             throw new ScopeViolationError("Agent stop work requires its exact operation identity.");
           }
         }
@@ -2994,7 +3148,7 @@ function repositories(
               (operation.kind === "agent" &&
                 existing.target === operation.target &&
                 (existing.target === "deleted" ||
-                  (operation.target === "stopped" &&
+                  (operation.target !== "deleted" &&
                     existing.operationId === operation.operationId)))),
         );
         if (duplicate !== undefined) {
@@ -3128,6 +3282,8 @@ function finalizeAgentDeletion(
     if (
       (binding.subjectKind === "identity" && binding.subjectId === agent.servicePrincipalId) ||
       (binding.resourceKind === "agent" && binding.resourceId === agentId) ||
+      (binding.resourceKind === "sandbox_policy" &&
+        binding.resourceId === `sbp_${agentId.slice(4)}`) ||
       (binding.resourceKind === "agent_revision" &&
         binding.resourceId !== undefined &&
         revisionIds.has(binding.resourceId))
@@ -3140,6 +3296,7 @@ function finalizeAgentDeletion(
   // here (liveWithdrawal), as the database cascade does.
   snapshot.workspaceSetups.delete(key);
   snapshot.revisions.delete(key);
+  snapshot.sandboxPolicies.delete(key);
   snapshot.agents.delete(key);
 
   snapshot.audit.push(
@@ -3184,6 +3341,7 @@ export class InMemoryPlatformState implements PlatformStateStore {
     credentialWithdrawals: new Map(),
     serviceAccounts: new Map(),
     agents: new Map(),
+    sandboxPolicies: new Map(),
     workspaceSetups: new Map(),
     revisions: new Map(),
     roles: new Map(),

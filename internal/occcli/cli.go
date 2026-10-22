@@ -743,7 +743,13 @@ func (app *application) agentCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return app.printAgent(agent, false)
+			if err := app.printAgent(agent, false); err != nil {
+				return err
+			}
+			if app.output != "table" {
+				return nil
+			}
+			return app.printAgentHarness(client, namespace, args[0], agent)
 		},
 	}
 
@@ -909,6 +915,7 @@ func (app *application) agentCommand() *cobra.Command {
 		app.agentCredentialWithdrawalCommand(),
 		app.agentRuntimeCommand(),
 		app.agentLogsCommand(),
+		app.agentPolicyCommand(),
 	)
 	return command
 }
@@ -1187,16 +1194,17 @@ func (app *application) validateOptions(command *cobra.Command) error {
 // key; Namespace commands refuse it), so neither is listed. The other string
 // flags refuse an empty value themselves.
 var emptyFlagValues = map[string]string{
-	"file":              "a JSON document",
-	"key-output":        "a key file path",
-	"level":             "error, warn, info or debug",
-	"out":               "a key file path",
-	"pod":               "a Pod",
-	"revision":          "a revision ID",
-	"service-key-file":  "a bootstrap or service-key response file",
-	"service-principal": "a ServicePrincipal ID",
-	"source":            "gateway, agent or sandbox",
-	"url":               "the OCC endpoint URL",
+	"file":                        "a JSON document",
+	"key-output":                  "a key file path",
+	"sandbox-network-policy-file": "a Sandbox network policy file",
+	"level":                       "error, warn, info or debug",
+	"out":                         "a key file path",
+	"pod":                         "a Pod",
+	"revision":                    "a revision ID",
+	"service-key-file":            "a bootstrap or service-key response file",
+	"service-principal":           "a ServicePrincipal ID",
+	"source":                      "gateway, agent or sandbox",
+	"url":                         "the OCC endpoint URL",
 }
 
 // refuseEmptyFlags refuses an explicitly empty value for a flag in

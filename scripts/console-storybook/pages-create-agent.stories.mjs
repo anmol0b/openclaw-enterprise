@@ -7,6 +7,10 @@ export const NamespaceProvisioning = {
   ...story("createNamespaceProvisioning"),
   name: "Namespace still provisioning",
 };
+export const FormNamespaceProvisioning = story("createFormNamespaceProvisioning");
+export const FormNamespaceBecomesReady = story("createFormNamespaceBecomesReady");
+export const FormNamespaceFailed = story("createFormNamespaceFailed");
+export const FormNamespaceMissing = story("createFormNamespaceMissing");
 export const CreateForm = { ...story("createForm"), name: "OpenAI with Codex harness" };
 export const CreateInvalidConfiguration = {
   ...story("createInvalidConfiguration"),
@@ -50,6 +54,8 @@ export const CreateSecretRequiredFields = {
   ...story("createSecretRequiredFields"),
   name: "Create Secret required fields",
 };
+export const CreateSecretRefused = story("createSecretRefused");
+export const CreateModelSecretRequired = story("createModelSecretRequired");
 export const CreateSlackSecretStaged = {
   ...story("createSlackSecretStaged"),
   name: "Slack Secret bindings staged",
@@ -161,7 +167,15 @@ export const CreatePresetInvalidField = {
 };
 export const CreateCapabilitiesDenied = {
   ...story("createCapabilitiesDenied"),
-  name: "Agent creation needs an administrator",
+  name: "Permission check failed",
+};
+export const CreateMember = {
+  ...story("createMember"),
+  name: "Member with Agent create",
+};
+export const CreateMemberGrantRefused = {
+  ...story("createMemberGrantRefused"),
+  name: "Member Agent created, grant needs an administrator",
 };
 export const CreateRestricted = {
   ...story("createRestricted"),
