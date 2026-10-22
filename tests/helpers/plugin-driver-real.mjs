@@ -441,11 +441,12 @@ function sanitizedPluginProofWorkerEvents(events, revisionId) {
 
 const sessionEvidenceScript = String.raw`
   const { DatabaseSync } = require("node:sqlite");
+  const { isDeepStrictEqual } = require("node:util");
   const { zstdDecompressSync } = require("node:zlib");
   const sessionKey = process.argv[1];
   const marker = process.argv[2];
   const toolName = process.argv[3];
-  const resultPattern = process.argv[4];
+  const resultPatterns = JSON.parse(process.argv[4]);
   const expectedArguments = JSON.parse(process.argv[5] || "null");
   const expectedCatalog = JSON.parse(process.argv[6] || "null");
   const databasePath = "/home/node/.openclaw/agents/main/agent/openclaw-agent.sqlite";
@@ -634,7 +635,7 @@ const sessionEvidenceScript = String.raw`
             calls.push({ seq: row.seq, id: block.id, name: block.name, mirrorIdentity,
               ...(targetId ? { targetId, targetName: toolName } : {}),
               matchesArguments: expectedArguments === null || Object.entries(expectedArguments)
-                .every(([key, value]) => input?.[key] === value),
+                .every(([key, value]) => isDeepStrictEqual(input?.[key], value)),
               ...(expectedCatalog ? {
                 matchesSearchArguments: block.name === "tool_search" && Array.isArray(input?.queries) &&
                   input.queries.length === expectedCatalog.present.length + expectedCatalog.absent.length &&
@@ -686,6 +687,8 @@ const sessionEvidenceScript = String.raw`
               : exact.length === 0;
           })
         );
+        const matchedResultPattern = resultPatterns.find((pattern) =>
+          contains(targetResult, pattern) || textOf(targetResult?.content).includes(pattern));
         results.push({
           seq: row.seq,
           toolCallId: message.toolCallId,
@@ -696,9 +699,10 @@ const sessionEvidenceScript = String.raw`
           errorText: isError ? textOf(targetResult?.content) : undefined,
           // Native Codex emits this terminal reason when MCP approval is denied.
           deniedByUser: textOf(message.content).includes("user rejected MCP tool call"),
-          matchesResult: matchesTarget && matchesCatalog && (resultPattern
-            ? contains(targetResult, resultPattern) || textOf(targetResult?.content).includes(resultPattern)
+          matchesResult: matchesTarget && matchesCatalog && (resultPatterns.length
+            ? matchedResultPattern !== undefined
             : hasStructuredResult(targetResult?.content)),
+          matchedResultPattern,
           ...(expectedCatalog ? { matchesCatalog, catalog: groups?.map((group) => ({
             query: group.query,
             names: group.candidates?.map((candidate) => candidate.name),
@@ -1560,7 +1564,9 @@ export function createNativePluginAssertions({
       sessionKey,
       turnMarker,
       toolName ?? "",
-      resultPattern ?? "",
+      JSON.stringify(
+        Array.isArray(resultPattern) ? resultPattern : resultPattern ? [resultPattern] : [],
+      ),
       JSON.stringify(expectedArguments ?? null),
       JSON.stringify(expectedCatalog ?? null),
     ]);
@@ -1833,7 +1839,12 @@ export function createNativePluginAssertions({
   }
 
   async function assertSessionToolPolicyDeniedEvidence(agent, options) {
-    assert.ok(options.resultPattern, "policy proof requires the expected native refusal");
+    const patterns = [options.resultPattern].flat();
+    assert.ok(
+      patterns.length > 0 &&
+        patterns.every((pattern) => typeof pattern === "string" && pattern.length),
+      "policy proof requires the expected native refusal",
+    );
     assert.ok(options.expectedArguments, "policy proof requires the intended invocation target");
     const evidence = await assertSessionToolFailureEvidence(agent, options);
     assert.equal(
@@ -1850,6 +1861,9 @@ export function createNativePluginAssertions({
       sessionId: evidence.sessionId,
       toolCallId: evidence.calls[0].id,
       toolName: evidence.calls[0].name,
+      ...(Array.isArray(options.resultPattern)
+        ? { matchedRefusal: evidence.results[0].matchedResultPattern }
+        : {}),
       ...(evidence.calls[0].targetId
         ? {
             targetId: evidence.calls[0].targetId,

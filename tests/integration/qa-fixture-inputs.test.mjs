@@ -179,7 +179,12 @@ test("QA selection keeps prerequisite credentials and reports omitted coverage",
       { cell: "kubernetes/Codex", scenarios: ["model-ui", "calendar"] },
     ],
   );
-  assert.deepEqual(selected.cells[1].unselected, ["git-full", "git-read", "slack"]);
+  assert.deepEqual(selected.cells[1].unselected, [
+    "console-secrets",
+    "git-full",
+    "git-read",
+    "slack",
+  ]);
   assert.deepEqual(selected.cells[0].notApplicable, ["calendar", "git-read", "slack"]);
   assert.throws(() => validateQaInputs(selected, {}), /OPENAI_KEY_FILE is required/);
   assert.throws(
@@ -198,8 +203,15 @@ test("QA selection keeps prerequisite credentials and reports omitted coverage",
   assert.ok(!calendar.requiredEnv.includes("OCC_TEST_QA_OPENAI_KEY_FILE"));
   assert.deepEqual(calendar.cells[0].scenarios, []);
   const openclaw = selectQaMatrix({ OCC_TEST_QA_PRESET: "OpenClaw" });
-  assert.deepEqual(openclaw.cells[0].scenarios, ["model-ui", "git-full"]);
+  assert.deepEqual(openclaw.cells[0].scenarios, ["model-ui", "console-secrets", "git-full"]);
   assert.ok(!openclaw.requiredEnv.some((name) => /CODEX|SLACK|CALENDAR/.test(name)));
+  const secrets = selectQaMatrix({
+    OCC_TEST_QA_SCENARIOS: "console-secrets",
+    OCC_TEST_QA_PRESET: "Codex",
+    OCC_TEST_QA_INSTALLATION: "compose",
+  });
+  assert.equal(secrets.browser, true);
+  assert.deepEqual(secrets.requiredEnv, ["OCC_TEST_QA_CODEX_TOKEN_FILE"]);
   const sandbox = selectQaMatrix({
     OCC_TEST_QA_SCENARIOS: "sandbox-policy",
     OCC_TEST_QA_PRESET: "Codex",
@@ -1941,7 +1953,11 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
           type: "toolCall",
           id: "denied-call",
           name: "automations",
-          arguments: { action: "run", jobId: "fixture-job" },
+          arguments: {
+            action: "update",
+            jobId: "fixture-job",
+            job: { payload: { timeoutSeconds: 5 } },
+          },
         },
       ],
     },
@@ -2120,17 +2136,48 @@ test("native tool evidence reads compressed rows, prompt snapshots and command e
     sessionKey,
     turnMarker: "denied-fixture",
     toolName: "automations",
-    expectedArguments: { action: "run", jobId: "fixture-job" },
-    resultPattern: "Automation not found: fixture-job",
+    expectedArguments: {
+      action: "update",
+      jobId: "fixture-job",
+      job: { payload: { timeoutSeconds: 5 } },
+    },
+    resultPattern: ["job.payload.kind:", "Automation not found: fixture-job"],
   };
   assert.equal(
     (await native.assertSessionToolPolicyDeniedEvidence({}, denial)).toolCallId,
     "denied-call",
   );
+  assert.equal(
+    (await native.assertSessionToolPolicyDeniedEvidence({}, denial)).matchedRefusal,
+    "Automation not found: fixture-job",
+  );
   await assert.rejects(
     native.assertSessionToolPolicyDeniedEvidence(
       {},
-      { ...denial, expectedArguments: { action: "run", jobId: "wrong-target" } },
+      { ...denial, expectedArguments: { ...denial.expectedArguments, jobId: "wrong-target" } },
+    ),
+    /exact requested action and target/,
+  );
+  await assert.rejects(
+    native.assertSessionToolPolicyDeniedEvidence(
+      {},
+      {
+        ...denial,
+        resultPattern: [
+          "job.payload.kind:",
+          "automation command payloads cannot be created or edited",
+        ],
+      },
+    ),
+    /the attempted tool must return the policy refusal/,
+  );
+  await assert.rejects(
+    native.assertSessionToolPolicyDeniedEvidence(
+      {},
+      {
+        ...denial,
+        expectedArguments: { ...denial.expectedArguments, job: { payload: { timeoutSeconds: 6 } } },
+      },
     ),
     /exact requested action and target/,
   );

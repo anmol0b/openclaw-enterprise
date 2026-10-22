@@ -413,6 +413,204 @@ const shareExistingPerson = [
 
 // Page failures use the HTTP boundary; isolated component previews receive their input state.
 export const scenarios = {
+  secrets: {
+    group: "Pages/Secrets",
+    name: "Populated",
+    path: "/console/secrets",
+    description:
+      "The library shows names and IDs. The privacy notice explains why stored values are never returned. Simulated UI proof.",
+    steps: [
+      "Search by name or ID. Tab to a result and press Enter; its dialog names the Namespace and lists consumers.",
+      "Create a Secret with a dummy value, replace it, then delete it. Switch Namespace to inspect isolation in navigation.",
+    ],
+  },
+  secretsMobile: {
+    group: "Pages/Secrets",
+    name: "Mobile",
+    path: "/console/secrets",
+    mobile: true,
+    description: "The Secret list and dialogs at phone width. Simulated UI proof.",
+  },
+  secretsSearch: {
+    group: "Pages/Secrets",
+    name: "No search matches",
+    path: "/console/secrets",
+    actions: [{ selector: '[aria-label="Search Secrets"]', value: "no-such-secret" }],
+    description: "Clear the search to see the Secrets in this Namespace again.",
+  },
+  secretsEmpty: {
+    group: "Pages/Secrets",
+    name: "Empty",
+    path: "/console/secrets",
+    emptySecrets: true,
+    description: "An authorized list without Secrets offers creation.",
+  },
+  secretsLoading: {
+    group: "Pages/Secrets",
+    name: "Loading",
+    path: "/console/secrets",
+    rules: [{ path: presetSecretsPath, hold: true }],
+    description: "Namespace admission succeeds while the Secret list is still loading.",
+  },
+  secretsUnavailable: {
+    group: "Pages/Secrets",
+    name: "Read unavailable",
+    path: "/console/secrets",
+    rules: [{ path: presetSecretsPath, status: 503 }],
+    description: "A failed Secret collection read shows recovery, with no stale rows.",
+  },
+  secretsNoNamespace: {
+    group: "Pages/Secrets",
+    name: "No readable Namespace",
+    path: "/console/secrets",
+    emptyNamespaces: true,
+    description: "Secret requests require an admitted Namespace selection.",
+  },
+  secretsNamespaceNotReady: {
+    group: "Pages/Secrets",
+    name: "Namespace provisioning",
+    path: "/console/secrets",
+    namespaceStatus: "provisioning",
+    description: "Metadata stays readable; creation and replacement wait for Namespace readiness.",
+  },
+  secretsCreate: {
+    group: "Pages/Secrets",
+    name: "Create",
+    path: "/console/secrets",
+    actions: [click("Create Secret")],
+    description:
+      "The header identifies the Namespace. The form preserves whitespace and explains that you can replace a saved value but cannot retrieve it.",
+    steps: [
+      "Enter a name and a dummy value. Use Show value beside the Value label, then hide it again.",
+      "Press Enter from Secret name to submit. After the save, Close is the only dialog action.",
+    ],
+  },
+  secretsMissingValue: {
+    group: "Pages/Secrets",
+    name: "Missing value",
+    path: "/console/secrets",
+    actions: [
+      click("Create Secret"),
+      { selector: "#secret-name", value: "Team API key" },
+      { selector: 'dialog button[type="submit"]', click: true },
+    ],
+    description: "Required-value errors remain beside their field; no request is sent.",
+  },
+  secretsCreateDenied: {
+    group: "Pages/Secrets",
+    name: "Create denied",
+    path: "/console/secrets",
+    denySecretCreate: true,
+    actions: [
+      click("Create Secret"),
+      { selector: "#secret-name", value: "Team API key" },
+      { selector: "#secret-value", value: "synthetic-story-value" },
+      { selector: 'dialog button[type="submit"]', click: true },
+    ],
+    description:
+      "The API refuses creation, clears the entered value and disables the refused write.",
+  },
+  secretsUnknownSave: {
+    group: "Pages/Secrets",
+    name: "Unknown save outcome",
+    path: "/console/secrets",
+    rules: [{ path: presetSecretsPath, method: "POST", bodyError: true }],
+    actions: [
+      click("Create Secret"),
+      { selector: "#secret-name", value: "Team API key" },
+      { selector: "#secret-value", value: "synthetic-story-value" },
+      { selector: 'dialog button[type="submit"]', click: true },
+    ],
+    description:
+      "An unreadable reply leaves an amber warning that the outcome is unknown. The value is erased and this dialog cannot resubmit.",
+  },
+  secretsConsumers: {
+    group: "Pages/Secrets",
+    name: "Consumers and restricted references",
+    path: "/console/secrets",
+    secretConsumers: {
+      agents: ["agt_00000000-0000-4000-8000-000000000001"],
+      configurations: ["cfg_00000000-0000-4000-8000-000000000001"],
+      credentialSources: [],
+      provisioningRequests: [],
+      unreadable: 2,
+      truncated: true,
+    },
+    actions: [click("Demo model API key (simulated)")],
+    description:
+      "Agent links and other consumer IDs are grouped by resource. The blue notice explains restricted visibility; the amber warning identifies an incomplete list. Simulated UI proof.",
+  },
+  secretsReplace: {
+    group: "Pages/Secrets",
+    name: "Replace value",
+    path: "/console/secrets",
+    actions: [click("Demo model API key (simulated)"), click("Replace value")],
+    description:
+      "Replacement preserves the reference and explains deployment and CredentialSource handoff. Existing values are never loaded.",
+  },
+  secretsReplaceDenied: {
+    group: "Pages/Secrets",
+    name: "Replace denied",
+    path: "/console/secrets",
+    rules: [{ suffix: "/secrets/sec_demo_model", method: "PATCH", status: 403, code: "FORBIDDEN" }],
+    actions: [
+      click("Demo model API key (simulated)"),
+      click("Replace value"),
+      { selector: "#secret-value", value: "synthetic-story-value" },
+      { selector: 'dialog button[type="submit"]', click: true },
+    ],
+    description: "A denied replacement clears the entered value and disables further submission.",
+  },
+  secretsDelete: {
+    group: "Pages/Secrets",
+    name: "Delete confirmation",
+    path: "/console/secrets",
+    actions: [click("Demo model API key (simulated)"), click("Delete Secret")],
+    description:
+      "Permanent storage deletion requires confirmation and explains upstream revocation and previously delivered values.",
+  },
+  secretsDeleteConflict: {
+    group: "Pages/Secrets",
+    name: "Concurrent reference conflict",
+    path: "/console/secrets",
+    rules: [
+      {
+        suffix: "/secrets/sec_demo_model",
+        method: "DELETE",
+        status: 409,
+        code: "RESOURCE_CONFLICT",
+      },
+    ],
+    actions: [
+      click("Demo model API key (simulated)"),
+      click("Delete Secret"),
+      click("Permanently delete Secret"),
+    ],
+    description:
+      "A newly added reference can refuse deletion after the detail read. Reopen the detail to inspect current consumers.",
+  },
+  secretsDeletionUnconfirmed: {
+    group: "Pages/Secrets",
+    name: "Deletion could not be confirmed",
+    path: "/console/secrets",
+    rules: [
+      { suffix: "/secrets/sec_demo_model", method: "DELETE", bodyError: true },
+      {
+        suffix: "/secrets/sec_demo_model",
+        skip: 1,
+        data: { id: "sec_different", name: "Different Secret (simulated)" },
+      },
+    ],
+    actions: [
+      click("Demo model API key (simulated)"),
+      click("Delete Secret"),
+      click("Permanently delete Secret"),
+      click("Check deletion status"),
+    ],
+    description:
+      "The delete response was lost, then the status check returned a different Secret. The dialog leaves the outcome unknown and offers no second Delete.",
+  },
+
   runtimeImages: {
     group: "Pages/Navigation",
     name: "Debug runtime images",
@@ -3652,6 +3850,39 @@ export const scenarios = {
       "When the grants are written, the note goes, Direct Agent grants lists the new binding, and navigation is available again. If you tried Back above, Back now reaches the draft and Forward returns through Configuration to Access.",
     ],
   },
+  agentSharingHoldsAfterDelete: {
+    group: "Pages/Agent detail",
+    name: "Sharing holds navigation after Delete",
+    path: `${draft}&tab=access`,
+    deployed: true,
+    rules: [
+      {
+        suffix: "/iam/access-bindings",
+        method: "POST",
+        delayMs: 4000,
+        once: true,
+      },
+      // The deletion status poll never answers, so the Agent stays deleting.
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001",
+        skip: 1,
+        hold: true,
+      },
+    ],
+    actions: [
+      ...shareExistingPerson,
+      click("Delete Agent"),
+      { selector: ".agent-delete-dialog button.danger", click: true },
+      { selector: "a.page-back", click: true },
+    ],
+    description:
+      "The story shares the Agent, deletes it while the first grant is pending, then selects ← Agents. Delete replaces the page with its deletion row; the note above that row says why the page stays until both grants are written, about 4 s later.",
+    steps: [
+      "While the note “This page stays open until sharing finishes.” shows above Danger zone, select ← Agents or Agents in the sidebar: the page stays and the note remains. Select Reset story to replay the hold.",
+      "When the grants are written, the note goes and ← Agents opens the Agents list.",
+    ],
+    gap: "The deletion status check never answers here, so the Agent stays deleting.",
+  },
   agentSharingRemoved: {
     group: "Pages/Agent detail",
     name: "Direct Agent grant removed",
@@ -4554,6 +4785,38 @@ export const scenarios = {
     ],
     gap: "Runtime status and output are simulated UI evidence; this story does not verify a live deployment or log read.",
   },
+  sandboxLost: {
+    group: "Pages/Agent detail",
+    name: "Current version's Sandbox lost",
+    path: currentVersion,
+    deployed: true,
+    harness: { state: "lost", code: "SANDBOX_STOPPED" },
+    description:
+      "The current version's Sandbox stopped (for example after a node restart) and OCC does not restart it. The Agent still reads active, so Live serving says the Sandbox is lost and names the next step.",
+    steps: [
+      'Live serving shows a red "Sandbox lost" badge and, on the line under it, "Deploy a new version." The line was reserved while the Sandbox was read, so nothing below moved.',
+      "At 390 and 900 wide the note stays on one line under the badge.",
+    ],
+    gap: "The Sandbox record is simulated; this story does not verify a live OpenShell read or a node restart.",
+  },
+  sandboxRunning: {
+    group: "Pages/Agent detail",
+    name: "Current version's Sandbox running",
+    path: currentVersion,
+    deployed: true,
+    harness: { state: "running" },
+    description:
+      "A healthy Sandbox carries no warning: Live serving stays Not verified, with Sandbox running under it.",
+  },
+  sandboxStatusUnknown: {
+    group: "Pages/Agent detail",
+    name: "Sandbox status unknown",
+    path: currentVersion,
+    deployed: true,
+    harness: { state: "unknown", code: "UNAVAILABLE" },
+    description:
+      "The Sandbox Driver could not read the Sandbox record. Live serving stays Not verified and says the Sandbox status is unknown; it never reports a Sandbox it could not read as lost.",
+  },
   agentHeader: {
     group: "Pages/Agent detail",
     name: "Page header with a long name",
@@ -4821,7 +5084,7 @@ export const scenarios = {
     name: "Deployment activity loading",
     path: candidateVersion,
     deployed: true,
-    candidateDeploymentStatus: "succeeded",
+    candidateDeploymentStatus: "running",
     rules: [
       {
         prefix:
@@ -4830,9 +5093,10 @@ export const scenarios = {
       },
     ],
     description:
-      "Deployment status reads take 4 s. Deployment activity keeps its loading placeholder until the newest version's status arrives, then shows it in one step.",
+      "Deployment status reads take 4 s, longer than the page waits for them (about 2 s). The page shows with Deployment activity as one loading row; the in-progress record then fills that row as folded Deployment details, and Latest visible deployment reads v7 · In progress. Nothing above the version tabs moves.",
     steps: [
-      "Reload and watch Deployment activity: it shows its loading line until the recorded status arrives, never an empty panel first. The sharing panel and version tabs below move once.",
+      "Reload at desktop and phone width and watch the version tabs: they stay in place when the record arrives, and v7's deployment record fills its two loading rows.",
+      "Open Deployment details to read the in-progress stages.",
     ],
   },
   deploymentUnavailable: {
@@ -4992,6 +5256,17 @@ export const scenarios = {
     runtimePod: "startupWarnings",
     description:
       "The Gateway Pod is Ready with no restarts; its startup readiness-probe Event is listed in muted text as an earlier warning instead of in the warning color.",
+  },
+  runtimeLogsDedicatedPods: {
+    ...runtimeLogsPage,
+    name: "Runtime status for a dedicated Agent's Pods",
+    runtimePod: "dedicatedPair",
+    description:
+      "The Agent (Harness) and Gateway Pod cards share the Logs panel's width, each with its long generated name and its init containers.",
+    steps: [
+      "At 1440 the two cards sit side by side and together fill the panel; no blank column is left beside them.",
+      "At 390 each card spans the panel, one under the other.",
+    ],
   },
   runtimeLogsFilteredDownload: {
     group: "Pages/Agent detail",
@@ -5430,7 +5705,7 @@ export const scenarios = {
     name: "Account menu",
     actions: account,
     description:
-      "The account row (initials, name and email) opens Settings and Sign out. Namespace selection is available directly in the page header.",
+      "The account row in the dark navigation opens a light menu with Settings and Sign out. Use the arrow keys to check focus inside the menu, then Escape to return to the account.",
   },
   menuMobile: {
     group: "Components/Navigation",
@@ -7354,5 +7629,26 @@ for (const [id, state, name] of [
     ...(state === "noCredential"
       ? { rules: [{ suffix: "/runtime/logs", status: 503, code: "DEPENDENCY_UNAVAILABLE" }] }
       : {}),
+  };
+}
+
+// The shell and assets are produced by the API's actual theme loader/renderer.
+for (const [id, source, name, theme] of [
+  ["themeSignIn", "login", "Custom sign-in", "custom"],
+  ["themeNavigation", "agents", "Custom desktop navigation", "custom"],
+  ["themeMobile", "mobile", "Custom mobile navigation", "custom"],
+  ["themeLongName", "agents", "Long product name", "long-name"],
+  ["themeEmpty", "agentsEmpty", "Custom empty state", "custom"],
+  ["themeDenied", "agentsDenied", "Custom denied state", "custom"],
+  ["themeLoading", "agentsLoading", "Custom loading state", "custom"],
+  ["themeCredentials", "authMissing", "Custom missing credentials", "custom"],
+  ["themePublicError", "sessionUnavailable", "Custom public error", "custom"],
+]) {
+  scenarios[id] = {
+    ...scenarios[source],
+    name,
+    theme,
+    description:
+      "Deployment branding from the production theme loader. Resource, session, and runtime states are simulated.",
   };
 }

@@ -36,11 +36,9 @@ import {
   imageTestOptions,
   runDocker,
   waitForDockerLog,
-  commandOutput,
   temporaryGatewayConfiguration,
   createAdmittedRuntimeImageConfiguration,
   jsonLogEntries,
-  failureTail,
   runGatewaySmoke,
   reviewedCodexSeccompSecurityOptions,
   assertGatewayLogEntry,
@@ -324,10 +322,6 @@ async function createRuntimeRepositoryMaterial(t, fixture) {
   }));
   await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
   return material.root;
-}
-
-function sanitizeSyntheticCredential(output) {
-  return output.replaceAll(syntheticCodexApiKey, "[REDACTED_SYNTHETIC_KEY]");
 }
 
 function assertNoPackagingFailure(output) {
@@ -712,7 +706,10 @@ test(
     const probe = String.raw`
 set -eu
 printf "%s\n" "$SYNTHETIC_CODEX_API_KEY" | timeout ${20 * imageSmokeTimeoutMultiplier}s codex login --with-api-key >/tmp/codex-login.stdout 2>/tmp/codex-login.stderr || {
-  sed -E "s/sk-[A-Za-z0-9_-]+/[REDACTED_SYNTHETIC_KEY]/g" /tmp/codex-login.stderr >&2
+  status=$?
+  # 124: timeout stopped codex login. Its output may be empty, so name the status.
+  echo "codex login exited $status" >&2
+  sed -E "s/sk-[A-Za-z0-9_-]+/[REDACTED_SYNTHETIC_KEY]/g" /tmp/codex-login.stdout /tmp/codex-login.stderr >&2
   exit 1
 }
 node - <<'NODE'
@@ -769,10 +766,8 @@ NODE
         "-c",
         probe,
       ],
-      { timeout: 30_000 * imageSmokeTimeoutMultiplier },
-    ).catch((error) => {
-      throw new Error(failureTail(sanitizeSyntheticCredential(commandOutput(error))));
-    });
+      { timeout: 30_000 * imageSmokeTimeoutMultiplier, redact: [syntheticCodexApiKey] },
+    );
 
     const result = JSON.parse(stdout);
     assert.equal(result.uid, 1000);
@@ -1816,11 +1811,11 @@ assert.equal(execFileSync(process.execPath, [bundledCommand, "--version"], {enco
 const provenance = JSON.parse(readFileSync("/opt/oce/runtime/provenance.json", "utf8"));
 assert.equal(provenance.source, "https://github.com/openclaw/openclaw");
 assert.equal(provenance.commit, ${JSON.stringify(GATEWAY_TOOL_POLICY_SOURCE_COMMIT)});
-assert.equal(provenance.sourceArchiveSha256, "2e8ef25b1ab2b0589142390e34d3f163b651074dedae264fd8620fad9947db9e");
+assert.equal(provenance.sourceArchiveSha256, "35b18728938421c6b5831198be521d4fae256edac606fa47482d54fce9c24e13");
 assert.equal(provenance.openclawBridgePatchSha256, "2e529593cb72c69be86cf7bb927aa555de50bc7ef923e80b37ba67df9bc1a624");
 assert.equal(Object.hasOwn(provenance, "openclawConnectPatchSha256"), false);
 assert.equal(provenance.codexDependencyPinPatchSha256, "686dcb3fcdd384150845f7af5b5f3bf46b2dc6ee24ab8f5b629b10566e18afd4");
-assert.equal(provenance.openclawRequiredWorkerAuthorityRegressionPatchSha256, "ba95cbc56d3f9c75de6768760411f15a2c20dac2f59d406e321596a863c90511");
+assert.equal(provenance.openclawRequiredWorkerAuthorityRegressionPatchSha256, "fedec7335f557c20f401a577543d77ba8ed244aca5909d85ad4207a990fb758d");
 assert.equal(provenance.codex.version, "0.163.0-alpha.2");
 assert.equal(Object.hasOwn(provenance, "codexPatchSha256"), false);
 assert.equal(Object.hasOwn(provenance, "codexVersion"), false);

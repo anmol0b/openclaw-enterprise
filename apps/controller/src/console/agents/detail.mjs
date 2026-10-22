@@ -550,7 +550,16 @@ function rovingVersions(list, items) {
   return focusItem;
 }
 
-function createDeploymentStatusPanel(context, path, revision, onAgentChange, onStatusChange) {
+function createDeploymentStatusPanel(
+  context,
+  path,
+  revision,
+  onAgentChange,
+  onStatusChange,
+  // Whether the page already shows; given only to the panel that replaces the page's loading
+  // stand-in (finding 2163).
+  pageShown = () => false,
+) {
   const refresh = button(
     "Refresh deployment",
     () => {
@@ -779,7 +788,8 @@ function createDeploymentStatusPanel(context, path, revision, onAgentChange, onS
 
   function render() {
     // Keep both controls mounted during reads. Only a routine completed record starts folded;
-    // a new outcome, read error, cleanup or startup warning is visible without opening details.
+    // a new outcome, read error, cleanup or startup warning is visible without opening details,
+    // except a first read that lands after the page showed (below).
     const busy = String((state.loading && !state.polling) || state.refreshQueued);
     if (refresh.getAttribute("aria-disabled") !== busy) {
       refresh.setAttribute("aria-disabled", busy);
@@ -791,9 +801,15 @@ function createDeploymentStatusPanel(context, path, revision, onAgentChange, onS
     const { cleanup, warnings } = state.status ?? {};
     const evidence = [outcome, cleanup?.status, warnings?.length, state.overviewError].join("/");
     if (evidence !== previousEvidence) {
+      // A first read that lands after the bounded reveal showed the page fills the folded panel
+      // without opening it, so the tab strip below does not move: the Agent summary above shows
+      // its outcome or read failure, and a failure's card leads the page. Evidence only these
+      // details show (cleanup, startup warnings, an overview error) still opens them, as does
+      // every later change (finding 2163).
+      const late = previousEvidence === undefined && pageShown();
       details.open = Boolean(
         previousEvidence !== undefined ||
-        outcome !== "succeeded" ||
+        (outcome !== "succeeded" && !late) ||
         state.overviewError ||
         cleanup ||
         warnings?.length,
@@ -953,7 +969,14 @@ function createVersionDeploymentRecord(
                   )
                 : null,
             )
-          : element("p", { className: "muted" }, "Loading this version’s recorded outcome…"),
+          : // The two rows a recorded outcome fills, so it lands without moving the version's
+            // tab strip below (finding 2163).
+            element(
+              "div",
+              {},
+              element("p", {}, "Recorded outcome: Loading…"),
+              element("p", { className: "muted" }, "Reading this version’s deployment record."),
+            ),
     ]);
   }
 
@@ -1292,6 +1315,13 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   ];
   let selectedTab = tabsForSelection.includes(tab) ? tab : "configuration";
   let deployInFlight = false;
+  // The draft holds below are declared before a deleting Agent's early return: ← Agents and the
+  // reload check read them on that page too (finding 2125).
+  let draftEditorNavigationBlock = null;
+  // Whether a draft editor's write is in flight (its block names the save to wait for).
+  let draftEditorSaving = false;
+  // Set while a saved draft refreshes in place; tab and version changes wait for it.
+  let refreshingDraft = false;
   // A share or binding removal in flight. Its writes belong to this page, so other versions and
   // pages wait for it (finding 2108); tabs do not, since the panel stays with the page.
   let sharingWrite = false;
@@ -1363,6 +1393,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     return true;
   };
   context.setLeaveGuard?.(refuseLeave);
+  // The writes that hold Back and the sidebar make a reload or tab close ask first too. A draft
+  // reread does not: a reload would lose nothing (finding 1938).
+  context.setWriteInFlight?.(() => sharingWrite || Boolean(draftWriteInFlight({ rereads: false })));
   const currentVersionValue = element("strong", { className: "stat-value" });
   const currentVersionNote = element("p", { className: "stat-help" });
   // The summary's loading text follows the 250 ms rule: a read that settles sooner never shows
@@ -1373,7 +1406,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     }
   }
   const latestDeploymentValue = element("strong", { className: "stat-value" });
-  const latestDeploymentNote = element("p", { className: "stat-help" });
+  // The note keeps its line while empty (console.css) when the page shows before the outcome,
+  // so the loading text giving way to it moves nothing below (finding 2163); see showDetail.
+  const latestDeploymentNote = element("p", { className: "stat-help stat-help-line" });
   setDelayedText(latestDeploymentValue, "", "Loading…");
   setDelayedText(latestDeploymentNote, "", "Reading deployment history.");
   // A recorded outcome is the version and a status badge (spec 3.5). The separator stays in the
@@ -1395,16 +1430,98 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     { className: "stat-value" },
     element("span", { className: "badge" }, "Not verified"),
   );
-  function setLiveServing(mayBeOffline) {
-    const badge = liveServingValue.firstElementChild;
-    setText(badge, mayBeOffline ? "May be offline" : "Not verified");
-    if (mayBeOffline) {
-      if (badge.dataset.tone !== "warning") {
-        badge.dataset.tone = "warning";
-      }
-    } else if (badge.dataset.tone) {
-      delete badge.dataset.tone;
+  const liveServingNote = element("p", { className: "stat-help" });
+  // A failed deployment that probably left nothing serving (see renderLatestDeployment).
+  let mayBeOfflineAfterFailure = false;
+  // The Sandbox Driver's record of the current version's Sandbox, read once per serving state
+  // (finding 2152). Nothing restarts a lost Sandbox, so Live serving says so and names the next
+  // step. A status that cannot be read is unknown, never lost.
+  let harnessRead = null;
+  let harnessReads = 0;
+  // The current version the read in flight or answered is for, or null when none is wanted.
+  let harnessRequested = null;
+  // Only a running Agent's dedicated current version has a Sandbox to read. The version's own
+  // mode decides once the version list shows it; the Agent's saved mode can differ from it.
+  // The note line is reserved from the first paint (console.css), so the answer moves nothing.
+  const harnessExpected = () =>
+    !deleting &&
+    currentRuntimeState === "running" &&
+    Boolean(currentRevisionId) &&
+    (visibleRevisions.find((revision) => revision.id === currentRevisionId)?.harness?.mode ??
+      currentAgent.executionMode) === "dedicated";
+  function syncHarnessRead() {
+    const wanted = harnessExpected() ? currentRevisionId : null;
+    if (wanted === harnessRequested) {
+      return;
     }
+    // A stop, a new current version or a deletion drops any answer for the old state.
+    const read = ++harnessReads;
+    harnessRequested = wanted;
+    harnessRead = null;
+    if (wanted === null) {
+      return;
+    }
+    void request(`${path}/harness-status`)
+      .then(
+        (status) => status,
+        () => null,
+      )
+      .then((status) => {
+        if (read !== harnessReads || !context.isCurrent() || deleting) {
+          return;
+        }
+        // A read that failed is kept as null: the note then says the status is unknown.
+        harnessRead = { revisionId: wanted, status };
+        renderLiveServing();
+      });
+  }
+  function renderLiveServing() {
+    syncHarnessRead();
+    const expected = harnessExpected();
+    const answer = harnessRead?.revisionId === currentRevisionId ? harnessRead : null;
+    const harness =
+      answer?.status?.status === "observed" && answer.status.revisionId === currentRevisionId
+        ? answer.status.harness
+        : undefined;
+    const lost = expected && harness?.state === "lost";
+    const badge = liveServingValue.firstElementChild;
+    setText(
+      badge,
+      lost ? "Sandbox lost" : mayBeOfflineAfterFailure ? "May be offline" : "Not verified",
+    );
+    const tone = lost ? "danger" : mayBeOfflineAfterFailure ? "warning" : undefined;
+    if (tone === undefined) {
+      if (badge.dataset.tone) {
+        delete badge.dataset.tone;
+      }
+    } else if (badge.dataset.tone !== tone) {
+      badge.dataset.tone = tone;
+    }
+    liveServingNote.classList.toggle("stat-help-line", expected);
+    if (!expected) {
+      setText(liveServingNote, "");
+    } else if (answer === null) {
+      setDelayedText(liveServingNote, "", "Checking Sandbox…");
+    } else if (lost) {
+      // OCC does not restart a lost Sandbox. The notes stay short enough for one line in the
+      // narrowest column (beside the sidebar), so the reserved line never grows.
+      setText(liveServingNote, "Deploy a new version.");
+    } else if (answer.status === null || harness?.state === "unknown") {
+      setText(liveServingNote, "Sandbox status unknown.");
+    } else if (harness?.code === "HARNESS_RESTARTING") {
+      setText(liveServingNote, "Harness restarting.");
+    } else if (harness?.state === "running") {
+      setText(liveServingNote, "Sandbox running.");
+    } else if (harness?.state === "starting") {
+      setText(liveServingNote, "Sandbox starting.");
+    } else {
+      // The Sandbox Driver keeps no record of this Sandbox.
+      setText(liveServingNote, "");
+    }
+  }
+  function setLiveServing(mayBeOffline) {
+    mayBeOfflineAfterFailure = mayBeOffline;
+    renderLiveServing();
   }
   // A requested stop belongs in the summary, not only in the Stop row at the bottom (finding
   // 1899). It is attached only once the Agent has a version: an Agent is created stopped.
@@ -1428,8 +1545,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     { className: "agent-current-summary stats", "aria-label": "Agent state at a glance" },
     stat("Selected version", currentVersionValue, currentVersionNote),
     stat("Latest visible deployment", latestDeploymentValue, latestDeploymentNote),
-    stat("Live serving", liveServingValue),
+    stat("Live serving", liveServingValue, liveServingNote),
   );
+  renderLiveServing();
   const pageDisclosure = element(
     "details",
     { className: "disclosure" },
@@ -1586,16 +1704,19 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     detailPane,
   );
   setLayoutShape();
-  const deploymentStatus = element("section", { className: "agent-card deployment-status" });
-  deploymentStatus.append(
-    element("h2", {}, "Deployment activity"),
-    element("p", { className: "muted" }, "Loading the most recent visible deployment…"),
+  // The stand-in has the folded panel's one row, so the panel that replaces it moves nothing
+  // when the bounded reveal shows the page before the latest record is read (finding 2163).
+  const deploymentStatus = element(
+    "section",
+    { className: "deployment-status deployment-evidence", "aria-label": "Deployment activity" },
+    element(
+      "p",
+      { className: "deployment-evidence-loading muted" },
+      "Loading the most recent visible deployment…",
+    ),
   );
   const tabControls = new Map();
   const revisionControls = new Map();
-  let draftEditorNavigationBlock = null;
-  // Whether a draft editor's write is in flight (its block names the save to wait for).
-  let draftEditorSaving = false;
   // A refused leave says why beside the control whose request holds the page (finding 1962).
   // The configuration, channels and repositories editors write their block into their own
   // feedback; every other hold writes it here.
@@ -1651,7 +1772,14 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   }
   function showLeaveBlock() {
     const reason = leaveReason();
-    if (!draftEditorBlocksNavigation()) {
+    if (deleting) {
+      // Delete replaced the page, editors and tab panel included, with its deletion row: a
+      // write still in flight says why above that row (finding 2125).
+      showLeaveNote(view, reason, "start");
+      if (leaveNote.isConnected) {
+        leaveNote.scrollIntoView({ block: "nearest" });
+      }
+    } else if (!draftEditorBlocksNavigation()) {
       showLeaveNote(content, reason, "start");
       // The note tops the tab panel, which may be scrolled out of view; focus stays put.
       if (leaveNote.isConnected) {
@@ -1671,6 +1799,11 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     }
   }
   function draftEditorBlocksNavigation() {
+    if (deleting) {
+      // The editors went with Delete, so their unsaved changes no longer hold the page; a write
+      // in flight still does.
+      return draftWriteInFlight();
+    }
     return (
       selected === "draft" &&
       (deployInFlight ||
@@ -1683,11 +1816,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   }
   // A write in flight, whose answer only this page can handle: the sidebar and Back wait for it
   // too (finding 1937). An uncertain or stale editor is kept as a draft, so they may leave it.
-  function draftWriteInFlight() {
+  // `rereads` counts the draft's reread after a save as one.
+  function draftWriteInFlight({ rereads = true } = {}) {
     return (
       selected === "draft" &&
       (deployInFlight ||
-        refreshingDraft ||
+        (rereads && refreshingDraft) ||
         authenticationSaveState === "saving" ||
         activeCredentials?.isSaving() ||
         (["configuration", "plugins", "repositories", "channels"].includes(selectedTab) &&
@@ -1859,6 +1993,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   // The bounded wait still exposes loading, refresh and the version controls on a slow read.
   view.classList.add("agent-detail-pending");
   let revealTimer = null;
+  // Set once the page shows (after any minimum loading time), whether its first deployment
+  // record is in or the wait ran out.
+  let detailShown = false;
   let markRevealed;
   const revealed = new Promise((resolve) => {
     markRevealed = resolve;
@@ -1980,6 +2117,12 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   function showDetail() {
     clearTimeout(revealTimer);
     const shown = () => {
+      // A note already empty gives its line back before the page first shows; one still loading
+      // keeps it, so the outcome that empties it moves nothing (finding 2163).
+      if (!detailShown && !latestDeploymentNote.textContent) {
+        latestDeploymentNote.classList.remove("stat-help-line");
+      }
+      detailShown = true;
       if (view.classList.contains("agent-detail-pending")) {
         view.classList.remove("agent-detail-pending");
       }
@@ -2054,8 +2197,6 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   }
   // Shown once by the tab a draft refresh rebuilds after a save (finding 1445).
   let savedNotice = "";
-  // Set while a saved draft refreshes in place; tab and version changes wait for it.
-  let refreshingDraft = false;
   let activityPanel = deploymentStatus;
   let activityRevisionId;
   let viewedSnapshot = null;
@@ -2485,6 +2626,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     currentAgent = freshAgent;
     stopPanel.updateAgent(freshAgent);
     if (servingChanged) {
+      renderLiveServing();
       retainedTabs.clear();
       if (mountedTab) {
         // Leaving must not put a tab built for the old serving state back in the cache.
@@ -2965,6 +3107,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
               }
               refreshDeployControls();
             },
+            // A newer version found later is one the reader is following: its first record
+            // opens the details as any new outcome does.
+            firstLoad ? () => detailShown : undefined,
           )
         : element(
             "section",
@@ -3601,6 +3746,17 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   // page to its summary, made about 12 reads, scrolled to the top and dropped focus with no
   // saved message (finding 1445). `focus` names the button that takes focus afterwards.
   async function refreshDraftInPlace({ agent: freshAgent = null, saved = "", focus = null } = {}) {
+    if (deleting) {
+      // Delete took the editors: there is nothing to rebuild, and a settled save no longer holds
+      // the page (finding 2125).
+      draftEditorNavigationBlock = null;
+      draftEditorSaving = false;
+      authenticationSaveState = "idle";
+      if (context.isCurrent()) {
+        updateNavigationControls();
+      }
+      return;
+    }
     if (freshAgent && freshAgent.configurationId !== agent.configurationId) {
       // The draft now edits another Configuration; reload the page for it.
       context.navigate(target("draft", selectedTab), namespaceId, true);

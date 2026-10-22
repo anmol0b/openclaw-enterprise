@@ -1,4 +1,4 @@
-ARG OPENCLAW_COMMIT=6796ef305fc2d4d4a765c6d54274ec352cf0a65e
+ARG OPENCLAW_COMMIT=aff376aa64bed3f14733c8dd942bda045d4dc1d7
 ARG NODE_BASE_IMAGE=docker.io/library/node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
 ARG NODE_RUNTIME_BASE_IMAGE=docker.io/library/node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
@@ -87,7 +87,7 @@ FROM node-build-base AS openclaw-source
 # Keep the source identity separate from its unreleased package version.
 ARG OPENCLAW_COMMIT
 ENV GIT_COMMIT=${OPENCLAW_COMMIT}
-ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-21T20:01:51Z
+ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-21T23:48:21Z
 ENV OPENCLAW_PREFER_PNPM=1
 WORKDIR /source
 RUN --mount=type=secret,id=build-ca,required=false \
@@ -95,7 +95,7 @@ RUN --mount=type=secret,id=build-ca,required=false \
     if [ -f /run/secrets/build-ca ]; then export CURL_CA_BUNDLE=/run/secrets/build-ca; fi; \
     curl --fail --location --silent --show-error \
       "https://codeload.github.com/openclaw/openclaw/tar.gz/${GIT_COMMIT}" -o /tmp/openclaw-source.tar.gz; \
-    echo '2e8ef25b1ab2b0589142390e34d3f163b651074dedae264fd8620fad9947db9e  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
+    echo '35b18728938421c6b5831198be521d4fae256edac606fa47482d54fce9c24e13  /tmp/openclaw-source.tar.gz' | sha256sum --check --strict; \
     tar -xzf /tmp/openclaw-source.tar.gz --strip-components=1; \
     rm /tmp/openclaw-source.tar.gz
 # TODO: Remove this bridge patch when OpenClaw supports networkProxy.readOnlyPaths.
@@ -134,7 +134,7 @@ RUN --mount=type=secret,id=build-ca,required=false \
 FROM node-build-base AS openclaw-dependency-inputs
 ARG OPENCLAW_COMMIT
 ENV GIT_COMMIT=${OPENCLAW_COMMIT}
-ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-21T20:01:51Z
+ENV OPENCLAW_BUILD_TIMESTAMP=2026-10-21T23:48:21Z
 ENV OPENCLAW_PREFER_PNPM=1
 WORKDIR /source
 COPY --from=openclaw-source /inputs/ ./
@@ -161,7 +161,7 @@ COPY --from=openclaw-source /source/ ./
 # Exercise the original caller through the public RPC before and after the
 # placement acknowledgment, including revocation, against this exact source.
 COPY deploy/runtime/openclaw-required-worker-authority-regression.patch /tmp/openclaw-required-worker-authority-regression.patch
-RUN echo 'ba95cbc56d3f9c75de6768760411f15a2c20dac2f59d406e321596a863c90511  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
+RUN echo 'fedec7335f557c20f401a577543d77ba8ed244aca5909d85ad4207a990fb758d  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-required-worker-authority-regression.patch
 RUN --network=none OPENCLAW_VITEST_RUNTIME=node OPENCLAW_VITEST_MAX_WORKERS=1 pnpm_config_verify_deps_before_run=false \
     node --import ./scripts/tsx.mjs scripts/test-projects.mts src/gateway/server.required-placement-scopes.test.ts

@@ -89,7 +89,7 @@ const openShellSupervisorImage = process.env.OCC_TEST_OPENSHELL_SUPERVISOR_IMAGE
 const openShellHelmPath = process.env.OCC_TEST_OPENSHELL_HELM;
 const openShellHelmChart = process.env.OCC_TEST_OPENSHELL_HELM_CHART;
 const openShellWorkspaceHelmChart = process.env.OCC_TEST_OPENSHELL_WORKSPACE_HELM_CHART;
-const openShellChartVersion = process.env.OCC_TEST_OPENSHELL_CHART_VERSION ?? "0.1.4";
+const openShellChartVersion = process.env.OCC_TEST_OPENSHELL_CHART_VERSION ?? "0.1.5";
 const openShellRuntimeClass = process.env.OCC_TEST_OPENSHELL_RUNTIME_CLASS ?? "openshell-sandbox";
 const providerModel = (process.env.OCC_TEST_OPENAI_MODEL ?? defaultAgentModel).replace(
   /^(?:openai|codex)\//,
@@ -7518,6 +7518,27 @@ test(
     assert.ok(job, "the model must create the scoped ordinary job");
     assert.equal(job.enabled, false);
     assert.deepEqual(job.payload.toolsAllow, ["agents_list"]);
+    assert.equal(job.owner?.agentId, "main");
+    assert.equal(job.owner?.sessionKey, sessionKey);
+    const updatedName = `policy-updated-${randomUUID()}`;
+    const updateMarker = `UPDATE-${randomUUID()}`;
+    const ordinaryUpdate = { action: "update", jobId: job.id, job: { name: updatedName } };
+    await turn(
+      `Call automations exactly once with ${JSON.stringify(ordinaryUpdate)}. Do not change any other job fields.`,
+      updateMarker,
+    );
+    const updateEvidence = await native.assertSessionToolCallEvidence(topology.agent, {
+      sessionKey,
+      turnMarker: updateMarker,
+      toolName: "automations",
+      expectedArguments: ordinaryUpdate,
+      resultPattern: updatedName,
+    });
+    const updatedJob = await client.request("cron.get", { id: job.id });
+    assert.equal(updatedJob.name, updatedName);
+    assert.deepEqual(updatedJob.owner, job.owner);
+    assert.deepEqual(updatedJob.payload, job.payload);
+    proof.modelTurns.push({ kind: "scoped-update", ...updateEvidence, jobId: job.id });
     const runMarker = `RUN-${randomUUID()}`;
     await turn(
       `Use automations once with action=run, runMode=force and jobId=${job.id}. Do not create another job.`,
@@ -7603,6 +7624,46 @@ test(
       unchangedAfterModel: true,
       humanUpdateSucceeded: true,
     });
+
+    const commandPath = `/tmp/DENIED-COMMAND-${randomUUID()}`;
+    const commandPayload = {
+      kind: "command",
+      argv: ["node", "-e", `require('node:fs').writeFileSync('${commandPath}','denied-command')`],
+      toolsAllow: [],
+    };
+    const ordinaryBefore = await client.request("cron.get", { id: job.id });
+    for (const [kind, patch, resultPattern] of [
+      [
+        "command-conversion-denied",
+        { payload: commandPayload },
+        ["automation command payloads cannot be created or edited", "job.payload.kind:"],
+      ],
+      [
+        "cross-agent-session-target-denied",
+        { sessionTarget: `session:agent:outside-${randomUUID()}:main` },
+        "session target outside caller scope",
+      ],
+    ]) {
+      const marker = `UPDATE-DENIED-${randomUUID()}`;
+      const args = { action: "update", jobId: job.id, job: patch };
+      await turn(
+        `Call automations exactly once with ${JSON.stringify(args)}. Report the returned error; do not retry, substitute a job, or use another interface.`,
+        marker,
+      );
+      const evidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
+        sessionKey,
+        turnMarker: marker,
+        toolName: "automations",
+        expectedArguments: args,
+        resultPattern,
+      });
+      assert.deepEqual(await client.request("cron.get", { id: job.id }), ordinaryBefore);
+      assert.equal(
+        await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath),
+        false,
+      );
+      proof.modelTurns.push({ kind, ...evidence, jobId: job.id, unchangedAfterModel: true });
+    }
 
     const childMarker = `CHILD-${randomUUID()}`;
     const spawnMarker = `SPAWN-${randomUUID()}`;
@@ -7775,36 +7836,43 @@ test(
       });
     }
 
-    const commandPath = `/tmp/DENIED-COMMAND-${randomUUID()}`;
     await client.request("cron.update", {
       id: job.id,
-      patch: {
-        payload: {
-          kind: "command",
-          argv: [
-            "node",
-            "-e",
-            `require('node:fs').writeFileSync('${commandPath}','denied-command')`,
-          ],
-          toolsAllow: [],
-        },
-      },
+      patch: { payload: commandPayload },
     });
     const commandBefore = await client.request("cron.get", { id: job.id });
-    const commandMarker = `COMMAND-${randomUUID()}`;
-    await turn(
-      `Call automations exactly once with action=run and jobId=${job.id}. Report the returned error; do not retry or use another interface.`,
-      commandMarker,
-    );
-    const commandEvidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
-      sessionKey,
-      turnMarker: commandMarker,
-      toolName: "automations",
-      expectedArguments: { action: "run", jobId: job.id },
-      resultPattern: `Automation not found: ${job.id}`,
-    });
-    assert.deepEqual(await client.request("cron.get", { id: job.id }), commandBefore);
-    assert.equal(await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath), false);
+    assert.deepEqual(commandBefore.owner, job.owner);
+    assert.equal(commandBefore.enabled, false);
+    const commandEvidence = [];
+    // Command jobs are operator-only even when they retain this model caller's owner.
+    for (const [kind, operation] of [
+      [
+        "kind-less-command-update-denied",
+        { action: "update", job: { payload: { timeoutSeconds: 1 } } },
+      ],
+      ["command-enable-denied", { action: "update", job: { enabled: true } }],
+      ["command-run-denied", { action: "run" }],
+    ]) {
+      const marker = `COMMAND-${randomUUID()}`;
+      const args = { ...operation, jobId: job.id };
+      await turn(
+        `Call automations exactly once with ${JSON.stringify(args)}. Report the returned error; do not retry or use another interface.`,
+        marker,
+      );
+      const evidence = await native.assertSessionToolPolicyDeniedEvidence(topology.agent, {
+        sessionKey,
+        turnMarker: marker,
+        toolName: "automations",
+        expectedArguments: args,
+        resultPattern: `Automation not found: ${job.id}`,
+      });
+      assert.deepEqual(await client.request("cron.get", { id: job.id }), commandBefore);
+      assert.equal(
+        await exists(topology.gatewayPod, topology.gatewayPlacement, commandPath),
+        false,
+      );
+      commandEvidence.push({ kind, ...evidence });
+    }
     const humanCommandMarker = `HUMAN-COMMAND-${randomUUID()}`;
     const humanCommandPath = `/tmp/${humanCommandMarker}`;
     const humanCommandJob = await client.request("cron.add", {
@@ -7840,7 +7908,8 @@ test(
     assert.deepEqual(await client.request("cron.get", { id: job.id }), commandBefore);
     proof.modelTurns.push({
       kind: "command-run-denied",
-      ...commandEvidence,
+      ...commandEvidence.at(-1),
+      additionalChecks: commandEvidence.slice(0, -1),
       jobId: job.id,
       rejectingOwner: "caller scope",
       unchangedAfterModel: true,

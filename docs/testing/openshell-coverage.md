@@ -12,12 +12,16 @@ for either `OCC_TEST_OPENSHELL_HARNESS=openclaw` or `codex`. With an explicit
 requires `CODEX_ACCESS_TOKEN` for its other owners.
 
 A live model turn enters through the authenticated Envoy route as a Control UI
-administrator. The test checks a shell task on the Harness Pod, creation and
-execution of an ordinary caller-owned schedule, and an actual refused automation
-call against each of a foreign job and a command job. It correlates the model's
-call and error with the requested job ID and checks that the job is unchanged.
-The command denial comes from caller scope; the command-only guard has separate
-OpenClaw tests. Direct human updates and a canary command remain positive controls.
+administrator. The test checks a shell task and child task on the Harness,
+creation and execution of a caller-owned schedule, and an allowed schedule update.
+It then checks refusals to convert that schedule to a command or retarget it to
+another Agent. After a human converts the same owned job to a disabled command,
+model attempts to update, enable or run it must leave the job unchanged and the
+command canary absent. A foreign-job update is also refused. Direct human updates
+and a successful canary command remain positive controls.
+
+These refusals exercise the composed caller-scope and command-job restrictions.
+OpenClaw also tests the individual guards independently.
 
 Separate `tools.invoke` probes check an excluded administrative tool and a denied
 message action. They are direct invocation checks, not model-origin execution.
@@ -30,10 +34,10 @@ while a permitted automation call still succeeds. This tests policy activation
 through replacement after old work ends. It does not test mid-turn policy changes.
 
 These are fixture assertions; passing evidence remains tied to the tested source
-and images. Native OC child execution and checks with the updated OC pin remain
-pending. Harness-local configuration, credentials and process protection remain
-separate work. Retained callbacks and inheritance also have focused OpenClaw owner
-tests.
+and images recorded in the implementation PR. A reconstructed Codex thread proves
+that excluded declarations are omitted, not that an old callback was retained and
+denied. The retained/fallback callback paths also have focused OpenClaw owner tests.
+Harness-local configuration, credentials and process protection remain separate work.
 
 ## Credential source and Harness
 
