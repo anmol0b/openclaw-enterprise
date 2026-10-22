@@ -8,6 +8,7 @@ import { GATEWAY_STOP_TIMEOUT_MS } from "../../apps/controller/src/drivers/compu
 import {
   STOP_PHASE_TIMEOUT_MS,
   agentStopDiagnostic,
+  assertChatReply,
   observeAgentStop,
   smokeSlotNames,
   waitFor,
@@ -15,6 +16,49 @@ import {
 } from "../../scripts/ci/first-agent-smoke.mjs";
 
 const revision = "rev_00000000-0000-4000-8000-000000000001";
+
+test("chat proof accepts the deterministic assistant answer for either Harness", () => {
+  const nonce = "OCE_SMOKE_00000000-0000-4000-8000-000000000001";
+  // The shared stand-in provider emits plain text on both HTTPS and WebSocket.
+  for (const label of ["embedded", "codex"]) {
+    for (const content of [nonce, ` \t${nonce}\r\n`]) {
+      assertChatReply({ status: 200, role: "assistant", content }, nonce, label);
+    }
+  }
+});
+
+test("chat proof rejects a prompt echo, missing role, and other non-assistant replies", () => {
+  const nonce = "OCE_SMOKE_00000000-0000-4000-8000-000000000001";
+  const prompt = `Reply with exactly this nonce and no other text: ${nonce}`;
+  for (const role of ["user", undefined, "system", "tool"]) {
+    for (const content of [nonce, prompt]) {
+      assert.throws(
+        () => assertChatReply({ status: 200, role, content }, nonce, "embedded"),
+        /reply was not an assistant message/,
+      );
+    }
+  }
+  for (const content of [prompt, `Answer: ${nonce}`, `${nonce} extra`, `\`${nonce}\``]) {
+    assert.throws(
+      () => assertChatReply({ status: 200, role: "assistant", content }, nonce, "codex"),
+      /assistant reply did not equal the nonce/,
+    );
+  }
+});
+
+test("chat proof still requires HTTP success and the current nonce as text", () => {
+  const nonce = "OCE_SMOKE_00000000-0000-4000-8000-000000000001";
+  assert.throws(
+    () => assertChatReply({ status: 503, role: "assistant", content: nonce }, nonce, "codex"),
+    /chat turn failed/,
+  );
+  for (const content of ["OCE_SMOKE_previous", "", undefined, null, [nonce], { text: nonce }]) {
+    assert.throws(
+      () => assertChatReply({ status: 200, role: "assistant", content }, nonce, "embedded"),
+      /assistant reply did not equal the nonce/,
+    );
+  }
+});
 
 function virtualClock() {
   let elapsed = 0;
