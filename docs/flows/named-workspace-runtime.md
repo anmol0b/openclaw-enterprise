@@ -1,7 +1,7 @@
 ---
 created: "2026-10-23"
 updated: "2026-10-23"
-last_updated_session: "named-workspace-runtime-publication-20261023"
+last_updated_session: "named-workspace-readiness-rate-limit-20261023"
 ---
 
 # Named workspace runtime flow
@@ -69,6 +69,13 @@ checks before serving; `/readyz` repeats them. The API therefore withdraws
 readiness if the Namespace identity changes. Its read-only attachment needs no
 Git credential issuer or Credential Proxy. Authentication and IAM retain their ordinary owners.
 
+Each API replica limits `/readyz` to a burst of ten requests per direct peer IP,
+refilling one request per second. Excess requests return HTTP 429 with `Retry-After`
+before database, identity or Kubernetes checks. Forwarded addresses do not change
+the budget. Admitted probes repeat the checks without caching readiness, and
+`/healthz` remains independent of this limit. The budget permits normal kubelet
+readiness probes; callers behind one proxy share a budget.
+
 ### 3. Gate only the selected startup cycle
 
 `apps/controller/src/worker/startup-gate.ts:waitForStartupDependency` runs before
@@ -114,4 +121,5 @@ GitHub sign-in, browser behavior, supplier compatibility or model execution.
 
 ## Changelog
 
+- 2026-10-23 01:13: Bound readiness requests before dependency checks. (named-workspace-readiness-rate-limit-20261023 - 70a74c6bb1eaba6acb7536101889cbf79b26c7ef)
 - 2026-10-23 00:48: Document runtime attachment and optional worker dependency checks. (named-workspace-runtime-publication-20261023 - 9c10e6d571333c89e9206df6505fd0fbebd14247)

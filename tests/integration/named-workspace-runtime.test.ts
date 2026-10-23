@@ -297,6 +297,44 @@ test(
     assert.equal((await api.inject({ method: "GET", url: "/readyz" })).statusCode, 200);
     assert.ok(reads.includes(`GET /api/v1/namespaces/${namespaceName}`));
     assert.deepEqual(unexpected, []);
+    // Exhaust one direct peer's budget without time-dependent refill. Queries
+    // still execute against PostgreSQL; the spy observes, rather than replaces, them.
+    let probeTime = performance.now();
+    const clock = t.mock.method(performance, "now", () => probeTime);
+    const queries = t.mock.method(Pool.prototype, "query");
+    const noisyPeer = { method: "GET" as const, url: "/readyz", remoteAddress: "192.0.2.1" };
+    try {
+      for (let i = 0; i < 10; i++) {
+        assert.equal((await api.inject(noisyPeer)).statusCode, 200);
+      }
+      const queryCount = queries.mock.callCount();
+      const readCount = reads.length;
+      const denied = await api.inject({
+        ...noisyPeer,
+        headers: { "x-forwarded-for": "192.0.2.99" },
+      });
+      assert.equal(denied.statusCode, 429);
+      assert.equal(denied.headers["retry-after"], "1");
+      assert.equal((await api.inject({ ...noisyPeer, url: "/healthz" })).statusCode, 200);
+      assert.equal(queries.mock.callCount(), queryCount, "denial and liveness do no database work");
+      assert.equal(reads.length, readCount, "denial and liveness do no Kubernetes work");
+      assert.equal(
+        (await api.inject({ ...noisyPeer, remoteAddress: "192.0.2.2" })).statusCode,
+        200,
+      );
+      assert.ok(queries.mock.callCount() > queryCount);
+      assert.ok(reads.length > readCount, "a second peer performs fresh readiness checks");
+      // The advertised retry admits a real probe and observes changed identity.
+      probeTime += 1000;
+      physicalUid = randomUUID();
+      const readsBeforeRetry = reads.length;
+      assert.equal((await api.inject(noisyPeer)).statusCode, 500);
+      assert.ok(reads.length > readsBeforeRetry);
+    } finally {
+      clock.mock.restore();
+      queries.mock.restore();
+      physicalUid = selected.uid;
+    }
     physicalUid = randomUUID();
     assert.notEqual((await api.inject({ method: "GET", url: "/readyz" })).statusCode, 200);
     await assert.rejects(compose(), /Namespace|namespace|403|404/);

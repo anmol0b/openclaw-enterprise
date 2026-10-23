@@ -25,6 +25,8 @@ import {
   type PreparedAuthAccount,
 } from "../auth/index.ts";
 import { createFastifyApp } from "../index.ts";
+import type { RouteGenericInterface } from "fastify";
+import { RequestRateLimiter } from "../http/request-rate-limiter.ts";
 import type { ConsoleTheme } from "../console-theme.ts";
 import { SlackChannelDriver } from "../drivers/channel/slack.ts";
 import type {
@@ -413,14 +415,31 @@ export async function composeProduction(
     await preparedGitHub?.connect(pool);
     const exchange = protectedDriver && (await installEgressAuthority(controller, protectedDriver));
     app.get("/healthz", async () => ({ status: "ok" }));
-    app.get("/readyz", async () => {
-      await pool.query("SELECT 1");
-      if (config.drivers.namedWorkspace) {
-        await verifyNamedWorkspace(state, config.drivers.namedWorkspace);
-        await computeDriver.preflight?.();
-      }
-      return { status: "ready" };
-    });
+    app.get<RouteGenericInterface, { rateLimit: RequestRateLimiter }>(
+      "/readyz",
+      {
+        // Bound expensive probes per direct peer while allowing kubelet probes
+        // and a small burst. Forwarded addresses cannot reset the budget.
+        config: { rateLimit: new RequestRateLimiter(10, 1) },
+        onRequest: async (request, reply) => {
+          const retryAfter = request.routeOptions.config.rateLimit.consume(request.ip);
+          if (retryAfter !== undefined) {
+            return reply
+              .code(429)
+              .header("Retry-After", String(retryAfter))
+              .send({ status: "rate-limited" });
+          }
+        },
+      },
+      async () => {
+        await pool.query("SELECT 1");
+        if (config.drivers.namedWorkspace) {
+          await verifyNamedWorkspace(state, config.drivers.namedWorkspace);
+          await computeDriver.preflight?.();
+        }
+        return { status: "ready" };
+      },
+    );
     app.addHook("onClose", async () => {
       await exchange?.close();
       await config.drivers.protectedDriver?.close();
