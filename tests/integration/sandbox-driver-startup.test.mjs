@@ -5505,11 +5505,13 @@ test("repository.openShell names each unmet requirement, including ones earlier 
     authority: {},
     observedHookPreviewWorkspace: undefined,
   };
+  let messages = [];
   const refusal = (input) => {
     try {
       validateOpenShellRepositoryTransport(configuration, input);
     } catch (error) {
       assert.equal(error.name, "InstallationFieldError");
+      messages = error.details.map(({ message }) => message);
       return error.details.map(({ path, code }) => [path, code]);
     }
     return [];
@@ -5564,6 +5566,10 @@ test("repository.openShell names each unmet requirement, including ones earlier 
     ["/backend/2/configuration/endpoint", "REQUIRED"],
     ["/backend/2/configuration/auth", "REQUIRED"],
   ]);
+  assert.equal(
+    messages[0],
+    "repository.openShell requires the openshell backend configuration.endpoint, an https:// URL, rather than serviceName and port.",
+  );
   const unauthenticated = { ...backend.configuration, auth: { mode: "unauthenticated" } };
   assert.deepEqual(refusal({ ...met, backend: { ...backend, configuration: unauthenticated } }), [
     ["/backend/2/configuration/auth/mode", "INVALID_VALUE"],

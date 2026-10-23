@@ -2250,11 +2250,16 @@ test("native repository delivery names a missing or misplaced broker peer in sta
   const { configuration } = await repositoryInstallation(t);
   const missing = structuredClone(configuration);
   delete missing.drivers.compute.configuration.network.repositoryCredentials;
-  const misplaced = structuredClone(configuration);
-  misplaced.drivers.compute.configuration.network.repositoryCredentials.port = 8444;
+  // Ports on both sides of 8443; neither appears inside "8443", so the echo check means something.
+  const misplaced = (port) => {
+    const value = structuredClone(configuration);
+    value.drivers.compute.configuration.network.repositoryCredentials.port = port;
+    return value;
+  };
   for (const [mutated, expected] of [
     [missing, [field, "REQUIRED"]],
-    [misplaced, [`${field}/port`, "INVALID_VALUE"]],
+    [misplaced(8444), [`${field}/port`, "INVALID_VALUE"]],
+    [misplaced(8442), [`${field}/port`, "INVALID_VALUE"]],
   ]) {
     await assert.rejects(
       loadInstallationConfiguration({
@@ -2272,7 +2277,7 @@ test("native repository delivery names a missing or misplaced broker peer in sta
           [expected],
           failure,
         );
-        assert.ok(!failure.includes("8444"), failure);
+        assert.ok(!failure.includes("8444") && !failure.includes("8442"), failure);
         return true;
       },
     );
@@ -2294,10 +2299,14 @@ test("native repository delivery names a missing or misplaced broker peer in sta
     assert.equal(result.status, 1, result.stderr);
     const diagnostic = startupDiagnostic(result.stderr, event);
     assert.equal(diagnostic.code, "DRIVER_CONFIGURATION_INVALID", result.stderr);
-    assert.deepEqual(
-      diagnostic.details.map((detail) => [detail.path, detail.code]),
-      [[field, "REQUIRED"]],
-    );
+    assert.deepEqual(diagnostic.details, [
+      {
+        path: field,
+        code: "REQUIRED",
+        message:
+          "repository.nativeSender requires drivers.compute.configuration.network.repositoryCredentials, the Kubernetes repository service peer.",
+      },
+    ]);
   }
 });
 
