@@ -22,8 +22,8 @@ Installation listener that the chart Service cannot reach. That is
 `drivers.credential_proxy.configuration.authority` or
 `repository.openShell.authority` on another port than Helm
 `egressAuthority.port` or `openshellGit.port`, on a host other than `0.0.0.0`
-or `::`, or with that chart listener disabled. Earlier builds started, then refused every protected
-request or Git call at first use.
+or `::`, or with that chart listener disabled. Earlier builds started, or failed
+to bind, and then refused every protected request or Git call at first use.
 
 **Who is affected.** Helm installs with a Credential Proxy authority or
 protected OpenShell Git.
