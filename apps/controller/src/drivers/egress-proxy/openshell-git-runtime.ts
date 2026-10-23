@@ -1946,8 +1946,11 @@ export class OpenShellGitRuntime {
       this.stopped.signal,
       AbortSignal.timeout(this.observeTimeoutMs),
     ]);
-    const { workspace, sandbox } = entry.binding;
-    const present = await entry.client.getSandbox({ workspace, name: sandbox }, signal).then(
+    // A read that fails for any reason keeps the entry.
+    const present = await (async () => {
+      const { workspace, sandbox } = entry.binding;
+      return entry.client.getSandbox({ workspace, name: sandbox }, signal);
+    })().then(
       (box) => box !== undefined,
       () => true,
     );
