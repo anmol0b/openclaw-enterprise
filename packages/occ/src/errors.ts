@@ -112,6 +112,13 @@ export class DependencyUnavailableError extends AuthorizationDeniedError {
 }
 
 /**
+ * Persisted platform state that its reader cannot decode, such as an invalid row. It fails closed
+ * like any unavailable dependency, but unlike an outage it does not recover by itself, so a caller
+ * that waits out outages must not wait on it forever.
+ */
+export class PersistedStateInvalidError extends DependencyUnavailableError {}
+
+/**
  * A Secret the selected Secret Driver cannot serve, typically one stored through a driver the
  * Installation no longer selects. Each subclass is raised only after the caller's grant and the
  * Secret lookup, so it reveals nothing a 403 or 404 hides, and carries a fixed message naming
@@ -546,6 +553,48 @@ export class ProtectedExecutionNetworkPolicyError extends ResourceStateConflictE
   constructor(operation: keyof typeof PROTECTED_EXECUTION_NETWORK_POLICY_MESSAGES) {
     super(PROTECTED_EXECUTION_NETWORK_POLICY_MESSAGES[operation]);
     this.name = "ProtectedExecutionNetworkPolicyError";
+  }
+}
+
+/**
+ * Finding 2199: the selected Credential Proxy has no qualified enforcement for protected
+ * repository Git delivery (the `git-write` profile), so a revision admitted with it could only
+ * wait at Harness enrollment for the convergence deadline. No retry changes that: deploy
+ * refuses it with 409 REPOSITORY_GIT_SENDER_UNQUALIFIED, and the worker fails a revision
+ * admitted before this check at once with the same code. The message names only the
+ * Installation's capability, never the repository or grant.
+ */
+export class RepositoryGitSenderUnqualifiedError extends ResourceStateConflictError {
+  static readonly code = "REPOSITORY_GIT_SENDER_UNQUALIFIED";
+  static readonly description =
+    "The selected Credential Proxy cannot enforce the Agent's git-write repository binding: no OpenShell release is qualified for it. Use native prepared Git or a qualified installed sender, or remove the binding, then deploy again.";
+  readonly code = RepositoryGitSenderUnqualifiedError.code;
+
+  constructor() {
+    super(RepositoryGitSenderUnqualifiedError.description);
+    this.name = "RepositoryGitSenderUnqualifiedError";
+  }
+}
+
+/**
+ * Finding 2204: a Credential Proxy delivers repository Git only for one binding with a mapped
+ * delivery profile (`git-write` or `github-installation`; `repositoryGitDeliveryProfile`).
+ * Protected admission v4-v7 requires that profile, so a `git-read` or `git-full` binding, or
+ * several bindings, could never start. Deploy refuses it with 409
+ * REPOSITORY_GIT_PROFILE_UNSUPPORTED before reading the counterpart, instead of a generic 503 or
+ * 500. The bundled OpenShell `configureRevision` repeats it and the worker fails it at once; that
+ * is defence in depth, as PostgreSQL cannot read a stored revision of this shape. HTTP keeps
+ * messages under 256 characters.
+ */
+export class RepositoryGitProfileUnsupportedError extends ResourceStateConflictError {
+  static readonly code = "REPOSITORY_GIT_PROFILE_UNSUPPORTED";
+  static readonly description =
+    "A Credential Proxy delivers repository Git only for one binding with the git-write or github-installation profile, so this Agent's repository access can never start. Use one such binding or native prepared Git, or remove the bindings, then deploy again.";
+  readonly code = RepositoryGitProfileUnsupportedError.code;
+
+  constructor() {
+    super(RepositoryGitProfileUnsupportedError.description);
+    this.name = "RepositoryGitProfileUnsupportedError";
   }
 }
 
@@ -1055,6 +1104,23 @@ export class CredentialWithdrawalInProgressError extends ResourceStateConflictEr
       "A credential withdrawal is still queued or running for an Agent revision that held the source. Wait for it to finish (it retries for up to about an hour), or delete that revision's Agent, then retry.",
     );
     this.name = "CredentialWithdrawalInProgressError";
+  }
+}
+
+/**
+ * Source deletion is refused only because a provider token issued for the source may still be
+ * valid: an issue or revocation whose outcome was lost. It settles once the provider's maximum
+ * token lifetime has passed, never earlier. A retry repeats only the safe withdrawal.
+ */
+export class CredentialTokenUnsettledError extends ResourceStateConflictError {
+  constructor(settlesAt?: Date) {
+    super(
+      "A GitHub token issued for this credential source may still be valid, so it cannot be deleted yet. " +
+        (settlesAt
+          ? `Retry the deletion after ${settlesAt.toISOString()}, when GitHub's maximum token lifetime has passed.`
+          : "Retry the deletion after GitHub's maximum token lifetime has passed."),
+    );
+    this.name = "CredentialTokenUnsettledError";
   }
 }
 

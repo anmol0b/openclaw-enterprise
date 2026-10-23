@@ -596,12 +596,24 @@ export function deploymentErrorForWork(
 }
 
 /**
- * The guidance for a refusal whose next step does not depend on the operation. A stop, deletion
- * or credential withdrawal the Sandbox gateway refused has no status of its own, so the worker
- * logs this with the failed work, as the deployment status shows it (finding 1694).
+ * The fixed codes that name the guidance for a refusal whose next step does not depend on the
+ * operation. A stop, deletion or credential withdrawal the Sandbox gateway refused has no status
+ * of its own, so the worker logs the code with the failed work (finding 1694); the deployment
+ * status shows the same guidance as text, and the Sandbox Driver reference spells it out. The
+ * log carries the code, not the sentence, because the log sanitizer keeps no free text.
  */
-export function operationRefusalHint(code: string): string | undefined {
-  return code === "SANDBOX_GATEWAY_UNAUTHORIZED" ? deploymentErrorMessage(code) : undefined;
+export const OPERATION_REFUSAL_HINT_CODES = Object.freeze({
+  SANDBOX_GATEWAY_UNAUTHORIZED: "sandbox-gateway-identity",
+} as const);
+
+export type OperationRefusalHintCode =
+  (typeof OPERATION_REFUSAL_HINT_CODES)[keyof typeof OPERATION_REFUSAL_HINT_CODES];
+
+/** The guidance code a refusal with this result code logs, if any. */
+export function operationRefusalHintCode(code: string): OperationRefusalHintCode | undefined {
+  return Object.hasOwn(OPERATION_REFUSAL_HINT_CODES, code)
+    ? OPERATION_REFUSAL_HINT_CODES[code as keyof typeof OPERATION_REFUSAL_HINT_CODES]
+    : undefined;
 }
 
 export function deploymentWarningsForWork(
@@ -704,6 +716,10 @@ function deploymentErrorMessage(code: string): string {
       return "The Installation no longer selects the repository credential Driver this revision was admitted with. Deploy again to admit a revision for the selected Driver, choosing approved repository access first if the deploy is refused. If the Installation has none, remove the Agent's repository access or ask an admin to select one.";
     case "REPOSITORY_GIT_ROUTE_BLOCKED":
       return "This version's repository Git access was closed by the controller: its Sandbox or supervisor was replaced, a credential write's outcome is unknown, or the access was withdrawn. The worker log names the reason (OPENSHELL_GIT_RECONCILIATION_REQUIRED). Deploy a new version.";
+    case "REPOSITORY_GIT_SENDER_UNQUALIFIED":
+      return "This version was admitted with repository Git delivery that the selected Credential Proxy cannot enforce: no OpenShell release is qualified for the git-write profile, so it could never start. Use native prepared Git or a qualified installed sender, or remove the Agent's repository binding, then deploy again.";
+    case "REPOSITORY_GIT_PROFILE_UNSUPPORTED":
+      return "This version was admitted with repository Git delivery that has no delivery profile: a Credential Proxy delivers only one binding with the git-write or github-installation profile, so it could never start. Keep one binding with a supported profile, use native prepared Git, or remove the Agent's repository bindings, then deploy again.";
     case "REPOSITORY_CREDENTIAL_DEADLINE_EXCEEDED":
       return "This revision's repository access deadline, fixed when the revision was admitted, has passed. Deploy again to admit a revision with a new deadline.";
     // Refusals the worker decides again on every pass (finding 1039). The status never names

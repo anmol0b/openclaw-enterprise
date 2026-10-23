@@ -18,6 +18,7 @@ import {
   apiRequests,
   detailUrl,
   expectNoText,
+  expireSessions,
   holdRequests,
   login,
   setSlackSelection,
@@ -1151,7 +1152,7 @@ test("Agent detail opens native admin UI only after real API access checks pass"
   assert.deepEqual([...deniedTabWrites, ...nonAuthWriteRequests(requests)], []);
 });
 
-test("Agent detail rereads native admin access once when a pending deployment activates", async (t) => {
+test("Agent detail rereads native admin access once when a pending deployment activates, and Refresh access keeps keyboard focus", async (t) => {
   const cookieDomain = "oce.example.test";
   const consoleHost = `console.${cookieDomain}`;
   const nativeDomain = `agents.${cookieDomain}`;
@@ -1245,6 +1246,37 @@ test("Agent detail rereads native admin access once when a pending deployment ac
   // The button returns from "Refreshing…" only after the reread Agent was applied.
   await activity.getByRole("button", { name: "Refresh deployment", disabled: false }).waitFor();
   assert.equal(pathRequests(requests, "GET", nativeAdminPath).length, 2);
+
+  // A keyboard reader who refreshes access keeps focus on the button through the read: a second
+  // Enter while it reads sends nothing, and the next Tab continues from the card (issue 3311).
+  const reload = card.getByRole("button", { name: "Refresh access" });
+  const isFocused = (locator) =>
+    locator.evaluate((node) => node === node.ownerDocument.activeElement);
+  const readSettled = async () => {
+    await waitForEnabled(reload);
+    // Chromium moves focus off a disabled control when it next renders.
+    await page.evaluate(() => new Promise(globalThis.requestAnimationFrame));
+  };
+  let held = await holdRequests(t, page, `${fixture.origin}${nativeAdminPath}`, { once: true });
+  await reload.focus();
+  await page.keyboard.press("Enter");
+  await held.requested;
+  await page.keyboard.press("Enter");
+  held.release();
+  await readSettled();
+  assert.equal(pathRequests(requests, "GET", nativeAdminPath).length, 3);
+  assert.equal(await isFocused(reload), true);
+
+  // Focus the reader moves during a read stays where they put it.
+  held = await holdRequests(t, page, `${fixture.origin}${nativeAdminPath}`, { once: true });
+  await page.keyboard.press("Enter");
+  await held.requested;
+  await page.keyboard.press("Tab");
+  const next = page.locator("summary", { hasText: "What this page can tell you" });
+  assert.equal(await isFocused(next), true);
+  held.release();
+  await readSettled();
+  assert.equal(await isFocused(next), true);
 });
 
 for (const [dmPolicy, groupPolicy, enterpriseOrgInstall] of [
@@ -1520,9 +1552,7 @@ test("Agent detail refocus clears a revision after session expiry", async (t) =>
   const url = detailUrl(fixture, namespace.id, agent.id, "draft", "configuration");
   await login(page, fixture, url);
   await page.getByRole("heading", { name: "Configuration draft", exact: true }).waitFor();
-  for (const session of fixture.memoryDatabase.session) {
-    session.expiresAt = new Date(Date.now() - 1000);
-  }
+  expireSessions(fixture);
 
   await page.evaluate(() => globalThis.dispatchEvent(new Event("focus")));
   await page.getByText("Your session has expired").waitFor();
@@ -1556,9 +1586,7 @@ for (const variant of ["credentials", "workspace", "sharing"]) {
     } else {
       await page.locator(".content form:not(.agent-access-form)").first().waitFor();
     }
-    for (const session of fixture.memoryDatabase.session) {
-      session.expiresAt = new Date(Date.now() - 1000);
-    }
+    expireSessions(fixture);
 
     await page.evaluate(() => globalThis.dispatchEvent(new Event("focus")));
     await page.getByText("Your session has expired").waitFor();
@@ -1602,9 +1630,7 @@ test("Agent detail history navigation rechecks session during refocus", async (t
   });
   await page.evaluate(() => globalThis.dispatchEvent(new Event("focus")));
   await held;
-  for (const session of fixture.memoryDatabase.session) {
-    session.expiresAt = new Date(Date.now() - 1000);
-  }
+  expireSessions(fixture);
   await page.goBack();
   await page.getByText("Your session has expired").waitFor();
   await expectNoText(page, /Configuration draft|Create new version|History refocus Agent/);
@@ -2204,9 +2230,7 @@ test("Agent sharing reconciles a truncated committed response without replaying 
   assert.equal((await fixture.request("GET", `${policyPath}/roles`)).data.length, 2);
   assert.equal((await fixture.request("GET", `${policyPath}/access-bindings`)).data.length, 2);
   // A sharing read must preserve global expiry handling, including private panel removal.
-  for (const savedSession of fixture.memoryDatabase.session) {
-    savedSession.expiresAt = new Date(Date.now() - 1000);
-  }
+  expireSessions(fixture);
   await panel.getByRole("button", { name: "Refresh sharing" }).click();
   await page.getByText("Your session has expired").waitFor();
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
@@ -3613,15 +3637,7 @@ test("Secret summaries retain revision bindings and distinguish unreadable metad
   });
   // Real admission requires exact Agent access to each projected credential.
   for (const secret of [app, bot, replacement]) {
-    fixture.policy.bindings.push({
-      id: `grant-${secret.id}`,
-      namespaceId: namespace.id,
-      subjectKind: "identity",
-      subjectId: `service-agent-${agent.id}`,
-      roleId: `auth-${agent.id}`,
-      resourceKind: "secret",
-      resourceId: secret.id,
-    });
+    await fixture.grantAgentSecretOperate(agent, secret.ref);
   }
   const active = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
   // Mutate both current owners after admission; the read-only view must keep the old references.

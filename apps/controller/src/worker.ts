@@ -68,10 +68,14 @@ import {
   CredentialSourceRevisionError,
   CredentialWithdrawalRefusedError,
   DependencyUnavailableError,
+  PersistedStateInvalidError,
   SandboxGatewayUnauthorizedError,
   SandboxGatewayUnavailableError,
   SANDBOX_DELETION_UNCONFIRMED,
-  operationRefusalHint,
+  operationRefusalHintCode,
+  type OperationRefusalHintCode,
+  RepositoryGitProfileUnsupportedError,
+  RepositoryGitSenderUnqualifiedError,
   SandboxRevisionUnsupportedError,
   SandboxRepositoryRecipientUnverifiedError,
   ScopeViolationError,
@@ -323,6 +327,11 @@ function revisionFailureLogFields(error: unknown): {
   return record === undefined
     ? { cause: errorClass }
     : { cause: errorClass, ...causeStatusLogFields(record) };
+}
+
+/** An invalid row: reading it again fails the same way until someone repairs it. */
+function unrecoverableRead(error: unknown): boolean {
+  return error instanceof ScopeViolationError || error instanceof PersistedStateInvalidError;
 }
 
 /**
@@ -623,10 +632,16 @@ function harnessExposureWithdrawalCode(error: unknown): string {
     : "HARNESS_EXPOSURE_WITHDRAWAL_FAILED";
 }
 
-/** The operator guidance a failed stop, deletion or withdrawal logs with its code (finding 1694). */
-function refusalHintField(terminal: boolean, code: string): { readonly hint?: string } {
-  const hint = terminal ? operationRefusalHint(code) : undefined;
-  return hint === undefined ? {} : { hint };
+/**
+ * The operator guidance a failed stop, deletion or withdrawal logs with its code, as a fixed code
+ * (findings 1694, 2245): the log sanitizer keeps no free text.
+ */
+function refusalHintField(
+  terminal: boolean,
+  code: string,
+): { readonly hintCode?: OperationRefusalHintCode } {
+  const hintCode = terminal ? operationRefusalHintCode(code) : undefined;
+  return hintCode === undefined ? {} : { hintCode };
 }
 
 /** A revision whose Sandbox Driver may hold a native Harness exposure for this Compute. */
@@ -3986,6 +4001,48 @@ export class ControllerWorker {
     }
   }
 
+  /**
+   * A withdrawal recorded on a revision that was not yet the Agent's active one (a candidate
+   * still deploying) is refused with CREDENTIAL_WITHDRAWAL_REQUIRES_RUNTIME_RETIREMENT, which
+   * awaits a replay (finding 2235). Once that revision's deployment activates it, the same
+   * attempt can reduce its policy, so the transaction that completes the deployment queues one
+   * attempt (finding 2242). That attempt takes the ordinary path: it rechecks each requester,
+   * and only a confirmed reduction marks a withdrawal revoked. Only the deployment claim calls
+   * this, and that claim completes once in this transaction, so it runs once per revision; the
+   * fixed key names the attempt, and none is queued beside an outstanding attempt. A proxy or
+   * plan that cannot reduce in place refuses with the same reason, so its candidate gets one
+   * more refused attempt (and failure audit) on activation, not a chain.
+   */
+  private async queueActivatedRevisionWithdrawal(
+    unit: PlatformUnitOfWork,
+    revision: Readonly<AgentRevision>,
+  ): Promise<void> {
+    const refused = (
+      await unit.credentialSources.listCredentialWithdrawals(revision.namespaceId, revision.id)
+    ).find(
+      ({ state, lastReason }) =>
+        state === "pending" && lastReason === CREDENTIAL_WITHDRAWAL_REQUIRES_RUNTIME_RETIREMENT,
+    );
+    if (
+      refused === undefined ||
+      (await unit.operations.hasOutstandingCredentialWithdrawalWork(
+        revision.namespaceId,
+        revision.id,
+      ))
+    ) {
+      return;
+    }
+    await unit.operations.append({
+      kind: "agent_revision",
+      action: "reconcile",
+      target: CREDENTIAL_WITHDRAWAL_TARGET,
+      namespaceId: revision.namespaceId,
+      resourceId: revision.id,
+      actorId: refused.requestedBy,
+      operationId: "activation",
+    });
+  }
+
   private beginDeployPass(claim: ClaimedWork): void {
     // Maintenance, cleanup and stop work are not deployments.
     if (claim.idempotencyKey !== `agent_revision:${claim.revisionId}:reconcile`) {
@@ -4536,6 +4593,11 @@ export class ControllerWorker {
           result = { outcome: error.transient ? "retry" : "permanent", code: error.code };
         } else if (
           error instanceof RepositoryCredentialAuthorityError ||
+          // Finding 2199: a revision admitted before deploy refused an unqualified Git sender
+          // can never enroll, so it fails now instead of at the convergence deadline.
+          error instanceof RepositoryGitSenderUnqualifiedError ||
+          // Finding 2204: a Git plan with no delivery profile can never start either.
+          error instanceof RepositoryGitProfileUnsupportedError ||
           error instanceof SandboxRevisionUnsupportedError ||
           error instanceof CredentialSourceRevisionError ||
           error instanceof ActivationFailedError
@@ -6154,9 +6216,11 @@ export class ControllerWorker {
    * an ordinary retry instead, the error spent an attempt and its evidence ended the wait: the
    * next pass prepared the candidate again, and at the attempt limit the work failed with the
    * candidate running and the refusal lost (finding 1041). If this read fails too, the error
-   * leaves the claim to lease recovery, which keeps a stored wait and refunds its attempt. A
-   * ScopeViolationError (an invalid row) cannot recover by itself, so it stays a retry that the
-   * attempt limit ends instead of a wait repeated forever.
+   * leaves the claim to lease recovery, which keeps a stored wait and refunds its attempt. An
+   * invalid row (a ScopeViolationError, or persisted state its reader cannot decode) cannot
+   * recover by itself, so it stays a retry that the attempt limit ends instead of a wait repeated
+   * forever (finding 1801). After one, the wait is kept only if the stop can still read its
+   * Namespace, Agent and revision: an unreadable active revision alone does not block the stop.
    */
   private async rereadRefusalWait(
     claim: ClaimedWork,
@@ -6172,9 +6236,14 @@ export class ControllerWorker {
       return;
     }
     try {
-      const current =
-        agent ??
-        (await this.state.read((view) => view.agents.findAgent(claim.namespaceId, agentId)));
+      const current = await this.state.read(async (view) => {
+        if (unrecoverableRead(error)) {
+          // The rows `stopRefusedCandidate` reads.
+          await view.namespaces.findNamespace(claim.namespaceId);
+          await view.revisions.findRevision(claim.namespaceId, agentId, revisionId);
+        }
+        return agent ?? view.agents.findAgent(claim.namespaceId, agentId);
+      });
       if (current !== undefined) {
         await this.readRefusalWait(claim, current, revisionId);
       }
@@ -6182,7 +6251,7 @@ export class ControllerWorker {
       if (reread instanceof WorkClaimLostError) {
         throw reread;
       }
-      if (reread instanceof ScopeViolationError || error instanceof ScopeViolationError) {
+      if (unrecoverableRead(reread) || unrecoverableRead(error)) {
         return;
       }
       // The run loop's own log names no work.
@@ -6296,6 +6365,9 @@ export class ControllerWorker {
         await unit.workspaceSetups.complete(revision.namespaceId, revision.agentId, setup.id);
       }
       await this.appendRevisionObservation(unit, claim, result);
+      if (isCandidateDeployment(claim)) {
+        await this.queueActivatedRevisionWithdrawal(unit, revision);
+      }
       await queue.complete(claim, {
         code: result.code,
         ...(result.resultData === undefined ? {} : { resultData: result.resultData }),
