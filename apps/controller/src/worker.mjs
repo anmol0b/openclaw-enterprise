@@ -12,13 +12,16 @@ import {
   loadStartupConfigurationSnapshot,
   readPublicCaBundle,
 } from "./composition/installation-config.ts";
-import { ChartListenerMismatchError } from "./composition/installation-fields.ts";
 import { PresetFileError } from "./composition/installation-presets.ts";
 import { createOccLogger, createWorkerLogEmitter, emitOccLogEvent } from "./logging.ts";
 import { createControllerWorker, workerDatabasePoolOptions } from "./worker.ts";
 import { PostgresMetricsSnapshot } from "@openclaw-enterprise/occ";
 import { createOccMetrics } from "./metrics/index.ts";
-import { startupDependencyFailure, startupConfigurationFailure } from "./startup-failure.ts";
+import {
+  startupDependencyFailure,
+  startupConfigurationFailure,
+  startupListenerFailure,
+} from "./startup-failure.ts";
 import { metricsConfiguration, startMetricsListener } from "./metrics/listener.ts";
 
 function positiveEnvironment(name, fallback) {
@@ -64,9 +67,6 @@ function configuration() {
 function workerStartupFailureCode(error) {
   if (error instanceof PresetFileError) {
     return "PRESET_FILE_INVALID";
-  }
-  if (error instanceof ChartListenerMismatchError) {
-    return error.code;
   }
   const message = error instanceof Error ? error.message : "";
   if (/stored Installation name breaks the Name rule/.test(message)) {
@@ -294,7 +294,8 @@ try {
   emitOccLogEvent(logger, {
     event: "worker.startup-error",
     ...(startupDependencyFailure(error) ??
-      startupConfigurationFailure(error) ?? { code: workerStartupFailureCode(error) }),
+      startupConfigurationFailure(error) ??
+      startupListenerFailure(error) ?? { code: workerStartupFailureCode(error) }),
   });
   process.exitCode = 1;
 }

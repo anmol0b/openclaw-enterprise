@@ -332,7 +332,8 @@ function sanitizedEvent(
     if (key === "details") {
       if (
         (eventName === "startup-error" || eventName === "worker.startup-error") &&
-        event.code === "DRIVER_CONFIGURATION_INVALID" &&
+        (event.code === "DRIVER_CONFIGURATION_INVALID" ||
+          event.code === "CHART_LISTENER_MISMATCH") &&
         Array.isArray(value)
       ) {
         result.details = configurationLogDetails(value);

@@ -13,13 +13,16 @@ import {
   loadInstallationConfiguration,
   loadStartupConfigurationSnapshot,
 } from "./composition/installation-config.ts";
-import { ChartListenerMismatchError } from "./composition/installation-fields.ts";
 import { PresetFileError } from "./composition/installation-presets.ts";
 import { composeProduction } from "./composition/production.ts";
 import { validateWorkspaceFilesApiKeyPath } from "./composition/workspace-files.ts";
 import { createOccLogger, emitOccLogEvent } from "./logging.ts";
 import { createOccMetrics } from "./metrics/index.ts";
-import { startupDependencyFailure, startupConfigurationFailure } from "./startup-failure.ts";
+import {
+  startupDependencyFailure,
+  startupConfigurationFailure,
+  startupListenerFailure,
+} from "./startup-failure.ts";
 import { metricsConfiguration, startMetricsListener } from "./metrics/listener.ts";
 
 const developmentBindHosts = new Set(["127.0.0.1", "::1", "0.0.0.0"]);
@@ -31,9 +34,6 @@ function startupFailureCode(error) {
   }
   if (error instanceof PresetFileError) {
     return "PRESET_FILE_INVALID";
-  }
-  if (error instanceof ChartListenerMismatchError) {
-    return error.code;
   }
   const message = error instanceof Error ? error.message : "";
   if (/stored Installation name breaks the Name rule/.test(message)) {
@@ -101,7 +101,8 @@ function startupFailureCode(error) {
 export function startupFailureFields(error) {
   return (
     startupDependencyFailure(error) ??
-    startupConfigurationFailure(error) ?? { code: startupFailureCode(error) }
+    startupConfigurationFailure(error) ??
+    startupListenerFailure(error) ?? { code: startupFailureCode(error) }
   );
 }
 

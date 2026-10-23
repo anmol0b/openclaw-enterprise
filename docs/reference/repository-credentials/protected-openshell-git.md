@@ -50,9 +50,9 @@ Omit `controlSocket`, `publicCaPath`, and `repository.nativeSender`.
 Set Helm `openshellGit.enabled: true`, `openshellGit.mode: protected`,
 `repositoryCredentials.enabled: false`, and
 `repositoryCredentials.authority: prepared-git`. Keep
-`repository.openShell.authority` on host `0.0.0.0` and on the `openshellGit.port`
-value (default 8445). Startup and the upgrade check refuse a loopback host or
-another port with `CHART_LISTENER_MISMATCH`. The `repositoryCredentials`
+`repository.openShell.authority` on host `0.0.0.0` (or `::`) and on the
+`openshellGit.port` value (default 8445). Startup and the upgrade check refuse
+another host or port with `CHART_LISTENER_MISMATCH`. The `repositoryCredentials`
 inputs select the registry ConfigMap, worker-only App-key and existing custody
 Secrets, and approved issuer CIDRs. Preserve the custody key across restarts;
 never put either key in Agent configuration or Helm values.

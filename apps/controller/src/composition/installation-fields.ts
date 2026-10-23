@@ -1,7 +1,6 @@
 // Shared Installation value validation. File loading, environment access and
 // Driver binding remain in their owning composition modules.
 import { asRecord, isNonEmptyString } from "@openclaw-enterprise/utils";
-import { BlockList, isIP } from "node:net";
 import { isAbsolute } from "node:path";
 
 export type ConfigurationRecord = Readonly<Record<string, unknown>>;
@@ -76,12 +75,19 @@ export function egressAuthorityConfiguration(
 
 /**
  * An Installation listener that the production chart's Service cannot reach: the chart
- * serves no such listener, serves it on another port, or the host is loopback. Startup and
- * the chart's upgrade check report it as `CHART_LISTENER_MISMATCH` (finding 2213).
+ * serves no such listener, serves it on another port, or the listener does not bind all
+ * addresses. Startup and the chart's upgrade check report it as `CHART_LISTENER_MISMATCH`.
+ * The message names the Installation and Helm settings and values, which hold no secret;
+ * `path` is the refused Installation setting as a JSON Pointer (finding 2213).
  */
 export class ChartListenerMismatchError extends Error {
   override readonly name = "ChartListenerMismatchError";
   readonly code = "CHART_LISTENER_MISMATCH";
+  readonly path: string;
+  constructor(message: string, setting: string) {
+    super(message);
+    this.path = setting === "" ? "" : `/${setting.replaceAll(".", "/")}`;
+  }
 }
 
 /** The chart routes these listeners and passes each one's port, or `disabled`, to startup. */
@@ -98,22 +104,11 @@ export const chartListeners = {
   },
 } as const;
 
-const loopbackAddresses = new BlockList();
-loopbackAddresses.addSubnet("127.0.0.0", 8, "ipv4");
-loopbackAddresses.addAddress("::1", "ipv6");
-
-function loopbackHost(host: string): boolean {
-  const name = host.toLowerCase();
-  if (name === "localhost" || name.endsWith(".localhost")) {
-    return true;
-  }
-  const family = isIP(host);
-  return family !== 0 && loopbackAddresses.check(host, family === 4 ? "ipv4" : "ipv6");
-}
-
 /**
- * Refuse an Installation listener the chart's Service cannot reach. Without the chart's
- * variable (no chart, for example a test or another packaging) there is nothing to compare.
+ * Refuse an Installation listener the chart's Service cannot reach. The Service targets the
+ * Pod's address, which the Installation cannot name, so the listener must bind all addresses.
+ * Without the chart's variable (no chart, for example a test or another packaging) there is
+ * nothing to compare.
  */
 export function requireChartListener(
   authority: Pick<EgressAuthorityConfiguration, "host" | "port"> | undefined,
@@ -128,6 +123,7 @@ export function requireChartListener(
     if (authority !== undefined) {
       throw new ChartListenerMismatchError(
         `${listener.path}.port is ${authority.port}, but Helm ${listener.chart}.enabled is false, so no chart Service reaches it.`,
+        `${listener.path}.port`,
       );
     }
     return;
@@ -136,6 +132,7 @@ export function requireChartListener(
   if (port < 1 || port > 65535) {
     throw new ChartListenerMismatchError(
       `${listener.variable} must be a TCP port from 1 to 65535 or disabled.`,
+      "",
     );
   }
   if (authority === undefined) {
@@ -144,11 +141,13 @@ export function requireChartListener(
   if (authority.port !== port) {
     throw new ChartListenerMismatchError(
       `${listener.path}.port is ${authority.port}, but Helm ${listener.chart}.port is ${port}.`,
+      `${listener.path}.port`,
     );
   }
-  if (loopbackHost(authority.host)) {
+  if (authority.host !== "0.0.0.0" && authority.host !== "::") {
     throw new ChartListenerMismatchError(
-      `${listener.path}.host is ${authority.host}, a loopback address that the chart's ${listener.chart} Service on port ${port} cannot reach; use 0.0.0.0.`,
+      `${listener.path}.host is ${authority.host}, but the chart's ${listener.chart} Service on port ${port} reaches only a listener on all addresses: use 0.0.0.0 or ::.`,
+      `${listener.path}.host`,
     );
   }
 }

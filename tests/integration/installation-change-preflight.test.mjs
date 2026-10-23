@@ -237,7 +237,7 @@ test(
   async (t) => {
     // The chart routes egressAuthority.port to the API Pod's address. An Installation authority on
     // another port, on loopback, or without the chart listener passed install and readiness, then
-    // refused every protected request at first use (finding 2213).
+    // refused every protected request at first use (finding 2213). `::` binds all addresses too.
     const prefix =
       "installation-check: API and worker startup would refuse the Installation (CHART_LISTENER_MISMATCH)";
     const chartEnvironment = async (values) => {
@@ -253,9 +253,12 @@ test(
     const enabled = await chartEnvironment(preparedGitHubValues);
     const reachable = credentialProxyInstallation();
     reachable.drivers.credential_proxy.configuration.authority.host = "0.0.0.0";
-    const accepted = await runCheck(t, reachable, {}, () => enabled);
-    assert.equal(accepted.status, 0, accepted.stderr);
-    assert.equal(accepted.stdout, "installation-startup-ready\n");
+    for (const host of ["0.0.0.0", "::"]) {
+      reachable.drivers.credential_proxy.configuration.authority.host = host;
+      const accepted = await runCheck(t, reachable, {}, () => enabled);
+      assert.equal(accepted.status, 0, accepted.stderr);
+      assert.equal(accepted.stdout, "installation-startup-ready\n");
+    }
 
     const loopback = structuredClone(reachable);
     loopback.drivers.credential_proxy.configuration.authority.host = "127.0.0.1";
@@ -273,7 +276,7 @@ test(
       [
         loopback,
         enabled,
-        "drivers.credential_proxy.configuration.authority.host is 127.0.0.1, a loopback address that the chart's egressAuthority Service on port 9444 cannot reach; use 0.0.0.0.",
+        "drivers.credential_proxy.configuration.authority.host is 127.0.0.1, but the chart's egressAuthority Service on port 9444 reaches only a listener on all addresses: use 0.0.0.0 or ::.",
       ],
     ]) {
       const refused = await runCheck(t, configuration, {}, () => environment);

@@ -1978,6 +1978,41 @@ test("API and worker name a Preset file failure in their startup error code", as
   );
 });
 
+test("API and worker name a chart listener mismatch and both values in their startup error", async (t) => {
+  // On a fresh install no upgrade check runs, so startup's log is the operator's only clue
+  // that the Installation authority is not on the port the chart routes (finding 2213).
+  const configuration = credentialProxyInstallation();
+  configuration.drivers.credential_proxy.configuration.authority.host = "0.0.0.0";
+  const shared = {
+    PATH: process.env.PATH,
+    NODE_ENV: "production",
+    OCC_CONFIG_PATH: await fixture(t, configuration),
+    OCC_DATABASE_URL: "postgresql://127.0.0.1:1/occ",
+    OCC_EGRESS_AUTHORITY_PORT: "9555",
+    OCC_OPENSHELL_GIT_PORT: "disabled",
+  };
+  const [server, worker] = await settled([
+    boot("apps/controller/src/server.mjs", { ...shared, ...productionServer }),
+    boot("apps/controller/src/worker.mjs", shared),
+  ]);
+  for (const [result, event] of [
+    [server, "startup-error"],
+    [worker, "worker.startup-error"],
+  ]) {
+    assert.equal(result.status, 1, result.stderr);
+    const diagnostic = startupDiagnostic(result.stderr, event);
+    assert.equal(diagnostic.code, "CHART_LISTENER_MISMATCH");
+    assert.deepEqual(diagnostic.details, [
+      {
+        path: "/drivers/credential_proxy/configuration/authority/port",
+        code: "INVALID_VALUE",
+        message:
+          "drivers.credential_proxy.configuration.authority.port is 9444, but Helm egressAuthority.port is 9555.",
+      },
+    ]);
+  }
+});
+
 test("closed Installation observes only its operator-bound Namespace, including Secret and Configuration custody", async (t) => {
   const { gatewayRouting, digest } = await import("../helpers/kubernetes-routed-scenarios.mjs");
   const controllerRequire = createRequire(

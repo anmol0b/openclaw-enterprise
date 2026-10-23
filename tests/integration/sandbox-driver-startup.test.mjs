@@ -5647,7 +5647,7 @@ test(
     // upgrade check, not at the first Git request (finding 2213). This test binds the listener
     // on loopback itself, so its own load declares no chart listener.
     for (const [declared, message] of [
-      [String(port), /repository\.openShell\.authority\.host is 127\.0\.0\.1, a loopback address/],
+      [String(port), /repository\.openShell\.authority\.host is 127\.0\.0\.1, but the chart's/],
       [
         String(port + 1),
         /repository\.openShell\.authority\.port is \d+, but Helm openshellGit\.port is \d+\./,

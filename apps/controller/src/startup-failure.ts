@@ -2,6 +2,7 @@ import { configurationLogDetails } from "./logging.ts";
 import { ConfigurationValidationError } from "@openclaw-enterprise/contracts";
 import { PostgresCertificateRejectedError } from "@openclaw-enterprise/occ";
 import { KubernetesApiUnavailableError } from "./drivers/kubernetes/client.ts";
+import { ChartListenerMismatchError } from "./composition/installation-fields.ts";
 
 /**
  * Log fields for a startup failure caused by an unreachable or untrusted dependency,
@@ -22,6 +23,20 @@ export function startupDependencyFailure(
     return { code: "DATABASE_TLS_CERTIFICATE_INVALID", reason: error.reason };
   }
   return undefined;
+}
+
+/**
+ * Log fields for an Installation listener the chart cannot reach: the code and one detail
+ * whose message names the Installation and Helm settings and values (ports, a bind host or
+ * a flag; never a file path or secret).
+ */
+export function startupListenerFailure(error: unknown) {
+  return error instanceof ChartListenerMismatchError
+    ? {
+        code: error.code,
+        details: [{ path: error.path, code: "INVALID_VALUE" as const, message: error.message }],
+      }
+    : undefined;
 }
 
 /** Shared configuration failures contain only bounded, schema-owned diagnostics. */
