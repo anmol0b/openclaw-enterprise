@@ -994,14 +994,8 @@ test("repository startup rejects unmatched ownership, registry identity, duratio
     [(value) => (value.repository.package = "@example/driver"), /unsupported option package/],
     [(value) => (value.repository.implementation = "other"), /unsupported option implementation/],
     [(value) => (value.drivers.compute.id = "compute-ssh"), /bundled Kubernetes/],
-    [
-      (value) => delete value.drivers.compute.configuration.network.repositoryCredentials,
-      /repository service peer/,
-    ],
-    [
-      (value) => (value.drivers.compute.configuration.network.repositoryCredentials.port = 443),
-      /repository service peer/,
-    ],
+    // A missing or misplaced native broker peer: see "native repository delivery names a
+    // missing or misplaced broker peer in startup logs".
     // Without native delivery no repository material Secret exists and the chart grants no
     // Secret list, so a peer left behind is refused rather than looping on 403 (finding 2212).
     [
@@ -2246,6 +2240,64 @@ test("a leftover repository broker peer names its field in API and worker startu
     const diagnostic = startupDiagnostic(result.stderr, event);
     assert.equal(diagnostic.code, "DRIVER_CONFIGURATION_INVALID", result.stderr);
     assert.deepEqual(diagnostic.details, details);
+  }
+});
+
+test("native repository delivery names a missing or misplaced broker peer in startup logs", async (t) => {
+  // Finding 2227: like finding 2226, the refusal was a plain Error, so API and worker logged
+  // only STARTUP_FAILED and WORKER_STARTUP_FAILED.
+  const field = "/drivers/compute/configuration/network/repositoryCredentials";
+  const { configuration } = await repositoryInstallation(t);
+  const missing = structuredClone(configuration);
+  delete missing.drivers.compute.configuration.network.repositoryCredentials;
+  const misplaced = structuredClone(configuration);
+  misplaced.drivers.compute.configuration.network.repositoryCredentials.port = 8444;
+  for (const [mutated, expected] of [
+    [missing, [field, "REQUIRED"]],
+    [misplaced, [`${field}/port`, "INVALID_VALUE"]],
+  ]) {
+    await assert.rejects(
+      loadInstallationConfiguration({
+        mode: "production",
+        environment: { OCC_CONFIG_PATH: await fixture(t, mutated) },
+      }),
+      (error) => {
+        // What the startup log and the upgrade check print, after the log filter.
+        const failure = formatStartupConfigurationFailure(error);
+        const prefix = "DRIVER_CONFIGURATION_INVALID: ";
+        assert.ok(failure?.startsWith(prefix), String(error));
+        const details = JSON.parse(failure.slice(prefix.length));
+        assert.deepEqual(
+          details.map((detail) => [detail.path, detail.code]),
+          [expected],
+          failure,
+        );
+        assert.ok(!failure.includes("8444"), failure);
+        return true;
+      },
+    );
+  }
+  const shared = {
+    PATH: process.env.PATH,
+    NODE_ENV: "production",
+    OCC_CONFIG_PATH: await fixture(t, missing),
+    OCC_DATABASE_URL: "postgresql://127.0.0.1:1/occ",
+  };
+  const [server, worker] = await settled([
+    boot("apps/controller/src/server.mjs", { ...shared, ...productionServer }),
+    boot("apps/controller/src/worker.mjs", shared),
+  ]);
+  for (const [result, event] of [
+    [server, "startup-error"],
+    [worker, "worker.startup-error"],
+  ]) {
+    assert.equal(result.status, 1, result.stderr);
+    const diagnostic = startupDiagnostic(result.stderr, event);
+    assert.equal(diagnostic.code, "DRIVER_CONFIGURATION_INVALID", result.stderr);
+    assert.deepEqual(
+      diagnostic.details.map((detail) => [detail.path, detail.code]),
+      [[field, "REQUIRED"]],
+    );
   }
 });
 

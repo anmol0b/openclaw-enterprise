@@ -110,7 +110,9 @@ export function validateOpenShellRepositoryTransport(
       refuse(
         `${field}/endpoint`,
         endpoint === undefined ? "REQUIRED" : "INVALID_VALUE",
-        "the openshell backend configuration.endpoint to be an https:// URL",
+        endpoint === undefined
+          ? "the openshell backend configuration.endpoint, an https:// URL, rather than serviceName and port"
+          : "the openshell backend configuration.endpoint to be an https:// URL",
       );
     }
     const modes = configuration.observedHookPreviewWorkspace

@@ -5499,8 +5499,6 @@ for (const kind of ["Role", "RoleBinding"]) {
   });
 }
 
-// Production configuration and Sandbox provisioning, with controlled gateway observations.
-// This proves the join and fail-closed lifecycle, not an installed stock supervisor or GitHub.
 test("repository.openShell names each unmet requirement, including ones earlier checks preempt", () => {
   const configuration = {
     registrationName: "oce-prepared-git",
@@ -5550,9 +5548,11 @@ test("repository.openShell names each unmet requirement, including ones earlier 
     }),
     [
       ["/repository/preparedGitHub", "REQUIRED"],
+      // The github entry; its message names the type.
       ["/backend", "REQUIRED"],
       ["/drivers/sandbox", "REQUIRED"],
       ["/drivers/compute", "INVALID_VALUE"],
+      // The openshell entry.
       ["/backend", "REQUIRED"],
     ],
   );
@@ -5570,6 +5570,8 @@ test("repository.openShell names each unmet requirement, including ones earlier 
   ]);
 });
 
+// Production configuration and Sandbox provisioning, with controlled gateway observations.
+// This proves the join and fail-closed lifecycle, not an installed stock supervisor or GitHub.
 test(
   "configured protected OpenShell Git admits only the selected execution and network policy",
   { timeout: 30000 },

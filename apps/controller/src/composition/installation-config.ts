@@ -878,11 +878,26 @@ export async function loadInstallationConfiguration(options: {
     );
   }
   if (repositoryDeliveryMode === "native") {
-    const kubernetes = compute.configuration as unknown as KubernetesComputeDriverOptions;
-    if (kubernetes.network.repositoryCredentials?.port !== 8443) {
-      throw new Error(
-        "repository.nativeSender requires an exact Kubernetes repository service peer on port 8443.",
-      );
+    const peer = (compute.configuration as unknown as KubernetesComputeDriverOptions).network
+      .repositoryCredentials;
+    if (peer?.port !== 8443) {
+      // A field error, so API and worker startup logs name the field (finding 2227).
+      const path = "/drivers/compute/configuration/network/repositoryCredentials";
+      throw new InstallationFieldError([
+        peer === undefined
+          ? {
+              path,
+              code: "REQUIRED",
+              message:
+                "repository.nativeSender requires drivers.compute.configuration.network.repositoryCredentials, the Kubernetes repository service peer.",
+            }
+          : {
+              path: `${path}/port`,
+              code: "INVALID_VALUE",
+              message:
+                "repository.nativeSender requires drivers.compute.configuration.network.repositoryCredentials.port to be 8443.",
+            },
+      ]);
     }
   } else if (
     kubernetesCompute &&
