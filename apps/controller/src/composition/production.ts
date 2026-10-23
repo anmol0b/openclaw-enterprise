@@ -1,3 +1,4 @@
+import { verifyNamedWorkspace } from "./named-workspace.ts";
 import { installEgressAuthority } from "./egress-authority.ts";
 import { installationDriverConfigurations } from "./installation-config.ts";
 import type { AuditEvent } from "@openclaw-enterprise/contracts";
@@ -117,6 +118,19 @@ export async function composeProduction(
     );
   }
 
+  if (
+    config.drivers.namedWorkspace &&
+    (config.nativeAdmin?.enabled ||
+      config.google ||
+      config.oidc ||
+      config.channelDirectoryProxyUrl ||
+      (config.github && !config.github.allowedOrgs?.length && !config.github.allowedTeams?.length))
+  ) {
+    throw new Error(
+      "Named workspace supports guarded GitHub sign-in only; native admin and Slack must be disabled.",
+    );
+  }
+
   const driverId = installation.drivers.iam.id;
   if (config.github !== undefined && config.nativeAdmin?.enabled === true) {
     throw new Error("GitHub sign-in does not support native administration.");
@@ -147,6 +161,8 @@ export async function composeProduction(
     if (persistedInstallation === undefined) {
       throw new Error("The singleton Installation must be bootstrapped before production startup.");
     }
+
+    await verifyNamedWorkspace(state, config.drivers.namedWorkspace);
 
     const iamState = await state.loadNativeIAMState(persistedInstallation.id);
     validatePersistedNativeIAMState(iamState);
@@ -399,6 +415,10 @@ export async function composeProduction(
     app.get("/healthz", async () => ({ status: "ok" }));
     app.get("/readyz", async () => {
       await pool.query("SELECT 1");
+      if (config.drivers.namedWorkspace) {
+        await verifyNamedWorkspace(state, config.drivers.namedWorkspace);
+        await computeDriver.preflight?.();
+      }
       return { status: "ready" };
     });
     app.addHook("onClose", async () => {
