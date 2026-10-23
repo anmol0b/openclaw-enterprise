@@ -101,8 +101,8 @@ A local PoC exercised live Gmail reads with a temporary worker patch and custom 
 ### P0: working managed OpenClaw plugins
 
 1. **Catalog and Agent binding.** Publish the reviewed integration; admit its release, placement, connection reference, supported settings, and credential destinations to the Agent revision.
-2. **OAuth connection lifecycle.** Support multiple reusable OAuth clients per namespace, consent and code exchange, one refresh custodian, requested versus granted scopes, and failure recovery.
-3. **Console setup.** Let administrators select or create a connection, choose products and scopes, and see unsupported actions and prerequisites before deployment.
+2. **OAuth connection lifecycle.** Support multiple reusable OAuth clients per namespace, consent and code exchange, one refresh custodian, requested versus granted scopes, and failure recovery. Related: [#3098](https://github.com/openclaw/openclaw-enterprise/pull/3098).
+3. **Console setup.** Let administrators select or create a connection, choose products and scopes, and see unsupported actions and prerequisites before deployment. Related: [#3175](https://github.com/openclaw/openclaw-enterprise/pull/3175).
 4. **Execution binding and worker propagation.** Admit a fresh binding for each execution. Have Compute configure the execution's proxy plan through `CredentialProxyDriver`, then have Sandbox apply and attest the returned wiring. Give the worker the placeholder and required proxy/CA settings. Keep model and platform credentials isolated.
 5. **Runtime packaging and skill.** Pin and verify gog in the Harness worker image, connect the admitted skill selection to OpenClaw’s existing turn setup, and persist an indexed Agent workspace across replacement pods.
 6. **Google service and scope inventory.** Describe supported products, plugin actions, required scopes, and identity prerequisites for the initial workflow.
