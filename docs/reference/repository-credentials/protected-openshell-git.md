@@ -263,7 +263,10 @@ its [source flow](../../flows/credential-source-refresh.md#6-oce-prepared-github
 Inspect `OPENSHELL_GIT_RECONCILIATION_REQUIRED` and its `reason`:
 `execution_replaced`, `supervisor_replaced`, `write_unknown`, `worker_restarted`
 or `gateway_unauthorized`. `worker.openshell-git-route-warning` distinguishes
-`unobserved` reads, `closed` worker replacement and `pending` material.
+`unobserved` reads, `pending` material and `closed` routes: `worker_replaced`, or
+`withdrawn` and `repository_expired` when another worker closed the route.
+`OPENSHELL_GIT_WITHDRAWAL_UNRECORDED` means the store did not record a withdrawal;
+this worker still refuses the route.
 `worker.openshell-git-route` reports adoption and restoration, with `durationMs`.
 Correlate the revision and request ID with `worker.openshell-git-denied`.
 

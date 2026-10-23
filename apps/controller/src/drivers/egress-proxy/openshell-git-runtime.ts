@@ -35,6 +35,7 @@ import {
   type OpenShellGitRouteRecord,
   type OpenShellGitRouteSnapshot,
   type OpenShellGitRouteStore,
+  type OpenShellGitRouteWithdrawal,
   PostgresOpenShellGitRouteStore,
 } from "./openshell-git-route-store.ts";
 import {
@@ -463,6 +464,9 @@ export class OpenShellGitRuntime {
     signal: AbortSignal,
     cold?: () => Promise<StandingGitExecution | undefined>,
   ) {
+    if (this.states.get(revision.id)?.blocked !== undefined) {
+      return;
+    }
     const entry = await this.entries.get(revision.id);
     if (!entry && revision.executionAdmission?.version === 6) {
       return;
@@ -1028,12 +1032,29 @@ export class OpenShellGitRuntime {
       return;
     }
     if (!(await read(() => routes.record(entry.revision.id, fence, snapshot), signal))) {
-      throw new OpenShellGitRouteError(
-        "worker_replaced",
-        "OpenShell Git route was adopted by another worker.",
-      );
+      throw await this.refusal(entry, fence, signal);
     }
     entry.persisted = snapshot;
+  }
+
+  /**
+   * Why the store refused this holder, as the error that closes the route. A route closed at
+   * this fence names its own reason: another worker withdrew the revision or expired its
+   * access, and the Agent is told so (finding 2218). Otherwise another worker took it over.
+   */
+  private async refusal(
+    entry: Entry,
+    fence: number,
+    signal: AbortSignal,
+    held?: boolean | OpenShellGitRouteBlockReason,
+  ): Promise<OpenShellGitRouteError> {
+    held ??= await read(() => this.routes!.owns(entry.revision.id, fence), signal);
+    return typeof held === "string"
+      ? new OpenShellGitRouteError(held, "OpenShell Git route was closed by another worker.")
+      : new OpenShellGitRouteError(
+          "worker_replaced",
+          "OpenShell Git route was adopted by another worker.",
+        );
   }
 
   /** Whether this worker still holds the route; a provider write is marked before it runs. */
@@ -1048,22 +1069,21 @@ export class OpenShellGitRuntime {
     if (routes === undefined || fence === undefined) {
       return;
     }
-    const held = await read<boolean | number | undefined>(
-      () =>
-        write === undefined
-          ? routes.owns(entry.revision.id, fence)
-          : routes.writing(entry.revision.id, fence, write, material),
+    if (write === undefined) {
+      const held = await read(() => routes.owns(entry.revision.id, fence), signal);
+      if (held !== true) {
+        throw await this.refusal(entry, fence, signal, held);
+      }
+      return;
+    }
+    const reserved = await read(
+      () => routes.writing(entry.revision.id, fence, write, material),
       signal,
     );
-    if (typeof held === "number") {
-      entry.fence = held;
+    if (reserved === undefined) {
+      throw await this.refusal(entry, fence, signal);
     }
-    if (!held) {
-      throw new OpenShellGitRouteError(
-        "worker_replaced",
-        "OpenShell Git route was adopted by another worker.",
-      );
-    }
+    entry.fence = reserved;
   }
 
   /**
@@ -1335,7 +1355,8 @@ export class OpenShellGitRuntime {
 
   withdraw(revisionId: string): void {
     // Keep the tombstone to prevent adoption/recreation under the same execution identity,
-    // in this process and, through the store, in any later one.
+    // in this process and, through the store, in any later one. The entry itself is dropped
+    // once its Sandbox is gone; its reason stays.
     void this.entries.get(revisionId)?.then(
       (entry) => {
         entry.blocked ??= "withdrawn";
@@ -1343,7 +1364,7 @@ export class OpenShellGitRuntime {
       },
       () => {},
     );
-    void this.routes?.withdraw({ revisionId }).catch(() => {});
+    this.recordWithdrawal({ revisionId });
   }
 
   withdrawNamespace(namespaceId: string): void {
@@ -1358,7 +1379,20 @@ export class OpenShellGitRuntime {
         () => {},
       );
     }
-    void this.routes?.withdraw({ namespaceId }).catch(() => {});
+    this.recordWithdrawal({ namespaceId });
+  }
+
+  /** The store's tombstone keeps any other worker from adopting the routes; this process's
+   * own tombstone already refuses them, so a store that does not answer is reported only. */
+  private recordWithdrawal(selector: OpenShellGitRouteWithdrawal): void {
+    void this.routes?.withdraw(selector).catch((error: unknown) => {
+      this.emit?.({
+        event: "worker.error",
+        code: "OPENSHELL_GIT_WITHDRAWAL_UNRECORDED",
+        ...selector,
+        cause: error instanceof Error ? error.name : "unknown",
+      });
+    });
   }
 
   /**
@@ -1541,6 +1575,18 @@ export class OpenShellGitRuntime {
       });
       return;
     }
+    if (reason === "withdrawn" || reason === "repository_expired") {
+      // Only the store reports these here: another worker withdrew the revision or expired its
+      // access, and the row already says so. The entry stays, so the Agent is told
+      // access_withdrawn, until its Sandbox is gone (finding 2218).
+      this.emit?.({
+        event: "worker.openshell-git-route-warning",
+        status: "closed",
+        reason,
+        ...this.identity(entry),
+      });
+      return;
+    }
     if (entry.preview && entry.fence !== undefined) {
       entry.previewClosure = { reason, fence: entry.fence };
       void this.confirmPreviewClosure(entry);
@@ -1654,6 +1700,7 @@ export class OpenShellGitRuntime {
   private async reconcile(entry: Entry): Promise<void> {
     if (entry.blocked) {
       await this.confirmPreviewClosure(entry);
+      await this.release(entry);
       return;
     }
     if (!entry.verify || !this.owner) {
@@ -1865,6 +1912,39 @@ export class OpenShellGitRuntime {
       await this.persist(entry, signal);
     } catch (error) {
       this.failed(entry, error, signal);
+    }
+  }
+
+  /**
+   * Drops a closed route whose Sandbox is gone (finding 2218): nothing can ask for it any more,
+   * so the tick and lookups stop walking it. Its reason stays in this process, which never
+   * prepares, adopts or verifies the revision again, and the store's tombstone refuses it to any
+   * other worker. A Sandbox still there, or a failed read, is read again a refresh interval later.
+   */
+  private async release(entry: Entry): Promise<void> {
+    const id = entry.revision.id;
+    const now = performance.now();
+    if (
+      entry.previewClosure !== undefined ||
+      entry.sandboxId === undefined ||
+      this.states.get(id)?.entry !== entry ||
+      now < (entry.nextObserveAt ?? 0)
+    ) {
+      return;
+    }
+    entry.nextObserveAt = now + REFRESH_INTERVAL_MS;
+    const signal = AbortSignal.any([
+      this.stopped.signal,
+      AbortSignal.timeout(this.observeTimeoutMs),
+    ]);
+    const { workspace, sandbox } = entry.binding;
+    const present = await entry.client.getSandbox({ workspace, name: sandbox }, signal).then(
+      (box) => box !== undefined,
+      () => true,
+    );
+    if (!present && entry.blocked !== undefined && this.states.get(id)?.entry === entry) {
+      this.entries.delete(id);
+      this.states.set(id, { blocked: entry.blocked });
     }
   }
 

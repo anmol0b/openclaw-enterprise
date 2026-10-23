@@ -229,7 +229,9 @@ test(
       writePending: undefined,
       blocked: "supervisor_replaced",
     });
-    assert.equal(await store.owns(revision.id, 6), false);
+    // Closed at the holder's fence, the route answers its reason, not a replacement.
+    assert.equal(await store.owns(revision.id, 6), "supervisor_replaced");
+    assert.equal(await store.owns(revision.id, 5), false);
     assert.equal(await store.record(revision.id, 6, active), false);
     await store.withdraw({ revisionId: revision.id });
     assert.equal((await store.adopt(revision.id, workers[2]!))?.blocked, "supervisor_replaced");
@@ -250,6 +252,8 @@ test(
       "another Namespace",
     );
     await store.withdraw({ namespaceId: other.namespaceId });
+    // Withdrawal leaves the fence: its holder reads the reason (finding 2218).
+    assert.equal(await store.owns(other.id, 2), "withdrawn");
     assert.deepEqual(await store.adopt(other.id, workers[1]!), {
       ...second,
       fence: 2,
@@ -375,7 +379,7 @@ test(
     assert.equal(await store.owns(id, 2), true);
     const frozen = await expire();
     assert.equal(frozen?.retainedLaunchHash, launch);
-    assert.equal(await store.owns(id, 2), false);
+    assert.equal(await store.owns(id, 2), "repository_expired");
     assert.equal(await store.record(id, 2, snapshot), false);
     assert.equal(await store.writing(id, 2, "rotate"), undefined);
     assert.equal((await store.adopt(id, randomUUID()))?.blocked, "repository_expired");

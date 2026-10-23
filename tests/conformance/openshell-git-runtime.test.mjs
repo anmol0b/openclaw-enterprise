@@ -1061,15 +1061,19 @@ test("a provider write that answers after withdrawal or replacement opens nothin
   await expectDenied(f, "route_blocked");
   assert.equal(f.denials().at(-1).reasonCode, "access_withdrawn");
 
-  // Withdrawn by another worker, in the store only: the write's result is not recorded and
-  // the route is dropped.
+  // Withdrawn by another worker, in the store only: the write's result is not recorded, and
+  // the route closes with the store's reason, so the Agent is told its access was withdrawn
+  // rather than given a generic denial (finding 2218).
   f = fixture({ store: routeStore() });
   f.faults.duringWrite = () => f.store.withdraw({ revisionId: f.revision.id });
   await f.reconcile();
   assert.equal(f.calls.rotate, 1);
   assert.equal(f.store.rows.get(f.revision.id).blocked, "withdrawn");
   assert.equal(f.store.rows.get(f.revision.id).material, undefined);
-  await expectDenied(f, "no_binding");
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "blocked", reason: "withdrawn" });
+  await expectDenied(f, "route_blocked");
+  assert.equal(f.denials().at(-1).reasonCode, "access_withdrawn");
+  assert.deepEqual(f.errors(), []);
 
   // Another worker adopted the route: this one drops it, and the pending write stays for the
   // adopter to read as unknown.
@@ -1123,6 +1127,131 @@ test("a provider write that answers after withdrawal or replacement opens nothin
   assert.deepEqual(f.runtime.route(f.revision.id), { state: "installed" });
   assert.equal(f.calls.rotate, 1);
   assert.deepEqual(f.errors(), []);
+});
+
+test("a route another worker withdrew or expired closes with that reason, not as replaced", async () => {
+  // Withdrawal and expiry close the row at the holder's fence without moving it. The holder's
+  // next check reads the reason from the store (finding 2218): the Agent is told access_withdrawn,
+  // and the closure is a warning, not a reconciliation report; this worker writes nothing.
+  for (const [reason, close] of [
+    ["withdrawn", (f) => f.store.withdraw({ revisionId: f.revision.id })],
+    // As the store's expire() does for a deadline another worker reached first.
+    ["repository_expired", (f) => (f.store.rows.get(f.revision.id).blocked = "repository_expired")],
+  ]) {
+    // Seen by a request's lookup.
+    let f = await reconciledFixture({ store: routeStore() });
+    assert.equal((await f.lookup())?.executionId, f.revision.id);
+    await close(f);
+    await expectDenied(f, "route_blocked");
+    assert.equal(f.denials().at(-1).reasonCode, "access_withdrawn");
+    assert.deepEqual(f.runtime.route(f.revision.id), { state: "blocked", reason });
+    assert.deepEqual(f.errors(), []);
+    assert.deepEqual(
+      warnings(f).map(({ status, reason }) => [status, reason]),
+      [["closed", reason]],
+    );
+    assert.equal(f.store.rows.get(f.revision.id).blocked, reason);
+
+    // Seen by the next reconcile pass.
+    f = await reconciledFixture({ store: routeStore() });
+    await close(f);
+    await f.reconcile();
+    assert.deepEqual(f.runtime.route(f.revision.id), { state: "blocked", reason });
+    await expectDenied(f, "route_blocked");
+    assert.equal(f.denials().at(-1).reasonCode, "access_withdrawn");
+    assert.deepEqual(f.errors(), []);
+
+    // Seen when a rotation's write reservation is refused: nothing is written.
+    f = await reconciledFixture({ store: routeStore() });
+    f.owner.material = { ...f.owner.material, materialVersion: "version-two" };
+    const writing = f.store.writing;
+    f.store.writing = async (...args) => (await close(f), writing(...args));
+    await f.reconcile();
+    assert.equal(f.calls.rotate, 1);
+    assert.deepEqual(f.runtime.route(f.revision.id), { state: "blocked", reason });
+    assert.deepEqual(f.errors(), []);
+  }
+
+  // A route another worker adopted is still replaced: dropped here, the row left alone.
+  const f = await reconciledFixture({ store: routeStore() });
+  await f.store.adopt(f.revision.id, "worker-two");
+  await expectDenied(f, "route_blocked");
+  assert.equal(f.denials().at(-1).reasonCode, "route_blocked");
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "none" });
+  assert.equal(f.store.rows.get(f.revision.id).blocked, undefined);
+});
+
+test("a withdrawn route is dropped once its Sandbox is gone and never prepared again", async () => {
+  // withdraw() closes the route; the Sandbox Driver then deletes the Sandbox. Only then is the
+  // entry dropped, so the tick and lookups stop walking it (finding 2218), while the revision
+  // stays refused in this process and, through the store's tombstone, in any other.
+  const f = await reconciledFixture({ store: routeStore() });
+  f.runtime.withdraw(f.revision.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(f.store.rows.get(f.revision.id).blocked, "withdrawn");
+
+  // The Sandbox is still there: the entry stays, and its Agent is told why it is refused.
+  await f.reconcile();
+  assert.ok(f.runtime.entries.has(f.revision.id));
+  await expectDenied(f, "route_blocked");
+  assert.equal(f.denials().at(-1).reasonCode, "access_withdrawn");
+  // A failed read keeps it too.
+  f.faults.gateway = new Error("connection reset");
+  await f.reconcile();
+  f.faults.gateway = undefined;
+  assert.ok(f.runtime.entries.has(f.revision.id));
+
+  // The Sandbox is gone: the entry is dropped, its reason kept.
+  f.faults.sandboxMissing = true;
+  await f.reconcile();
+  assert.equal(f.runtime.entries.has(f.revision.id), false);
+  assert.deepEqual(f.runtime.states.get(f.revision.id), { blocked: "withdrawn" });
+  assert.deepEqual(f.runtime.route(f.revision.id), { state: "blocked", reason: "withdrawn" });
+  await expectDenied(f, "no_binding");
+
+  // Preparing the revision again neither re-adopts nor re-bootstraps it: the store is not asked.
+  f.faults.sandboxMissing = false;
+  const calls = { ...f.store.calls };
+  const fence = f.store.rows.get(f.revision.id).fence;
+  await assert.rejects(f.prepare(), { name: "OpenShellGitRouteBlockedError", reason: "withdrawn" });
+  assert.deepEqual(f.store.calls, calls);
+  assert.equal(f.store.rows.get(f.revision.id).fence, fence);
+  assert.equal(f.calls.rotate, 1);
+  assert.equal(await f.runtime.verifyExecution(f.revision, AbortSignal.timeout(2_000)), undefined);
+  // A restarted worker finds the store's tombstone.
+  await assert.rejects(workerAfterRestart(f).prepare(), {
+    name: "OpenShellGitRouteBlockedError",
+    reason: "withdrawn",
+  });
+  assert.deepEqual(f.errors(), []);
+
+  // A store that does not answer the withdrawal is reported, and still nothing reopens: this
+  // process keeps its own tombstone after the drop.
+  const g = await reconciledFixture({ store: routeStore() });
+  g.store.fault = new Error("connection terminated");
+  g.runtime.withdraw(g.revision.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  g.store.fault = undefined;
+  assert.deepEqual(
+    g.errors().map(({ code, revisionId, cause }) => [code, revisionId, cause]),
+    [["OPENSHELL_GIT_WITHDRAWAL_UNRECORDED", g.revision.id, "Error"]],
+  );
+  assert.equal(g.store.rows.get(g.revision.id).blocked, undefined);
+  g.faults.sandboxMissing = true;
+  await g.reconcile();
+  assert.equal(g.runtime.entries.has(g.revision.id), false);
+  const before = g.store.calls.adopt;
+  await assert.rejects(g.prepare(), { name: "OpenShellGitRouteBlockedError", reason: "withdrawn" });
+  assert.equal(g.store.calls.adopt, before);
+
+  // A whole Namespace's withdrawal drops its routes the same way.
+  const h = await reconciledFixture({ store: routeStore() });
+  h.runtime.withdrawNamespace(h.revision.namespaceId);
+  await new Promise((resolve) => setImmediate(resolve));
+  h.faults.sandboxMissing = true;
+  await h.reconcile();
+  assert.deepEqual(h.runtime.route(h.revision.id), { state: "blocked", reason: "withdrawn" });
+  assert.equal(h.runtime.entries.has(h.revision.id), false);
 });
 
 test("the Git route refuses overlapping policies at startup and again at deploy", async () => {
