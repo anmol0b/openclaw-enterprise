@@ -32,6 +32,8 @@ import {
 import { nodeProgramArguments } from "../../apps/controller/src/drivers/compute/node-program.ts";
 import { OpenShellSandboxDriver } from "../../apps/controller/src/drivers/sandbox/openshell.ts";
 import { openShellEgressConfiguration } from "../../apps/controller/src/drivers/egress-proxy/openshell.ts";
+import { validateOpenShellRepositoryTransport } from "../../apps/controller/src/drivers/egress-proxy/openshell-configuration.ts";
+import { formatStartupConfigurationFailure } from "../../apps/controller/src/startup-failure.ts";
 import { ProtectedExecutionDriver } from "../../apps/controller/src/drivers/compute/protected-execution-driver.ts";
 import {
   normalizeServiceUrl,
@@ -5499,6 +5501,75 @@ for (const kind of ["Role", "RoleBinding"]) {
 
 // Production configuration and Sandbox provisioning, with controlled gateway observations.
 // This proves the join and fail-closed lifecycle, not an installed stock supervisor or GitHub.
+test("repository.openShell names each unmet requirement, including ones earlier checks preempt", () => {
+  const configuration = {
+    registrationName: "oce-prepared-git",
+    authority: {},
+    observedHookPreviewWorkspace: undefined,
+  };
+  const refusal = (input) => {
+    try {
+      validateOpenShellRepositoryTransport(configuration, input);
+    } catch (error) {
+      assert.equal(error.name, "InstallationFieldError");
+      return error.details.map(({ path, code }) => [path, code]);
+    }
+    return [];
+  };
+  const backend = {
+    id: "openshell",
+    type: "openshell",
+    configuration: {
+      endpoint: "https://gateway.example.test:8443",
+      auth: { mode: "mtls", certificatePath: "/c", privateKeyPath: "/k" },
+    },
+    drivers: { sandbox: "sandbox", credential_gateway: "gateway" },
+  };
+  const met = {
+    prepared: true,
+    repository: true,
+    backend,
+    backendIndex: 2,
+    sandbox: true,
+    external: false,
+    kubernetes: true,
+  };
+  assert.deepEqual(refusal(met), []);
+  assert.doesNotThrow(() =>
+    validateOpenShellRepositoryTransport(undefined, { ...met, prepared: false }),
+  );
+  assert.deepEqual(
+    refusal({
+      prepared: false,
+      repository: false,
+      backend: undefined,
+      backendIndex: -1,
+      sandbox: false,
+      external: false,
+      kubernetes: false,
+    }),
+    [
+      ["/repository/preparedGitHub", "REQUIRED"],
+      ["/backend", "REQUIRED"],
+      ["/drivers/sandbox", "REQUIRED"],
+      ["/drivers/compute", "INVALID_VALUE"],
+      ["/backend", "REQUIRED"],
+    ],
+  );
+  assert.deepEqual(refusal({ ...met, external: true }), [
+    ["/drivers/sandbox/package", "INVALID_VALUE"],
+  ]);
+  const { endpoint: _endpoint, auth: _auth, ...service } = backend.configuration;
+  assert.deepEqual(refusal({ ...met, backend: { ...backend, configuration: service } }), [
+    ["/backend/2/configuration/endpoint", "REQUIRED"],
+    ["/backend/2/configuration/auth", "REQUIRED"],
+  ]);
+  const unauthenticated = { ...backend.configuration, auth: { mode: "unauthenticated" } };
+  assert.deepEqual(refusal({ ...met, backend: { ...backend, configuration: unauthenticated } }), [
+    ["/backend/2/configuration/auth/mode", "INVALID_VALUE"],
+  ]);
+});
+
 test(
   "configured protected OpenShell Git admits only the selected execution and network policy",
   { timeout: 30000 },
@@ -5692,6 +5763,35 @@ test(
     await assert.rejects(
       loadInstallationFile(t, brokerPeer, { createOpenShellBackend: () => backendFor(gateway) }),
       /drivers\.compute\.configuration\.network\.repositoryCredentials requires repository\.nativeSender/,
+    );
+    // Each unmet repository.openShell requirement names its own field in the startup log and
+    // the upgrade check, never its value (finding 2216): one message used to cover all of them.
+    const unprepared = structuredClone(configuration);
+    delete unprepared.repository.preparedGitHub;
+    // A plaintext, unauthenticated gateway the Backend admits only behind a NetworkPolicy.
+    unprepared.backend[0].configuration = {
+      endpoint: "http://sentinel-5b9d.example.test:8080",
+      auth: { mode: "unauthenticated" },
+      insecureTransport: "network-policy",
+    };
+    await assert.rejects(
+      loadInstallationFile(t, unprepared, { createOpenShellBackend: () => backendFor(gateway) }),
+      (error) => {
+        const failure = formatStartupConfigurationFailure(error);
+        const prefix = "DRIVER_CONFIGURATION_INVALID: ";
+        assert.ok(failure?.startsWith(prefix), String(error));
+        assert.deepEqual(
+          JSON.parse(failure.slice(prefix.length)).map(({ path, code }) => [path, code]),
+          [
+            ["/repository/preparedGitHub", "REQUIRED"],
+            ["/backend/0/configuration/endpoint", "INVALID_VALUE"],
+            ["/backend/0/configuration/auth/mode", "INVALID_VALUE"],
+          ],
+          failure,
+        );
+        assert.ok(!failure.includes("sentinel-5b9d"), failure);
+        return true;
+      },
     );
     // The chart routes openshellGit.port to the worker Pod's address, so a worker listener on
     // loopback, on another port, or without the chart listener is refused at startup and in the

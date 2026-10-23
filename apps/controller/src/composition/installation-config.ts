@@ -1004,6 +1004,7 @@ export async function loadInstallationConfiguration(options: {
     prepared: preparedRepositoryGit !== undefined,
     repository: repositoryRuntime !== undefined,
     backend: openShellBackend,
+    backendIndex: openShellBackend === undefined ? -1 : backends.indexOf(openShellBackend),
     sandbox: sandbox !== undefined,
     external: sandboxPackage !== undefined,
     kubernetes: kubernetesCompute,
