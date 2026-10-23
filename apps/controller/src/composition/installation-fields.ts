@@ -1,6 +1,7 @@
 // Shared Installation value validation. File loading, environment access and
 // Driver binding remain in their owning composition modules.
 import { asRecord, isNonEmptyString } from "@openclaw-enterprise/utils";
+import { BlockList, isIP } from "node:net";
 import { isAbsolute } from "node:path";
 
 export type ConfigurationRecord = Readonly<Record<string, unknown>>;
@@ -71,6 +72,85 @@ export function egressAuthorityConfiguration(
     );
   }
   return value as unknown as EgressAuthorityConfiguration;
+}
+
+/**
+ * An Installation listener that the production chart's Service cannot reach: the chart
+ * serves no such listener, serves it on another port, or the host is loopback. Startup and
+ * the chart's upgrade check report it as `CHART_LISTENER_MISMATCH` (finding 2213).
+ */
+export class ChartListenerMismatchError extends Error {
+  override readonly name = "ChartListenerMismatchError";
+  readonly code = "CHART_LISTENER_MISMATCH";
+}
+
+/** The chart routes these listeners and passes each one's port, or `disabled`, to startup. */
+export const chartListeners = {
+  egressAuthority: {
+    path: "drivers.credential_proxy.configuration.authority",
+    chart: "egressAuthority",
+    variable: "OCC_EGRESS_AUTHORITY_PORT",
+  },
+  openshellGit: {
+    path: "repository.openShell.authority",
+    chart: "openshellGit",
+    variable: "OCC_OPENSHELL_GIT_PORT",
+  },
+} as const;
+
+const loopbackAddresses = new BlockList();
+loopbackAddresses.addSubnet("127.0.0.0", 8, "ipv4");
+loopbackAddresses.addAddress("::1", "ipv6");
+
+function loopbackHost(host: string): boolean {
+  const name = host.toLowerCase();
+  if (name === "localhost" || name.endsWith(".localhost")) {
+    return true;
+  }
+  const family = isIP(host);
+  return family !== 0 && loopbackAddresses.check(host, family === 4 ? "ipv4" : "ipv6");
+}
+
+/**
+ * Refuse an Installation listener the chart's Service cannot reach. Without the chart's
+ * variable (no chart, for example a test or another packaging) there is nothing to compare.
+ */
+export function requireChartListener(
+  authority: Pick<EgressAuthorityConfiguration, "host" | "port"> | undefined,
+  environment: Readonly<Record<string, string | undefined>>,
+  listener: (typeof chartListeners)[keyof typeof chartListeners],
+): void {
+  const declared = environment[listener.variable];
+  if (declared === undefined) {
+    return;
+  }
+  if (declared === "disabled") {
+    if (authority !== undefined) {
+      throw new ChartListenerMismatchError(
+        `${listener.path}.port is ${authority.port}, but Helm ${listener.chart}.enabled is false, so no chart Service reaches it.`,
+      );
+    }
+    return;
+  }
+  const port = /^[1-9][0-9]{0,4}$/.test(declared) ? Number(declared) : 0;
+  if (port < 1 || port > 65535) {
+    throw new ChartListenerMismatchError(
+      `${listener.variable} must be a TCP port from 1 to 65535 or disabled.`,
+    );
+  }
+  if (authority === undefined) {
+    return;
+  }
+  if (authority.port !== port) {
+    throw new ChartListenerMismatchError(
+      `${listener.path}.port is ${authority.port}, but Helm ${listener.chart}.port is ${port}.`,
+    );
+  }
+  if (loopbackHost(authority.host)) {
+    throw new ChartListenerMismatchError(
+      `${listener.path}.host is ${authority.host}, a loopback address that the chart's ${listener.chart} Service on port ${port} cannot reach; use 0.0.0.0.`,
+    );
+  }
 }
 
 export function openShellRepositoryConfiguration(

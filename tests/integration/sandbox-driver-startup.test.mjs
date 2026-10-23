@@ -5642,6 +5642,26 @@ test(
     const gitId = configuration.drivers.sandbox.id;
     configuration.backend[0].drivers.credential_proxy = gitId;
     configuration.drivers.credential_proxy = { id: gitId, configuration: {} };
+    // The chart routes openshellGit.port to the worker Pod's address, so a worker listener on
+    // loopback, on another port, or without the chart listener is refused at startup and in the
+    // upgrade check, not at the first Git request (finding 2213). This test binds the listener
+    // on loopback itself, so its own load declares no chart listener.
+    for (const [declared, message] of [
+      [String(port), /repository\.openShell\.authority\.host is 127\.0\.0\.1, a loopback address/],
+      [
+        String(port + 1),
+        /repository\.openShell\.authority\.port is \d+, but Helm openshellGit\.port is \d+\./,
+      ],
+      ["disabled", /but Helm openshellGit\.enabled is false/],
+    ]) {
+      await assert.rejects(
+        loadInstallationFile(t, configuration, {
+          createOpenShellBackend: () => backendFor(gateway),
+          environment: { OCC_OPENSHELL_GIT_PORT: declared, OCC_EGRESS_AUTHORITY_PORT: "disabled" },
+        }),
+        { name: "ChartListenerMismatchError", code: "CHART_LISTENER_MISMATCH", message },
+      );
+    }
     const protectedGit = await loadInstallationFile(t, configuration, {
       createOpenShellBackend: () => backendFor(gateway),
     });

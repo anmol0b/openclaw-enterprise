@@ -18,6 +18,7 @@ import {
   type OpenShellProxyOptions,
 } from "../drivers/egress-proxy/openshell.ts";
 import type { EgressAuthorityConfiguration } from "./egress-authority.ts";
+import { chartListeners, requireChartListener } from "./installation-fields.ts";
 import { assertConfigurationSchema, requireConfiguration } from "@openclaw-enterprise/contracts";
 import { validateSandboxNetworkGrants } from "@openclaw-enterprise/contracts";
 import type { SandboxNetworkGrant } from "@openclaw-enterprise/contracts";
@@ -705,6 +706,13 @@ export async function loadInstallationConfiguration(options: {
       );
     }
   }
+
+  requireChartListener(egressAuthority, environment, chartListeners.egressAuthority);
+  requireChartListener(
+    repositoryTransportConfiguration?.authority,
+    environment,
+    chartListeners.openshellGit,
+  );
 
   const backends = backendConfiguration(
     configuration.backend,

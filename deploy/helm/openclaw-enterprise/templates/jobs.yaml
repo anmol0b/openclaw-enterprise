@@ -105,6 +105,7 @@ spec:
               value: production
             - name: OCC_CONFIG_PATH
               value: /etc/openclaw/installation/installation.yaml
+            {{- include "openclaw.listenerEnv" . | trim | nindent 12 }}
             {{- if .Values.api.consoleTheme.configMapName }}
             - name: OCC_CONSOLE_THEME_DIR
               value: /etc/openclaw/console-theme

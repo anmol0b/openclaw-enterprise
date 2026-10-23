@@ -297,6 +297,9 @@ until tenant deployment/TUI procedures run.
   `KUBERNETES_API_UNAVAILABLE`: Compute cannot reach Kubernetes at the logged
   `host` and `port`. Check `cluster.cidrs`; restarted clusters can move it.
 - Code `PRESET_FILE_INVALID`: an invalid `presets.files` entry or file.
+- Code `CHART_LISTENER_MISMATCH`: an Installation authority on another port than
+  the chart's `egressAuthority` or `openshellGit` listener, on loopback, or
+  without that listener.
 - `DRIVER_CONFIGURATION_INVALID`: inspect `details` (JSON Pointer, code, message).
   `/runtime/gatewayStorageClassName` requires a Kubernetes DNS-subdomain name.
   `apps/controller/src/api-startup.mjs:startupFailureFields` passes these diagnostics

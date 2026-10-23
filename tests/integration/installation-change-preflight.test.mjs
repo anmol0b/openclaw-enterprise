@@ -3,7 +3,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { captureChild } from "../helpers/child-processes.mjs";
-import { createInstallationDriverConfiguration as installation } from "../helpers/installation-driver-configuration.mjs";
+import {
+  createCredentialProxyInstallationConfiguration as credentialProxyInstallation,
+  createInstallationDriverConfiguration as installation,
+} from "../helpers/installation-driver-configuration.mjs";
 import {
   chartTooling,
   parseProductionChart,
@@ -111,8 +114,16 @@ test(
       assert.deepEqual(check.env, [
         environment(server, "NODE_ENV"),
         environment(server, "OCC_CONFIG_PATH"),
+        environment(server, "OCC_EGRESS_AUTHORITY_PORT"),
+        environment(server, "OCC_OPENSHELL_GIT_PORT"),
         ...(theme ? [environment(server, "OCC_CONSOLE_THEME_DIR")] : []),
       ]);
+      // The check compares the Installation's listeners with the ports the chart routes.
+      assert.equal(
+        environment(check, "OCC_EGRESS_AUTHORITY_PORT").value,
+        "egressAuthority.enabled" in values ? "9444" : "disabled",
+      );
+      assert.equal(environment(check, "OCC_OPENSHELL_GIT_PORT").value, "disabled");
       // Each file the check reads comes from the API's own volume at the API's path.
       const expected = ["installation-startup"];
       if (theme) {
@@ -219,6 +230,59 @@ test("the upgrade hook check names the key and file of a refused Installation", 
     `${prefix}: observability.url must be an absolute HTTP or HTTPS URL without credentials or a fragment.\n`,
   );
 });
+
+test(
+  "the upgrade hook check refuses a Credential Proxy listener the chart Service cannot reach",
+  tooling,
+  async (t) => {
+    // The chart routes egressAuthority.port to the API Pod's address. An Installation authority on
+    // another port, on loopback, or without the chart listener passed install and readiness, then
+    // refused every protected request at first use (finding 2213).
+    const prefix =
+      "installation-check: API and worker startup would refuse the Installation (CHART_LISTENER_MISMATCH)";
+    const chartEnvironment = async (values) => {
+      const [check] = (await render(values, true)).hook.initContainers;
+      return Object.fromEntries(
+        check.env
+          .filter(
+            ({ name }) => name === "OCC_EGRESS_AUTHORITY_PORT" || name === "OCC_OPENSHELL_GIT_PORT",
+          )
+          .map(({ name, value }) => [name, value]),
+      );
+    };
+    const enabled = await chartEnvironment(preparedGitHubValues);
+    const reachable = credentialProxyInstallation();
+    reachable.drivers.credential_proxy.configuration.authority.host = "0.0.0.0";
+    const accepted = await runCheck(t, reachable, {}, () => enabled);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(accepted.stdout, "installation-startup-ready\n");
+
+    const loopback = structuredClone(reachable);
+    loopback.drivers.credential_proxy.configuration.authority.host = "127.0.0.1";
+    for (const [configuration, environment, message] of [
+      [
+        reachable,
+        await chartEnvironment({ ...preparedGitHubValues, "egressAuthority.port": "9555" }),
+        "drivers.credential_proxy.configuration.authority.port is 9444, but Helm egressAuthority.port is 9555.",
+      ],
+      [
+        reachable,
+        await chartEnvironment({}),
+        "drivers.credential_proxy.configuration.authority.port is 9444, but Helm egressAuthority.enabled is false, so no chart Service reaches it.",
+      ],
+      [
+        loopback,
+        enabled,
+        "drivers.credential_proxy.configuration.authority.host is 127.0.0.1, a loopback address that the chart's egressAuthority Service on port 9444 cannot reach; use 0.0.0.0.",
+      ],
+    ]) {
+      const refused = await runCheck(t, configuration, {}, () => environment);
+      assert.equal(refused.status, 1);
+      assert.equal(refused.stdout, "");
+      assert.equal(refused.stderr, `${prefix}: ${message}\n`);
+    }
+  },
+);
 
 test("the upgrade hook check refuses a Console theme the API would refuse", async (t) => {
   // A valid Installation with a bad bundle: the API's own loader fails the hook, so the

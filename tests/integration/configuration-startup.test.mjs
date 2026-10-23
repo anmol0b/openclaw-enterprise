@@ -27,7 +27,10 @@ import { validateSelectedBackendDrivers } from "../../packages/occ/src/index.ts"
 import { spawnSync } from "node:child_process";
 import { captureChild, concurrencyLimit, settled } from "../helpers/child-processes.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
-import { createInstallationDriverConfiguration as installation } from "../helpers/installation-driver-configuration.mjs";
+import {
+  createCredentialProxyInstallationConfiguration as credentialProxyInstallation,
+  createInstallationDriverConfiguration as installation,
+} from "../helpers/installation-driver-configuration.mjs";
 import { createTlsMaterial } from "../fixtures/repository-credentials/process.mjs";
 import { syntheticCredentialUrl } from "../fixtures/synthetic-credential-url.mjs";
 
@@ -127,72 +130,6 @@ async function fixture(t, configuration = installation()) {
   // JSON is valid YAML; mutations exercise the same real SDK YAML parser as controller startup.
   await writeFile(path, JSON.stringify(configuration), "utf8");
   return path;
-}
-
-function credentialProxyInstallation() {
-  const configuration = installation();
-  configuration.backend = [
-    {
-      id: "openshell",
-      type: "openshell",
-      configuration: {
-        endpoint: "https://openshell.example.test:8080",
-        auth: { mode: "bearerTokenFile", path: "/etc/openclaw/openshell/token" },
-      },
-      drivers: {
-        sandbox: "openshell-sandbox",
-        credential_gateway: "openshell-credentials",
-        credential_proxy: "openshell-egress",
-      },
-    },
-  ];
-  configuration.drivers.sandbox = {
-    id: "openshell-sandbox",
-    configuration: {
-      gateway: { workspaceMode: "operator" },
-      kubernetes: {
-        runtimeClassName: "openshell-sandbox",
-        serviceAccount: { mode: "gatewayConfigured" },
-        sandboxDataMount: {
-          subPath: "workspace",
-          mountPath: "/sandbox/enterprise",
-          readOnly: false,
-        },
-      },
-      policy: {
-        process: { runAsUser: "1000", runAsGroup: "1000" },
-        networkPolicies: [
-          {
-            name: "inference",
-            endpoints: [{ host: "provider.example.test", ports: [443] }],
-            binaries: [{ path: "/usr/bin/model-client" }],
-          },
-        ],
-      },
-    },
-  };
-  configuration.drivers.credential_gateway = {
-    id: "openshell-credentials",
-    configuration: { binaries: ["/usr/bin/model-client"] },
-  };
-  configuration.drivers.credential_proxy = {
-    id: "openshell-egress",
-    configuration: {
-      middlewareName: "oce-authority",
-      authorityScope: "execution",
-      authority: {
-        host: "127.0.0.1",
-        port: 9444,
-        certificatePath: "/etc/openclaw/egress/tls/tls.crt",
-        privateKeyPath: "/etc/openclaw/egress/tls/tls.key",
-        issuerPublicKeyPath: "/etc/openclaw/egress/issuer/issuer.pub",
-        issuer: "openshell-gateway:openshell-gateway",
-        audience: "oce-egress",
-        keyId: "current",
-      },
-    },
-  };
-  return configuration;
 }
 
 test("Credential Proxy startup preserves the selection and refuses retired keys", async (t) => {
