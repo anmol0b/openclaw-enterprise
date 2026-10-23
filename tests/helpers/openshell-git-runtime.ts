@@ -396,6 +396,9 @@ export function openShellGitRuntimeFixture({
     // Force the refresh and backoff clocks so each call observes now.
     f.entry.nextRefreshAt = 0;
     f.entry.nextObserveAt = 0;
+    if (f.entry.release !== undefined) {
+      f.entry.release.at = 0;
+    }
     await runtime["reconcile"](f.entry);
   };
   const lookup = () => runtime["lookup"](identity, AbortSignal.timeout(2_000));

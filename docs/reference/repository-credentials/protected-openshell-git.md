@@ -265,8 +265,10 @@ Inspect `OPENSHELL_GIT_RECONCILIATION_REQUIRED` and its `reason`:
 or `gateway_unauthorized`. `worker.openshell-git-route-warning` distinguishes
 `unobserved` reads, `pending` material and `closed` routes: `worker_replaced`, or
 `withdrawn` and `repository_expired` when another worker closed the route.
-`OPENSHELL_GIT_WITHDRAWAL_UNRECORDED` means the store did not record a withdrawal;
-this worker still refuses the route.
+`OPENSHELL_GIT_WITHDRAWAL_UNRECORDED` means the store did not record a withdrawal:
+this worker still refuses the route, but confirm its Sandbox was deleted, or another
+worker could adopt it. Once a withdrawn route's Sandbox is gone, its denials log
+`no_binding`.
 `worker.openshell-git-route` reports adoption and restoration, with `durationMs`.
 Correlate the revision and request ID with `worker.openshell-git-denied`.
 

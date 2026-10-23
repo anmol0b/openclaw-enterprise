@@ -1195,6 +1195,10 @@ test("a withdrawn route is dropped once its Sandbox is gone and never prepared a
   assert.ok(f.runtime.entries.has(f.revision.id));
   await expectDenied(f, "route_blocked");
   assert.equal(f.denials().at(-1).reasonCode, "access_withdrawn");
+  // The next read waits, backing off while the Sandbox stays: a tick reads nothing meanwhile.
+  const reads = f.calls.getSandbox;
+  await f.runtime.reconcile(f.entry);
+  assert.equal(f.calls.getSandbox, reads);
   // A failed read keeps it too.
   f.faults.gateway = new Error("connection reset");
   await f.reconcile();
@@ -1243,6 +1247,51 @@ test("a withdrawn route is dropped once its Sandbox is gone and never prepared a
   const before = g.store.calls.adopt;
   await assert.rejects(g.prepare(), { name: "OpenShellGitRouteBlockedError", reason: "withdrawn" });
   assert.equal(g.store.calls.adopt, before);
+  // Nor is a standing execution verified from the store's unclosed row.
+  let standing = 0;
+  g.store.standing = async () => {
+    standing += 1;
+  };
+  const approved = {
+    ...g.revision,
+    repositoryCredentials: { ...g.revision.repositoryCredentials, standingApprovalId: "approval" },
+  };
+  assert.equal(
+    await g.runtime.verifyExecution(approved, AbortSignal.timeout(2_000), async () => ({
+      client: g.client,
+      workspace: g.sandbox.workspace,
+      sandbox: g.sandbox.name,
+    })),
+    undefined,
+  );
+  assert.equal(standing, 0);
+
+  // Withdrawn before its Sandbox was ever observed: the Sandbox may still be in creation, so
+  // the entry is dropped only after two reads, a refresh interval apart, find none.
+  const u = bootstrapping({ store: routeStore() });
+  await u.prepare();
+  u.entry = await u.runtime.entries.get(u.revision.id);
+  assert.equal(u.entry.sandboxId, undefined);
+  u.runtime.withdraw(u.revision.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  await u.reconcile();
+  assert.ok(u.runtime.entries.has(u.revision.id));
+  await u.reconcile();
+  assert.equal(u.runtime.entries.has(u.revision.id), false);
+  assert.deepEqual(u.runtime.route(u.revision.id), { state: "blocked", reason: "withdrawn" });
+
+  // A Sandbox read that answers after the worker closed drops nothing back into its maps.
+  const c = await reconciledFixture({ store: routeStore() });
+  c.runtime.withdraw(c.revision.id);
+  await new Promise((resolve) => setImmediate(resolve));
+  let answer;
+  c.client.getSandbox = () => new Promise((resolve) => (answer = resolve));
+  const pass = c.runtime.reconcile(c.entry);
+  await c.runtime.close();
+  answer(undefined);
+  await pass;
+  assert.equal(c.runtime.states.size, 0);
+  assert.equal(c.runtime.entries.size, 0);
 
   // A whole Namespace's withdrawal drops its routes the same way.
   const h = await reconciledFixture({ store: routeStore() });

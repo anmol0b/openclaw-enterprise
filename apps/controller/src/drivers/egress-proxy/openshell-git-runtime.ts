@@ -232,6 +232,9 @@ interface Entry extends OpenShellGitObservationEntry {
   persisted?: OpenShellGitRouteSnapshot | undefined;
   /** Why the owner last had no material: the session is gone, or none is usable (finding 2149). */
   absent?: "withdrawn" | "unprepared" | undefined;
+  /** A closed route's next Sandbox read, the reads that found it, and whether the last found
+   * none: release() drops the entry once the Sandbox is gone (finding 2218). */
+  release?: { at: number; present: number; absent?: true | undefined } | undefined;
 }
 interface EntryState {
   entry?: Entry;
@@ -257,8 +260,15 @@ const REFRESH_INTERVAL_MS = 10_000;
 // A failed read is observed again after 1 s, doubling to this cap. A replaced OpenShell
 // Gateway Pod answers again within about 30 s; the route is back on the next read after that.
 const OBSERVE_BACKOFF_CAP_MS = 10_000;
+// A closed route's Sandbox is read after one refresh interval, doubling to this cap while it
+// stays (a Sandbox retained after Git expiry can run for a long time).
+const RELEASE_INTERVAL_CAP_MS = 60_000;
 /** The revision's route is a tombstone: Compute fails the revision with that cause instead of
  * retrying a preparation that can never succeed (a new revision is required). */
+/** The store closed the route at this worker's fence: another worker withdrew the revision or
+ * expired its access, and the row already says why (finding 2218). */
+class OpenShellGitRouteClosedError extends OpenShellGitRouteError {}
+
 export class OpenShellGitRouteBlockedError extends Error {
   readonly reason: OpenShellGitRouteBlockReason;
 
@@ -1050,7 +1060,7 @@ export class OpenShellGitRuntime {
   ): Promise<OpenShellGitRouteError> {
     held ??= await read(() => this.routes!.owns(entry.revision.id, fence), signal);
     return typeof held === "string"
-      ? new OpenShellGitRouteError(held, "OpenShell Git route was closed by another worker.")
+      ? new OpenShellGitRouteClosedError(held, "OpenShell Git route was closed by another worker.")
       : new OpenShellGitRouteError(
           "worker_replaced",
           "OpenShell Git route was adopted by another worker.",
@@ -1548,7 +1558,7 @@ export class OpenShellGitRuntime {
 
   /** Closes the route for good and reports why; the entry is a tombstone from here on, in
    * this process and, unless another worker holds the route now, in the store. */
-  private block(entry: Entry, reason: OpenShellGitRouteBlockReason): void {
+  private block(entry: Entry, reason: OpenShellGitRouteBlockReason, reported = false): void {
     if (entry.preview && entry.blocked) {
       return;
     }
@@ -1575,10 +1585,10 @@ export class OpenShellGitRuntime {
       });
       return;
     }
-    if (reason === "withdrawn" || reason === "repository_expired") {
-      // Only the store reports these here: another worker withdrew the revision or expired its
-      // access, and the row already says so. The entry stays, so the Agent is told
-      // access_withdrawn, until its Sandbox is gone (finding 2218).
+    if (reported) {
+      // Another worker closed the route in the store (withdrawal or expiry), and the row already
+      // says why. The entry stays, so the Agent is told access_withdrawn, until its Sandbox is
+      // gone (finding 2218).
       this.emit?.({
         event: "worker.openshell-git-route-warning",
         status: "closed",
@@ -1653,7 +1663,7 @@ export class OpenShellGitRuntime {
     }
     let failure: OpenShellGitObservationFailure | undefined;
     if (error instanceof OpenShellGitRouteError) {
-      this.block(entry, error.reason);
+      this.block(entry, error.reason, error instanceof OpenShellGitRouteClosedError);
       return;
     }
     if (error instanceof OpenShellPreparedGitProviderError) {
@@ -1919,20 +1929,19 @@ export class OpenShellGitRuntime {
    * Drops a closed route whose Sandbox is gone (finding 2218): nothing can ask for it any more,
    * so the tick and lookups stop walking it. Its reason stays in this process, which never
    * prepares, adopts or verifies the revision again, and the store's tombstone refuses it to any
-   * other worker. A Sandbox still there, or a failed read, is read again a refresh interval later.
+   * other worker. A Sandbox still there, or a failed read, is read again later, backing off. A
+   * Sandbox the route never observed may still be in creation: it must read absent twice.
    */
   private async release(entry: Entry): Promise<void> {
     const id = entry.revision.id;
-    const now = performance.now();
+    const last = entry.release;
     if (
       entry.previewClosure !== undefined ||
-      entry.sandboxId === undefined ||
       this.states.get(id)?.entry !== entry ||
-      now < (entry.nextObserveAt ?? 0)
+      performance.now() < (last?.at ?? 0)
     ) {
       return;
     }
-    entry.nextObserveAt = now + REFRESH_INTERVAL_MS;
     const signal = AbortSignal.any([
       this.stopped.signal,
       AbortSignal.timeout(this.observeTimeoutMs),
@@ -1942,10 +1951,20 @@ export class OpenShellGitRuntime {
       (box) => box !== undefined,
       () => true,
     );
-    if (!present && entry.blocked !== undefined && this.states.get(id)?.entry === entry) {
+    if (entry.blocked === undefined || this.states.get(id)?.entry !== entry) {
+      return;
+    }
+    if (!present && (entry.sandboxId !== undefined || last?.absent)) {
       this.entries.delete(id);
       this.states.set(id, { blocked: entry.blocked });
+      return;
     }
+    const reads = (last?.present ?? 0) + (present ? 1 : 0);
+    entry.release = {
+      at: performance.now() + Math.min(REFRESH_INTERVAL_MS * 2 ** reads, RELEASE_INTERVAL_CAP_MS),
+      present: reads,
+      ...(!present && { absent: true }),
+    };
   }
 
   /**

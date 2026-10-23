@@ -108,7 +108,8 @@ export interface OpenShellGitRouteStore {
   /**
    * True while the fence still names the holder; false once another worker took the route (or
    * it is gone). A route closed at this fence answers its reason instead: another worker
-   * withdrew the revision or expired its access, which leaves the fence where it was.
+   * withdrew the revision or expired its access, which leaves the fence where it was. Only
+   * `=== true` means held.
    */
   owns(revisionId: string, fence: number): Promise<boolean | OpenShellGitRouteBlockReason>;
   /** Closes the route for good (the first reason stays). False when the fence is stale. */
