@@ -34,6 +34,23 @@ protected OpenShell Git.
 **Steps.** Set the authority `host` to `0.0.0.0` and its `port` to the Helm
 value, or enable the chart listener, then upgrade again.
 
+## 2026-10-23: a repository broker peer needs the native sender
+
+**What breaks.** Startup and the chart's upgrade check refuse an Installation
+that sets `drivers.compute.configuration.network.repositoryCredentials` without
+`repository.nativeSender`. Earlier builds accepted it. Then every stop, retire
+and delete of an Agent with repository bindings listed Secrets that the worker
+may not list, and retried the 403 without end.
+
+**Who is affected.** Installations that switched from the native repository
+broker to protected OpenShell Git or an installed sender, and kept the peer.
+
+**How to tell.** The upgrade check or startup fails with
+`drivers.compute.configuration.network.repositoryCredentials requires repository.nativeSender; ...`.
+
+**Steps.** Delete `network.repositoryCredentials` from the Compute
+configuration, keep its other `network` settings, and upgrade again.
+
 ## 2026-10-16: stored model provider settings are checked at deploy
 
 **What breaks.** On every Compute, deploying or redeploying an Agent runs the

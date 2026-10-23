@@ -5642,6 +5642,19 @@ test(
     const gitId = configuration.drivers.sandbox.id;
     configuration.backend[0].drivers.credential_proxy = gitId;
     configuration.drivers.credential_proxy = { id: gitId, configuration: {} };
+    // A native broker peer left in Compute after a switch to protected Git would make every
+    // stop, retire and delete list repository material Secrets the chart no longer lets the
+    // worker list (finding 2212). Startup, and so the chart's upgrade check, refuses it.
+    const brokerPeer = structuredClone(configuration);
+    brokerPeer.drivers.compute.configuration.network.repositoryCredentials = {
+      namespace: "openclaw-system",
+      podLabels: { "app.kubernetes.io/component": "worker" },
+      port: 8443,
+    };
+    await assert.rejects(
+      loadInstallationFile(t, brokerPeer, { createOpenShellBackend: () => backendFor(gateway) }),
+      /drivers\.compute\.configuration\.network\.repositoryCredentials requires repository\.nativeSender/,
+    );
     // The chart routes openshellGit.port to the worker Pod's address, so a worker listener on
     // loopback, on another port, or without the chart listener is refused at startup and in the
     // upgrade check, not at the first Git request (finding 2213). This test binds the listener
