@@ -1734,7 +1734,7 @@ assert.equal(execFileSync(process.execPath, [bundledCommand, "--version"], {enco
 const provenance = JSON.parse(readFileSync("/opt/oce/runtime/provenance.json", "utf8"));
 assert.equal(provenance.source, "https://github.com/openclaw/openclaw");
 assert.equal(provenance.commit, ${JSON.stringify(GATEWAY_TOOL_POLICY_SOURCE_COMMIT)});
-assert.equal(provenance.sourceArchiveSha256, "1f49c8f716dd3a3c573ad73faaf286d988c49118fe55dda623c039475e93f580");
+assert.equal(provenance.sourceArchiveSha256, "7ca145909cd262bec9c8e2575fc0951c9367da61691bbadc75871461a84d4752");
 assert.equal(provenance.openclawBridgePatchSha256, "2e529593cb72c69be86cf7bb927aa555de50bc7ef923e80b37ba67df9bc1a624");
 assert.equal(Object.hasOwn(provenance, "openclawConnectPatchSha256"), false);
 assert.equal(provenance.codexDependencyPinPatchSha256, "686dcb3fcdd384150845f7af5b5f3bf46b2dc6ee24ab8f5b629b10566e18afd4");
