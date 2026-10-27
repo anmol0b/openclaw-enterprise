@@ -47,6 +47,7 @@
     "tests/integration/repository-credentials-server-timeout.test.mjs",
     "tests/integration/protected-repository-metadata-read.test.mjs",
     "tests/integration/repository-credentials-http.test.mjs",
+    "tests/integration/repository-original-lease.test.ts",
     "tests/integration/public-github-read-http.test.mjs",
     "tests/conformance/repository-credentials-fixture-ownership.test.mjs",
     "tests/integration/repository-credentials-projected-inputs.test.mjs",
@@ -383,6 +384,16 @@
     },
     {
       "path": "tests/integration/repository-credentials-http.test.mjs"
+    },
+    {
+      "path": "tests/integration/repository-original-lease.test.ts",
+      "expectedTests": [
+        "an owned exchange keeps its original lease through replacement and an injected standing callback fences the first write",
+        "standing denial prevents eager Expect headers",
+        "authentication rejection closes a pending dispatch",
+        "a confirmed TLS close before the first write is not dispatched",
+        "authentication rejection after the first write remains uncertain"
+      ]
     },
     {
       "path": "tests/integration/public-github-read-http.test.mjs"

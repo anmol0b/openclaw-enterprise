@@ -1,7 +1,7 @@
 ---
 created: "2026-09-17"
 updated: 2026-10-27
-last_updated_session: authoring-run/c791ff25-9d48-4b6a-b400-315fa09ba049
+last_updated_session: authoring-run/53fbc611-31df-40b6-b106-b4035812ccb6
 ---
 
 # Repository credential service flow
@@ -9,7 +9,7 @@ last_updated_session: authoring-run/c791ff25-9d48-4b6a-b400-315fa09ba049
 ## Overview
 
 Operators or workers admit sessions over a private Unix control socket.
-Each session has a maximum duration, and the service limits the number of sessions.
+Sessions have a maximum duration and a capped count.
 Clients send Git or selected API requests over HTTPS with a gateway bearer. This trace
 covers forwarding, closure and cleanup in the separate credential process. The
 [Agent flow](agent-repository-credentials.md) owns admission and material delivery.
@@ -39,7 +39,7 @@ graph TD
   Route -->|Denied| Denial["Local failure without private details"]
   Route -->|Admitted| Credential["Reuse valid credential<br/>or acquire and capture"]
   Credential -->|Uncertain issue| Blocked["Block minting<br/>retain cleanup obligation"]
-  Credential -->|Usable| Gate["Synchronous dispatch<br/>rechecks lease and deadline"]
+  Credential -->|Usable| Gate["Authorize first write<br/>recheck lease and deadline"]
   Gate --> Upstream["Upstream exchange with size limits and deadlines"]
   Upstream --> Result["Response or uncertainty<br/>without write replay"]
   Operator -->|Close| Closed["Deny local use<br/>cancel exchanges"]
@@ -113,21 +113,20 @@ this binding and independently resolves its fingerprint. The broker holds one
 local session slot and freezes the selected route before the worker-owned private
 journal reserves the original attempt. It constructs that route only after the
 reservation succeeds, using the original deadline. A capacity or shutdown refusal
-before reservation leaves no receipt. A missing or uncertain reservation creates no
+before reservation leaves no receipt; a missing or uncertain reservation creates no
 session. Recovery durably fences a missing admission. If the broker cannot open or
-bind after reservation, it fences its own reservation. A fence that does not commit stays
-with that admission, and the next open or recovery fences it; past the admission
-window a sweep retries it and forgets it once the fence commits, so it stops
-counting toward capacity. Known nondelivery closes the session.
+bind after reservation, it fences its own reservation. An uncommitted fence stays
+with its admission for the next open or recovery; past the admission window a sweep
+retries it and forgets it once committed, so it stops counting toward capacity.
+Known nondelivery closes the session.
 Reconciliation cannot recover a bearer, change its binding or replay provider work.
 
 The receipt and operator control clients reject private-socket replies over
-16,384 bytes before destroying the response.
+16,384 bytes and destroy the response without waiting for its end.
 [`RepositoryReceiptClient.call`](../../apps/controller/src/drivers/repo/credentials/receipt-client.ts)
 reports `RECEIPT_UNAVAILABLE`;
 [`callControl`](../../apps/controller/src/drivers/repo/github/credentials/client/operator.ts)
 retains the admission ID in `control-request-failed` and also closes the request.
-Neither waits for the oversized response to end.
 
 Factory failure or an invalid binding closes construction admission before
 `apps/controller/src/drivers/repo/credentials/custody.ts:disposeAllRenewal`.
@@ -150,8 +149,7 @@ canonical host, then emits deterministic rewrites and origin-scoped credential/T
 defaults. Exclusive no-follow creation writes staged `gitconfig`; the receiver
 rechecks deadlines and publishes atomically. Source does not qualify installed images or receivers.
 
-Stock Git reads the resulting include and owns its normal command/configuration
-semantics. On authentication,
+Stock Git reads the resulting include with its normal semantics. On authentication,
 `apps/controller/src/drivers/repo/github/credentials/client/git-helper.ts`
 parses credential protocol input of at most 16 KiB and verifies the embedded generation.
 `apps/controller/src/drivers/repo/github/credentials/client/targets.ts:selectGitCredential`
@@ -166,8 +164,8 @@ selects a binding from its explicit target, inherited pin or native Git remotes,
 and propagates the exact generation/reference/session pin to children.
 Before launching gh, the router and single-session launcher compare the private
 bearer and generated host configuration and check the deadline again after
-reading them. A mismatch or unsafe file refuses the launch. This preflight
-detects inconsistent material; it is not an atomic snapshot or authorization.
+reading them. A mismatch or unsafe file refuses the launch. This preflight is
+not an atomic snapshot or authorization.
 `apps/controller/src/drivers/repo/github/credentials/client/environment.ts:createClientEnvironment`
 keeps gh token/config isolation while preserving normal HOME and system Git
 configuration. `apps/controller/src/drivers/repo/github/credentials/client/commands.ts:prepareGhCommand`
@@ -216,38 +214,35 @@ buffers the body within the input bounds before credential use and refuses
 invalid JSON or any decoded string naming `tempCloneToken` with 400.
 
 `apps/controller/src/drivers/repo/credentials/service.ts:createCredentialService`
-reserves the exchange. Its
+reserves the exchange.
 `apps/controller/src/drivers/repo/credentials/lifecycle/exchange.ts:executeExchange`
-reuses sufficient credential validity or acquires replacement under common custody.
-Concurrent misses share acquisition in
+reuses a valid credential or acquires one through
 `apps/controller/src/drivers/repo/credentials/lifecycle.ts:createLifecycle`.
-The last departing waiter cancels it. Until settlement, acquisition-dependent
-requests return `not-dispatched` without new waiters or acquisitions. The original
-owner retains capture, settlement and cleanup obligations.
-Custody records the original monotonic timestamp and declared cleanup lifetime.
-After settlement, the use lifetime starts at that timestamp, capped by cleanup's
-deadline. Acceptance, reuse, dispatch and authentication honor the earlier deadline;
-cleanup retains separate expiry and callback drainage. Wall-clock changes cannot
-shorten custody or restart use lifetime.
-
+Concurrent misses share acquisition; the last departing waiter cancels it. Until
+settlement, dependent requests return `not-dispatched` without new acquisition.
+The original owner retains capture, settlement and cleanup obligations. Use
+lifetime starts at capture and cannot exceed cleanup expiry; wall-clock changes
+cannot shorten custody or restart use lifetime. An exchange retains its selected
+credential through replacement. Its selected authenticator gets a temporary copy,
+cleared after use; a reference alone cannot retrieve authentication bytes.
 Production native requests use
 `apps/controller/src/drivers/repo/github/credentials/warm-use.ts:authorizePreparedGitSend`.
 The worker validates the live grant and lends prepared material for that exchange.
 Missing or uncertain material does not cause request-time issuance. The explicit
 development token factory instead borrows its process-owned static token.
 
-The handler and sender independently capture their allowed upstream origins.
+Handler and sender capture allowed origins independently.
 `apps/controller/src/drivers/repo/credentials/transport/request-headers.ts:createUpstreamHeaders`
-validates adapter fields, rejects case-insensitive duplicates and reconstructs
-transport headers within the configured byte and field-count limits before dispatch. Credential bytes stay
-inside private adapter/sender callbacks. The sender's final-response-header wait
-starts after the input pipeline finishes within its size and time limits, unless headers have already
-arrived. Connection, upload, stall and total deadlines remain active in their
-respective phases. Upload-pack plans carry separate response byte, first-header,
-stall and total budgets; discovery, receive-pack and API requests retain their
-ordinary limits. The service caps every plan by `maxExchangeMs` and the session
-deadline. Static-token plans also cap upload-pack to the available lease. The
-streaming byte counter applies backpressure without buffering the pack.
+validates adapter fields within byte and field-count limits, rejects case-insensitive
+duplicates, and removes reserved fields such as `Expect` before request construction.
+After verified TLS, owned exchanges recheck configured standing before first write.
+Prepared sends check their original one-use permit, cancellation and send deadline
+there. Gate denial or confirmed pre-write socket close prevents HTTP writes. The response-header timer starts
+after upload unless headers arrived. Connection, upload, stall and total deadlines
+apply. Upload-pack has separate response-byte, first-header, stall and total
+budgets; other requests retain ordinary limits. Every plan obeys `maxExchangeMs` and
+the session deadline; static-token upload-pack also obeys its lease. The byte counter
+applies backpressure without buffering the pack.
 
 ### 5. Deliver an outcome and release ownership
 
@@ -277,13 +272,12 @@ I/O, then sends fixed `502 exchange-uncertain` after settlement. Cancellation,
 deadlines, input failure and post-header failure destroy the incoming connection,
 including later cancellation while error delivery remains owned.
 
-`apps/controller/src/drivers/repo/credentials/lifecycle/exchange.ts:executeExchange` joins
-tracked I/O before releasing credential use and returning exchange capacity to
-the service owner. Transport returns completed, not-dispatched or
-possibly-dispatched outcomes. The handler ignores response `close` after
-`writableFinished`; premature close cancels the exchange. Possibly dispatched
-mutations have no automatic replay. Original provider settlement and cleanup
-ownership outlive outward requests.
+`apps/controller/src/drivers/repo/credentials/lifecycle/exchange.ts:executeExchange`
+closes a rejecting authenticator's gate, drains its admitted sender, then classifies
+the result: completed, not-dispatched or possibly-dispatched. Committed writes stay
+possibly dispatched and are never replayed. The exchange joins tracked I/O before releasing credential use and capacity. The handler
+ignores response `close` after `writableFinished`; premature close cancels the
+exchange. Original provider settlement and cleanup outlive requests.
 
 ### 6. Close locally and finish cleanup
 
@@ -306,9 +300,9 @@ Only a committed observation survives restart. Uncommitted or uncertain
 provider inventory remains unknown. The original issuer retains token cleanup;
 the sender closes its TLS and session material after shutdown disposition.
 
-Failed construction custody also participates in shutdown drainage. Its
-pending obligation contributes to `pendingAuxiliary` without inventing a
-published or disposed session; disposal wakes the shutdown waiters.
+Failed construction custody joins shutdown drainage: its pending obligation
+counts in `pendingAuxiliary` without a published or disposed session; disposal
+wakes shutdown waiters.
 
 ## Emitted packaging
 
@@ -358,7 +352,11 @@ client and alternate-adapter checks; live-provider behavior requires separate qu
 
 ## Changelog
 
+- 2026-10-27 14:02: Classify failed authentication after sender drainage. (authoring-run/53fbc611-31df-40b6-b106-b4035812ccb6 - 9d53c40b47afc7915d22a011ba721a880101b5ba)
+
 - 2026-10-27 13:43: Reserve the original attempt before constructing the selected prepared route. (authoring-run/c791ff25-9d48-4b6a-b400-315fa09ba049 - af7b0b904719bc1e1b238985d3db7cda8a3f7515)
+
+- 2026-10-27 13:13: Preserve the selected exchange credential through rotation and authorize the first write. (authoring-run/1d86daf8-5e6c-47f3-b6b2-624ef2b23f37 - 852146b8faea0fd083abd2255190eed5c0e5f43d)
 
 - 2026-10-27 11:09: Separate prepared startup from development authority and defer listener admission until socket setup completes. (authoring-run/51557b14-ec25-4b33-98f2-b5a16d00d6ea - 0418ef3a2c116b73f025281395d92477daf665d2)
 
