@@ -223,14 +223,12 @@ broker blocks both. The check proves neither journal availability, absence nor
 disposal; recovery, closure and runtime retirement do not depend on it.
 
 Platform admission binds `namespaceId`, `repositoryRef`, normalized `profile`,
-`expectedBinding` and `deadlineWallMs` to the persisted attempt. The worker's
-private receipt socket commits a reservation before the broker constructs the
-selected prepared route and releases a bearer.
-A recovery-only lookup can durably fence a missing admission; a reservation or
-active session without a confirmed terminal receipt remains unknown. Only the
-original broker can record its exact `DISPOSED` result. Receipts contain no
-credentials and remain with attempt history. Journal failure prevents new bound
-admission and cannot establish absence or disposal.
+`expectedBinding` and `deadlineWallMs` to the persisted attempt. The worker's private
+receipt socket reserves before the broker constructs the selected route or releases a
+bearer. Recovery can durably fence a missing admission; unconfirmed reservations,
+active sessions and disposals remain unknown. Only the original broker records its
+exact `DISPOSED` result. Credential-free receipts remain with attempt history.
+Journal failure prevents new bound admission and proves neither absence nor disposal.
 
 Unseen IDs must be under 60 seconds old and never future-dated. Process-local
 correlations stop at twice the session limit and can return `overloaded`;
@@ -248,8 +246,9 @@ of provider clock skew and stops authentication before reported expiry. Cleanup 
 its one-hour bound from local receipt. A forward wall-clock change can deny authentication
 but cannot prove remote expiration.
 
-Closing or expiry immediately prevents new use and cancels owned exchanges. `CLOSED`
-does not prove revocation. Private control status distinguishes pending, revoked,
+Closing or expiring a session prevents use and cancels owned exchanges. Status observes
+expiry without cancellation or cleanup; clock rollback cannot restore use, including
+reserved exchanges. `CLOSED` does not prove revocation. Private control status distinguishes pending, revoked,
 expired and uncertain credentials and auxiliary cleanup.
 `DISPOSED` requires settled actions, resolved access-token obligations and
 completed auxiliary finalization; historical revoked/expired counters may remain
