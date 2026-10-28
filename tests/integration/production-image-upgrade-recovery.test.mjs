@@ -481,9 +481,15 @@ async function fakeCommand(root, { command: tool, args, cwd }, io) {
         status: "Success",
         message: "private-delete-response-marker",
       });
-    } else if (resource?.startsWith("pod/") && args.includes("get") && state.revisionPods) {
-      // The revision's Pods after a scripted eviction or replacement: a read by name
-      // finds a Pod that still exists, ended or not, as the Kubernetes API does.
+    } else if (
+      resource?.startsWith("pod/") &&
+      args.includes("get") &&
+      state.revisionPods &&
+      !(resource.slice("pod/".length) in state.preflight.pods)
+    ) {
+      // The revision's Pods, as scripted (a dedicated Agent's two) or after an eviction or
+      // replacement: a read by name finds a Pod that still exists, ended or not, as the
+      // Kubernetes API does. The startup preflight's Pods are read below.
       const pod = state.revisionPods.find((item) => "pod/" + item.metadata.name === resource);
       if (!pod) {
         return fail(1, `Error from server (NotFound): pods "${resource.slice(4)}" not found`);
@@ -2010,6 +2016,80 @@ test("a gateway changed after a passing Doctor fails the upgrade and resume chec
   );
   assert.match(failure.stderr, /OpenClaw Doctor failed for at least one replacement gateway/);
   assert.doesNotMatch(failure.stdout, /Upgraded/);
+  // A dedicated Agent serves through its gateway and Codex agent Pods, and the readiness
+  // wait requires both. Node memory pressure during the Doctors evicts only the agent Pod
+  // (finding 2755): Doctor in the untouched gateway passes, but the upgrade must name the
+  // agent Pod instead of reporting success, and resume checks the replacement.
+  const agentPod = ({
+    name = "agent",
+    uid = "agent-uid",
+    phase = "Running",
+    ready = true,
+  } = {}) => ({
+    metadata: { namespace: "tenant", name, uid },
+    spec: { containers: [{ name: "agent", image: runtime }] },
+    status: {
+      phase,
+      ...(phase === "Failed" ? { reason: "Evicted" } : {}),
+      conditions: [{ type: "Ready", status: ready ? "True" : "False" }],
+      containerStatuses: [{ name: "agent", restartCount: 0, lastState: {} }],
+    },
+  });
+  const dedicated = await fixture(t, {
+    inventoryNamespaces: [
+      {
+        id: "ns_test",
+        status: "ready",
+        agents: [
+          {
+            id: "agt_test",
+            status: "active",
+            desiredRuntimeState: "running",
+            executionMode: "dedicated",
+            activeRevisionId: "rev_old",
+            deploymentInProgress: false,
+          },
+        ],
+      },
+    ],
+  });
+  const dedicatedState = await dedicated.state();
+  dedicatedState.revisionPods = [pod(), agentPod()];
+  dedicatedState.afterDoctor = {
+    revisionPods: [
+      pod(),
+      agentPod({ phase: "Failed", ready: false }),
+      agentPod({ name: "agent-2", uid: "agent-2-uid" }),
+    ],
+  };
+  await writeFile(join(dedicated.directory, "state.json"), JSON.stringify(dedicatedState));
+  const agentFailure = await dedicated.run().then(
+    () => assert.fail("an agent Pod evicted during Doctor must stop the upgrade"),
+    (stopped) => stopped,
+  );
+  assert.match(
+    agentFailure.stderr,
+    /Agent agt_test's agent Pod tenant\/agent was evicted \(phase Failed\) after it became Ready for OpenClaw Doctor\./,
+  );
+  assert.doesNotMatch(agentFailure.stderr, /gateway Pod tenant\/gateway|OpenClaw Doctor failed/);
+  assert.match(agentFailure.stderr, /did not stay on the same Ready Pod without restarts/);
+  assert.doesNotMatch(agentFailure.stdout, /Upgraded/);
+  const resumedDedicated = await dedicated.run("--resume");
+  assert.match(resumedDedicated.stdout, /Upgraded runtime image/);
+  assert.equal((await dedicated.state()).dispatches, 1);
+  const [dedicatedTarget] = (
+    await readFile(join(dedicated.evidence, "doctor-targets.jsonl"), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    dedicatedTarget.revisionPods.map(({ role, name }) => [role, name]),
+    [
+      ["gateway", "gateway"],
+      ["agent", "agent-2"],
+    ],
+  );
 });
 
 // Doctors in several gateways on one node can together exhaust its memory, so they run
