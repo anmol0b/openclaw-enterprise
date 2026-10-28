@@ -2065,7 +2065,7 @@ export const scenarios = {
     steps: [
       "Review the reminder before deployment: catalog availability does not confirm linked credentials, and OCE policies do not configure them.",
       "Open Plugin selections JSON and confirm that Calendar has only enabled: true; presentation links and setup guidance are not stored in selections.",
-      "Reopen Configure plugins, remove Calendar, and click Done. With no configured plugins, the reminder is hidden.",
+      "Reopen Configure plugins, open More actions on Calendar, choose Remove Calendar, and click Done. With no configured plugins, the reminder is hidden.",
     ],
     gap: pluginDiscoveryGap,
   },
@@ -2393,9 +2393,10 @@ export const scenarios = {
     actions: [
       click("Configure plugins"),
       { selector: 'button[aria-label="Google Workspace"]', click: true },
+      click("Add Google Workspace"),
     ],
     description:
-      "Select the package for installation. The fixture simulates the catalog and does not deploy an Agent.",
+      "Toggle Enable plugin. Open More actions to find Remove Google Workspace. Compare the Plugin policies, Driver policy, and Tools sections. Each shows which settings Google Workspace supports. This fixture simulates the catalog.",
   },
   pluginsNativeLimited: {
     group: "Components/Plugins",
@@ -4644,7 +4645,7 @@ export const scenarios = {
       "The first catalog page loads in the background when the Plugins tab opens, using the saved Service Accounts token. Open Configure plugins to review Calendar's saved policy.",
       "Open Calendar and inspect the tool IDs beneath their titles. Type create into Filter tools, then clear it; filtering should keep the cursor in the search box.",
       "In Available, select Calendar, filter tools by create, and expand Create event. Switch to Configured, filter plugins by Calendar, and choose Calendar with a different tool filter. Round-trip the tabs: each keeps its selection, query, tool filter, and expanded rows without another catalog request.",
-      "Remove Calendar from Configured: its details clear even though Available still lists it. Add Calendar again from Available; Configured must not restore the removed detail state.",
+      "In Configured, open More actions and choose Remove Calendar. Its details clear even though Available still lists it. Add Calendar again from Available; Configured must not restore the removed detail state.",
       "In Configure plugins, change Calendar's tool policy, add Documents from the next page, and select Done.",
       "Select Save plugin selections. The tab updates in place: the page keeps its scroll and focus moves to Plugin selections saved. Then select Deploy new version and compare the new version with the earlier immutable plugin snapshot.",
     ],
