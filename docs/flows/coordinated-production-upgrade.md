@@ -1,7 +1,7 @@
 ---
 created: 2026-09-23
 updated: "2026-10-28"
-last_updated_session: "authoring-run/f03f716e-ea13-48ab-ad6e-e179b342d585"
+last_updated_session: "authoring-run/bf262f39-fa9d-4e70-94e1-e2fc516234e9"
 ---
 
 # Production image upgrade flow
@@ -92,16 +92,20 @@ not Kubernetes image availability, receipt durability, or disposal. The helper
 preserves the live broker hostname; broker restart recovery remains an operator
 task in the [broker procedure](../guides/repository-credentials/installation.md#install-and-verify).
 
-After rendering the chart and running a server-side Helm dry run,
+After rendering and a server-side Helm dry run,
 [`scripts/upgrade-startup-preflight.mjs`](../../scripts/upgrade-startup-preflight.mjs)
-copies rendered API and worker Pod templates (selected controller image, env,
-mounts, service account) into one-shot Pods whose Installation volume uses a
-temporary candidate Secret. Each runs `loadStartupConfigurationSnapshot` and
-`loadInstallationConfiguration`, resolving Drivers and Preset files without the
-database. On a typed configuration refusal,
-`apps/controller/src/startup-failure.ts:formatStartupConfigurationFailure` prints
-up to 32 field diagnostics through the API/worker log filter. The helper saves
-the paths and messages in component logs before stopping writers.
+copies API and worker templates into one-shot Pods with the image,
+environment, mounts and service account; the Installation mount uses a temporary
+candidate Secret.
+
+An API Pod with a theme first calls
+`apps/controller/src/composition/console-theme.ts:loadConsoleTheme`. Invalid bundles
+stop preflight; workers do not load themes. Both call
+`loadStartupConfigurationSnapshot` and `loadInstallationConfiguration` to resolve
+Drivers and Preset files without opening the database.
+`apps/controller/src/startup-failure.ts:formatStartupConfigurationFailure` formats
+typed configuration refusals with up to 32 field diagnostics through the API/worker
+log filter. The helper saves logs before writers stop.
 
 With the bundled Kubernetes Compute Driver, each Pod runs
 `KubernetesComputeDriver.preflight` with its Kubernetes credentials (its service
@@ -325,6 +329,8 @@ The check does not separate resources an older import already merged.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-28 21:01: Check API themes before writer quiescence. (authoring-run/bf262f39-fa9d-4e70-94e1-e2fc516234e9 - 304fcfb169bc8403794e8562a08b1e3ee4cc23ac)
 
 - 2026-10-28 06:40: Check every revision Pod, not only the gateway, after Doctor. (fix-2755)
 - 2026-10-28 05:40: Check gateways after failed Doctors. (bughunt-1028)
