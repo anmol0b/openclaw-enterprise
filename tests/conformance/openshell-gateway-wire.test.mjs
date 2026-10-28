@@ -1587,15 +1587,16 @@ test("OpenShell client names only an unanswered gateway request a Sandbox gatewa
   await assert.rejects(forwarded.health(AbortSignal.timeout(5_000)), ordinary);
   let closed;
   for (const deadline = Date.now() + 10_000; closed === undefined && Date.now() < deadline;) {
-    try {
-      await forwarded.health(AbortSignal.timeout(5_000));
-    } catch (error) {
-      if (error instanceof SandboxGatewayUnavailableError) {
-        closed = error;
-      } else {
-        ordinary(error);
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+    const error = await forwarded.health(AbortSignal.timeout(5_000)).then(
+      () => null,
+      (cause) => cause,
+    );
+    assert.notEqual(error, null, "a stale forward's health retry must not succeed");
+    if (error instanceof SandboxGatewayUnavailableError) {
+      closed = error;
+    } else {
+      ordinary(error);
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
   assert.ok(closed !== undefined, "a closed forward must read as an outage");
