@@ -2128,7 +2128,7 @@ test("Namespaces rows open their Agents and status badges use words with a tone"
   for (const [namespace, label, tone] of [
     [ready, "Ready", "success"],
     [provisioning, "Provisioning", "warning"],
-    [retiring, "Deleting", "warning"],
+    [retiring, "Deleting…", "warning"],
   ]) {
     const row = list.getByRole("listitem").filter({ hasText: namespace.id });
     const link = row.getByRole("link", { name: namespace.name, exact: true });

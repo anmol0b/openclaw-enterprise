@@ -829,6 +829,10 @@ export const NamespaceCallerPermissionsResponse = Type.Object(
   {
     data: Type.Object(
       {
+        delete: Type.Boolean({
+          description:
+            "Whether the selected IAM Driver allows deletion of this exact Namespace now. Advisory only: remaining resources, required Preset deletion permissions, or a later authorization decision can still prevent deletion.",
+        }),
         agents: Type.Object(
           {
             create: Type.Boolean({
