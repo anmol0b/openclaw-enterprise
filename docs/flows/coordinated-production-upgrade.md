@@ -282,20 +282,21 @@ begins with the read-only `scripts/split-layout-tenants.mjs export --out FILE`.
 Its `createOccApi.expect` requires a data envelope for each successful resource
 response before `exportTenants` assembles the bundle. Malformed JSON, an empty
 body, or a missing data envelope causes export to exit nonzero before `main`
-writes the bundle; an actual empty collection remains valid. After restoring
-the API response path, the operator retries the read and checks the exported
-inventory before proceeding with recovery. Empty
-204 deletes and explicitly accepted 404 responses retain their existing meaning.
+writes the bundle; an actual empty collection remains valid. Restore the API
+response path, retry the read, and check exported inventory before recovery. Empty 204 deletes
+and explicitly accepted 404 responses retain their meaning.
 
-On re-creation, `importTenants` filters skipped sources and checks that each
-selected source Namespace has a distinct target name. Saved destination IDs
-remain reserved even when their sources are skipped. It combines those IDs with
-selected unsaved sources resolved from live names, and rejects shared destinations
-before any mutation or ID-map save. The operator
-chooses distinct `--rename` targets, skips a source, or corrects a conflicting
-saved map before retrying. A one-to-one mapping can still reuse an empty target
-and resume. A skipped source without a saved destination reserves nothing.
-The check does not separate resources an older import already merged.
+On re-creation, `importTenants` requires distinct target names for selected
+Namespaces. Saved destination IDs stay reserved even for skipped sources; skipped
+sources without saved destinations reserve nothing. The importer resolves selected
+unsaved targets by live name and rejects shared destinations before any mutation or ID-map
+save. Choose distinct `--rename` targets, skip a source, or correct the saved map
+before retrying. Saved mappings resume after validation. Previously merged
+resources stay merged.
+
+`--rename` keys are literal: `constructor` and `__proto__` remain unchanged unless
+renamed. Without a saved mapping, exact-name reuse requires a Namespace without
+Agents or Secrets.
 
 ## Debugging and Verification
 
