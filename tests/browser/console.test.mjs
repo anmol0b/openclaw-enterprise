@@ -36,6 +36,7 @@ import {
 import { temporaryDirectory } from "../helpers/temporary-directory.mjs";
 import {
   NO_READABLE_NAMESPACES,
+  NAMESPACE_UNAVAILABLE,
   WORKSPACE_FILES_UNAVAILABLE,
   SIGN_IN_UNAVAILABLE,
 } from "../helpers/refusal-text.mjs";
@@ -728,7 +729,7 @@ test("Agents with no readable Namespace names it once and keeps one Refresh", as
     [
       `/console/agents?namespace=${granted.id}`,
       "Namespace unavailable",
-      "This Namespace is missing or not shared with you, and you cannot read any other Namespace. Ask an Installation administrator to give you access to one, then Refresh.",
+      `${NAMESPACE_UNAVAILABLE}, and you cannot read any other Namespace. Ask an Installation administrator to give you access to one, then Refresh.`,
       "Unavailable",
     ],
     // An Agent bookmark in that Namespace kept the Agent page's header above the panel: the
@@ -737,7 +738,7 @@ test("Agents with no readable Namespace names it once and keeps one Refresh", as
     [
       `/console/agents/${agent.id}?namespace=${granted.id}`,
       "Namespace unavailable",
-      "This Namespace is missing or not shared with you, and you cannot read any other Namespace. Ask an Installation administrator to give you access to one, then Refresh.",
+      `${NAMESPACE_UNAVAILABLE}, and you cannot read any other Namespace. Ask an Installation administrator to give you access to one, then Refresh.`,
       "Unavailable",
     ],
   ]) {
