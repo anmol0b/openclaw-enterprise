@@ -226,18 +226,19 @@ outside the Agent's Namespace or to a Configuration whose `kind` is not
 permission for the exact referenced Configuration. Deployment deeply
 snapshots its admitted native document, including unresolved inline SecretRefs,
 into the `AgentRevision.configuration` field and records
-`configurationId`, `configurationKind`, and `configurationGeneration` as
-separate Agent revision fields. A selected [SandboxDriver](drivers/sandbox.md) may
+`configurationId`, `configurationKind`, and `configurationGeneration` beside
+it. A selected [SandboxDriver](drivers/sandbox.md) may
 transform a copy through `configureAgent` before admission; the reusable
 Configuration and its generation remain unchanged. The snapshot adds the
 [Agent display name](agents/deployment.md#versions-and-deployment) to that document;
 its metadata names the source generation. Admission also sets
-`messages.queue.allowCollaborativeSteering: false` and
-`tools.exec.applyPatch.workspaceOnly: true` where the document leaves them
-unset, the values from before OpenClaw's `personal` security preset.
-Subsequent Configuration updates do not change a
-running gateway or existing version; only a later explicit deployment observes
-the next generation. Deleting a Configuration still referenced by an Agent
+`tools.exec.applyPatch.workspaceOnly: true` where the document leaves it
+unset, as before OpenClaw's `personal` security preset. Other unset settings
+keep the preset's defaults: `messages.queue.allowCollaborativeSteering` is on,
+so other participants can steer a running turn, which keeps its first
+requester's permissions.
+Later Configuration updates change no running gateway or existing version
+until the next deployment. Deleting a Configuration still referenced by an Agent
 returns `409`.
 
 Native OpenClaw provider settings in `values.channels` follow the same
