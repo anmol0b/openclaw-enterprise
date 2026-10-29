@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
-updated: 2026-10-28
-last_updated_session: fix-3285
+updated: 2026-10-29
+last_updated_session: authoring-run/84c88245631c4882bd93c2140e0f313b
 ---
 
 # Console Agent editing and runtime requests
@@ -204,21 +204,21 @@ selection; redeployment applies it. See
 [Slack policies](../../reference/configuration/secrets.md#native-channel-configuration).
 
 `apps/controller/src/console/agents/detail.mts:renderAgentDetail` supplies Namespace,
-bindings, and Credentials URL to `channels/slack.mjs:credentialReferenceField`.
-It loads `GET /namespaces/:namespaceId/secrets`; Namespace read is required.
-`packages/occ/src/index.ts:listSecrets` filters records by exact Secret read
-without calling the Secret Driver. Shared `agents/secret-picker.mjs:createSecretReferenceField`
-filters names/IDs in a combobox. Arrows navigate, Enter selects, and Escape
-restores the binding. Typing stages nothing; selection stages a reference,
-Cancel discards it. A false Namespace `secrets.create` disables creation, with its reason;
-drawer hints and Preset Secret sources then offer only existing Secrets. **Save configuration**
-stays disabled until a field or binding changes.
-On the Agent page, `GET .../agents/:agentId/permissions/secrets` lists readable Secrets the
-caller may not `operate`; each is disabled with its reason and never staged. A refused binding
-save rereads it to name such a Secret; an inline create rereads it before staging.
-When it lists any Secret, `operate` is granted per Secret and a new Secret has none: creation is
-disabled with that reason and drawer hints offer only existing Secrets, as the Preset's **Create
-new Secret** is. A failed reread keeps the last answer.
+bindings and Credentials URL to `channels/slack.mjs:credentialReferenceField`.
+`GET /namespaces/:namespaceId/secrets` requires Namespace read;
+`packages/occ/src/index.ts:listSecrets` filters exact Secret read without the Secret Driver.
+`agents/secret-picker.mjs:createSecretReferenceField` filters names/IDs. Arrows navigate,
+Enter selects, Escape restores, Cancel discards; typing stages nothing, selection stages references.
+**Refresh Secret list** preserves query, focus, staged fields and highlighted IDs across reordering;
+vanished highlights require new intent. It retries metadata, never saves; pending reads disable refresh.
+When a selection waits for permission, a refused list clears readable metadata and prevents that
+selection from staging. The completed refresh clears its loading hint without replacing newer feedback.
+False Namespace `secrets.create` disables creation with reasons and existing-only drawer/Preset hints.
+**Save configuration** requires changed fields/bindings.
+`GET .../agents/:agentId/permissions/secrets` lists readable but inoperable Secrets, disabled with
+reasons, never staged. Refused binding saves reread it; inline creation rereads before staging.
+Any listed denial means per-Secret operate: new Secrets have none, disabling picker/Preset
+creation with reasons and existing-only hints. Failed rereads keep prior answers.
 
 `apps/controller/src/console/agents/secret-picker.mjs:openCreateSecretDialog` shows
 an editable Agent-prefixed Name, the Secrets page's `secretValueControl` (CRLF becomes LF),
@@ -343,6 +343,8 @@ Moved to [Agent stop and deletion](agent-stop-and-deletion.md#8-confirm-deletion
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-29 03:49: Clear a completed Secret refresh hint while selection permission is pending. Accompanying uncommitted changes. (authoring-run/84c88245631c4882bd93c2140e0f313b - b81139ddfe086aca0e4da4eb5b9feedc8ac39d67)
 
 - 2026-10-28 13:53: Keep the reader’s fold through routine polls and show failed record checks outside it. (fix-3285 - 14f6d94db)
 
