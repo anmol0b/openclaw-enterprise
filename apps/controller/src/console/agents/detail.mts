@@ -1795,6 +1795,8 @@ export async function renderAgentDetail(
   // Shown once by the tab a draft refresh rebuilds after a save (finding 1445).
   let savedNotice = "";
   let activityPanel = deploymentStatus;
+  let invalidateActivity: ((cause: unknown) => void) | undefined;
+  let acceptActivity: ((record: AgentDeploymentStatusWire) => void) | undefined;
   let activityRevisionId: string | null | undefined;
   let viewedSnapshot: Snapshot | null = null;
   let detailLoadFinished = false;
@@ -2339,16 +2341,16 @@ export async function renderAgentDetail(
         label ?? (latestDeploymentUnavailable ? "Unavailable" : "Loading…"),
         latestDeploymentStatus ? DEPLOYMENT_OUTCOME_TONES[latestDeploymentStatus] : undefined,
       );
-      setText(
-        latestDeploymentNote,
-        neutral
-          ? latestDeploymentStatus === "stopped"
+      let note = latestDeploymentUnavailable ? "Update delayed." : "Latest update received.";
+      if (neutral) {
+        note =
+          latestDeploymentStatus === "stopped"
             ? `${NEUTRAL_DEPLOYMENT_NOTES.stopped}. Deploy a new version when you want it running.`
-            : `${NEUTRAL_DEPLOYMENT_NOTES.superseded}.`
-          : latestDeploymentStatus
-            ? ""
-            : "Recorded deployment status could not be read.",
-      );
+            : `${NEUTRAL_DEPLOYMENT_NOTES.superseded}.`;
+      } else if (!latestDeploymentStatus) {
+        note = "Recorded deployment status could not be read.";
+      }
+      setText(latestDeploymentNote, note);
     }
     const mayBeOffline = replacementFailed || selectedFailed;
     setLiveServing(mayBeOffline);
@@ -2549,6 +2551,7 @@ export async function renderAgentDetail(
     );
     const mostRecent = revisions[0];
     if (activityRevisionId !== (mostRecent?.id ?? null)) {
+      activityRevisionId = mostRecent?.id ?? null;
       // The version's record panel no longer gets this panel's reads.
       versionRecord?.release();
       latestDeploymentStatus = null;
@@ -2574,9 +2577,13 @@ export async function renderAgentDetail(
           revealDetail,
         );
       };
-      const nextPanel: HTMLElement = mostRecent
+      const nextActivity = mostRecent
         ? createDeploymentStatusPanel(
-            { ...context, failureText: (error) => recordedFailureText(error, mostRecent.id) },
+            {
+              ...context,
+              isCurrent: () => context.isCurrent() && activityRevisionId === mostRecent.id,
+              failureText: (error) => recordedFailureText(error, mostRecent.id),
+            },
             path,
             mostRecent,
             (freshAgent, freshRevisions) =>
@@ -2593,7 +2600,14 @@ export async function renderAgentDetail(
               overviewUnavailable,
               transientFailure,
             }) => {
-              if (activityRevisionId !== mostRecent.id) {
+              if (
+                !context.isCurrent() ||
+                activityRevisionId !== mostRecent.id ||
+                (record &&
+                  (record.deploymentId !== mostRecent.id ||
+                    record.namespaceId !== namespaceId ||
+                    record.agentId !== agentId))
+              ) {
                 return;
               }
               showPanel(nextPanel, status === "failed");
@@ -2618,7 +2632,7 @@ export async function renderAgentDetail(
               if (mostRecent.id === selected) {
                 // Share success and failure only with this same selected version.
                 if (record) {
-                  versionRecord?.show(record);
+                  versionRecord?.show(record, readError);
                 } else {
                   versionRecord?.fail(readError);
                 }
@@ -2636,23 +2650,28 @@ export async function renderAgentDetail(
             // opens the details as any new outcome does.
             firstLoad ? () => detailShown : undefined,
           )
-        : element(
-            "section",
-            // With no versions the card would repeat the facts' "No readable deployments", so it
-            // stays out of the way of the draft's next step (UX spec 3.7).
-            {
-              className: "agent-card deployment-status",
-              hidden: revisionResult.status !== "rejected",
-            },
-            element("h2", {}, "Deployment activity"),
-            element(
-              "p",
-              { className: "muted" },
-              revisionResult.status === "rejected"
-                ? "Version history is unavailable."
-                : "No readable deployment records.",
-            ),
-          );
+        : null;
+      invalidateActivity = nextActivity?.invalidate;
+      acceptActivity = nextActivity?.accept;
+      const nextPanel: HTMLElement =
+        nextActivity ??
+        element(
+          "section",
+          // With no versions the card would repeat the facts' "No readable deployments", so it
+          // stays out of the way of the draft's next step (UX spec 3.7).
+          {
+            className: "agent-card deployment-status",
+            hidden: revisionResult.status !== "rejected",
+          },
+          element("h2", {}, "Deployment activity"),
+          element(
+            "p",
+            { className: "muted" },
+            revisionResult.status === "rejected"
+              ? "Version history is unavailable."
+              : "No readable deployment records.",
+          ),
+        );
       if (!mostRecent || !firstLoad) {
         showPanel(nextPanel);
       }
@@ -2665,7 +2684,6 @@ export async function renderAgentDetail(
         },
         true,
       );
-      activityRevisionId = mostRecent?.id ?? null;
       versionRecord?.render();
     }
     renderLatestDeployment();
@@ -2783,6 +2801,22 @@ export async function renderAgentDetail(
         selected,
         {
           shared: activityRevisionId === selected,
+          onRefused: (cause) => {
+            if (context.isCurrent() && activityRevisionId === selected) {
+              invalidateActivity?.(cause);
+            }
+          },
+          onFreshRecord: (record) => {
+            if (
+              context.isCurrent() &&
+              activityRevisionId === selected &&
+              record.deploymentId === selected &&
+              record.namespaceId === namespaceId &&
+              record.agentId === agentId
+            ) {
+              acceptActivity?.(record);
+            }
+          },
           hasVisibleReadError: (cause) => {
             if (activityRevisionId !== selected || !latestDeploymentUnavailable) {
               return false;
@@ -2821,7 +2855,7 @@ export async function renderAgentDetail(
       versionEvidence.append(...versionRecord.panels);
       versionRecord.setFailureShownAbove(recoveryRevisionId === selected);
       if (latestDeploymentRecord?.deploymentId === selected) {
-        versionRecord.show(latestDeploymentRecord);
+        versionRecord.show(latestDeploymentRecord, latestDeploymentReadError);
       } else if (activityRevisionId === selected && latestDeploymentUnavailable) {
         versionRecord.fail(latestDeploymentReadError);
       }

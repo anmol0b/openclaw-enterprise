@@ -5368,9 +5368,10 @@ export const scenarios = {
     description:
       "One deployment status read fails while v7 is deploying. The notice keeps Deploying version rather than turning Historical, polling continues, and the next read records success and makes v7 current. The deployment, failure and activation are simulated.",
     steps: [
-      "Open Deployment before the first poll, choose folded or expanded details, and Tab to Run diagnostics for this version. The transient failure preserves that choice and the visible focused control; the selected record clears its old outcome and shows the error outside the fold. Reset to repeat the other choice. The later completion is a terminal result, not routine pending recovery.",
-      'On arrival the notice begins "Deploying version". Within about 5 s Latest visible deployment reads "v7 · Unavailable" and the notice still begins "Deploying version".',
+      "Open Deployment before the first poll, choose folded or expanded details, and Tab to Run diagnostics for this version. The transient failure preserves that choice and the visible focused control; the selected record retains its outcome with an update-delayed label. Expanded activity keeps the last readable progress and labels the delayed update without an alert. Repeat without focusing a control: the summary must stay in place. Reset to repeat the other choice. The later completion is a terminal result, not routine pending recovery.",
+      'On arrival the notice begins "Deploying version". Within about 5 s Latest visible deployment keeps "v7 · In progress" with "Update delayed" in its existing status line and the notice still begins "Deploying version".',
       'Within about 10 s the notice begins "Current version" and Selected for service reads v7, with no "Historical version" in between.',
+      "After completion, hover and focus Refresh deployment, then press Enter. The hovered fill and focus stay while the busy control blocks another Enter; the selected version and tab stay unchanged.",
     ],
   },
   deploymentDeferred: {
@@ -5911,6 +5912,7 @@ export const scenarios = {
       "Watch v7 change from running to failed. The recovery card then leads the page, as it does on a reload, and Deployment details fold under it. The deployment and failure are simulated.",
     steps: [
       'On arrival v7\'s Configuration tab notice begins "Deploying version". Once v7 reads Failed, it begins "Failed version" and Selected for service still reads v6.',
+      "Repeat after reloading: focus Refresh record and press Enter before the next poll. Completion must also refresh the overview while preserving focus.",
       'Once v7 fails, "Deployment failed · v7" is the first card and Deployment details are folded. Open them: they show the failure\'s record and stay open.',
     ],
   },
@@ -6164,6 +6166,31 @@ export const scenarios = {
       "Focus Refresh record and press Enter. While Refreshing… is shown, the button keeps focus and repeated Enter or Space does not start another read. Completion leaves focus on Refresh record.",
       "Refresh again and press Tab before the response arrives. Completion leaves focus on the control you moved to.",
     ],
+  },
+  deploymentRecordRefused: {
+    group: "Pages/Agent detail",
+    name: "Selected record refusal clears shared evidence",
+    path: `${candidateVersion}&tab=deployment`,
+    deployed: true,
+    candidateDeploymentStatus: "succeeded",
+    rules: [
+      {
+        method: "GET",
+        suffix: "/deployments/rev_00000000-0000-4000-8000-000000000007",
+        skip: 1,
+        once: true,
+        status: 403,
+        code: "FORBIDDEN",
+      },
+    ],
+    description:
+      "A selected-record refresh loses access to the same version shown in Deployment activity. Both panels clear their previous evidence.",
+    steps: [
+      "Read the completed record, focus Refresh record, and press Enter. Both panels must show the refusal, with no completed outcome remaining.",
+      "Focus remains on Refresh record. Fold and unfold Deployment details: only the visible leading refusal owns the alert role.",
+      "Refresh record again after the one-time refusal. Both panels recover to Completed and the overview refreshes once. Repeat on the settled record: its overview does not reread.",
+    ],
+    gap: "Simulated UI proof only. The deployment browser suite verifies native IAM denial, missing records, stale deliveries, recovery, and version isolation with the real controller.",
   },
   deploymentActivityLoading: {
     group: "Pages/Agent detail",

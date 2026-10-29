@@ -2115,17 +2115,14 @@ test("a late first deployment read moves nothing above the version tabs", async 
     return sizes;
   };
   // Control: a pending record read before the page shows opens its details as before, and the
-  // summary's note, empty by then, gives its line back.
+  // summary keeps a status note for both successful and delayed updates.
   answer = Promise.resolve(deploymentStatusResponse(revision, { status: "running" }));
   await page.goto(detailUrl(fixture, namespace.id, agent.id, "draft", "configuration").href);
   await page.locator(".agent-detail-pending").waitFor({ state: "detached" });
   await expectDeploymentOutcome(page, "In progress", { folded: false });
-  assert.equal(
-    await summary
-      .locator(":scope > div:nth-child(2) > p")
-      .evaluate((node) => node.checkVisibility()),
-    false,
-  );
+  const freshnessNote = summary.locator(":scope > div:nth-child(2) > p");
+  assert.equal(await freshnessNote.textContent(), "Latest update received.");
+  assert.equal(await freshnessNote.evaluate((node) => node.checkVisibility()), true);
 
   const unavailable = apiErrorResponse(503, "DEPENDENCY_UNAVAILABLE", "Service unavailable.");
   for (const c of [
@@ -2539,7 +2536,19 @@ for (const refreshDuring of ["terminal poll", "automatic overview reread"]) {
       const holding = new Promise((resolve) => {
         held = resolve;
       });
-      const heldRead = refreshDuring === "terminal poll" ? 1 : 2;
+      // Completion now reuses the verified record; hold the actual overview read.
+      if (refreshDuring === "automatic overview reread") {
+        await page.route(agentUrl, async (route) => {
+          if (!terminal) {
+            await route.continue();
+            return;
+          }
+          const response = await route.fetch();
+          held();
+          await gate;
+          await route.fulfill({ response });
+        });
+      }
       await page.route(recordUrl, async (route) => {
         const response = await route.fetch();
         assert.equal(response.status(), 200);
@@ -2548,7 +2557,7 @@ for (const refreshDuring of ["terminal poll", "automatic overview reread"]) {
         assert.equal(body.data.status, "queued");
         body.data.status = terminal ? "succeeded" : "running";
         body.data.progress = null;
-        if (terminal && ++terminalReads === heldRead) {
+        if (terminal && ++terminalReads === 1 && refreshDuring === "terminal poll") {
           held();
           await gate;
         }
@@ -2637,7 +2646,7 @@ for (const refreshDuring of ["terminal poll", "automatic overview reread"]) {
       await page.clock.runFor(DEPLOYMENT_POLL_MS * 2);
       await waitForIdleFetches(page);
       const fullReads = refreshDuring === "terminal poll" ? 1 : 2;
-      assert.deepEqual(reads, { record: fullReads + 1, agent: fullReads, revisions: fullReads });
+      assert.deepEqual(reads, { record: 2, agent: fullReads, revisions: fullReads });
       assert.equal(await refresh.evaluate((button, prior) => button === prior, original), true);
     },
   );
