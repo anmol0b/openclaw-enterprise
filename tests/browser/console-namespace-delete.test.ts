@@ -10,7 +10,10 @@ import {
   login,
   newPage,
   pathRequests,
+  settledFetches,
   settledView,
+  trackSettledFetches,
+  waitForSettledFetches,
 } from "./console-agents-browser-helpers.mjs";
 
 const browser = fileBrowser();
@@ -212,4 +215,82 @@ test("losing Namespace read permission during cleanup does not report deletion",
     await page.getByRole("button", { name: "Request deletion again", exact: true }).count(),
     0,
   );
+});
+
+test("a background Namespace deletion poll keeps keyboard focus and the shown status", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Polled cleanup", { ready: true });
+  const { page } = await newPage(t, fixture, { browser });
+  await trackSettledFetches(page);
+  await login(page, fixture, `/console/namespaces?namespace=${namespace.id}`);
+  const path = `/namespaces/${namespace.id}`;
+  const refreshLabel = "Refresh Polled cleanup deletion status";
+  const focused = () => page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+  await page.getByRole("button", { name: "Delete Polled cleanup", exact: true }).click();
+  await page.getByRole("button", { name: "Delete Namespace", exact: true }).click();
+  // Acceptance moves focus to Refresh status while cleanup runs.
+  await page.waitForFunction(
+    (label) => document.activeElement?.getAttribute("aria-label") === label,
+    refreshLabel,
+  );
+  const statusSelector = `#namespace-delete-feedback-${namespace.id} [role="status"]`;
+  // Keep a reference to the shown status node; an attribute marker would itself change the HTML.
+  const shownStatus = await page.locator(statusSelector).elementHandle();
+  // The next read of this path is the 3 s background status poll.
+  await waitForSettledFetches(page, path, (await settledFetches(page, path)) + 1);
+  // A keyboard user who just confirmed stays on Refresh status, and a screen reader is not told
+  // the same status again: the background poll changed nothing on screen.
+  assert.equal(await focused(), refreshLabel);
+  assert.equal(
+    await page.evaluate(([selector, shown]) => document.querySelector(selector) === shown, [
+      statusSelector,
+      shownStatus,
+    ] as const),
+    true,
+  );
+  // A requested check disables the button while it reads, then gives focus back to it. It ends
+  // with the permission answer, which only a requested check reads while cleanup runs.
+  const permissions = `${path}/permissions`;
+  const answered = (await settledFetches(page, permissions)) + 1;
+  await page.keyboard.press("Enter");
+  await waitForSettledFetches(page, permissions, answered);
+  assert.equal(await focused(), refreshLabel);
+});
+
+test("a Namespace deletion confirmation opened during a background poll closes when that poll finds the Namespace removed", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Finishing cleanup", { ready: true });
+  const { page } = await newPage(t, fixture, { browser });
+  await login(page, fixture, `/console/namespaces?namespace=${namespace.id}`);
+  await page.getByRole("button", { name: "Delete Finishing cleanup", exact: true }).click();
+  await page.getByRole("button", { name: "Delete Namespace", exact: true }).click();
+  const retry = page.getByRole("button", { name: "Request deletion again", exact: true });
+  await retry.waitFor();
+  // Hold the next background status read; it reaches the server only on release, after
+  // cleanup has finished.
+  const poll = await holdRequests(t, page, `${fixture.origin}/namespaces/${namespace.id}`, {
+    method: "GET",
+    once: true,
+  });
+  const event = fixture.auditSink
+    .list()
+    .find((entry: AuditEvent) => entry.action === "openclaw.namespaces.delete");
+  assert.ok(event);
+  await fixture.controller!.handleNamespaceLifecycle(event.actorId, namespace.id, "deleted");
+  await poll.requested;
+  // A background read leaves the retry usable, so the confirmation can open during it.
+  await retry.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Retry deletion of Finishing cleanup?",
+    exact: true,
+  });
+  await dialog.waitFor();
+  poll.release();
+  await page
+    .getByText("Finishing cleanup was deleted. Its name remains reserved.", { exact: true })
+    .waitFor();
+  // Nothing is left to delete, so the confirmation closes instead of offering a dead action.
+  await dialog.waitFor({ state: "detached" });
 });
