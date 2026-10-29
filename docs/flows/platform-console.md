@@ -110,7 +110,7 @@ graph TD
 [theme bundle](../reference/console/theming.md) once; an invalid bundle or a
 ConfigMap link outside it stops startup. `renderConsoleThemeShell` escapes branding
 and links the generated stylesheet; a bundle with colors also gets
-`<html data-theme-colors>`, which keeps the light role set. `console/shell.mts:brandContents` renders the name as text.
+`<html data-theme-colors>`, keeping the light role set. `console/shell.mts:brandContents` renders the name as text.
 `/console/theme/` serves only referenced images and generated CSS, with a plain 404
 for missing assets and `no-store` so a restart can replace the theme.
 
@@ -169,6 +169,8 @@ not row reads. The newest readable revisions page supplies each row;
 `deniedReadsFor` retains 403s. Reused deployment cells show **Reading deployment…**
 after 250 ms, for at least 150 ms, before fresh results. Back/refocus focuses the
 cell, not the old version link. Unfinished/failed row reads resume without blocking reuse.
+A search cancels the unfinished reads of rows it hides (`collection.mts:retireHidden`); a row
+shown again reads once.
 
 Changed users or session keys clear retained views and drafts before private
 reads. Missing sessions open login; failed reads offer Retry. The
@@ -300,9 +302,8 @@ stop; arrows move) and focused controls keep focus. Navigation, Namespace change
 reads; generations reject late responses. Refocus coalesces events.
 `revalidateMountedAgent` rechecks session, Namespace, Agent, and version;
 unchanged access preserves controls, input, and saves.
-The same owner’s exact draft Configuration refusal preserves the partial Agent
-after reload/refocus on repeated 403 if that mounted path was never readable.
-Refocus sends a fresh GET.
+Refocus sends a fresh GET. A repeated 403 on a never-readable draft Configuration
+keeps the partial Agent; a version proved unreadable is not read again.
 Lost access scrubs; Agent, session, and scope failures clear their protected views.
 Other pages revalidate before reuse, including a shown 403 or 404; forms defer the check.
 Returning to the tab restores focus after the unchanged view is admitted, if the control
@@ -370,6 +371,9 @@ gateway startup and file availability.
 ## Changelog
 
 - 2026-10-30 03:41: Follow system dark appearance; color themes stay light. (authoring-run/8d7f8ba3-f41e-46d5-ba36-6adca6c837e7 - 4a364ef759354)
+
+- 2026-10-29 22:18: Cancel the unfinished row reads of Agents a search hides. (authoring-run/6f6ebb4a-7c4c-4bd7-a11c-8381c411c816 - 225ce0ebaf1dd14c01c5c50ccf8ac420e13c72a4)
+
 - 2026-10-29 12:23: Retire denied Save views. (authoring-run/3ff450d4-971d-48f5-bb76-367dbfa06f25 - 5d8c060238a58)
 
 - 2026-10-29 12:06: Clarify denials. (authoring-run/d43e9380-649f-4966-80a0-1fedecf36e05 - 4d68e053e69a1)
