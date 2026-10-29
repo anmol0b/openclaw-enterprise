@@ -193,6 +193,29 @@ function schemaTable(schema, document) {
   );
 }
 
+const permissionScopeQualifiers = {
+  associated_service_account: " (when associated)",
+  existing_namespace: " (when selecting an existing namespace)",
+  bound_secret: " (when bound)",
+  bound_credential_source: " (when bound)",
+  read_logs_alternative: " (instead of `read_logs`)",
+  provisioning_work: " (once created)",
+  gateway_managed_mode_disabled: " (when `gatewayManagedMode` is `false`)",
+  gateway_managed_mode_changed: " (when the request changes `gatewayManagedMode`)",
+  saved_sandbox_policy_additions: " (when saved network policy additions exist)",
+};
+
+function renderedExamples(content, contentType) {
+  return Object.values(content.examples ?? {}).map(({ summary, value }) =>
+    [
+      summary ?? "Example",
+      contentType === "text/plain" ? "```text" : "```json",
+      contentType === "text/plain" ? value : JSON.stringify(value, null, 2),
+      "```",
+    ].join("\n"),
+  );
+}
+
 function operationReference(path, method, operation, document, { headingLevel = 2 } = {}) {
   const childHeading = "#".repeat(Math.min(headingLevel + 1, 6));
   const sections = [
@@ -209,18 +232,7 @@ function operationReference(path, method, operation, document, { headingLevel = 
         "| Action | Resource | Scope |",
         "| --- | --- | --- |",
         ...operation["x-openclaw-permissions"].map(({ action, resourceKind, scope, condition }) => {
-          const qualifier =
-            condition === "associated_service_account"
-              ? " (when associated)"
-              : condition === "existing_namespace"
-                ? " (when selecting an existing namespace)"
-                : condition === "bound_secret" || condition === "bound_credential_source"
-                  ? " (when bound)"
-                  : condition === "read_logs_alternative"
-                    ? " (instead of `read_logs`)"
-                    : condition === "provisioning_work"
-                      ? " (once created)"
-                      : "";
+          const qualifier = permissionScopeQualifiers[condition] ?? "";
           return `| \`${action}\` | \`${resourceKind}\` | \`${scope}\`${qualifier} |`;
         }),
       ].join("\n"),
@@ -231,8 +243,8 @@ function operationReference(path, method, operation, document, { headingLevel = 
     sections.push(
       `${childHeading} Parameters`,
       [
-        "| Name | In | Type | Required | Constraints |",
-        "| --- | --- | --- | --- | --- |",
+        "| Name | In | Type | Required | Constraints | Example |",
+        "| --- | --- | --- | --- | --- | --- |",
         ...operation.parameters.map((parameter) => {
           const columns = [
             `\`${parameter.name}\``,
@@ -240,6 +252,7 @@ function operationReference(path, method, operation, document, { headingLevel = 
             `\`${schemaType(parameter.schema, document)}\``,
             parameter.required ? "Yes" : "No",
             schemaConstraints(parameter.schema),
+            JSON.stringify(parameter.examples?.example?.value)?.replaceAll("|", "\\|") ?? "—",
           ];
           return `| ${columns.join(" | ")} |`;
         }),
@@ -254,7 +267,11 @@ function operationReference(path, method, operation, document, { headingLevel = 
     );
 
     for (const [contentType, content] of Object.entries(operation.requestBody.content ?? {})) {
-      sections.push(`**Content type:** \`${contentType}\``, schemaTable(content.schema, document));
+      sections.push(
+        `**Content type:** \`${contentType}\``,
+        schemaTable(content.schema, document),
+        ...renderedExamples(content, contentType),
+      );
     }
   }
 
@@ -283,6 +300,7 @@ function operationReference(path, method, operation, document, { headingLevel = 
       sections.push(
         `**\`${status}\` response body:** \`${contentType}\``,
         schemaTable(content.schema, document),
+        ...renderedExamples(content, contentType),
       );
     }
   }
@@ -418,6 +436,7 @@ function referencePage(document, groups, entries) {
   }
 
   sections.push(
+    "[Browse interactive examples in the API explorer](api-explorer.md).",
     "## Resources",
     [
       "| Resource | Operations |",

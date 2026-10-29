@@ -48,17 +48,21 @@ not isolate files from an untrusted process that can change the mount during sta
 The manifest limit is 64 KiB; each image is limited to 256 KiB. The manifest and
 distinct referenced images together must fit 768 KiB. These bounds support a
 single operator-managed Kubernetes ConfigMap. Supply appropriately sized images:
-the logo renders at 20 pixels in navigation and 40 pixels on sign-in.
+navigation logos fit within 48 × 48 pixels and keep their aspect ratio. Sign-in
+logos fit within 40 × 40 pixels.
 
 ## Color roles
 
 Colors accept `#RRGGBB` or `#RRGGBBAA`. CSS expressions are rejected. The generated
 stylesheet overrides semantic tokens after the bundled styles without changing
-typography, spacing, or layout.
+typography, spacing, or layout. A translucent `bg` blends once with the browser’s
+canvas color. A modal dims that same background across the page and any empty
+scrollbar gutter.
 
 The Console follows the system light or dark appearance. A bundle that sets any
 color keeps the light appearance, because its colors replace roles chosen for
-light surfaces. A bundle with only a name or images follows the system appearance.
+light surfaces and a translucent `bg` blends with the light canvas. A bundle with
+only a name or images follows the system appearance.
 
 | Roles                                               | Surfaces                                                    |
 | --------------------------------------------------- | ----------------------------------------------------------- |
