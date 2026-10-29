@@ -3870,12 +3870,37 @@ export const scenarios = {
       { suffix: "/permissions", status: 503, code: "DEPENDENCY_UNAVAILABLE" },
     ],
     description:
-      "The Installation read is refused and the Namespace permission read failed, so whether this caller may create Agents is unknown. Create Agent stays disabled, a warning above the form says the permission check failed, and its Retry permission check rereads only the permission answer: a grant continues as Member with Agent create, a denial keeps the refusal in the same block.",
+      "The Installation read is refused and the Namespace permission read failed, so whether this caller may create Agents is unknown. Create Agent stays disabled, a warning above the form says the permission check failed, and its Retry permission check rereads only the permission answer: a grant continues as Member with Agent create, a denial replaces the form with the refusal a fresh load shows. Repository access reads no choices until the answer allows Agent create.",
     steps: [
       'Above the form, the "Your access" warning reads "Your permissions in this Namespace could not be checked"; the hint under the form fields is empty.',
+      'Repository access reads "Repository choices load after your permission check." and offers no retry.',
       "Retry permission check is the warning's action; the fixture keeps failing the read, so the text stays.",
     ],
-    gap: "The member creation browser test also covers a successful retry.",
+    gap: "The member creation browser tests cover a retry that grants and one that refuses Agent create.",
+  },
+  createPermissionRetryDenied: {
+    group: "Pages/Create Agent",
+    name: "Permission retry refuses Agent create",
+    path: create,
+    actions: [...form, click("Retry permission check")],
+    rules: [
+      { path: "/installation", status: 403, code: "FORBIDDEN" },
+      { suffix: "/permissions", status: 503, code: "DEPENDENCY_UNAVAILABLE", once: true },
+      {
+        suffix: "/permissions",
+        data: {
+          agents: { create: false },
+          secrets: { create: false },
+          installation: { administer: false },
+        },
+      },
+    ],
+    description:
+      "The Installation read is refused and the first Namespace permission read failed. Retry permission check then answers that this caller may not create Agents: the form is replaced by the refusal a fresh load shows. Repository access never read its choices.",
+    steps: [
+      'The page shows "Creating Agents is not available" with the access reason, and no form or start choices.',
+    ],
+    gap: "The story presses Retry permission check from a script, so focus stays on the page heading. The member creation browser test presses it, checks that the refusal takes focus, and counts repository reads and audited denials against the real API.",
   },
   createMember: {
     group: "Pages/Create Agent",
