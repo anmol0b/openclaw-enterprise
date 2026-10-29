@@ -4890,6 +4890,24 @@ export const scenarios = {
       "The Configuration denies every tool of the selected plugin, so the API refuses the save. The refusal shows as an error and takes focus; editing the selections clears it.",
     gap: "The refusal is simulated; the in-memory API's plugin check is covered by tests/browser/console-agent-plugin-refusals.test.mjs.",
   },
+  pluginsPrefetchReturn: {
+    group: "Pages/Agent detail",
+    name: "Return before plugin prefetch starts",
+    path: draft,
+    deployed: true,
+    auth: "codex_pat",
+    agentPlugins: JSON.parse(pluginSelections),
+    pluginCapabilities,
+    pluginDiscovery,
+    actions: [click("Plugins"), click("Configuration")],
+    description:
+      "The fixture leaves Plugins while catalog prefetch is deferred. Returning can load the catalog without losing saved selections.",
+    steps: [
+      "After the initial Configuration view settles, select Plugins and open Configure plugins. Calendar should load and Load plugins should be enabled; Loading plugins must not persist.",
+      "Close and reopen the picker. Calendar's saved policy is unchanged. Repeat from Reset story to inspect the skipped prefetch again.",
+    ],
+    gap: "Catalog responses and the saved Agent are simulated. This verifies Console recovery, not plugin installation or a live runtime.",
+  },
   pluginsDraft: {
     group: "Pages/Agent detail",
     name: "Edit plugins in new version",
