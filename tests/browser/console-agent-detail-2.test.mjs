@@ -524,10 +524,16 @@ test("Repeat deletion preserves bounded retry ownership feedback and ordinary de
   assert.equal(writes, 1);
   serverMessage = GENERIC_DENIAL;
   await confirm();
-  await page.getByRole("alert").getByText(deleteRefused("this Agent"), { exact: false }).waitFor();
+  await page
+    .getByRole("alert")
+    .getByText(deleteRefused("Owned cleanup"), { exact: false })
+    .waitFor();
   assert.equal(writes, 2);
   await page.clock.fastForward(DELETION_POLL_MS * 2);
-  await page.getByRole("alert").getByText(deleteRefused("this Agent"), { exact: false }).waitFor();
+  await page
+    .getByRole("alert")
+    .getByText(deleteRefused("Owned cleanup"), { exact: false })
+    .waitFor();
   await page.getByRole("button", { name: "Refresh deletion status", exact: true }).click();
   await page.getByRole("alert").waitFor({ state: "hidden" });
   assert.equal(writes, 2);
@@ -1007,10 +1013,9 @@ test("Agent delete denial keeps the Agent visible with permission feedback", asy
   await dialog.getByRole("button", { name: "Permanently delete Agent" }).click();
   assert.equal((await denied).status(), 403);
 
-  // The API names the grant the delete checked on the Agent it named (finding 2534).
-  await page
-    .getByText(callerDenied("Agent delete", `Agent ${agent.id}`), { exact: true })
-    .waitFor();
+  // The page names the Agent and the grant the delete checked, not the API's Agent ID
+  // (findings 2534, 2951).
+  await page.getByText(deleteRefused("Denied Candidate"), { exact: true }).waitFor();
   await page.getByRole("heading", { name: "Denied Candidate" }).waitFor();
   assert.match(page.url(), new RegExp(`/console/agents/${agent.id}`));
   assert.equal(agentDeleteRequests(requests, namespace.id, agent.id).length, 1);
