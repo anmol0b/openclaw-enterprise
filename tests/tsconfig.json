@@ -20,6 +20,7 @@
     "helpers/credential-source-owner-upgrade.ts",
     "helpers/compute-credential-catalog.ts",
     "helpers/provisioning-repository-status.ts",
+    "helpers/provisioning-source-status.ts",
     "helpers/codex-preparation-caller.ts",
     "helpers/controlled-tls-origin.ts",
     "helpers/controlled-tls-origin-scenario.ts",
