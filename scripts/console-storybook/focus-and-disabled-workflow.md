@@ -83,6 +83,11 @@ follows `:focus-visible`. No part of any ring may be cut off.
    Agent / Other Presets, no default**), the chooser's status says only
    "Choose a Preset." and describes Use Preset; the hint is not repeated
    (finding 2946).
+   So do Previous instance before a restart (**Pages / Agent
+   detail / Runtime status after a healthy first deploy**), described by its
+   note (finding 2944), and Execution mode with the Codex harness (**Pages /
+   Create Agent / OpenAI with Codex harness**, Runtime details open), described
+   by its hint (finding 2945).
 10. Open **Components / Stop Agent / Stop pending**. Stopping… sets
     `aria-busy="true"` and shows the `progress` pointer, as Deleting… and a
     saving Save Configuration do (finding 1927).
